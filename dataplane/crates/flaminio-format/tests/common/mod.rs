@@ -24,7 +24,7 @@ impl SparseDevice {
 
     pub fn write(&mut self, offset: u64, data: &[u8]) {
         assert!(
-            offset % BLOCK_SIZE_U64 == 0 && data.len() % BLOCK_SIZE == 0,
+            offset.is_multiple_of(BLOCK_SIZE_U64) && data.len().is_multiple_of(BLOCK_SIZE),
             "unaligned write"
         );
         assert!(offset + data.len() as u64 <= self.size, "write past end");

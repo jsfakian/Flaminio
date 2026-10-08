@@ -1,17 +1,26 @@
 [workspace]
 resolver = "3"
-members = ["crates/flaminio-format", "crates/flaminio-store", "crates/flaminio-disktool"]
+members = [
+    "crates/flaminio-format",
+    "crates/flaminio-store",
+    "crates/flaminio-uring",
+    "crates/flaminio-bench",
+    "crates/flaminio-disktool",
+]
 exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.88"
 repository = "https://github.com/flaminio/flaminio"
 
 [workspace.dependencies]
 flaminio-format = { path = "crates/flaminio-format" }
 flaminio-store = { path = "crates/flaminio-store" }
+flaminio-uring = { path = "crates/flaminio-uring" }
+io-uring = "0.7.10"
+libc = "0.2.175"
 crc32c = "0.6.8"
 thiserror = "2.0.12"
 proptest = "1.6.0"
@@ -21,3 +30,5 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+# Block and word helpers take slices; as_chunks would hand them arrays.
+chunks_exact_to_as_chunks = "allow"

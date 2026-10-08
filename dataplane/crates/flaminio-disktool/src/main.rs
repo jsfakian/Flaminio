@@ -173,13 +173,13 @@ fn format(args: &[String]) -> Result<()> {
     let size = device_size(&mut file)?;
 
     let existing = read_superblock(&file, size).ok();
-    if let Some((sb, _)) = &existing {
-        if opt(&opts, "--force").is_none() {
-            return Err(format!(
-                "{path} already holds Flaminio disk {} (label {:?}); pass --force to destroy it",
-                sb.disk_uuid, sb.label
-            ));
-        }
+    if let Some((sb, _)) = &existing
+        && opt(&opts, "--force").is_none()
+    {
+        return Err(format!(
+            "{path} already holds Flaminio disk {} (label {:?}); pass --force to destroy it",
+            sb.disk_uuid, sb.label
+        ));
     }
 
     let cluster_size = opt(&opts, "--cluster-size")

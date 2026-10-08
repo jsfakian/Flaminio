@@ -1,0 +1,20 @@
+[package]
+name = "flaminio-bench"
+version = "0.1.0"
+description = "Microbenchmark that drives the Flaminio replica store directly, like fio drives a disk"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "flaminio-bench"
+path = "src/main.rs"
+
+[dependencies]
+flaminio-format.workspace = true
+flaminio-store.workspace = true
+flaminio-uring.workspace = true
+
+[lints]
+workspace = true

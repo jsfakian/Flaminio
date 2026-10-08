@@ -80,7 +80,9 @@ impl CheckpointHeader {
             pool_free_pairs: get_u64(p, 24),
             created_unix_secs: get_u64(p, 32),
         };
-        if h.journal_start_offset % crate::consts::BLOCK_SIZE_U64 != 0
+        if !h
+            .journal_start_offset
+            .is_multiple_of(crate::consts::BLOCK_SIZE_U64)
             || h.journal_start_offset >= layout.journal_size
         {
             return Err(FormatError::invalid(
@@ -273,7 +275,7 @@ impl ChunkHeader {
             return Ok(());
         }
         let cluster = u64::from(layout.cluster_size);
-        if self.chunk_size == 0 || self.chunk_size % cluster != 0 {
+        if self.chunk_size == 0 || !self.chunk_size.is_multiple_of(cluster) {
             return Err(FormatError::invalid(
                 "chunk_size",
                 "must be a non-zero multiple of the cluster size",

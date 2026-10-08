@@ -181,7 +181,19 @@ cmd_bench_raw() {
     local vm out
     for vm in $(vms_of "${1:-all}"); do
         log "raw-disk fio baseline on $vm (${RUNTIME:-30}s per job)"
-        out=$(run_on_vm "$vm" "$SCRIPTS/guest/fio-raw.sh" "${RUNTIME:-30}" | tee /dev/stderr | tail -1)
+        out=$(run_on_vm "$vm" "$SCRIPTS/guest/fio-raw.sh" "${RUNTIME:-30}" "${JOBS:-.}" | tee /dev/stderr | tail -1)
+        mkdir -p "$LOCAL_STATE_DIR/results/$vm"
+        vssh "$vm" "tar -czf - -C $(dirname "$out") $(basename "$out")" | tar -xzf - -C "$LOCAL_STATE_DIR/results/$vm"
+        log "results saved in .lab/results/$vm/$(basename "$out")"
+    done
+}
+
+cmd_bench_store() {
+    local vm out
+    for vm in $(vms_of "${1:-all}"); do
+        log "replica-store benchmark on $vm (${RUNTIME:-30}s per job)"
+        out=$(ENV_VARS="FORMAT=${FORMAT:-1}" run_on_vm "$vm" "$SCRIPTS/guest/store-bench.sh" "${RUNTIME:-30}" "${JOBS:-.}" |
+            tee /dev/stderr | tail -1)
         mkdir -p "$LOCAL_STATE_DIR/results/$vm"
         vssh "$vm" "tar -czf - -C $(dirname "$out") $(basename "$out")" | tar -xzf - -C "$LOCAL_STATE_DIR/results/$vm"
         log "results saved in .lab/results/$vm/$(basename "$out")"
@@ -224,7 +236,8 @@ usage: scripts/lab.sh COMMAND [a|b|all]
   provision    toolchain and kernel modules in the VMs
   deploy       copy the working tree to VMs and build (release)
   test         cargo test --release in a VM (PROPTEST_CASES=N)
-  bench-raw    fio baseline on the raw data disk (RUNTIME=s); destroys data on it
+  bench-raw    fio baseline on the raw data disk (RUNTIME=s, JOBS=regex); destroys data on it
+  bench-store  replica-store benchmark on the data disk (RUNTIME, JOBS, FORMAT=0 to reuse)
   net-setup    forward $HOST_B_IP:$REPL_PORT to $VM_B (from $HOST_A_IP only)
   net-teardown remove that forward
   net-check    end-to-end check: $VM_A -> $HOST_B -> $VM_B
@@ -247,6 +260,7 @@ case "$cmd" in
     deploy) cmd_deploy "$@" ;;
     test) cmd_test "$@" ;;
     bench-raw) cmd_bench_raw "$@" ;;
+    bench-store) cmd_bench_store "$@" ;;
     net-setup) cmd_net_setup ;;
     net-teardown) cmd_net_teardown ;;
     net-check) cmd_net_check ;;

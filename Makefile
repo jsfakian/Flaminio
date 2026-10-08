@@ -14,6 +14,7 @@ LAB       := scripts/lab.sh
 VM        ?= all
 CASES     ?= 50000
 RUNTIME   ?= 30
+JOBS      ?= .
 IMAGE     ?= .lab/disk.img
 IMAGE_SIZE ?= 10G
 
@@ -107,7 +108,7 @@ net-check: ## End-to-end check: fl-a -> rhythm-backup -> fl-b
 
 ##@ Lab: build, test, benchmark
 
-.PHONY: deploy vm-test vm-crash-test bench-raw
+.PHONY: deploy vm-test vm-crash-test bench-raw bench-store
 deploy: ## Copy the working tree to the VMs and build (release)
 	$(LAB) deploy $(VM)
 
@@ -117,5 +118,8 @@ vm-test: ## Run the test suite inside a VM on Linux (default VM a)
 vm-crash-test: ## Long crash-test campaign inside a VM (CASES)
 	PROPTEST_CASES=$(CASES) $(LAB) test $(if $(filter all,$(VM)),a,$(VM)) -p flaminio-store --test crash_consistency
 
-bench-raw: ## fio baseline on the raw data disks (RUNTIME=30 s per job); destroys data on them
-	RUNTIME=$(RUNTIME) $(LAB) bench-raw $(VM)
+bench-raw: ## fio baseline on the raw data disks (RUNTIME, JOBS=regex); destroys data on them
+	RUNTIME=$(RUNTIME) JOBS='$(JOBS)' $(LAB) bench-raw $(VM)
+
+bench-store: ## Replica-store benchmark on the data disks (RUNTIME, JOBS=regex); reformats them
+	RUNTIME=$(RUNTIME) JOBS='$(JOBS)' $(LAB) bench-store $(VM)

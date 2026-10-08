@@ -86,7 +86,7 @@ impl BatchBuilder {
     pub fn new(max_total_len: usize) -> Self {
         assert!(
             max_total_len >= BLOCK_SIZE
-                && max_total_len % BLOCK_SIZE == 0
+                && max_total_len.is_multiple_of(BLOCK_SIZE)
                 && u32::try_from(max_total_len).is_ok(),
             "batch size must be a non-zero multiple of 4096"
         );
@@ -108,6 +108,11 @@ impl BatchBuilder {
         record.encode_into(&mut self.buf);
         self.records += 1;
         Ok(())
+    }
+
+    /// Whether `extra` more encoded bytes (see [`Record::encoded_len`]) still fit.
+    pub fn would_fit(&self, extra: usize) -> bool {
+        align_up((self.buf.len() + extra) as u64, BLOCK_SIZE_U64) <= self.max_total_len as u64
     }
 
     /// Records added so far.
@@ -245,7 +250,9 @@ impl<'d, D: ReadAt + ?Sized> JournalScanner<'d, D> {
 
     fn try_at(&self, pos: u64) -> Result<Option<Batch>, ScanError> {
         let js = self.journal_size;
-        if pos % BLOCK_SIZE_U64 != 0 || pos.checked_add(BLOCK_SIZE_U64).is_none_or(|end| end > js) {
+        if !pos.is_multiple_of(BLOCK_SIZE_U64)
+            || pos.checked_add(BLOCK_SIZE_U64).is_none_or(|end| end > js)
+        {
             return Ok(None);
         }
         let mut buf = vec![0u8; BLOCK_SIZE];

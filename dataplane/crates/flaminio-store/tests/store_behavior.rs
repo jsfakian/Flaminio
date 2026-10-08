@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use flaminio_format::consts::MIB;
-use flaminio_store::{BlockDevice, StoreError};
+use flaminio_store::{BlockDevice, ReadReq, StoreError, WriteReq};
 
 const CLUSTER: u64 = 64 * 1024;
 
@@ -236,4 +236,129 @@ fn fills_the_disk_then_reports_out_of_space() {
     s.create_chunk(key(1000), CHUNK, CHUNK, 1).unwrap();
     s.write(key(1000), 0, &vec![8u8; CHUNK as usize], 1, 1)
         .unwrap();
+}
+
+#[test]
+fn group_commit_orders_overlaps_and_isolates_failures() {
+    let mut s = new_store(16);
+    s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
+    s.create_chunk(key(1), CHUNK, CHUNK, 5).unwrap();
+    s.write(key(0), 0, &blocks(1, 0, 1024), 1, 1).unwrap();
+    let (a, b, c, d) = (
+        blocks(2, 3, 1),
+        blocks(3, 3, 2),
+        blocks(4, 500, 4),
+        blocks(5, 0, 1),
+    );
+    let reqs = [
+        WriteReq {
+            key: key(0),
+            offset: 3 * 4096,
+            data: &a,
+            write_seq: 2,
+            epoch: 1,
+        },
+        // Overlaps the first: must be applied after it, in a later group.
+        WriteReq {
+            key: key(0),
+            offset: 3 * 4096,
+            data: &b,
+            write_seq: 3,
+            epoch: 1,
+        },
+        WriteReq {
+            key: key(0),
+            offset: 500 * 4096,
+            data: &c,
+            write_seq: 4,
+            epoch: 1,
+        },
+        // Stale epoch and a bad offset: fail alone.
+        WriteReq {
+            key: key(1),
+            offset: 0,
+            data: &d,
+            write_seq: 5,
+            epoch: 4,
+        },
+        WriteReq {
+            key: key(0),
+            offset: 7,
+            data: &d,
+            write_seq: 6,
+            epoch: 1,
+        },
+    ];
+    let results = s.write_batch(&reqs).unwrap();
+    assert!(results[0].is_ok() && results[1].is_ok() && results[2].is_ok());
+    assert!(matches!(results[3], Err(StoreError::StaleEpoch { .. })));
+    assert!(matches!(results[4], Err(StoreError::Invalid(_))));
+
+    let mut expect = blocks(1, 0, 1024);
+    expect[3 * 4096..5 * 4096].copy_from_slice(&b);
+    expect[500 * 4096..504 * 4096].copy_from_slice(&c);
+    assert_eq!(
+        read(&s, 0, 0, CHUNK),
+        expect,
+        "the later overlapping write wins"
+    );
+
+    let (mut x, mut y, mut z) = (vec![0u8; 8192], vec![0u8; 16384], vec![0u8; 4096]);
+    let mut rr = [
+        ReadReq {
+            key: key(0),
+            offset: 3 * 4096,
+            buf: &mut x,
+            epoch: 1,
+        },
+        ReadReq {
+            key: key(0),
+            offset: 500 * 4096,
+            buf: &mut y,
+            epoch: 1,
+        },
+        ReadReq {
+            key: key(1),
+            offset: 0,
+            buf: &mut z,
+            epoch: 1,
+        },
+    ];
+    let results = s.read_batch(&mut rr).unwrap();
+    assert!(results[0].is_ok() && results[1].is_ok());
+    assert!(matches!(results[2], Err(StoreError::StaleEpoch { .. })));
+    assert_eq!((x, y), (b, c));
+    let s = reopen(s);
+    assert_eq!(read(&s, 0, 0, CHUNK), expect);
+    s.fsck(true).unwrap();
+}
+
+#[test]
+fn group_commit_shares_flushes() {
+    let mut s = new_store(64);
+    s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
+    s.write(key(0), 0, &blocks(1, 0, 1024), 1, 1).unwrap();
+    // 32 small writes into mapped clusters: journal-only (deferred) writes.
+    let data: Vec<Vec<u8>> = (0..32u64).map(|i| blocks(2, i * 32, 1)).collect();
+    let reqs: Vec<WriteReq<'_>> = (0..32u64)
+        .map(|i| WriteReq {
+            key: key(0),
+            offset: i * 32 * 4096,
+            data: &data[i as usize],
+            write_seq: 2 + i,
+            epoch: 1,
+        })
+        .collect();
+
+    let before = s.device().flushes();
+    for r in &reqs {
+        s.write(r.key, r.offset, r.data, r.write_seq, 1).unwrap();
+    }
+    let one_by_one = s.device().flushes() - before;
+
+    let before = s.device().flushes();
+    assert!(s.write_batch(&reqs).unwrap().iter().all(Result::is_ok));
+    let grouped = s.device().flushes() - before;
+    assert_eq!(one_by_one, 32, "one journal flush per write");
+    assert_eq!(grouped, 1, "one journal flush for the whole group");
 }

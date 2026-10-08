@@ -223,13 +223,13 @@ impl Layout {
         let pairs =
             |n: u64, f: &'static str| n.checked_mul(PAIR_SIZE).ok_or_else(|| inv(f, "overflow"));
 
-        if self.device_size % BLOCK_SIZE_U64 != 0 || self.device_size < MIN_DEVICE_SIZE {
+        if !self.device_size.is_multiple_of(BLOCK_SIZE_U64) || self.device_size < MIN_DEVICE_SIZE {
             return Err(inv("device_size", "not block aligned or below minimum"));
         }
         if self.journal_offset != JOURNAL_OFFSET {
             return Err(inv("journal_offset", "must be 1 MiB"));
         }
-        if self.journal_size % MIB != 0 || self.journal_size < MIN_JOURNAL_SIZE {
+        if !self.journal_size.is_multiple_of(MIB) || self.journal_size < MIN_JOURNAL_SIZE {
             return Err(inv(
                 "journal_size",
                 "must be a multiple of 1 MiB and >= 4 MiB",
@@ -295,7 +295,7 @@ impl Layout {
             return Err(inv("meta_size", "does not match the sub-regions"));
         }
         let data_align = u64::from(self.cluster_size).max(MIB);
-        if self.data_offset % data_align != 0 || self.data_offset < meta_end {
+        if !self.data_offset.is_multiple_of(data_align) || self.data_offset < meta_end {
             return Err(inv("data_offset", "misaligned or overlaps metadata"));
         }
         let data_len = self

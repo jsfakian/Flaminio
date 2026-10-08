@@ -173,6 +173,34 @@ impl<'a> Plan<'a> {
     }
 }
 
+/// One write of a [`Store::write_batch`].
+#[derive(Debug, Clone, Copy)]
+pub struct WriteReq<'a> {
+    /// Chunk to write.
+    pub key: ChunkKey,
+    /// Byte offset within the chunk (4 KiB aligned).
+    pub offset: u64,
+    /// Data (a multiple of 4 KiB).
+    pub data: &'a [u8],
+    /// The target's write sequence number.
+    pub write_seq: u64,
+    /// The writer's epoch.
+    pub epoch: u64,
+}
+
+/// One read of a [`Store::read_batch`].
+#[derive(Debug)]
+pub struct ReadReq<'a> {
+    /// Chunk to read.
+    pub key: ChunkKey,
+    /// Byte offset within the chunk (4 KiB aligned).
+    pub offset: u64,
+    /// Destination (a multiple of 4 KiB).
+    pub buf: &'a mut [u8],
+    /// The reader's epoch.
+    pub epoch: u64,
+}
+
 /// Chunk replicas on one device. See the crate documentation.
 pub struct Store<D: BlockDevice> {
     dev: D,
@@ -430,8 +458,8 @@ impl<D: BlockDevice> Store<D> {
         self.check_epoch(slot, epoch)?;
         let size = self.state.chunk(slot).chunk_size;
         if len == 0
-            || offset % BLOCK_SIZE_U64 != 0
-            || len % BLOCK_SIZE_U64 != 0
+            || !offset.is_multiple_of(BLOCK_SIZE_U64)
+            || !len.is_multiple_of(BLOCK_SIZE_U64)
             || offset.checked_add(len).is_none_or(|e| e > size)
         {
             return Err(StoreError::invalid(format!(
@@ -466,8 +494,8 @@ impl<D: BlockDevice> Store<D> {
         }
     }
 
-    /// Commits a plan: data, flush, journal batch, flush, apply. Returns false (and changes
-    /// nothing) if the journal has no room.
+    /// Commits a plan as one journal batch. Returns false (and changes nothing) if the journal
+    /// has no room.
     fn commit(&mut self, plan: Plan<'_>) -> Result<bool, StoreError> {
         let mut batch = BatchBuilder::new(self.config.max_batch_bytes);
         for r in &plan.records {
@@ -481,25 +509,34 @@ impl<D: BlockDevice> Store<D> {
                 });
             }
         }
+        self.execute(batch, plan)
+    }
+
+    /// The commit protocol (format spec §6.2): redirect-on-write data, flush, journal batch,
+    /// flush, apply (including in-place deferred writes). Returns false, after releasing the
+    /// plan's reservations, if the journal has no room for the batch.
+    fn execute(&mut self, batch: BatchBuilder, plan: Plan<'_>) -> Result<bool, StoreError> {
         let len = batch.total_len();
         let Some(at) = self.journal.place(len) else {
             self.release(&plan.reserved);
             return Ok(false);
         };
-        for (o, d) in &plan.data_writes {
-            self.dev.write_at(*o, d)?;
-        }
         if !plan.data_writes.is_empty() {
+            let writes: Vec<(u64, &[u8])> =
+                plan.data_writes.iter().map(|(o, d)| (*o, &d[..])).collect();
+            self.dev.write_many(&writes)?;
             self.dev.flush()?;
         }
         let bytes = batch.finish(self.sb.format_nonce, self.journal.head.seq, at);
         self.dev.write_at(self.journal.offset + at, &bytes)?;
         self.dev.flush()?;
         self.journal.advance(at, len);
+        let mut in_place = Vec::new();
         for r in &plan.records {
-            for (o, d) in self.state.apply(r)? {
-                self.dev.write_at(o, d)?;
-            }
+            in_place.extend(self.state.apply(r)?);
+        }
+        if !in_place.is_empty() {
+            self.dev.write_many(&in_place)?;
         }
         if self.journal.live_bytes() as f64
             > self.journal.size as f64 * self.config.checkpoint_threshold
@@ -634,40 +671,155 @@ impl<D: BlockDevice> Store<D> {
         write_seq: u64,
         epoch: u64,
     ) -> Result<(), StoreError> {
-        self.guard(|s| {
-            let slot = s.check_io(key, offset, data.len() as u64, epoch)?;
-            s.run(|s| s.plan_write(slot, offset, data, write_seq))
-        })
+        let req = WriteReq {
+            key,
+            offset,
+            data,
+            write_seq,
+            epoch,
+        };
+        self.write_batch(&[req])?
+            .pop()
+            .expect("one result per request")
     }
 
-    fn plan_write<'a>(
+    /// Writes several requests with **group commit**: requests share the data flush, one
+    /// journal batch and the journal flush, which is what makes durable writes fast at queue
+    /// depths above one. All are durable when this returns.
+    ///
+    /// Requests are committed in order, in groups. A group ends early at a request that
+    /// touches a cluster an earlier request of the group touches, so overlapping writes are
+    /// applied in submission order. Each group is atomic.
+    ///
+    /// The outer `Err` means the store failed (and is poisoned). Otherwise there is one result
+    /// per request: a request can fail on its own (bad range, stale epoch, out of space)
+    /// without affecting the others.
+    pub fn write_batch(
         &mut self,
-        slot: u32,
-        offset: u64,
-        data: &'a [u8],
-        write_seq: u64,
-    ) -> Result<Plan<'a>, StoreError> {
-        let cs = self.state.cluster_size();
-        let end = offset + data.len() as u64;
-        let (first_x, last_x) = (offset / cs, (end - 1) / cs);
-        let needed = self.state.pool_needed(slot, first_x..=last_x);
-        if self.state.pool.free() < needed {
-            return Err(StoreError::OutOfSpace("metadata page pool"));
+        reqs: &[WriteReq<'_>],
+    ) -> Result<Vec<Result<(), StoreError>>, StoreError> {
+        if self.poisoned {
+            return Err(StoreError::Poisoned);
         }
-        let mut plan = Plan {
+        let mut results: Vec<Option<Result<(), StoreError>>> = reqs.iter().map(|_| None).collect();
+        let mut pending = Vec::with_capacity(reqs.len());
+        for (i, r) in reqs.iter().enumerate() {
+            match self.check_io(r.key, r.offset, r.data.len() as u64, r.epoch) {
+                Ok(slot) => pending.push((i, slot)),
+                Err(e) => results[i] = Some(Err(e)),
+            }
+        }
+        let mut next = 0;
+        let mut retries = 0;
+        while next < pending.len() {
+            let (consumed, failed) = self.guard(|s| s.commit_group(reqs, &pending[next..]))?;
+            if consumed == 0 {
+                // No journal room: commit_group checkpointed. Try once more.
+                retries += 1;
+                if retries > 1 {
+                    return Err(StoreError::corrupt(
+                        "journal has no room even after a checkpoint",
+                    ));
+                }
+                continue;
+            }
+            retries = 0;
+            for (i, e) in failed {
+                results[i] = Some(Err(e));
+            }
+            for &(i, _) in &pending[next..next + consumed] {
+                results[i].get_or_insert(Ok(()));
+            }
+            next += consumed;
+        }
+        Ok(results
+            .into_iter()
+            .map(|r| r.expect("every request has a result"))
+            .collect())
+    }
+
+    /// Plans and commits the longest prefix of `pending` that forms a valid group. Returns how
+    /// many requests it consumed (committed or failed individually) and the individual
+    /// failures. Consumes nothing, after checkpointing, if the journal had no room.
+    #[allow(clippy::type_complexity)]
+    fn commit_group(
+        &mut self,
+        reqs: &[WriteReq<'_>],
+        pending: &[(usize, u32)],
+    ) -> Result<(usize, Vec<(usize, StoreError)>), StoreError> {
+        let cs = self.state.cluster_size();
+        let mut batch = BatchBuilder::new(self.config.max_batch_bytes);
+        let mut group = Plan {
             records: Vec::new(),
             data_writes: Vec::new(),
             reserved: Vec::new(),
         };
-        let result =
-            self.fill_write_plan(&mut plan, slot, offset, data, write_seq, (first_x, last_x));
-        match result {
-            Ok(()) => Ok(plan),
-            Err(e) => {
-                self.release(&plan.reserved);
-                Err(e)
+        let mut touched: HashSet<(u32, u64)> = HashSet::new();
+        let mut pool_budget = 0;
+        let mut failed = Vec::new();
+        let mut consumed = 0;
+        for &(i, slot) in pending {
+            let r = &reqs[i];
+            let end = r.offset + r.data.len() as u64;
+            let clusters = r.offset / cs..=(end - 1) / cs;
+            if clusters.clone().any(|x| touched.contains(&(slot, x))) {
+                break;
             }
+            let needed = self.state.pool_needed(slot, clusters.clone());
+            if self.state.pool.free() < pool_budget + needed {
+                failed.push((i, StoreError::OutOfSpace("metadata page pool")));
+                consumed += 1;
+                continue;
+            }
+            let mut plan = Plan {
+                records: Vec::new(),
+                data_writes: Vec::new(),
+                reserved: Vec::new(),
+            };
+            let range = (*clusters.start(), *clusters.end());
+            if let Err(e) =
+                self.fill_write_plan(&mut plan, slot, r.offset, r.data, r.write_seq, range)
+            {
+                self.release(&plan.reserved);
+                if matches!(e, StoreError::Io(_) | StoreError::Corrupt(_)) {
+                    self.release(&group.reserved);
+                    return Err(e);
+                }
+                failed.push((i, e));
+                consumed += 1;
+                continue;
+            }
+            let size: usize = plan.records.iter().map(Record::encoded_len).sum();
+            if !batch.would_fit(size) {
+                self.release(&plan.reserved);
+                if group.records.is_empty() {
+                    failed.push((
+                        i,
+                        StoreError::invalid("request too large for one journal batch"),
+                    ));
+                    consumed += 1;
+                    continue;
+                }
+                break;
+            }
+            for rec in &plan.records {
+                batch.push(rec)?;
+            }
+            touched.extend(clusters.map(|x| (slot, x)));
+            pool_budget += needed;
+            group.records.extend(plan.records);
+            group.data_writes.extend(plan.data_writes);
+            group.reserved.extend(plan.reserved);
+            consumed += 1;
         }
+        if group.records.is_empty() {
+            return Ok((consumed, failed));
+        }
+        if !self.execute(batch, group)? {
+            self.checkpoint_inner()?;
+            return Ok((0, Vec::new()));
+        }
+        Ok((consumed, failed))
     }
 
     fn fill_write_plan<'a>(
@@ -771,11 +923,76 @@ impl<D: BlockDevice> Store<D> {
         buf: &mut [u8],
         epoch: u64,
     ) -> Result<(), StoreError> {
+        let mut reqs = [ReadReq {
+            key,
+            offset,
+            buf,
+            epoch,
+        }];
+        self.read_batch(&mut reqs)?
+            .pop()
+            .expect("one result per request")
+    }
+
+    /// Reads several requests with all device reads in flight at once. The outer `Err` is a
+    /// device failure; otherwise there is one result per request.
+    pub fn read_batch(
+        &self,
+        reqs: &mut [ReadReq<'_>],
+    ) -> Result<Vec<Result<(), StoreError>>, StoreError> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
         }
-        let slot = self.check_io(key, offset, buf.len() as u64, epoch)?;
-        self.read_range(slot, offset, buf)
+        let cs = self.state.cluster_size();
+        let mut results: Vec<Result<(), StoreError>> = Vec::with_capacity(reqs.len());
+        let mut reads: Vec<(u64, &mut [u8])> = Vec::new();
+        // For each device read: request index, chunk key, chunk offset, expected checksums.
+        let mut checks: Vec<(usize, ChunkKey, u64, Vec<u32>)> = Vec::new();
+        for (i, r) in reqs.iter_mut().enumerate() {
+            let slot = match self.check_io(r.key, r.offset, r.buf.len() as u64, r.epoch) {
+                Ok(slot) => slot,
+                Err(e) => {
+                    results.push(Err(e));
+                    continue;
+                }
+            };
+            results.push(Ok(()));
+            let chunk = self.state.chunk(slot);
+            let mut rest: &mut [u8] = &mut *r.buf;
+            let mut o = r.offset;
+            while !rest.is_empty() {
+                let (x, within) = (o / cs, o % cs);
+                let n = ((cs - within) as usize).min(rest.len());
+                let (piece, tail) = std::mem::take(&mut rest).split_at_mut(n);
+                rest = tail;
+                match chunk.resolve(self.state.epp, x) {
+                    Resolved::Zeros => piece.fill(0),
+                    Resolved::Data { phys, csums } => {
+                        let first = (within / BLOCK_SIZE_U64) as usize;
+                        let expected = csums[first..first + n / BLOCK_SIZE].to_vec();
+                        reads.push((self.state.layout.data_cluster_offset(phys) + within, piece));
+                        checks.push((i, chunk.key, o, expected));
+                    }
+                }
+                o += n as u64;
+            }
+        }
+        self.dev.read_many(&mut reads)?;
+        for ((_, data), (i, key, offset, expected)) in reads.iter().zip(&checks) {
+            if results[*i].is_err() {
+                continue;
+            }
+            for (b, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
+                if crc32c(block) != expected[b] {
+                    results[*i] = Err(StoreError::Checksum {
+                        key: *key,
+                        offset: offset + (b * BLOCK_SIZE) as u64,
+                    });
+                    break;
+                }
+            }
+        }
+        Ok(results)
     }
 
     fn read_range(&self, slot: u32, offset: u64, buf: &mut [u8]) -> Result<(), StoreError> {

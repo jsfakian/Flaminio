@@ -1,0 +1,25 @@
+[package]
+name = "flaminio-uring"
+version = "0.1.0"
+description = "io_uring + O_DIRECT block device for the Flaminio replica store, and aligned buffers"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+flaminio-store.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring.workspace = true
+libc.workspace = true
+
+# Not the workspace lints: this is the one crate that may use `unsafe` (ARCHITECTURE §15.5), and
+# only in modules that opt in explicitly.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

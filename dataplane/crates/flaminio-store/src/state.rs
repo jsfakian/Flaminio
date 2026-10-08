@@ -209,7 +209,7 @@ impl State {
 
     pub(crate) fn validate_chunk_size(&self, chunk_size: u64) -> Result<(), StoreError> {
         let cs = self.cluster_size();
-        if chunk_size == 0 || chunk_size % cs != 0 || chunk_size > MAX_CHUNK_SIZE {
+        if chunk_size == 0 || !chunk_size.is_multiple_of(cs) || chunk_size > MAX_CHUNK_SIZE {
             return Err(StoreError::invalid(format!(
                 "chunk size {chunk_size} must be a non-zero multiple of {cs} no larger than {MAX_CHUNK_SIZE}"
             )));

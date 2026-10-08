@@ -26,7 +26,7 @@ PROPTEST_CASES=50000 cargo test --release -p flaminio-store --test crash_consist
 
 ## Build and test
 
-Requires stable Rust ≥ 1.85.
+Requires stable Rust ≥ 1.88 (let-chains).
 
 ```bash
 cargo test                          # unit, integration and property tests

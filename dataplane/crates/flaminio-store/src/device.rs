@@ -22,6 +22,17 @@ pub trait BlockDevice {
     fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()>;
     /// Makes every completed write durable.
     fn flush(&self) -> io::Result<()>;
+
+    /// Writes several buffers, possibly concurrently and in any order. Returns when all are
+    /// complete. The ranges must not overlap.
+    fn write_many(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+        writes.iter().try_for_each(|(o, d)| self.write_at(*o, d))
+    }
+
+    /// Reads several buffers, possibly concurrently. Returns when all are complete.
+    fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
+        reads.iter_mut().try_for_each(|(o, b)| self.read_at(*o, b))
+    }
 }
 
 impl<D: BlockDevice + ?Sized> BlockDevice for &D {
@@ -39,6 +50,40 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &D {
 
     fn flush(&self) -> io::Result<()> {
         (**self).flush()
+    }
+
+    fn write_many(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+        (**self).write_many(writes)
+    }
+
+    fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
+        (**self).read_many(reads)
+    }
+}
+
+impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
+    fn size(&self) -> u64 {
+        (**self).size()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        (**self).read_at(offset, buf)
+    }
+
+    fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        (**self).write_at(offset, data)
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        (**self).flush()
+    }
+
+    fn write_many(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+        (**self).write_many(writes)
+    }
+
+    fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
+        (**self).read_many(reads)
     }
 }
 
@@ -104,6 +149,7 @@ struct MemInner {
     durable: HashMap<u64, Block>,
     cache: BTreeMap<u64, Block>,
     mutations: u64,
+    flushes: u64,
     fail_after: Option<u64>,
     failed: bool,
 }
@@ -117,10 +163,16 @@ impl MemDevice {
                 durable: HashMap::new(),
                 cache: BTreeMap::new(),
                 mutations: 0,
+                flushes: 0,
                 fail_after: None,
                 failed: false,
             }),
         }
+    }
+
+    /// Flushes performed so far.
+    pub fn flushes(&self) -> u64 {
+        self.inner.borrow().flushes
     }
 
     /// After `n` more successful writes or flushes, every further write, flush and read fails.
@@ -165,6 +217,7 @@ impl MemDevice {
                 durable,
                 cache: BTreeMap::new(),
                 mutations: 0,
+                flushes: 0,
                 fail_after: None,
                 failed: false,
             }),
@@ -188,7 +241,7 @@ impl MemInner {
     }
 
     fn bounds(&self, offset: u64, len: usize) -> io::Result<()> {
-        if offset % BLOCK_SIZE_U64 != 0 || len % BLOCK_SIZE != 0 {
+        if !offset.is_multiple_of(BLOCK_SIZE_U64) || !len.is_multiple_of(BLOCK_SIZE) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "unaligned I/O"));
         }
         if offset
@@ -238,6 +291,7 @@ impl BlockDevice for MemDevice {
     fn flush(&self) -> io::Result<()> {
         let mut d = self.inner.borrow_mut();
         d.check(true)?;
+        d.flushes += 1;
         let cache = std::mem::take(&mut d.cache);
         d.durable.extend(cache);
         Ok(())

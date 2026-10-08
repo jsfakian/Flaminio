@@ -210,7 +210,7 @@ impl Record<'_> {
                         "len",
                         "must be a non-zero multiple of 4096 no larger than a cluster",
                     ))
-                } else if *offset as usize % BLOCK_SIZE != 0 {
+                } else if !(*offset as usize).is_multiple_of(BLOCK_SIZE) {
                     Err(inv("offset", "must be 4 KiB aligned"))
                 } else if csums.len() != data.len() / BLOCK_SIZE {
                     Err(inv("csums", "need one checksum per 4 KiB block"))

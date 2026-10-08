@@ -66,7 +66,10 @@ pub fn payload_mut(page: &mut PageBuf) -> &mut [u8] {
 /// Writes the header and CRC of a page whose payload has already been filled in.
 /// `offset` is the page's byte offset on the device.
 pub fn seal(page: &mut PageBuf, page_type: PageType, nonce: u64, seq: u64, offset: u64) {
-    debug_assert!(offset % BLOCK_SIZE_U64 == 0, "pages are block aligned");
+    debug_assert!(
+        offset.is_multiple_of(BLOCK_SIZE_U64),
+        "pages are block aligned"
+    );
     page[0..4].copy_from_slice(&PAGE_MAGIC);
     put_u16(page, 4, page_type as u16);
     put_u16(page, 6, PAGE_VERSION);

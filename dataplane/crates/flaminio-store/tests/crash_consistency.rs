@@ -8,7 +8,9 @@
 mod common;
 
 use common::*;
-use flaminio_store::{Allocation, MemDevice, Store, StoreConfig, StoreError};
+use std::collections::BTreeMap;
+
+use flaminio_store::{Allocation, MemDevice, Store, StoreConfig, StoreError, WriteReq};
 use proptest::prelude::*;
 
 const CHUNKS: u64 = 2;
@@ -22,6 +24,12 @@ enum Op {
         chunk: u64,
         block: u64,
         len: u64,
+    },
+    /// Writes to distinct clusters, committed as one group, so all-or-nothing together.
+    /// Items: cluster -> (first block within the cluster, block count).
+    WriteBatch {
+        chunk: u64,
+        items: BTreeMap<u64, (u64, u64)>,
     },
     Discard {
         chunk: u64,
@@ -44,6 +52,11 @@ fn op() -> impl Strategy<Value = Op> {
     prop_oneof![
         10 => (0..CHUNKS, 0..BLOCKS, 1u64..48)
             .prop_map(|(chunk, block, len)| Op::Write { chunk, block, len: len.min(BLOCKS - block) }),
+        3 => (0..CHUNKS, prop::collection::btree_map(0..CLUSTERS, (0..CLUSTER_BLOCKS, 1..=CLUSTER_BLOCKS), 1..6))
+            .prop_map(|(chunk, items)| Op::WriteBatch {
+                chunk,
+                items: items.into_iter().map(|(c, (off, len))| (c, (off, len.min(CLUSTER_BLOCKS - off)))).collect(),
+            }),
         1 => (0..CHUNKS, 0..CLUSTERS, 1u64..4)
             .prop_map(|(chunk, cluster, count)| Op::Discard { chunk, cluster, count: count.min(CLUSTERS - cluster) }),
         1 => (0..CHUNKS).prop_map(|chunk| Op::Snapshot { chunk }),
@@ -76,6 +89,28 @@ fn run(store: &mut Store<&MemDevice>, model: &Model, op: &Op, id: u32) -> Result
                 .collect();
             store.write(key(chunk), block * BLOCK as u64, &data, u64::from(id), 1)?;
         }
+        Op::WriteBatch { chunk, ref items } if exists(chunk) => {
+            let data: Vec<Vec<u8>> = batch_blocks(items)
+                .map(|(first, len)| {
+                    (first..first + len)
+                        .flat_map(|b| content(id, chunk, b))
+                        .collect()
+                })
+                .collect();
+            let reqs: Vec<WriteReq<'_>> = batch_blocks(items)
+                .zip(&data)
+                .map(|((first, _), d)| WriteReq {
+                    key: key(chunk),
+                    offset: first * BLOCK as u64,
+                    data: d,
+                    write_seq: u64::from(id),
+                    epoch: 1,
+                })
+                .collect();
+            for result in store.write_batch(&reqs)? {
+                result?;
+            }
+        }
         Op::Discard {
             chunk,
             cluster,
@@ -101,8 +136,21 @@ fn run(store: &mut Store<&MemDevice>, model: &Model, op: &Op, id: u32) -> Result
     Ok(true)
 }
 
+/// (first block in the chunk, block count) of each write in a batch.
+fn batch_blocks(items: &BTreeMap<u64, (u64, u64)>) -> impl Iterator<Item = (u64, u64)> + '_ {
+    items
+        .iter()
+        .map(|(c, (off, len))| (c * CLUSTER_BLOCKS + off, *len))
+}
+
 fn update(model: &mut Model, op: &Op, id: u32) {
     match *op {
+        Op::WriteBatch { chunk, ref items } => {
+            let blocks = model[chunk as usize].as_mut().expect("exists");
+            for (first, len) in batch_blocks(items) {
+                blocks[first as usize..(first + len) as usize].fill(id);
+            }
+        }
         Op::Write { chunk, block, len } => {
             let blocks = model[chunk as usize].as_mut().expect("exists");
             blocks[block as usize..(block + len) as usize].fill(id);
@@ -134,6 +182,12 @@ fn in_flight_value(inflight: Option<&(Op, u32)>, chunk: u64, b: u64) -> Option<u
             },
             id,
         ) if *c == chunk && (*block..block + len).contains(&b) => Some(*id),
+        (Op::WriteBatch { chunk: c, items }, id)
+            if *c == chunk
+                && batch_blocks(items).any(|(first, len)| (first..first + len).contains(&b)) =>
+        {
+            Some(*id)
+        }
         (
             Op::Discard {
                 chunk: c,

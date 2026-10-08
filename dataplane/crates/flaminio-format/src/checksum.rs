@@ -14,7 +14,7 @@ pub fn crc32c(data: &[u8]) -> u32 {
 /// If `data.len()` is not a multiple of 4096.
 pub fn block_checksums(data: &[u8]) -> Vec<u32> {
     assert!(
-        data.len() % BLOCK_SIZE == 0,
+        data.len().is_multiple_of(BLOCK_SIZE),
         "data length must be a multiple of the block size"
     );
     data.chunks_exact(BLOCK_SIZE).map(crc32c).collect()
