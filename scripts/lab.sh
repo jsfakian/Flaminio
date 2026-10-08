@@ -45,26 +45,31 @@ cmd_host_prep() {
     done
 }
 
+# Renders a VM's cloud-init and domain files and uploads them to its host.
+upload_vm_files() {
+    local vm=$1 host dir f
+    host=$(vmvar "$vm" HOST)
+    dir="$LOCAL_STATE_DIR/$vm"
+    mkdir -p "$dir"
+    VM=$vm VM_CPUS=$(vmvar "$vm" CPUS) VM_MEM_GIB=$(vmvar "$vm" MEM_GIB) VM_MAC=$(vmvar "$vm" MAC)
+    SSH_PUBKEY=$(<"$SSH_PUBKEY_FILE") INSTANCE_STAMP=$(date +%s)
+    export VM VM_CPUS VM_MEM_GIB VM_MAC SSH_PUBKEY INSTANCE_STAMP
+    render "$SCRIPTS/templates/user-data.yaml" >"$dir/user-data"
+    render "$SCRIPTS/templates/meta-data.yaml" >"$dir/meta-data"
+    render "$SCRIPTS/templates/libvirt-domain.xml" >"$dir/domain.xml"
+    hsh "$host" "mkdir -p ~/$HOST_STATE_DIR/$vm"
+    for f in user-data meta-data domain.xml; do
+        hsh "$host" "cat > ~/$HOST_STATE_DIR/$vm/$f" <"$dir/$f"
+    done
+}
+
 cmd_create() {
-    local vm host dir
+    local vm host
     [[ -r $SSH_PUBKEY_FILE ]] || die "SSH public key $SSH_PUBKEY_FILE not found (set SSH_PUBKEY_FILE)"
     for vm in $(vms_of "${1:-all}"); do
         host=$(vmvar "$vm" HOST)
         log "creating $vm on $host"
-        dir="$LOCAL_STATE_DIR/$vm"
-        mkdir -p "$dir"
-        # Template variables.
-        VM=$vm VM_CPUS=$(vmvar "$vm" CPUS) VM_MEM_GIB=$(vmvar "$vm" MEM_GIB) VM_MAC=$(vmvar "$vm" MAC)
-        SSH_PUBKEY=$(<"$SSH_PUBKEY_FILE") INSTANCE_STAMP=$(date +%s)
-        export VM VM_CPUS VM_MEM_GIB VM_MAC SSH_PUBKEY INSTANCE_STAMP
-        render "$SCRIPTS/templates/user-data.yaml" >"$dir/user-data"
-        render "$SCRIPTS/templates/meta-data.yaml" >"$dir/meta-data"
-        render "$SCRIPTS/templates/libvirt-domain.xml" >"$dir/domain.xml"
-        hsh "$host" "mkdir -p ~/$HOST_STATE_DIR/$vm"
-        local f
-        for f in user-data meta-data domain.xml; do
-            hsh "$host" "cat > ~/$HOST_STATE_DIR/$vm/$f" <"$dir/$f"
-        done
+        upload_vm_files "$vm"
         ENV_VARS=$(host_env "$vm") run_on_host "$host" "$SCRIPTS/host/create-vm.sh"
     done
     for vm in $(vms_of "${1:-all}"); do
@@ -72,6 +77,44 @@ cmd_create() {
         log "$vm: waiting for cloud-init"
         vssh "$vm" 'cloud-init status --wait >/dev/null 2>&1; cloud-init status | tail -1' || true
     done
+}
+
+# Applies the current domain template to existing VMs. Takes effect at their next boot.
+cmd_redefine() {
+    local vm host
+    for vm in $(vms_of "${1:-all}"); do
+        host=$(vmvar "$vm" HOST)
+        upload_vm_files "$vm"
+        # Keep the domain's UUID, or libvirt sees a different domain with the same name.
+        hsh "$host" "set -e; f=~/$HOST_STATE_DIR/$vm/domain.xml; uuid=\$(virsh -c qemu:///system domuuid $vm);
+            sed -i \"s|<name>$vm</name>|<name>$vm</name><uuid>\$uuid</uuid>|\" \$f;
+            virsh -c qemu:///system define \$f" >/dev/null
+        log "$vm redefined (takes effect at its next power cycle: make vm-restart FORCE=1)"
+    done
+}
+
+# Reboots VMs: a clean reboot, or with FORCE=1 a hard reset (for a hung guest).
+cmd_restart() {
+    local vm host
+    for vm in $(vms_of "${1:-all}"); do
+        host=$(vmvar "$vm" HOST)
+        if [[ ${FORCE:-0} == 1 ]]; then
+            log "$vm: hard reset"
+            hsh "$host" "virsh -c qemu:///system destroy $vm >/dev/null 2>&1; virsh -c qemu:///system start $vm" >/dev/null
+        else
+            log "$vm: rebooting"
+            vssh "$vm" 'sudo systemctl reboot' >/dev/null 2>&1 || true
+            sleep 10
+        fi
+    done
+    for vm in $(vms_of "${1:-all}"); do wait_for "SSH on $vm" 300 vssh "$vm" true; done
+}
+
+# Shows the end of a VM's console log (kept on its host).
+cmd_console_log() {
+    local vm
+    vm=$(vms_of "${1:-a}")
+    hsh "$(vmvar "$vm" HOST)" "sudo tail -n ${LINES:-60} /var/log/libvirt/qemu/$vm-console.log"
 }
 
 cmd_start() {
@@ -120,6 +163,9 @@ cmd_status() {
         printf '\033[1m%-6s\033[0m on %-14s %-10s %s\n' "$vm" "$(vmvar "$vm" HOST)" "$state" "$(vmvar "$vm" IP)"
         [[ $state == running ]] || continue
         vssh "$vm" 'disk=$(lsblk -dn -o PATH,SERIAL | awk "\$2 ~ /data/ {print \$1; exit}");
+            bad=""; for c in $(seq 0 $(($(nproc) - 1))); do taskset -c "$c" true 2>/dev/null || bad="$bad $c"; done
+            printf "       vCPU health: %s; CET: %s\n" "${bad:+FAILING on vCPU$bad}${bad:-all $(nproc) run processes}" \
+                "$(grep -qw user_shstk /proc/cpuinfo && echo on || echo off)"
             printf "       kernel %s, %s vCPU, %s GiB, ublk %s, data %s %s, rust %s\n" "$(uname -r)" "$(nproc)" \
                 "$(free -g | awk "/Mem:/ {print \$2}")" "$(test -e /dev/ublk-control && echo ready || echo missing)" \
                 "${disk:-none}" "$(lsblk -dn -o SIZE "$disk" 2>/dev/null)" \
@@ -131,10 +177,16 @@ cmd_status() {
 cmd_ssh() { vssh_tty "$(vms_of "${1:-a}")"; }
 vssh_tty() {
     ssh -t -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new \
-        -J "$(vmvar "$1" HOST)" "$VM_USER@$(vmvar "$1" IP)"
+        -J "$(vm_jump "$1")" "$VM_USER@$(vmvar "$1" IP)"
 }
 
-cmd_console() { ssh -t "$(vmvar "$(vms_of "${1:-a}")" HOST)" "virsh -c qemu:///system console $(vms_of "${1:-a}")"; }
+cmd_console() {
+    local vm host jump
+    vm=$(vms_of "${1:-a}")
+    host=$(vmvar "$vm" HOST)
+    jump=$(host_jump "$host")
+    ssh -t ${jump:+-J "$jump"} "$host" "virsh -c qemu:///system console $vm"
+}
 
 cmd_exec() {
     local vm
@@ -144,10 +196,15 @@ cmd_exec() {
 }
 
 cmd_provision() {
-    local vm
+    local vm out
     for vm in $(vms_of "${1:-all}"); do
         log "provisioning $vm"
-        run_on_vm "$vm" "$SCRIPTS/guest/provision.sh"
+        out=$(ENV_VARS="GUEST_KERNEL_ARGS=$(printf %q "$GUEST_KERNEL_ARGS")" run_on_vm "$vm" "$SCRIPTS/guest/provision.sh" | tee /dev/stderr)
+        if [[ $out == *REBOOT_REQUIRED* ]]; then
+            cmd_restart "$vm"
+            ENV_VARS="GUEST_KERNEL_ARGS=$(printf %q "$GUEST_KERNEL_ARGS")" run_on_vm "$vm" "$SCRIPTS/guest/provision.sh" |
+                grep -E "kernel args|cet" >&2
+        fi
     done
 }
 
@@ -181,7 +238,7 @@ cmd_bench_raw() {
     local vm out
     for vm in $(vms_of "${1:-all}"); do
         log "raw-disk fio baseline on $vm (${RUNTIME:-30}s per job)"
-        out=$(run_on_vm "$vm" "$SCRIPTS/guest/fio-raw.sh" "${RUNTIME:-30}" "${JOBS:-.}" | tee /dev/stderr | tail -1)
+        out=$(run_detached "$vm" "$SCRIPTS/guest/fio-raw.sh" "${RUNTIME:-30}" "${JOBS:-.}" | tee /dev/stderr | tail -1)
         mkdir -p "$LOCAL_STATE_DIR/results/$vm"
         vssh "$vm" "tar -czf - -C $(dirname "$out") $(basename "$out")" | tar -xzf - -C "$LOCAL_STATE_DIR/results/$vm"
         log "results saved in .lab/results/$vm/$(basename "$out")"
@@ -192,7 +249,7 @@ cmd_bench_store() {
     local vm out
     for vm in $(vms_of "${1:-all}"); do
         log "replica-store benchmark on $vm (${RUNTIME:-30}s per job)"
-        out=$(ENV_VARS="FORMAT=${FORMAT:-1}" run_on_vm "$vm" "$SCRIPTS/guest/store-bench.sh" "${RUNTIME:-30}" "${JOBS:-.}" |
+        out=$(ENV_VARS="FORMAT=${FORMAT:-1}" run_detached "$vm" "$SCRIPTS/guest/store-bench.sh" "${RUNTIME:-30}" "${JOBS:-.}" |
             tee /dev/stderr | tail -1)
         mkdir -p "$LOCAL_STATE_DIR/results/$vm"
         vssh "$vm" "tar -czf - -C $(dirname "$out") $(basename "$out")" | tar -xzf - -C "$LOCAL_STATE_DIR/results/$vm"
@@ -231,6 +288,9 @@ usage: scripts/lab.sh COMMAND [a|b|all]
   host-prep    install KVM/libvirt, storage pool, network, ufw rules (idempotent)
   create       create and boot VMs (idempotent)
   start|stop   power VMs on or off
+  restart      reboot VMs (FORCE=1: hard reset of a hung guest)
+  redefine     apply the current domain template to existing VMs (next boot)
+  console-log  end of a VM's console log, kept on its host (default: a)
   status       VM state, kernel, ublk, data disk
   destroy      delete VMs and disks (CONFIRM=yes)
   provision    toolchain and kernel modules in the VMs
@@ -253,6 +313,9 @@ case "$cmd" in
     host-prep) cmd_host_prep "$@" ;;
     create) cmd_create "$@" ;;
     start) cmd_start "$@" ;;
+    restart) cmd_restart "$@" ;;
+    redefine) cmd_redefine "$@" ;;
+    console-log) cmd_console_log "$@" ;;
     stop) cmd_stop "$@" ;;
     status) cmd_status "$@" ;;
     destroy) cmd_destroy "$@" ;;

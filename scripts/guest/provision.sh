@@ -25,6 +25,26 @@ if [[ ! -x $HOME/.cargo/bin/cargo ]]; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
 fi
 
+# Guest kernel arguments (GUEST_KERNEL_ARGS from lab.conf). Applied through a GRUB drop-in;
+# a reboot is needed when they are not active yet.
+wanted=${GUEST_KERNEL_ARGS:-}
+dropin=/etc/default/grub.d/90-flaminio-lab.cfg
+if [[ -n $wanted ]]; then
+    line="GRUB_CMDLINE_LINUX_DEFAULT=\"\$GRUB_CMDLINE_LINUX_DEFAULT $wanted\""
+    if [[ $(cat "$dropin" 2>/dev/null) != "$line" ]]; then
+        log "setting guest kernel arguments: $wanted"
+        echo "$line" | sudo tee "$dropin" >/dev/null
+        sudo update-grub >/dev/null 2>&1
+    fi
+elif [[ -f $dropin ]]; then
+    sudo rm -f "$dropin"
+    sudo update-grub >/dev/null 2>&1
+fi
+missing_args=""
+for arg in $wanted; do
+    grep -qw -- "$arg" /proc/cmdline || missing_args+=" $arg"
+done
+
 disk=$(data_disk)
 cat <<SUMMARY
   kernel     $(uname -r)
@@ -35,4 +55,9 @@ cat <<SUMMARY
   rust       $(cargo --version)
   fio        $(fio --version)
   data disk  $disk $(lsblk -dn -o SIZE "$disk") (rotational=$(lsblk -dn -o ROTA "$disk"))
+  kernel args $(if [[ -z $wanted ]]; then echo "(none)"; elif [[ -z $missing_args ]]; then echo "active: $wanted"; else echo "PENDING REBOOT:$missing_args"; fi)
+  cet        $(grep -qw user_shstk /proc/cpuinfo && echo "user shadow stacks available" || echo "user shadow stacks off")
 SUMMARY
+if [[ -n $missing_args ]]; then
+    echo "REBOOT_REQUIRED"
+fi

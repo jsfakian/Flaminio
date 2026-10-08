@@ -22,6 +22,8 @@ host-passthrough CPU, and a virtio-blk data disk backed by a preallocated raw fi
 ## Requirements on the workstation
 
 - SSH aliases `rhythm` and `rhythm-backup` in `~/.ssh/config`, with key login.
+- **rhythm accepts SSH only from 147.52.71.0/24.** From anywhere else (off campus, no VPN), relay
+  through rhythm-backup: `export HOST_A_JUMP=rhythm-backup`, then use `make` as usual.
 - **bash ≥ 4.4.** macOS ships bash 3.2: run `brew install bash`. The scripts refuse to run on
   older versions.
 - Optional: `shellcheck` (used by `make lint`).
@@ -57,6 +59,48 @@ All of it is idempotent, and everything Flaminio-specific is named or tagged `fl
 
 The `net-setup` iptables rules are **not persistent**. After rhythm-backup reboots, run
 `make net-setup` again (it is idempotent). `make net-check` tells you whether the path works.
+
+## Long-running jobs
+
+`bench-raw` and `bench-store` run inside the VM as a transient systemd unit. The workstation
+only polls for output, so a dropped SSH connection (laptop sleep, network change) does not kill
+the run. If the connection drops anyway, rerun the target, or read the log in the VM at
+`~/.flaminio-lab/<unit>.log`.
+
+## Health checks
+
+- `make vm-status` runs a trivial process on **every vCPU** of each VM and reports any vCPU
+  where processes fail, plus whether CET is on.
+- `make vm-console-log VM=a` shows a VM's console (kernel messages, panics), which is logged on
+  its host in `/var/log/libvirt/qemu/<vm>-console.log`.
+- `make vm-restart VM=b FORCE=1` hard-resets a hung guest.
+
+## Known issues
+
+### 2026-10-08: CET (shadow stack) failures in guests
+
+**Symptoms.** About an hour after boot, every user process scheduled on **vCPU 2** of fl-a was
+killed with `segfault at 7726019fffb0 ... error 46`, while the other seven vCPUs were fine
+(`taskset -c 2 /bin/true` failed 5 times out of 5; every other vCPU succeeded 5 out of 5). Page-fault error
+`0x46` is `WRITE | USER | SHSTK`: a shadow-stack write. The fault address was the same in every
+process, including processes that had never enabled shadow stacks, which points to a stale
+shadow-stack pointer on that vCPU rather than to anything in the processes or on disk. In the
+same period fl-b hung: vCPU 0 spinning in the guest kernel (privilege level 0, not halted, interrupts
+enabled), with no console log to say why.
+
+**Environment.** Host and guest kernels 7.0.0-34. Host-passthrough CPUs (Xeon 6527P and Xeon
+E-2436, both with CET). Both guests reported `user_shstk`.
+
+**Workaround (lab only).** The guests boot with `clearcpuid=user_shstk ibt=off`
+(`GUEST_KERNEL_ARGS` in `scripts/lab.conf`, applied by `make provision`), and consoles are now
+logged so a recurrence leaves evidence. This disables a security feature **inside the lab VMs
+only**. It is a workaround for KVM/CET on these kernels, not a product decision. Before
+re-enabling it (`GUEST_KERNEL_ARGS=""`), retest with newer host kernels and QEMU, and consider
+reporting upstream with the evidence above. The failing processes were unrelated programs
+(`systemd`, `sshd`, `lsblk`, `dash`). The first fault (uptime 3304 s) came about 20 minutes into
+a store benchmark run, so the benchmark load may have triggered the bug. It is not known
+whether it did. Per-vCPU CPU state is kernel/KVM territory, which a userspace program cannot
+corrupt without a kernel bug.
 
 ## Security notes
 

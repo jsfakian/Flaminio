@@ -51,11 +51,27 @@ vmvar() {
     eval "echo \"\${${prefix}_$2}\""
 }
 
+# The relay (-J) for reaching a host: HOST_A_JUMP for HOST_A when set, otherwise none.
+host_jump() {
+    if [[ $1 == "$HOST_A" && -n $HOST_A_JUMP ]]; then
+        echo "$HOST_A_JUMP"
+    fi
+}
+
+# The -J value for reaching a VM: its host, preceded by the host's relay if any.
+vm_jump() {
+    local host jump
+    host=$(vmvar "$1" HOST)
+    jump=$(host_jump "$host")
+    echo "${jump:+$jump,}$host"
+}
+
 # Runs a command on a host: hsh HOST CMD...
 hsh() {
-    local host=$1
+    local host=$1 jump
     shift
-    ssh "${SSH_OPTS[@]}" "$host" "$@"
+    jump=$(host_jump "$host")
+    ssh "${SSH_OPTS[@]}" ${jump:+-J "$jump"} "$host" "$@"
 }
 
 # Runs a local script file on a host or VM with arguments. The script is copied to a temporary
@@ -69,13 +85,15 @@ run_on_host() {
     shift 2
     local args=""
     (($#)) && args=$(printf ' %q' "$@")
-    ssh "${SSH_OPTS[@]}" "$host" "env ${ENV_VARS:-} bash -c $(printf %q "$REMOTE_RUNNER") _$args" <"$script"
+    local jump
+    jump=$(host_jump "$host")
+    ssh "${SSH_OPTS[@]}" ${jump:+-J "$jump"} "$host" "env ${ENV_VARS:-} bash -c $(printf %q "$REMOTE_RUNNER") _$args" <"$script"
 }
 
 vssh() {
     local vm=$1
     shift
-    ssh "${VM_SSH_OPTS[@]}" -J "$(vmvar "$vm" HOST)" "$VM_USER@$(vmvar "$vm" IP)" "$@"
+    ssh "${VM_SSH_OPTS[@]}" -J "$(vm_jump "$vm")" "$VM_USER@$(vmvar "$vm" IP)" "$@"
 }
 
 run_on_vm() {
@@ -84,6 +102,34 @@ run_on_vm() {
     local args=""
     (($#)) && args=$(printf ' %q' "$@")
     cat "$SCRIPTS/guest/common.sh" "$script" | vssh "$vm" "env ${ENV_VARS:-} bash -c $(printf %q "$REMOTE_RUNNER") _$args"
+}
+
+# Runs a guest script detached from SSH (as a transient systemd unit in the VM), so long jobs
+# survive a dropped connection. Streams its output while polling, retrying through network
+# errors, and returns its exit status.   run_detached VM SCRIPT [ARGS...]
+run_detached() {
+    local vm=$1 script=$2
+    shift 2
+    local unit args rc="" shown=0 out
+    unit="flaminio-$(basename "$script" .sh)-$(date +%s)"
+    args=""
+    (($#)) && args=$(printf ' %q' "$@")
+    cat "$SCRIPTS/guest/common.sh" "$script" | vssh "$vm" "mkdir -p ~/.flaminio-lab && cat > ~/.flaminio-lab/$unit.sh"
+    vssh "$vm" "sudo systemd-run --quiet --unit=$unit --uid=$VM_USER --setenv=HOME=/home/$VM_USER \
+        bash -c 'cd ~; env ${ENV_VARS:-} bash ~/.flaminio-lab/$unit.sh$args > ~/.flaminio-lab/$unit.log 2>&1;
+                 echo \$? > ~/.flaminio-lab/$unit.rc'"
+    log "$vm: running $(basename "$script") as unit $unit (survives SSH drops)"
+    while [[ -z $rc ]]; do
+        sleep 10
+        if out=$(vssh "$vm" "tail -c +$((shown + 1)) ~/.flaminio-lab/$unit.log 2>/dev/null" 2>/dev/null); then
+            [[ -n $out ]] && printf '%s\n' "$out"
+            shown=$((shown + ${#out} + (${#out} > 0 ? 1 : 0)))
+            rc=$(vssh "$vm" "cat ~/.flaminio-lab/$unit.rc 2>/dev/null" 2>/dev/null || true)
+        else
+            warn "$vm unreachable; still waiting for $unit"
+        fi
+    done
+    return "$rc"
 }
 
 # Renders a template, replacing {{NAME}} with the value of $NAME.

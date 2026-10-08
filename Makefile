@@ -69,7 +69,7 @@ lab-up: host-prep vm-create net-setup provision deploy net-check ## Everything f
 
 ##@ Lab: VMs
 
-.PHONY: vm-create vm-start vm-stop vm-status vm-destroy vm-ssh vm-console provision
+.PHONY: vm-create vm-start vm-stop vm-restart vm-redefine vm-console-log vm-status vm-destroy vm-ssh vm-console provision
 vm-create: ## Create and boot VMs (idempotent)
 	$(LAB) create $(VM)
 
@@ -78,6 +78,15 @@ vm-start: ## Start VMs
 
 vm-stop: ## Shut VMs down
 	$(LAB) stop $(VM)
+
+vm-restart: ## Reboot VMs (FORCE=1 for a hard reset of a hung guest)
+	FORCE=$(FORCE) $(LAB) restart $(VM)
+
+vm-redefine: ## Apply the current libvirt template to existing VMs (next boot)
+	$(LAB) redefine $(VM)
+
+vm-console-log: ## End of a VM's console log (VM=a or VM=b)
+	$(LAB) console-log $(if $(filter all,$(VM)),a,$(VM))
 
 vm-status: ## State, kernel, ublk, data disk and toolchain of each VM
 	$(LAB) status $(VM)

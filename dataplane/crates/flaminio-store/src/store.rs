@@ -1139,9 +1139,8 @@ impl<D: BlockDevice> Store<D> {
                 &|o| page.encode(BitmapKind::Pool, nonce, k, o),
             );
         }
-        for (o, page) in &writes {
-            self.dev.write_at(*o, &page[..])?;
-        }
+        let batch: Vec<(u64, &[u8])> = writes.iter().map(|(o, p)| (*o, &p[..])).collect();
+        self.dev.write_many(&batch)?;
         // One flush makes the new pages and every earlier data write (including in-place
         // deferred writes) durable. Only the header below makes checkpoint K+1 count, and only
         // it moves the journal start, so nothing depends on these writes before then.

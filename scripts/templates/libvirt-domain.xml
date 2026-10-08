@@ -37,7 +37,11 @@
       <source network='{{LIBVIRT_NET}}'/>
       <model type='virtio'/>
     </interface>
-    <serial type='pty'><target port='0'/></serial>
+    <!-- The console is also logged on the host, so a guest panic leaves evidence. -->
+    <serial type='pty'>
+      <log file='/var/log/libvirt/qemu/{{VM}}-console.log' append='on'/>
+      <target port='0'/>
+    </serial>
     <console type='pty'><target type='serial' port='0'/></console>
     <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>
     <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
