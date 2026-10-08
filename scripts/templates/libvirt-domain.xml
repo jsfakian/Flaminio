@@ -1,0 +1,45 @@
+<domain type='kvm'>
+  <name>{{VM}}</name>
+  <description>Flaminio test lab VM (managed by scripts/lab.sh)</description>
+  <memory unit='GiB'>{{VM_MEM_GIB}}</memory>
+  <vcpu placement='static'>{{VM_CPUS}}</vcpu>
+  <os>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <features><acpi/><apic/></features>
+  <cpu mode='host-passthrough' check='none' migratable='off'/>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none' io='native' discard='unmap'/>
+      <source file='{{LIBVIRT_POOL_PATH}}/{{VM}}-root.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <!-- Flaminio's data disk: raw, preallocated, no host page cache. -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw' cache='none' io='native' discard='unmap'/>
+      <source file='{{LIBVIRT_POOL_PATH}}/{{VM}}-data.img'/>
+      <target dev='vdb' bus='virtio'/>
+      <serial>flaminio-data</serial>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{{LIBVIRT_POOL_PATH}}/{{VM}}-seed.iso'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>
+    <interface type='network'>
+      <mac address='{{VM_MAC}}'/>
+      <source network='{{LIBVIRT_NET}}'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
+    <channel type='unix'><target type='virtio' name='org.qemu.guest_agent.0'/></channel>
+    <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
+  </devices>
+</domain>

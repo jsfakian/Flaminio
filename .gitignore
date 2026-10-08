@@ -3,3 +3,4 @@
 /dataplane/fuzz/corpus/
 /dataplane/fuzz/artifacts/
 .DS_Store
+/.lab/

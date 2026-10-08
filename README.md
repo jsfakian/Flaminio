@@ -172,7 +172,9 @@ flaminio/
 ├── cli/                # kubectl-flaminio plugin
 ├── deploy/             # Helm chart, manifests
 ├── test/               # e2e, chaos (fault injection), performance benchmarks
-└── docs/               # architecture, ADRs, operations guides
+├── scripts/            # test-lab automation (VMs on the test servers), driven by the Makefile
+├── Makefile            # `make help`: build, test, lint, lab VMs, benchmarks
+└── docs/               # architecture, ADRs, format spec, lab guide, benchmarks
 ```
 
 ## Contributing

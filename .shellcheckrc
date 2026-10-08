@@ -1,0 +1,6 @@
+shell=bash
+source-path=SCRIPTDIR
+external-sources=true
+# Remote commands are deliberately single-quoted (expanded on the remote side) or built from
+# locally escaped values.
+disable=SC2016,SC2029

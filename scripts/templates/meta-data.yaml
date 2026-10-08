@@ -1,0 +1,2 @@
+instance-id: {{VM}}-{{INSTANCE_STAMP}}
+local-hostname: {{VM}}

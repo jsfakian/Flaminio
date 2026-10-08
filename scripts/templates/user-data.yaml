@@ -1,0 +1,27 @@
+#cloud-config
+hostname: {{VM}}
+users:
+  - name: {{VM_USER}}
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - {{SSH_PUBKEY}}
+ssh_pwauth: false
+package_update: true
+packages:
+  - build-essential
+  - pkg-config
+  - fio
+  - jq
+  - netcat-openbsd
+  - rsync
+  - qemu-guest-agent
+write_files:
+  - path: /etc/modules-load.d/flaminio.conf
+    content: |
+      ublk_drv
+runcmd:
+  - [sh, -c, "modprobe ublk_drv || true"]
+  - [systemctl, enable, --now, qemu-guest-agent]
