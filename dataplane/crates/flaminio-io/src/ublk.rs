@@ -11,27 +11,20 @@
 //!   durable, so the device advertises no volatile write cache and flushes are no-ops.
 
 use std::cell::RefCell;
-use std::fs::File;
-use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use flaminio_format::Uuid;
-use flaminio_format::consts::{BLOCK_SIZE, BLOCK_SIZE_U64, GIB};
-use flaminio_format::layout::LayoutParams;
-use flaminio_format::mkfs::FormatOptions;
-use flaminio_format::superblock::select_superblock;
-use flaminio_store::{BlockDevice, Store, StoreConfig};
-use flaminio_uring::{AlignedBuf, UringDevice};
+use flaminio_format::consts::GIB;
+use flaminio_store::{Store, StoreConfig};
+use flaminio_uring::UringDevice;
 use io_uring::{opcode, types};
 use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
 use libublk::helpers::IoBuf;
 use libublk::io::{UblkDev, UblkQueue};
 use libublk::{BufDesc, UblkError, UblkFlags, sys};
 
-use std::cell::Cell;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::cli::{format_if_asked, parse_size, volume_uuid};
 use crate::volume::{Op, Request, Volume, VolumeLayout};
@@ -304,6 +297,11 @@ fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
 
 /// One tag: fetch a request, serve it (reads here, the rest through the driver), commit its
 /// result, repeat.
+///
+/// The tag's buffer stays borrowed across the prep and commit awaits on purpose: while those
+/// commands are outstanding the buffer is lent to the kernel, which fills it with the next
+/// write's data. Holding the borrow makes any other access panic instead of racing the kernel.
+#[allow(clippy::await_holding_refcell_ref)]
 async fn io_task(
     q: &UblkQueue<'_>,
     tag: u16,

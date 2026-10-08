@@ -161,6 +161,7 @@ impl<D: BlockDevice> Volume<D> {
     }
 
     /// State of the remote replica, if there is one.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn remote_health(&self) -> Option<Health> {
         self.remote.as_ref().map(Remote::health)
     }

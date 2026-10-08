@@ -154,9 +154,12 @@ net-check: ## End-to-end check: fl-a -> rhythm-backup -> fl-b
 
 ##@ Lab: build, test, benchmark
 
-.PHONY: deploy vm-test vm-crash-test bench-raw bench-store
+.PHONY: deploy vm-lint vm-test vm-crash-test bench-raw bench-store
 deploy: ## Copy the working tree to the VMs and build (release)
 	$(LAB) deploy $(VM)
+
+vm-lint: ## clippy inside a VM: also checks the Linux-only code (io_uring, ublk)
+	$(LAB) lint $(if $(filter all,$(VM)),a,$(VM))
 
 vm-test: ## Run the test suite inside a VM on Linux (default VM a)
 	$(LAB) test $(if $(filter all,$(VM)),a,$(VM))

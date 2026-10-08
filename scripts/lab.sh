@@ -225,6 +225,16 @@ cmd_deploy() {
 }
 
 # test [VM] [CARGO_ARGS...]
+# clippy on Linux in a VM: covers code that only compiles there (io_uring, ublk).
+cmd_lint() {
+    local vm
+    vm=$(vms_of "${1:-a}")
+    log "clippy on $vm (Linux-only code included)"
+    vssh "$vm" '$HOME/.cargo/bin/rustup component add clippy >/dev/null 2>&1; cd $HOME/flaminio/dataplane &&
+        $HOME/.cargo/bin/cargo clippy --release --all-targets --message-format=short -- -D warnings 2>&1 |
+        grep -E "^(crates|error|warning)" | grep -v "could not compile" | sort -u; exit ${PIPESTATUS[0]}'
+}
+
 cmd_test() {
     local which=${1:-a} vm
     shift || true
@@ -370,6 +380,7 @@ usage: scripts/lab.sh COMMAND [a|b|all]
   provision    toolchain and kernel modules in the VMs
   deploy       copy the working tree to VMs and build (release)
   test         cargo test --release in a VM (PROPTEST_CASES=N)
+  lint         clippy (warnings are errors) in a VM, including Linux-only code
   bench-raw    fio baseline on the raw data disk (RUNTIME=s, JOBS=regex, default reads only)
   bench-store  replica-store benchmark on the data disk (RUNTIME, JOBS, FORMAT=0 to reuse)
   ublk ACTION [VM]  ublk frontend: up (FORMAT=1 reformats) | down | status | smoke | fio
@@ -402,6 +413,7 @@ case "$cmd" in
     provision) cmd_provision "$@" ;;
     deploy) cmd_deploy "$@" ;;
     test) cmd_test "$@" ;;
+    lint) cmd_lint "$@" ;;
     bench-raw) cmd_bench_raw "$@" ;;
     bench-store) cmd_bench_store "$@" ;;
     ublk) cmd_ublk "$@" ;;

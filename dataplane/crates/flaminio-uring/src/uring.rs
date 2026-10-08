@@ -210,10 +210,7 @@ impl BlockDevice for UringDevice {
     }
 
     fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
-        let mut ops: Vec<Op<'_>> = reads
-            .iter_mut()
-            .map(|(o, b)| Op::Read(*o, &mut **b))
-            .collect();
+        let mut ops: Vec<Op<'_>> = reads.iter_mut().map(|(o, b)| Op::Read(*o, b)).collect();
         self.run(&mut ops)
     }
 }

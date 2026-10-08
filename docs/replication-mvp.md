@@ -69,6 +69,18 @@ overwrite a newer write on the replica.
   10 s in and restarted 15 s later. The writes must not fail, fio's read-back must verify, the
   replica must reach `InSync`, and both disks must then be identical.
 
+## Results in the lab (2026-10-09)
+
+| Check | Result |
+|---|---|
+| First start (`FORMAT=1 make repl-up`) | fl-a connected to fl-b through rhythm-backup's port forward. The digest comparison of the 64 GiB volume took about 4.5 min, then `InSync` |
+| `make repl-fault` | fio wrote 4 GiB (random 64 KiB blocks) with checksums. fl-b's replica was stopped 10 s in and restarted 15 s later. **No write failed**, and fio read back and **verified all 4096 MiB, 0 errors**. The replica was back `InSync` 291 s after the load ended |
+| `make repl-verify` (part of `repl-fault`) | Both services stopped, then every chunk's digest compared: **identical** (volume `0ebb52de` on both) |
+
+**Follow-up:** the first comparison costs about 4.5 min even for an empty volume. Most of it
+is per-step overhead, not checksums. Skipping ranges that are unmapped on both sides would make
+it nearly free.
+
 ## Limitations (all in the full design, none in the MVP)
 
 | Missing | Consequence | Where it comes in |
