@@ -6,7 +6,7 @@
 //! errno.
 
 use flaminio_format::Uuid;
-use flaminio_store::{BlockDevice, ChunkKey, ReadReq, Store, StoreError, WriteReq};
+use flaminio_store::{BlockDevice, ChunkKey, ReadPlan, ReadReq, Store, StoreError, WriteReq};
 
 /// Block request operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +115,10 @@ fn errno(e: &StoreError) -> i32 {
 impl<D: BlockDevice> Volume<D> {
     /// Opens the volume, creating any chunk that does not exist yet.
     pub fn open(mut store: Store<D>, layout: VolumeLayout, epoch: u64) -> Result<Self, StoreError> {
-        if layout.chunk_size == 0 || layout.size == 0 || layout.size % layout.chunk_size != 0 {
+        if layout.chunk_size == 0
+            || layout.size == 0
+            || !layout.size.is_multiple_of(layout.chunk_size)
+        {
             return Err(StoreError::Invalid(
                 "volume size must be a non-zero multiple of the chunk size".into(),
             ));
@@ -141,14 +144,38 @@ impl<D: BlockDevice> Volume<D> {
         })
     }
 
-    /// The volume's shape.
-    pub fn layout(&self) -> VolumeLayout {
-        self.layout
-    }
-
     /// The underlying store.
     pub fn store(&self) -> &Store<D> {
         &self.store
+    }
+
+    /// Plans an asynchronous read of `buf.len()` bytes at `offset` (see [`Store::plan_read`]).
+    /// Returns one plan per chunk piece, with the piece's offset in `buf`. Pass them to
+    /// [`finish_read`](Self::finish_read) once their device reads are done.
+    pub fn plan_read(&self, offset: u64, buf: &mut [u8]) -> Result<Vec<(usize, ReadPlan)>, i32> {
+        let pieces = self.layout.split(offset, buf.len() as u64).ok_or(-EINVAL)?;
+        let mut plans = Vec::with_capacity(pieces.len());
+        for p in pieces {
+            let piece = &mut buf[p.buf_offset..p.buf_offset + p.len as usize];
+            match self
+                .store
+                .plan_read(self.layout.key(p.chunk), p.chunk_offset, piece, self.epoch)
+            {
+                Ok(plan) => plans.push((p.buf_offset, plan)),
+                Err(e) => {
+                    self.finish_read(plans);
+                    return Err(errno(&e));
+                }
+            }
+        }
+        Ok(plans)
+    }
+
+    /// Ends plans from [`plan_read`](Self::plan_read).
+    pub fn finish_read(&self, plans: Vec<(usize, ReadPlan)>) {
+        for (_, plan) in plans {
+            self.store.finish_read(plan);
+        }
     }
 
     /// Processes a batch of requests. All writes (and discards) are applied before all reads;
@@ -405,6 +432,38 @@ mod tests {
             },
         ];
         assert_eq!(v.process(&mut reqs), vec![-EINVAL, 4096]);
+    }
+
+    #[test]
+    fn planned_reads_across_chunks() {
+        let mut v = volume();
+        let mut a = vec![0xCD; 64 * 1024];
+        v.process(&mut [Request {
+            op: Op::Write,
+            offset: CHUNK - 32 * 1024,
+            len: 64 * 1024,
+            buf: &mut a,
+        }]);
+        let mut buf = vec![0u8; 64 * 1024];
+        let plans = v.plan_read(CHUNK - 32 * 1024, &mut buf).unwrap();
+        assert_eq!(plans.len(), 2, "one plan per chunk");
+        for (base, plan) in &plans {
+            for r in plan.reads() {
+                let at = base + r.buf_offset;
+                v.store()
+                    .device()
+                    .read_at(r.device_offset, &mut buf[at..at + r.len])
+                    .unwrap();
+            }
+        }
+        assert!(
+            plans
+                .iter()
+                .all(|(base, p)| p.verify(&buf[*base..]).is_ok())
+        );
+        v.finish_read(plans);
+        assert!(buf.iter().all(|&x| x == 0xCD));
+        assert_eq!(v.plan_read(4 * CHUNK, &mut buf).unwrap_err(), -EINVAL);
     }
 
     #[test]

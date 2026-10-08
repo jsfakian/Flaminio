@@ -5,7 +5,9 @@ mod common;
 
 use common::*;
 use flaminio_format::consts::MIB;
-use flaminio_store::{BlockDevice, ReadReq, StoreError, WriteReq};
+use flaminio_store::{
+    Allocation, BlockDevice, MemDevice, ReadReq, Store, StoreConfig, StoreError, WriteReq,
+};
 
 const CLUSTER: u64 = 64 * 1024;
 
@@ -361,4 +363,84 @@ fn group_commit_shares_flushes() {
     let grouped = s.device().flushes() - before;
     assert_eq!(one_by_one, 32, "one journal flush per write");
     assert_eq!(grouped, 1, "one journal flush for the whole group");
+}
+
+/// Performs a plan's device reads synchronously, as the frontend does asynchronously.
+fn perform(dev: &impl BlockDevice, plan: &flaminio_store::ReadPlan, buf: &mut [u8]) {
+    for r in plan.reads() {
+        dev.read_at(
+            r.device_offset,
+            &mut buf[r.buf_offset..r.buf_offset + r.len],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn planned_reads_zero_fill_merge_and_verify() {
+    let mut s = new_store(16);
+    s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
+    s.write(key(0), 0, &blocks(1, 0, 32), 1, 1).unwrap(); // two contiguous clusters
+    let mut buf = vec![0xFFu8; 48 * 4096];
+    let plan = s.plan_read(key(0), 0, &mut buf, 1).unwrap();
+    assert_eq!(
+        plan.reads().len(),
+        1,
+        "two adjacent clusters become one device read"
+    );
+    assert!(
+        buf[32 * 4096..].iter().all(|&b| b == 0),
+        "the unmapped third cluster is zero-filled"
+    );
+    perform(s.device(), &plan, &mut buf);
+    plan.verify(&buf).unwrap();
+    assert_eq!(&buf[..32 * 4096], &blocks(1, 0, 32)[..]);
+    buf[4096] ^= 1;
+    assert!(matches!(
+        plan.verify(&buf),
+        Err(StoreError::Checksum { offset: 4096, .. })
+    ));
+    s.finish_read(plan);
+    assert!(matches!(
+        s.plan_read(key(0), 0, &mut buf, 0),
+        Err(StoreError::StaleEpoch { .. })
+    ));
+}
+
+#[test]
+fn clusters_under_an_in_flight_read_are_not_reused() {
+    let dev = MemDevice::new(DEVICE);
+    Store::format(&dev, &options(16)).unwrap();
+    let config = StoreConfig {
+        allocation: Allocation::FirstFit,
+        ..StoreConfig::default()
+    };
+    let mut s = Store::open(&dev, config).unwrap();
+    s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
+    s.write(key(0), 0, &blocks(1, 0, 16), 1, 1).unwrap();
+
+    // Plan a read of cluster 0, then overwrite it (redirect-on-write frees the old cluster)
+    // and checkpoint, which would normally make the old cluster reusable at once.
+    let mut buf = vec![0u8; 16 * 4096];
+    let plan = s.plan_read(key(0), 0, &mut buf, 1).unwrap();
+    s.write(key(0), 0, &blocks(2, 0, 16), 2, 1).unwrap();
+    s.checkpoint().unwrap();
+    assert_eq!(s.stats().data_quarantined, 1);
+    // First-fit would hand out the lowest free cluster: the one the read is still targeting.
+    s.create_chunk(key(1), CHUNK, CHUNK, 1).unwrap();
+    s.write(key(1), 0, &blocks(3, 0, 16), 3, 1).unwrap();
+
+    perform(&dev, &plan, &mut buf);
+    plan.verify(&buf)
+        .expect("the in-flight read must still see the data it planned for");
+    assert_eq!(buf, blocks(1, 0, 16));
+    s.finish_read(plan);
+    s.write(key(1), 64 * 1024, &blocks(4, 16, 16), 4, 1)
+        .unwrap();
+    assert_eq!(
+        s.stats().data_quarantined,
+        0,
+        "released on the next mutation once no reads are in flight"
+    );
+    s.fsck(true).unwrap();
 }

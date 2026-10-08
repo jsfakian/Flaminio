@@ -18,6 +18,7 @@ flaminio-uring.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libublk.workspace = true
+io-uring.workspace = true
 smol.workspace = true
 libc.workspace = true
 

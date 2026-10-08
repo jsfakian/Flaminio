@@ -3,7 +3,7 @@
 #   up      start flaminio-io as the systemd service "flaminio-io" (FORMAT=1 reformats the disk)
 #   down    stop it and remove the ublk device
 #   smoke   ext4 on the device, write files, restart the daemon, verify every file
-#   fio     read benchmark on the device (fills the first 32 GiB once, with writes, first)
+#   fio     read benchmark on the device (fills the first 32 GiB with writes first, every time)
 bin="$HOME/flaminio/dataplane/target/release/flaminio-io"
 id=0
 dev=/dev/ublkb$id
@@ -23,11 +23,11 @@ up() {
         "$bin" serve --device "$(data_disk)" --size "$size" --id "$id" "${format[@]}"
     for _ in $(seq 1 60); do
         [[ -b $dev ]] && break
-        systemctl is-active --quiet flaminio-io || { journalctl -u flaminio-io --no-pager | tail -20 >&2; die "flaminio-io exited"; }
+        systemctl is-active --quiet flaminio-io || { sudo journalctl -u flaminio-io --no-pager | tail -20 >&2; die "flaminio-io exited"; }
         sleep 1
     done
     [[ -b $dev ]] || die "$dev did not appear"
-    log "$(journalctl -u flaminio-io --no-pager -o cat | grep -E 'volume ready|serving' | tail -2 | tr '\n' ' ')"
+    log "$(sudo journalctl -u flaminio-io --no-pager -o cat | grep -E 'volume ready|serving' | tail -2 | tr '\n' ' ')"
 }
 
 down() {
@@ -46,7 +46,7 @@ down() {
 status() {
     systemctl is-active flaminio-io || true
     [[ -b $dev ]] && lsblk -o NAME,SIZE,LOG-SEC,PHY-SEC,DISC-GRAN,ROTA "$dev"
-    journalctl -u flaminio-io --no-pager -o cat | tail -5
+    sudo journalctl -u flaminio-io --no-pager -o cat | tail -5
 }
 
 smoke() {
@@ -83,14 +83,12 @@ bench() {
     up
     out="$HOME/results/ublk-$(date -u +%Y%m%dT%H%M%SZ)"
     mkdir -p "$out"
-    marker="$HOME/.flaminio-ublk-filled"
-    if [[ ! -f $marker || $(cat "$marker") != "$(journalctl -u flaminio-io -o cat | grep -c formatted)" ]]; then
-        log "filling the first 32 GiB of $dev (setup, not measured)"
-        sudo fio --name=fill --filename="$dev" --rw=write --bs=1m --iodepth=32 --size=32G \
-            --ioengine=io_uring --direct=1 --output-format=json --output="$out/fill.json" >/dev/null
-        jq -r '.jobs[0].write | "  filled at \(.bw_bytes/1048576|floor) MiB/s"' "$out/fill.json" >&2
-        journalctl -u flaminio-io -o cat | grep -c formatted >"$marker"
-    fi
+    # Always fill: anything may have discarded the volume since the last run (mkfs.ext4 does, by
+    # default), and reads of discarded ranges return zeros without touching the disk.
+    log "filling the first 32 GiB of $dev (setup, not measured)"
+    sudo fio --name=fill --filename="$dev" --rw=write --bs=1m --iodepth=32 --size=32G \
+        --ioengine=io_uring --direct=1 --output-format=json --output="$out/fill.json" >/dev/null
+    jq -r '.jobs[0].write | "  filled at \(.bw_bytes/1048576|floor) MiB/s"' "$out/fill.json" >&2
     local jobs=(
         "randread-4k-qd1   randread 4k 1  -"
         "randread-4k-qd32  randread 4k 32 -"

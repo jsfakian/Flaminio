@@ -232,11 +232,16 @@ impl State {
         }
     }
 
-    /// Makes clusters and pages freed since the last checkpoint allocatable again. Called at the
-    /// start of a checkpoint, so the bitmaps it writes already show them as free.
-    pub(crate) fn release_pending(&mut self) {
+    /// Frees clusters and pages released since the last checkpoint. Called at the start of a
+    /// checkpoint, so the bitmaps it writes already show them as free. With `quarantine`, data
+    /// clusters stay unallocatable in memory (not on disk) until reads planned before now
+    /// finish: an in-flight read may still be targeting them.
+    pub(crate) fn release_pending(&mut self, quarantine: bool) {
         for q in std::mem::take(&mut self.pending_data) {
             self.data.set(q, false);
+            if quarantine {
+                self.data.block(q);
+            }
         }
         for p in std::mem::take(&mut self.pending_pool) {
             self.pool.set(p, false);

@@ -7,6 +7,9 @@ use flaminio_format::meta::BitmapPage;
 
 pub(crate) struct Bitmap {
     words: Vec<u64>,
+    /// Free bits that must not be allocated yet (quarantined). Never persisted.
+    blocked: Vec<u64>,
+    blocked_count: u64,
     len: u64,
     ones: u64,
     dirty: BTreeSet<u64>,
@@ -18,6 +21,8 @@ impl Bitmap {
     pub(crate) fn new(len: u64) -> Self {
         Self {
             words: vec![0; len.div_ceil(64) as usize],
+            blocked: vec![0; len.div_ceil(64) as usize],
+            blocked_count: 0,
             len,
             ones: 0,
             dirty: BTreeSet::new(),
@@ -52,8 +57,34 @@ impl Bitmap {
         self.ones
     }
 
+    /// Bits that can be allocated now.
     pub(crate) fn free(&self) -> u64 {
-        self.len - self.ones
+        self.len - self.ones - self.blocked_count
+    }
+
+    /// Keeps the free bit `i` from being allocated until [`unblock_all`](Self::unblock_all).
+    pub(crate) fn block(&mut self, i: u64) {
+        let (w, m) = ((i / 64) as usize, 1 << (i % 64));
+        if self.blocked[w] & m == 0 {
+            self.blocked[w] |= m;
+            self.blocked_count += 1;
+        }
+    }
+
+    pub(crate) fn blocked_count(&self) -> u64 {
+        self.blocked_count
+    }
+
+    pub(crate) fn unblock_all(&mut self) {
+        if self.blocked_count > 0 {
+            self.blocked.fill(0);
+            self.blocked_count = 0;
+        }
+    }
+
+    fn taken(&self, i: u64) -> bool {
+        let (w, m) = ((i / 64) as usize, 1 << (i % 64));
+        (self.words[w] | self.blocked[w]) & m != 0
     }
 
     pub(crate) fn get(&self, i: u64) -> bool {
@@ -78,13 +109,13 @@ impl Bitmap {
     /// Allocates up to `max` consecutive free bits, searching from a rotating cursor (or from 0
     /// with first-fit). Returns the first bit and how many were allocated.
     pub(crate) fn alloc_run(&mut self, max: u64) -> Option<(u64, u64)> {
-        if max == 0 || self.ones == self.len {
+        if max == 0 || self.ones + self.blocked_count == self.len {
             return None;
         }
         let from = if self.first_fit { 0 } else { self.cursor };
         let start = self.find_free(from).or_else(|| self.find_free(0))?;
         let mut n = 0;
-        while n < max && start + n < self.len && !self.get(start + n) {
+        while n < max && start + n < self.len && !self.taken(start + n) {
             self.set(start + n, true);
             n += 1;
         }
@@ -95,7 +126,7 @@ impl Bitmap {
     fn find_free(&self, from: u64) -> Option<u64> {
         let mut i = from;
         while i < self.len {
-            let w = self.words[(i / 64) as usize];
+            let w = self.words[(i / 64) as usize] | self.blocked[(i / 64) as usize];
             if w == u64::MAX {
                 i = (i / 64 + 1) * 64;
                 continue;
@@ -145,6 +176,19 @@ mod tests {
         b.set(3, false);
         assert_eq!(b.alloc_run(5), Some((3, 1)), "search wraps to the start");
         assert_eq!(b.ones(), 200);
+    }
+
+    #[test]
+    fn blocked_bits_are_free_but_not_allocatable() {
+        let mut b = Bitmap::new(8);
+        b.block(0);
+        b.block(1);
+        assert_eq!(b.free(), 6);
+        assert_eq!(b.alloc_run(8), Some((2, 6)));
+        assert_eq!(b.alloc_run(1), None);
+        assert!(!b.get(0), "blocked bits stay free in the persisted bitmap");
+        b.unblock_all();
+        assert_eq!(b.alloc_run(8), Some((0, 2)));
     }
 
     #[test]

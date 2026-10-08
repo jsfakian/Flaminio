@@ -1,6 +1,7 @@
 //! The replica store: recovery, the write and read paths, and checkpoints.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::HashSet;
 
 use flaminio_format::FormatError;
@@ -92,6 +93,8 @@ pub struct Stats {
     pub journal_live_bytes: u64,
     /// Where the next journal batch goes (offset within the journal region).
     pub journal_head: u64,
+    /// Freed data clusters held back from reuse while planned reads are in flight.
+    pub data_quarantined: u64,
 }
 
 /// Result of a consistency check.
@@ -203,6 +206,53 @@ pub struct ReadReq<'a> {
     pub epoch: u64,
 }
 
+/// One device read of a [`ReadPlan`].
+#[derive(Debug, Clone)]
+pub struct PlannedRead {
+    /// Byte offset on the device.
+    pub device_offset: u64,
+    /// Where the data goes, as an offset into the request buffer.
+    pub buf_offset: usize,
+    /// Length in bytes.
+    pub len: usize,
+    csums: Vec<u32>,
+}
+
+/// A read planned by [`Store::plan_read`]: the device reads the caller must perform, and the
+/// checksums to verify them against. Unmapped ranges were already zero-filled in the buffer.
+/// While a plan is outstanding, the clusters it reads cannot be reused; release it with
+/// [`Store::finish_read`].
+#[derive(Debug)]
+#[must_use = "pass the plan to Store::finish_read when its reads are done"]
+pub struct ReadPlan {
+    key: ChunkKey,
+    offset: u64,
+    reads: Vec<PlannedRead>,
+}
+
+impl ReadPlan {
+    /// The device reads to perform. They do not overlap, on the device or in the buffer.
+    pub fn reads(&self) -> &[PlannedRead] {
+        &self.reads
+    }
+
+    /// Checks the request buffer once every read has completed.
+    pub fn verify(&self, buf: &[u8]) -> Result<(), StoreError> {
+        for r in &self.reads {
+            let data = &buf[r.buf_offset..r.buf_offset + r.len];
+            for (b, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
+                if crc32c(block) != r.csums[b] {
+                    return Err(StoreError::Checksum {
+                        key: self.key,
+                        offset: self.offset + (r.buf_offset + b * BLOCK_SIZE) as u64,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Chunk replicas on one device. See the crate documentation.
 pub struct Store<D: BlockDevice> {
     dev: D,
@@ -211,6 +261,8 @@ pub struct Store<D: BlockDevice> {
     journal: Journal,
     config: StoreConfig,
     poisoned: bool,
+    /// Plans handed out by plan_read and not yet finished.
+    reads_in_flight: Cell<u64>,
 }
 
 fn read_block<D: BlockDevice + ?Sized>(dev: &D, offset: u64) -> Result<Box<PageBuf>, StoreError> {
@@ -423,6 +475,7 @@ impl<D: BlockDevice> Store<D> {
             journal,
             config,
             poisoned: false,
+            reads_in_flight: Cell::new(0),
         };
         store.checkpoint_inner()?;
         Ok(store)
@@ -451,6 +504,9 @@ impl<D: BlockDevice> Store<D> {
     ) -> Result<T, StoreError> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
+        }
+        if self.reads_in_flight.get() == 0 {
+            self.state.data.unblock_all();
         }
         let result = f(self);
         if matches!(
@@ -960,6 +1016,78 @@ impl<D: BlockDevice> Store<D> {
             .expect("one result per request")
     }
 
+    /// Resolves a read of `buf.len()` bytes at `offset` in chunk `slot` into device reads,
+    /// zero-filling unmapped ranges of `buf`. Neighbouring clusters that are also neighbours on
+    /// disk become one device read.
+    fn plan_segments(&self, slot: u32, offset: u64, buf: &mut [u8]) -> ReadPlan {
+        let cs = self.state.cluster_size();
+        let chunk = self.state.chunk(slot);
+        let mut reads: Vec<PlannedRead> = Vec::new();
+        let mut pos = 0usize;
+        while pos < buf.len() {
+            let o = offset + pos as u64;
+            let (x, within) = (o / cs, o % cs);
+            let n = ((cs - within) as usize).min(buf.len() - pos);
+            match chunk.resolve(self.state.epp, x) {
+                Resolved::Zeros => buf[pos..pos + n].fill(0),
+                Resolved::Data { phys, csums } => {
+                    let dev = self.state.layout.data_cluster_offset(phys) + within;
+                    let first = (within / BLOCK_SIZE_U64) as usize;
+                    let sums = &csums[first..first + n / BLOCK_SIZE];
+                    match reads.last_mut() {
+                        Some(r)
+                            if r.device_offset + r.len as u64 == dev
+                                && r.buf_offset + r.len == pos =>
+                        {
+                            r.len += n;
+                            r.csums.extend_from_slice(sums);
+                        }
+                        _ => reads.push(PlannedRead {
+                            device_offset: dev,
+                            buf_offset: pos,
+                            len: n,
+                            csums: sums.to_vec(),
+                        }),
+                    }
+                }
+            }
+            pos += n;
+        }
+        ReadPlan {
+            key: chunk.key,
+            offset,
+            reads,
+        }
+    }
+
+    /// Plans an asynchronous read: returns the device reads to perform into `buf` (unmapped
+    /// ranges are zero-filled now) and the checksums to verify them against. The caller performs
+    /// the reads, calls [`ReadPlan::verify`], and must then call [`finish_read`](Self::finish_read).
+    /// Until then, clusters freed by later writes are kept from reuse. A concurrent write to the
+    /// same range can make `verify` fail; plan and read again in that case.
+    pub fn plan_read(
+        &self,
+        key: ChunkKey,
+        offset: u64,
+        buf: &mut [u8],
+        epoch: u64,
+    ) -> Result<ReadPlan, StoreError> {
+        if self.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        let slot = self.check_io(key, offset, buf.len() as u64, epoch)?;
+        let plan = self.plan_segments(slot, offset, buf);
+        self.reads_in_flight.set(self.reads_in_flight.get() + 1);
+        Ok(plan)
+    }
+
+    /// Ends a plan from [`plan_read`](Self::plan_read).
+    pub fn finish_read(&self, plan: ReadPlan) {
+        drop(plan);
+        self.reads_in_flight
+            .set(self.reads_in_flight.get().saturating_sub(1));
+    }
+
     /// Reads several requests with all device reads in flight at once. The outer `Err` is a
     /// device failure; otherwise there is one result per request.
     pub fn read_batch(
@@ -969,76 +1097,38 @@ impl<D: BlockDevice> Store<D> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
         }
-        let cs = self.state.cluster_size();
         let mut results: Vec<Result<(), StoreError>> = Vec::with_capacity(reqs.len());
-        let mut reads: Vec<(u64, &mut [u8])> = Vec::new();
-        // For each device read: request index, chunk key, chunk offset, expected checksums.
-        let mut checks: Vec<(usize, ChunkKey, u64, Vec<u32>)> = Vec::new();
+        let mut plans: Vec<(usize, ReadPlan)> = Vec::new();
         for (i, r) in reqs.iter_mut().enumerate() {
-            let slot = match self.check_io(r.key, r.offset, r.buf.len() as u64, r.epoch) {
-                Ok(slot) => slot,
-                Err(e) => {
-                    results.push(Err(e));
-                    continue;
+            match self.check_io(r.key, r.offset, r.buf.len() as u64, r.epoch) {
+                Ok(slot) => {
+                    plans.push((i, self.plan_segments(slot, r.offset, r.buf)));
+                    results.push(Ok(()));
                 }
-            };
-            results.push(Ok(()));
-            // Plan the request as segments first, merging neighbouring clusters that are also
-            // neighbours on disk, so a sequential read becomes one device read rather than one
-            // per cluster. Then carve the buffer to match.
-            let chunk = self.state.chunk(slot);
-            let mut segments: Vec<(Option<u64>, usize, u64, Vec<u32>)> = Vec::new(); // (device offset, len, chunk offset, checksums)
-            let mut o = r.offset;
-            let end = r.offset + r.buf.len() as u64;
-            while o < end {
-                let (x, within) = (o / cs, o % cs);
-                let n = (cs - within).min(end - o) as usize;
-                match chunk.resolve(self.state.epp, x) {
-                    Resolved::Zeros => match segments.last_mut() {
-                        Some((None, len, _, _)) => *len += n,
-                        _ => segments.push((None, n, o, Vec::new())),
-                    },
-                    Resolved::Data { phys, csums } => {
-                        let dev = self.state.layout.data_cluster_offset(phys) + within;
-                        let first = (within / BLOCK_SIZE_U64) as usize;
-                        let sums = &csums[first..first + n / BLOCK_SIZE];
-                        match segments.last_mut() {
-                            Some((Some(d), len, _, expected)) if *d + *len as u64 == dev => {
-                                *len += n;
-                                expected.extend_from_slice(sums);
-                            }
-                            _ => segments.push((Some(dev), n, o, sums.to_vec())),
-                        }
-                    }
-                }
-                o += n as u64;
-            }
-            let mut rest: &mut [u8] = &mut *r.buf;
-            for (dev, len, offset, expected) in segments {
-                let (piece, tail) = std::mem::take(&mut rest).split_at_mut(len);
-                rest = tail;
-                match dev {
-                    None => piece.fill(0),
-                    Some(dev) => {
-                        reads.push((dev, piece));
-                        checks.push((i, chunk.key, offset, expected));
-                    }
-                }
+                Err(e) => results.push(Err(e)),
             }
         }
-        self.dev.read_many(&mut reads)?;
-        for ((_, data), (i, key, offset, expected)) in reads.iter().zip(&checks) {
-            if results[*i].is_err() {
-                continue;
-            }
-            for (b, block) in data.chunks_exact(BLOCK_SIZE).enumerate() {
-                if crc32c(block) != expected[b] {
-                    results[*i] = Err(StoreError::Checksum {
-                        key: *key,
-                        offset: offset + (b * BLOCK_SIZE) as u64,
-                    });
-                    break;
+        // Carve each request buffer into the planned pieces; all go to the device together.
+        {
+            let mut reads: Vec<(u64, &mut [u8])> = Vec::new();
+            let mut by_request: Vec<Option<&mut [u8]>> =
+                reqs.iter_mut().map(|r| Some(&mut *r.buf)).collect();
+            for (i, plan) in &plans {
+                let mut rest = by_request[*i].take().expect("one plan per request");
+                let mut at = 0;
+                for p in plan.reads() {
+                    let (_, tail) = std::mem::take(&mut rest).split_at_mut(p.buf_offset - at);
+                    let (piece, tail) = tail.split_at_mut(p.len);
+                    reads.push((p.device_offset, piece));
+                    rest = tail;
+                    at = p.buf_offset + p.len;
                 }
+            }
+            self.dev.read_many(&mut reads)?;
+        }
+        for (i, plan) in &plans {
+            if let Err(e) = plan.verify(reqs[*i].buf) {
+                results[*i] = Err(e);
             }
         }
         Ok(results)
@@ -1117,7 +1207,7 @@ impl<D: BlockDevice> Store<D> {
         let k = self.state.checkpoint_seq + 1;
         let nonce = self.sb.format_nonce;
         let layout: Layout = self.state.layout;
-        self.state.release_pending();
+        self.state.release_pending(self.reads_in_flight.get() > 0);
 
         let mut writes: Vec<(u64, Box<PageBuf>)> = Vec::new();
         let mut emit =
@@ -1243,6 +1333,7 @@ impl<D: BlockDevice> Store<D> {
             checkpoint_seq: self.state.checkpoint_seq,
             journal_live_bytes: self.journal.live_bytes(),
             journal_head: self.journal.head.offset,
+            data_quarantined: self.state.data.blocked_count(),
         }
     }
 

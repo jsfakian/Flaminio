@@ -175,6 +175,12 @@ fn len32(len: usize) -> io::Result<u32> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "I/O larger than 4 GiB"))
 }
 
+impl std::os::fd::AsRawFd for UringDevice {
+    fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        self.file.as_raw_fd()
+    }
+}
+
 impl BlockDevice for UringDevice {
     fn size(&self) -> u64 {
         self.size

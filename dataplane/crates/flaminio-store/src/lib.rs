@@ -18,4 +18,7 @@ mod store;
 pub use device::{BlockDevice, FileDevice, MemDevice};
 pub use error::StoreError;
 pub use state::ChunkKey;
-pub use store::{Allocation, ChunkInfo, FsckReport, ReadReq, Stats, Store, StoreConfig, WriteReq};
+pub use store::{
+    Allocation, ChunkInfo, FsckReport, PlannedRead, ReadPlan, ReadReq, Stats, Store, StoreConfig,
+    WriteReq,
+};

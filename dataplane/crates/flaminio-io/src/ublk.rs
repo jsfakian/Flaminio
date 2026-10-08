@@ -1,14 +1,19 @@
 //! The ublk frontend: one queue, served by one thread that owns the replica store.
 //!
-//! Each ublk tag has an async task that waits for the kernel to deliver a request, hands it to
-//! the driver task and waits for the result. Every round of the event loop, the driver collects
-//! all requests delivered so far and processes them as one batch: one group commit for the
-//! writes, one submission for the reads. Writes are acknowledged only once durable, so the
-//! device advertises no volatile write cache and flushes are no-ops.
+//! Each ublk tag has an async task that waits for the kernel to deliver a request.
+//!
+//! - **Reads** are handled by the tag task itself, fully asynchronously: the store plans the
+//!   device reads, the task queues them on the same io_uring as ublk, and verifies the
+//!   checksums when they complete. Meanwhile the event loop keeps accepting requests, so the
+//!   device queue stays full.
+//! - **Writes, flushes and discards** go to the driver task. Every round of the event loop, it
+//!   takes all of them as one batch: one group commit. Writes are acknowledged only once
+//!   durable, so the device advertises no volatile write cache and flushes are no-ops.
 
 use std::cell::RefCell;
 use std::fs::File;
 use std::io::Read;
+use std::os::fd::{AsRawFd, RawFd};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +24,7 @@ use flaminio_format::mkfs::FormatOptions;
 use flaminio_format::superblock::select_superblock;
 use flaminio_store::{BlockDevice, Store, StoreConfig};
 use flaminio_uring::{AlignedBuf, UringDevice};
+use io_uring::{opcode, types};
 use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
 use libublk::helpers::IoBuf;
 use libublk::io::{UblkDev, UblkQueue};
@@ -289,11 +295,13 @@ fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
     let exe = Rc::new(smol::LocalExecutor::new());
     let (tx, rx) = smol::channel::unbounded::<Pending>();
 
+    let fd = volume.borrow().store().device().as_raw_fd();
+    let volume = &volume;
     let mut tasks = Vec::with_capacity(depth as usize);
     for tag in 0..depth {
         let (q, bufs, tx) = (q.clone(), bufs.clone(), tx.clone());
         tasks.push(exe.spawn(async move {
-            match io_task(&q, tag, &bufs, tx).await {
+            match io_task(&q, tag, &bufs, tx, volume, fd).await {
                 Ok(()) | Err(UblkError::QueueIsDown) => {}
                 Err(e) => eprintln!("flaminio-io: tag {tag}: {e}"),
             }
@@ -302,7 +310,6 @@ fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
     drop(tx);
     let driver = {
         let (q, bufs) = (q.clone(), bufs.clone());
-        let volume = &volume;
         exe.spawn(async move { drive(&q, &bufs, rx, volume).await })
     };
 
@@ -316,12 +323,15 @@ fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
     result.map_err(|e| format!("event loop: {e}"))
 }
 
-/// One tag: fetch a request, hand it to the driver, commit its result, repeat.
+/// One tag: fetch a request, serve it (reads here, the rest through the driver), commit its
+/// result, repeat.
 async fn io_task(
     q: &UblkQueue<'_>,
     tag: u16,
     bufs: &[RefCell<IoBuf<u8>>],
     tx: smol::channel::Sender<Pending>,
+    volume: &RefCell<Volume<UringDevice>>,
+    fd: RawFd,
 ) -> Result<(), UblkError> {
     let (done_tx, done_rx) = smol::channel::bounded(1);
     {
@@ -330,23 +340,93 @@ async fn io_task(
             .await?;
     }
     loop {
-        if tx
-            .send(Pending {
-                tag,
-                done: done_tx.clone(),
-            })
-            .await
-            .is_err()
-        {
-            return Ok(());
-        }
-        let res = done_rx.recv().await.unwrap_or(-libc::EIO);
+        let (op, offset, len) = {
+            let iod = q.get_iod(tag);
+            (
+                iod.op_flags & 0xff,
+                iod.start_sector << 9,
+                u64::from(iod.nr_sectors) << 9,
+            )
+        };
+        let res = if op == sys::UBLK_IO_OP_READ {
+            read(q, &bufs[tag as usize], volume, fd, offset, len).await
+        } else {
+            if tx
+                .send(Pending {
+                    tag,
+                    done: done_tx.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+            done_rx.recv().await.unwrap_or(-libc::EIO)
+        };
         // The buffer stays borrowed until the kernel delivers this tag's next request; the
         // driver only touches a tag's buffer while it holds that tag's request.
         let buf = bufs[tag as usize].borrow();
         q.submit_io_commit_cmd(tag, BufDesc::Slice(buf.as_slice()), res)
             .await?;
     }
+}
+
+/// Serves one read: plan it, queue its device reads on the ublk io_uring (so they run while the
+/// event loop keeps accepting requests), then verify. A checksum mismatch can come from a write
+/// that changed the range while the read was in flight; it is planned and read once more, and
+/// only a second mismatch is an error.
+async fn read(
+    q: &UblkQueue<'_>,
+    buf: &RefCell<IoBuf<u8>>,
+    volume: &RefCell<Volume<UringDevice>>,
+    fd: RawFd,
+    offset: u64,
+    len: u64,
+) -> i32 {
+    let n = len as usize;
+    if n > buf.borrow().len() {
+        return -libc::EINVAL;
+    }
+    for _attempt in 0..2 {
+        let plans = match volume
+            .borrow()
+            .plan_read(offset, &mut buf.borrow_mut()[..n])
+        {
+            Ok(plans) => plans,
+            Err(errno) => return errno,
+        };
+        // The kernel writes into this tag's buffer. Nothing else touches it until the request
+        // is committed, and every read queued here is awaited before the buffer is used.
+        let base = buf.borrow_mut().as_mut_ptr();
+        let mut pending = Vec::new();
+        for (piece, plan) in &plans {
+            for r in plan.reads() {
+                let dst = base.wrapping_add(piece + r.buf_offset);
+                let sqe = opcode::Read::new(types::Fd(fd), dst, r.len as u32)
+                    .offset(r.device_offset)
+                    .build();
+                pending.push((q.ublk_submit_sqe(sqe), r.len as i32));
+            }
+        }
+        let mut io_ok = true;
+        for (completion, expected) in pending {
+            io_ok &= completion.await == expected;
+        }
+        let verified = io_ok && {
+            let data = buf.borrow();
+            plans
+                .iter()
+                .all(|(piece, plan)| plan.verify(&data[*piece..]).is_ok())
+        };
+        volume.borrow().finish_read(plans);
+        if !io_ok {
+            return -libc::EIO;
+        }
+        if verified {
+            return len as i32;
+        }
+    }
+    -libc::EIO
 }
 
 /// Collects every request delivered in this round and processes them as one batch.

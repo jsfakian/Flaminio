@@ -122,7 +122,7 @@ ublk-status: ## flaminio-io service state, device geometry, recent log
 ublk-smoke: ## ext4 + files + daemon restart + checksum verification on /dev/ublkb0
 	$(LAB) ublk smoke $(UVM)
 
-bench-ublk: ## fio reads on /dev/ublkb0 (RUNTIME); fills 32 GiB first, once
+bench-ublk: ## fio reads on /dev/ublkb0 (RUNTIME); fills 32 GiB first, every run
 	RUNTIME=$(RUNTIME) $(LAB) ublk fio $(UVM)
 
 ##@ Lab: network
