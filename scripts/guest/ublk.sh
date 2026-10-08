@@ -19,8 +19,10 @@ up() {
     local format=()
     [[ ${FORMAT:-0} == 1 ]] && format=(--format --force)
     sudo systemctl reset-failed flaminio-io 2>/dev/null || true
+    local replica=()
+    [[ -n ${REPLICA:-} ]] && replica=(--replica "$REPLICA")
     sudo systemd-run --quiet --unit=flaminio-io --property=Restart=no \
-        "$bin" serve --device "$(data_disk)" --size "$size" --id "$id" "${format[@]}"
+        "$bin" serve --device "$(data_disk)" --size "$size" --id "$id" "${format[@]}" "${replica[@]}"
     for _ in $(seq 1 60); do
         [[ -b $dev ]] && break
         systemctl is-active --quiet flaminio-io || { sudo journalctl -u flaminio-io --no-pager | tail -20 >&2; die "flaminio-io exited"; }

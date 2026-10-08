@@ -37,12 +37,18 @@ enum Op<'a> {
 
 impl UringDevice {
     /// Opens `path` read-write, with `O_DIRECT` if `direct`.
+    ///
+    /// Block devices are opened with `O_EXCL`: a second exclusive open (another Flaminio
+    /// process) or a mounted filesystem makes it fail with `EBUSY`, instead of two stores
+    /// writing checkpoints over each other.
     pub fn open(path: impl AsRef<Path>, direct: bool) -> io::Result<Self> {
         let mut options = OpenOptions::new();
         options.read(true).write(true);
+        let mut flags = libc::O_EXCL;
         if direct {
-            options.custom_flags(libc::O_DIRECT);
+            flags |= libc::O_DIRECT;
         }
+        options.custom_flags(flags);
         let mut file = options.open(path)?;
         let size = file.seek(SeekFrom::End(0))?;
         let ring = IoUring::builder()

@@ -30,6 +30,10 @@ use libublk::helpers::IoBuf;
 use libublk::io::{UblkDev, UblkQueue};
 use libublk::{BufDesc, UblkError, UblkFlags, sys};
 
+use std::cell::Cell;
+use std::time::{Duration, Instant};
+
+use crate::cli::{format_if_asked, parse_size, volume_uuid};
 use crate::volume::{Op, Request, Volume, VolumeLayout};
 
 const USAGE: &str = "\
@@ -45,6 +49,8 @@ usage:
                           unless --force)
       --force             allow --format to destroy an existing Flaminio disk
       --buffered          use the page cache instead of O_DIRECT
+      --replica ADDR      mirror writes to a remote replica (flaminio-io replica) at ADDR
+      --replica-timeout S give up on an unresponsive replica after S seconds (default 5)
   flaminio-io del --id N      stop and remove ublk device N
 
 Runs in the foreground; stop it with `flaminio-io del --id N` from another shell.";
@@ -62,6 +68,8 @@ struct Config {
     format: bool,
     force: bool,
     buffered: bool,
+    replica: Option<String>,
+    replica_timeout: Duration,
 }
 
 impl Config {
@@ -72,30 +80,6 @@ impl Config {
             chunk_size: self.chunk_size,
         }
     }
-}
-
-fn parse_size(s: &str) -> Result<u64, String> {
-    let (num, mult) = match s.chars().last() {
-        Some('K' | 'k') => (&s[..s.len() - 1], 1u64 << 10),
-        Some('M' | 'm') => (&s[..s.len() - 1], 1 << 20),
-        Some('G' | 'g') => (&s[..s.len() - 1], 1 << 30),
-        Some('T' | 't') => (&s[..s.len() - 1], 1 << 40),
-        _ => (s, 1),
-    };
-    num.parse::<u64>()
-        .ok()
-        .and_then(|n| n.checked_mul(mult))
-        .ok_or_else(|| format!("invalid size {s}"))
-}
-
-/// Volume names become UUIDs by padding: readable in `flaminio-disk inspect --slots`.
-fn volume_uuid(name: &str) -> Result<Uuid, String> {
-    if name.is_empty() || name.len() > 16 {
-        return Err("volume name must be 1 to 16 bytes".into());
-    }
-    let mut b = [0u8; 16];
-    b[..name.len()].copy_from_slice(name.as_bytes());
-    Ok(Uuid(b))
 }
 
 pub fn main(args: Vec<String>) -> Result<(), String> {
@@ -112,6 +96,8 @@ pub fn main(args: Vec<String>) -> Result<(), String> {
         format: false,
         force: false,
         buffered: false,
+        replica: None,
+        replica_timeout: Duration::from_secs(5),
     };
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
@@ -135,6 +121,11 @@ pub fn main(args: Vec<String>) -> Result<(), String> {
             "--format" => c.format = true,
             "--force" => c.force = true,
             "--buffered" => c.buffered = true,
+            "--replica" => c.replica = Some(value()?),
+            "--replica-timeout" => {
+                c.replica_timeout =
+                    Duration::from_secs(value()?.parse().map_err(|_| "invalid --replica-timeout")?)
+            }
             _ => return Err(format!("unknown argument {flag}\n\n{USAGE}")),
         }
     }
@@ -153,14 +144,6 @@ pub fn main(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-fn random_bytes<const N: usize>() -> Result<[u8; N], String> {
-    let mut b = [0u8; N];
-    File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut b))
-        .map_err(|e| e.to_string())?;
-    Ok(b)
-}
-
 fn open_device(c: &Config) -> Result<UringDevice, String> {
     UringDevice::open(&c.device, !c.buffered).map_err(|e| format!("open {}: {e}", c.device))
 }
@@ -172,34 +155,7 @@ fn prepare(c: &Config) -> Result<(), String> {
         return Err(USAGE.into());
     }
     let dev = open_device(c)?;
-    if c.format {
-        let size = dev.size();
-        let (mut first, mut last) = (
-            AlignedBuf::zeroed(BLOCK_SIZE),
-            AlignedBuf::zeroed(BLOCK_SIZE),
-        );
-        dev.read_at(0, &mut first).map_err(|e| e.to_string())?;
-        dev.read_at((size & !(BLOCK_SIZE_U64 - 1)) - BLOCK_SIZE_U64, &mut last)
-            .map_err(|e| e.to_string())?;
-        if select_superblock(&first, &last).is_ok() && !c.force {
-            return Err(format!(
-                "{} already holds a Flaminio disk; pass --force to destroy it",
-                c.device
-            ));
-        }
-        let options = FormatOptions {
-            disk_uuid: Uuid(random_bytes()?),
-            cluster_uuid: Uuid::NIL,
-            format_nonce: u64::from_le_bytes(random_bytes()?) | 1,
-            created_unix_secs: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
-            layout: LayoutParams::default(),
-            label: "flaminio-io".into(),
-        };
-        Store::format(&dev, &options).map_err(|e| format!("format: {e}"))?;
-        eprintln!("formatted {}", c.device);
-    }
+    format_if_asked(&dev, &c.device, c.format, c.force)?;
     let store = Store::open(dev, StoreConfig::default()).map_err(|e| format!("open store: {e}"))?;
     let volume =
         Volume::open(store, c.layout(), c.epoch).map_err(|e| format!("open volume: {e}"))?;
@@ -272,10 +228,13 @@ fn serve(c: Config) -> Result<(), String> {
     Ok(())
 }
 
-/// A request handed from a tag task to the driver.
-struct Pending {
-    tag: u16,
-    done: smol::channel::Sender<i32>,
+/// Work for the driver: a request from a tag task, or a tick for background replica work.
+enum Job {
+    Io {
+        tag: u16,
+        done: smol::channel::Sender<i32>,
+    },
+    Tick,
 }
 
 fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
@@ -284,6 +243,12 @@ fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
     let volume = RefCell::new(
         Volume::open(store, c.layout(), c.epoch).map_err(|e| format!("open volume: {e}"))?,
     );
+    if let Some(addr) = &c.replica {
+        eprintln!("mirroring writes to replica {addr}");
+        volume
+            .borrow_mut()
+            .attach_remote(addr.clone(), c.replica_timeout);
+    }
     let q = Rc::new(UblkQueue::new(qid, dev).map_err(|e| format!("ublk queue: {e}"))?);
     let depth = dev.dev_info.queue_depth;
     let buf_bytes = dev.dev_info.max_io_buf_bytes as usize;
@@ -293,7 +258,7 @@ fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
             .collect(),
     );
     let exe = Rc::new(smol::LocalExecutor::new());
-    let (tx, rx) = smol::channel::unbounded::<Pending>();
+    let (tx, rx) = smol::channel::unbounded::<Job>();
 
     let fd = volume.borrow().store().device().as_raw_fd();
     let volume = &volume;
@@ -307,6 +272,20 @@ fn serve_queue(qid: u16, dev: &UblkDev, c: &Config) -> Result<(), String> {
             }
         }));
     }
+    // Background replica work runs on ticks: a 50 ms io_uring timeout on the queue's own ring,
+    // so the event loop wakes up for it even when the device is idle.
+    let _ticker = c.replica.is_some().then(|| {
+        let (q, tx) = (q.clone(), tx.clone());
+        exe.spawn(async move {
+            let ts = types::Timespec::new().nsec(50_000_000);
+            loop {
+                let _ = q.ublk_submit_sqe(opcode::Timeout::new(&ts).build()).await;
+                if tx.send(Job::Tick).await.is_err() {
+                    break;
+                }
+            }
+        })
+    });
     drop(tx);
     let driver = {
         let (q, bufs) = (q.clone(), bufs.clone());
@@ -329,7 +308,7 @@ async fn io_task(
     q: &UblkQueue<'_>,
     tag: u16,
     bufs: &[RefCell<IoBuf<u8>>],
-    tx: smol::channel::Sender<Pending>,
+    tx: smol::channel::Sender<Job>,
     volume: &RefCell<Volume<UringDevice>>,
     fd: RawFd,
 ) -> Result<(), UblkError> {
@@ -352,7 +331,7 @@ async fn io_task(
             read(q, &bufs[tag as usize], volume, fd, offset, len).await
         } else {
             if tx
-                .send(Pending {
+                .send(Job::Io {
                     tag,
                     done: done_tx.clone(),
                 })
@@ -429,55 +408,69 @@ async fn read(
     -libc::EIO
 }
 
-/// Collects every request delivered in this round and processes them as one batch.
+/// Collects every request delivered in this round and processes them as one batch (one group
+/// commit for the writes). A tick runs one step of background replica work.
 async fn drive(
     q: &UblkQueue<'_>,
     bufs: &[RefCell<IoBuf<u8>>],
-    rx: smol::channel::Receiver<Pending>,
+    rx: smol::channel::Receiver<Job>,
     volume: &RefCell<Volume<UringDevice>>,
 ) {
     while let Ok(first) = rx.recv().await {
         // Let the other tag tasks woken in this round queue their requests too.
         smol::future::yield_now().await;
-        let mut batch = vec![first];
-        while let Ok(p) = rx.try_recv() {
-            batch.push(p);
+        let mut jobs = vec![first];
+        while let Ok(j) = rx.try_recv() {
+            jobs.push(j);
         }
-        let mut results = vec![0i32; batch.len()];
-        {
-            let mut guards: Vec<_> = batch
-                .iter()
-                .map(|p| bufs[p.tag as usize].borrow_mut())
-                .collect();
-            let mut reqs = Vec::with_capacity(batch.len());
-            let mut index = Vec::with_capacity(batch.len());
-            for (i, (p, g)) in batch.iter().zip(guards.iter_mut()).enumerate() {
-                let iod = q.get_iod(p.tag);
-                let op = match iod.op_flags & 0xff {
-                    sys::UBLK_IO_OP_READ => Op::Read,
-                    sys::UBLK_IO_OP_WRITE => Op::Write,
-                    sys::UBLK_IO_OP_FLUSH => Op::Flush,
-                    sys::UBLK_IO_OP_DISCARD => Op::Discard,
-                    _ => {
-                        results[i] = -libc::EOPNOTSUPP;
-                        continue;
-                    }
-                };
-                reqs.push(Request {
-                    op,
-                    offset: iod.start_sector << 9,
-                    len: u64::from(iod.nr_sectors) << 9,
-                    buf: &mut g[..],
-                });
-                index.push(i);
-            }
-            let rs = volume.borrow_mut().process(&mut reqs);
-            for (r, i) in rs.into_iter().zip(index) {
-                results[i] = r;
+        let mut batch = Vec::with_capacity(jobs.len());
+        let mut tick = false;
+        for j in jobs {
+            match j {
+                Job::Io { tag, done } => batch.push((tag, done)),
+                Job::Tick => tick = true,
             }
         }
-        for (p, r) in batch.into_iter().zip(results) {
-            let _ = p.done.send(r).await;
+        if !batch.is_empty() {
+            let mut results = vec![0i32; batch.len()];
+            {
+                let mut guards: Vec<_> = batch
+                    .iter()
+                    .map(|(tag, _)| bufs[*tag as usize].borrow_mut())
+                    .collect();
+                let mut reqs = Vec::with_capacity(batch.len());
+                let mut index = Vec::with_capacity(batch.len());
+                for (i, ((tag, _), g)) in batch.iter().zip(guards.iter_mut()).enumerate() {
+                    let iod = q.get_iod(*tag);
+                    let op = match iod.op_flags & 0xff {
+                        sys::UBLK_IO_OP_READ => Op::Read,
+                        sys::UBLK_IO_OP_WRITE => Op::Write,
+                        sys::UBLK_IO_OP_FLUSH => Op::Flush,
+                        sys::UBLK_IO_OP_DISCARD => Op::Discard,
+                        _ => {
+                            results[i] = -libc::EOPNOTSUPP;
+                            continue;
+                        }
+                    };
+                    reqs.push(Request {
+                        op,
+                        offset: iod.start_sector << 9,
+                        len: u64::from(iod.nr_sectors) << 9,
+                        buf: &mut g[..],
+                    });
+                    index.push(i);
+                }
+                let rs = volume.borrow_mut().process(&mut reqs);
+                for (r, i) in rs.into_iter().zip(index) {
+                    results[i] = r;
+                }
+            }
+            for ((_, done), r) in batch.into_iter().zip(results) {
+                let _ = done.send(r).await;
+            }
+        }
+        if tick {
+            volume.borrow_mut().maintain();
         }
     }
 }

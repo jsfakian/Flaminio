@@ -1,0 +1,12 @@
+
+fl-a
+  comparison                                   flaminio              raw     ratio          p50/p99 us  runs
+  ublk: 4K rand read, depth 1               6181 ±  4%      6361 ±  0%       97%       155 / 197      3/3 (IOPS)
+  ublk: 4K rand read, depth 32            113861 ±  0%    122687 ±  0%       93%       264 / 570      3/3 (IOPS)
+  ublk: 1M seq read, depth 8                 874 ±  0%       892 ±  1%       98%      8935 / 17170    3/3 (MiB/s)
+
+fl-b
+  comparison                                   flaminio              raw     ratio          p50/p99 us  runs
+  ublk: 4K rand read, depth 1              12566 ±  3%     13455 ±  3%       93%        74 / 108      3/3 (IOPS)
+  ublk: 4K rand read, depth 32            219153 ±  4%    254524 ±  2%       86%       141 / 222      3/3 (IOPS)
+  ublk: 1M seq read, depth 8                3418 ±  0%      5509 ± 13%       62%      2266 / 3359     3/3 (MiB/s)

@@ -269,8 +269,66 @@ cmd_ublk() {
             log "results saved in .lab/results/$vm/$(basename "$out")"
             ;;
         smoke) run_detached "$vm" "$SCRIPTS/guest/ublk.sh" smoke ;;
-        *) ENV_VARS="FORMAT=${FORMAT:-0} VOLUME_SIZE=${VOLUME_SIZE:-64G}" run_on_vm "$vm" "$SCRIPTS/guest/ublk.sh" "$action" ;;
+        *) ENV_VARS="FORMAT=${FORMAT:-0} VOLUME_SIZE=${VOLUME_SIZE:-64G} REPLICA=${REPLICA:-}" \
+            run_on_vm "$vm" "$SCRIPTS/guest/ublk.sh" "$action" ;;
     esac
+}
+
+# Replica service on a VM (default b): up (FORMAT=1 reformats) | down | status
+cmd_replica() {
+    ENV_VARS="FORMAT=${FORMAT:-0} REPL_PORT=$REPL_PORT" run_on_vm "$(vms_of "${2:-b}")" "$SCRIPTS/guest/replica.sh" "${1:-status}"
+}
+
+# RF=2: replica service on VM b, volume target on VM a mirroring to it through HOST_B.
+cmd_repl_up() {
+    FORMAT=${FORMAT:-0} cmd_replica up b
+    FORMAT=${FORMAT:-0} REPLICA="$HOST_B_IP:$REPL_PORT" cmd_ublk up a
+    log "fl-a: /dev/ublkb0 mirrors to fl-b (watch: make ublk-status)"
+}
+
+cmd_repl_down() {
+    cmd_ublk down a
+    cmd_replica down b
+}
+
+# Stops both sides and compares per-chunk checksums of the two replicas.
+cmd_repl_verify() {
+    cmd_repl_down
+    local a b
+    a=$(ENV_VARS="VOLUME_SIZE=${VOLUME_SIZE:-64G}" run_on_vm "$VM_A" "$SCRIPTS/guest/digest.sh")
+    b=$(ENV_VARS="VOLUME_SIZE=${VOLUME_SIZE:-64G}" run_on_vm "$VM_B" "$SCRIPTS/guest/digest.sh")
+    log "fl-a: $(tail -1 <<<"$a")   fl-b: $(tail -1 <<<"$b")"
+    if [[ $a == "$b" ]]; then
+        log "OK: both replicas hold identical data"
+    else
+        diff <(echo "$a") <(echo "$b") | head -20 >&2
+        die "replicas differ"
+    fi
+}
+
+# Writes with verification on VM a while the replica on VM b is stopped and restarted, then
+# checks that the volume came back in sync and that both replicas are identical.
+cmd_repl_fault() {
+    local load_pid rc=0
+    log "write load with verification on fl-a; fl-b's replica stops after 10 s, restarts 15 s later"
+    run_detached "$VM_A" "$SCRIPTS/guest/write-load.sh" &
+    load_pid=$!
+    sleep 10
+    cmd_replica down b
+    sleep 15
+    cmd_replica up b
+    wait "$load_pid" || rc=$?
+    ((rc == 0)) || die "write load failed (exit $rc): writes must not fail while the replica is down"
+    log "write load finished and verified; waiting for the replica to come back in sync"
+    local start=$SECONDS state
+    while :; do
+        state=$(vssh "$VM_A" "sudo journalctl -u flaminio-io -o cat | grep -E 'replica .*: (InSync|Resyncing|Down)' | tail -1")
+        [[ $state == *InSync* ]] && break
+        ((SECONDS - start < 900)) || die "not in sync after 15 min: $state"
+        sleep 10
+    done
+    log "in sync after $((SECONDS - start)) s"
+    cmd_repl_verify
 }
 
 cmd_net_setup() { ENV_VARS="$(host_env "$VM_B")" run_on_host "$HOST_B" "$SCRIPTS/host/net-forward.sh" up; }
@@ -315,6 +373,11 @@ usage: scripts/lab.sh COMMAND [a|b|all]
   bench-raw    fio baseline on the raw data disk (RUNTIME=s, JOBS=regex, default reads only)
   bench-store  replica-store benchmark on the data disk (RUNTIME, JOBS, FORMAT=0 to reuse)
   ublk ACTION [VM]  ublk frontend: up (FORMAT=1 reformats) | down | status | smoke | fio
+  replica ACTION [VM]  replica service: up (FORMAT=1 reformats) | down | status (default VM b)
+  repl-up      RF=2: replica on b, target on a mirroring to it (FORMAT=1 reformats both)
+  repl-down    stop both sides
+  repl-verify  stop both sides and compare the replicas' checksums
+  repl-fault   verified writes while the replica is stopped and restarted, then repl-verify
   net-setup    forward $HOST_B_IP:$REPL_PORT to $VM_B (from $HOST_A_IP only)
   net-teardown remove that forward
   net-check    end-to-end check: $VM_A -> $HOST_B -> $VM_B
@@ -342,6 +405,11 @@ case "$cmd" in
     bench-raw) cmd_bench_raw "$@" ;;
     bench-store) cmd_bench_store "$@" ;;
     ublk) cmd_ublk "$@" ;;
+    replica) cmd_replica "$@" ;;
+    repl-up) cmd_repl_up ;;
+    repl-down) cmd_repl_down ;;
+    repl-verify) cmd_repl_verify ;;
+    repl-fault) cmd_repl_fault ;;
     net-setup) cmd_net_setup ;;
     net-teardown) cmd_net_teardown ;;
     net-check) cmd_net_check ;;

@@ -1,30 +1,36 @@
 //! `flaminio-io`: the Flaminio data-plane daemon.
 //!
-//! MVP step 4: serves one volume from the local replica store (RF=1) as a ublk block device,
-//! `/dev/ublkbN`. Replication (step 5) adds remote replicas behind the same volume interface.
+//! - `serve` (Linux): a volume as a ublk block device, `/dev/ublkbN`, on the local replica
+//!   store, optionally mirrored to a remote replica (MVP steps 4 and 5).
+//! - `replica`: this disk as the remote replica of a volume.
+//! - `digest`: per-chunk checksums of a volume, to compare replicas offline.
 
+mod cli;
+mod proto;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod volume;
-
+mod remote;
+mod replica;
 #[cfg(target_os = "linux")]
 mod ublk;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod volume;
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    #[cfg(target_os = "linux")]
-    {
-        match ublk::main(std::env::args().skip(1).collect()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("flaminio-io: {e}");
-                ExitCode::FAILURE
-            }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.first().map(String::as_str) {
+        Some(cmd @ ("replica" | "digest")) => cli::main(cmd, &args[1..]),
+        #[cfg(target_os = "linux")]
+        _ => ublk::main(args),
+        #[cfg(not(target_os = "linux"))]
+        _ => Err("serve and del need Linux (ublk); replica and digest work anywhere".into()),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("flaminio-io: {e}");
+            ExitCode::FAILURE
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        eprintln!("flaminio-io needs Linux (ublk)");
-        ExitCode::FAILURE
     }
 }

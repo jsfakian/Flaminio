@@ -125,6 +125,21 @@ ublk-smoke: ## ext4 + files + daemon restart + checksum verification on /dev/ubl
 bench-ublk: ## fio reads on /dev/ublkb0 (RUNTIME); fills 32 GiB first, every run
 	RUNTIME=$(RUNTIME) $(LAB) ublk fio $(UVM)
 
+##@ Lab: replication (MVP step 5)
+
+.PHONY: repl-up repl-down repl-verify repl-fault
+repl-up: ## RF=2: replica service on fl-b, fl-a's /dev/ublkb0 mirroring to it (FORMAT=1 reformats both)
+	FORMAT=$(FORMAT) $(LAB) repl-up
+
+repl-down: ## Stop the target on fl-a and the replica on fl-b
+	$(LAB) repl-down
+
+repl-verify: ## Stop both sides and check that the two replicas hold identical data
+	$(LAB) repl-verify
+
+repl-fault: ## Verified writes while the replica is stopped and restarted; then repl-verify
+	$(LAB) repl-fault
+
 ##@ Lab: network
 
 .PHONY: net-setup net-teardown net-check

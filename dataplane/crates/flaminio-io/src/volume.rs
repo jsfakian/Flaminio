@@ -5,8 +5,16 @@
 //! returns one result per request, in the form ublk expects: bytes transferred, or a negative
 //! errno.
 
+use std::io;
+use std::time::{Duration, Instant};
+
 use flaminio_format::Uuid;
+use flaminio_format::checksum::crc32c;
 use flaminio_store::{BlockDevice, ChunkKey, ReadPlan, ReadReq, Store, StoreError, WriteReq};
+use flaminio_uring::AlignedBuf;
+
+use crate::proto::{UNIT, WriteItem};
+use crate::remote::{COPY_UNITS, Health, Remote, SCAN_UNITS};
 
 /// Block request operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,19 +101,21 @@ impl VolumeLayout {
     }
 }
 
-/// A volume served from a local replica store (MVP step 4: one replica, RF=1).
+/// A volume served from a local replica store, optionally mirrored to one remote replica
+/// (MVP steps 4 and 5).
 pub struct Volume<D: BlockDevice> {
     store: Store<D>,
     layout: VolumeLayout,
     epoch: u64,
     next_seq: u64,
+    remote: Option<Remote>,
 }
 
 /// Errno values returned to the block layer.
 const EIO: i32 = 5;
 const EINVAL: i32 = 22;
 
-fn errno(e: &StoreError) -> i32 {
+pub(crate) fn errno(e: &StoreError) -> i32 {
     match e {
         StoreError::Invalid(_) => -EINVAL,
         _ => -EIO,
@@ -141,7 +151,122 @@ impl<D: BlockDevice> Volume<D> {
             layout,
             epoch,
             next_seq,
+            remote: None,
         })
+    }
+
+    /// Mirrors writes to a replica at `addr`. The connection is made by [`maintain`](Self::maintain).
+    pub fn attach_remote(&mut self, addr: String, timeout: Duration) {
+        self.remote = Some(Remote::new(addr, timeout));
+    }
+
+    /// State of the remote replica, if there is one.
+    pub fn remote_health(&self) -> Option<Health> {
+        self.remote.as_ref().map(Remote::health)
+    }
+
+    /// Background work for the remote replica, in small steps for up to about 10 ms: reconnect,
+    /// compare ranges after a (re)start, copy units it is missing. Call it regularly.
+    pub fn maintain(&mut self) {
+        let start = Instant::now();
+        while self.maintain_step() && start.elapsed() < Duration::from_millis(10) {}
+        if let Some(r) = self.remote.as_mut() {
+            r.report();
+        }
+    }
+
+    /// One step of [`maintain`](Self::maintain). Returns whether more work is waiting.
+    fn maintain_step(&mut self) -> bool {
+        let Volume {
+            store,
+            layout,
+            epoch,
+            next_seq,
+            remote,
+        } = self;
+        let Some(r) = remote.as_mut() else {
+            return false;
+        };
+        let epoch = *epoch;
+        if r.conn.is_none() {
+            if Instant::now() < r.next_attempt {
+                return false;
+            }
+            if let Err(e) = r.connect(layout, epoch) {
+                r.fail(&e);
+                return false;
+            }
+            eprintln!("replica {}: connected", r.addr);
+        }
+        if let Some((chunk, unit)) = r.scan {
+            let units = layout.chunk_size / UNIT;
+            let count = u64::from(SCAN_UNITS).min(units - unit) as u32;
+            let compared = unit_digests(
+                store,
+                layout.key(chunk),
+                unit,
+                count,
+                epoch,
+                layout.chunk_size,
+            )
+            .map_err(io::Error::other)
+            .and_then(|local| Ok((local, r.digests(epoch, chunk, unit, count)?)));
+            match compared {
+                Ok((local, theirs)) if local.len() == theirs.len() => {
+                    for (i, (a, b)) in local.iter().zip(&theirs).enumerate() {
+                        if a != b {
+                            r.dirty.insert((chunk, unit + i as u64));
+                        }
+                    }
+                    let next = unit + u64::from(count);
+                    r.scan = if next < units {
+                        Some((chunk, next))
+                    } else if chunk + 1 < layout.chunks() {
+                        Some((chunk + 1, 0))
+                    } else {
+                        None
+                    };
+                }
+                Ok(_) => r.fail(&io::Error::other(
+                    "replica returned the wrong number of digests",
+                )),
+                Err(e) => r.fail(&e),
+            }
+            return r.conn.is_some();
+        }
+        if !r.dirty.is_empty() {
+            let batch: Vec<(u64, u64)> = r.dirty.iter().take(COPY_UNITS).copied().collect();
+            let mut items = Vec::with_capacity(batch.len());
+            for &(chunk, unit) in &batch {
+                let mut data = vec![0u8; UNIT as usize];
+                if let Err(e) = store.read(layout.key(chunk), unit * UNIT, &mut data, epoch) {
+                    // The local copy cannot be read; there is nothing correct to send.
+                    eprintln!(
+                        "replica {}: cannot read local chunk {chunk} unit {unit} to resync it: {e}",
+                        r.addr
+                    );
+                    return false;
+                }
+                *next_seq += 1;
+                items.push(WriteItem {
+                    chunk,
+                    offset: unit * UNIT,
+                    write_seq: *next_seq,
+                    data,
+                });
+            }
+            let n = items.len();
+            match r
+                .send_writes(epoch, items)
+                .and_then(|()| r.finish_writes(n))
+            {
+                Ok(()) => batch.iter().for_each(|u| {
+                    r.dirty.remove(u);
+                }),
+                Err(e) => r.fail(&e),
+            }
+        }
+        r.conn.is_some() && (r.scan.is_some() || !r.dirty.is_empty())
     }
 
     /// The underlying store.
@@ -221,7 +346,41 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
         if !writes.is_empty() {
-            match self.store.write_batch(&writes) {
+            // Send to the replica first, so both commit at the same time.
+            let mut sent = false;
+            if let Some(r) = self.remote.as_mut().filter(|r| r.conn.is_some()) {
+                let items = writes
+                    .iter()
+                    .map(|w| WriteItem {
+                        chunk: w.key.index,
+                        offset: w.offset,
+                        write_seq: w.write_seq,
+                        data: w.data.to_vec(),
+                    })
+                    .collect();
+                match r.send_writes(self.epoch, items) {
+                    Ok(()) => sent = true,
+                    Err(e) => r.fail(&e),
+                }
+            }
+            let local = self.store.write_batch(&writes);
+            if let Some(r) = self.remote.as_mut() {
+                let mirrored = sent
+                    && match r.finish_writes(writes.len()) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            r.fail(&e);
+                            false
+                        }
+                    };
+                if !mirrored {
+                    // The replica may be missing these: resync them once it is back.
+                    for w in &writes {
+                        r.mark_dirty(w.key.index, w.offset, w.data.len() as u64);
+                    }
+                }
+            }
+            match local {
                 Ok(rs) => {
                     for (r, &i) in rs.iter().zip(&owner) {
                         if let Err(e) = r {
@@ -244,6 +403,19 @@ impl<D: BlockDevice> Volume<D> {
                         .discard(self.layout.key(p.chunk), p.chunk_offset, p.len, self.epoch)
                 {
                     results[i] = errno(&e);
+                }
+                if let Some(r) = self.remote.as_mut() {
+                    let forwarded = r.conn.is_some()
+                        && match r.discard(self.epoch, p.chunk, p.chunk_offset, p.len) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                r.fail(&e);
+                                false
+                            }
+                        };
+                    if !forwarded {
+                        r.mark_dirty(p.chunk, p.chunk_offset, p.len);
+                    }
                 }
             }
         }
@@ -287,6 +459,74 @@ impl<D: BlockDevice> Volume<D> {
             }
         }
         results
+    }
+}
+
+/// CRC-32C of each 64 KiB unit of `count` units of a chunk from `first_unit` (clipped to the
+/// chunk). Unmapped data reads as zeros, so two replicas agree exactly when their contents do.
+pub(crate) fn unit_digests<D: BlockDevice>(
+    store: &Store<D>,
+    key: ChunkKey,
+    first_unit: u64,
+    count: u32,
+    epoch: u64,
+    chunk_size: u64,
+) -> Result<Vec<u32>, StoreError> {
+    const STEP: u64 = 16;
+    let end = (first_unit + u64::from(count)).min(chunk_size / UNIT);
+    let mut buf = AlignedBuf::zeroed((STEP * UNIT) as usize);
+    let mut crcs = Vec::with_capacity(end.saturating_sub(first_unit) as usize);
+    let mut u = first_unit;
+    while u < end {
+        let n = (end - u).min(STEP);
+        let len = (n * UNIT) as usize;
+        store.read(key, u * UNIT, &mut buf[..len], epoch)?;
+        crcs.extend(buf[..len].chunks_exact(UNIT as usize).map(crc32c));
+        u += n;
+    }
+    Ok(crcs)
+}
+
+impl<D: BlockDevice> Volume<D> {
+    /// Digests of every unit of every chunk, for comparing replicas offline.
+    pub fn digests(&self) -> Result<Vec<Vec<u32>>, StoreError> {
+        (0..self.layout.chunks())
+            .map(|c| {
+                let units = (self.layout.chunk_size / UNIT) as u32;
+                unit_digests(
+                    &self.store,
+                    self.layout.key(c),
+                    0,
+                    units,
+                    self.epoch,
+                    self.layout.chunk_size,
+                )
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+impl<D: BlockDevice> Volume<D> {
+    /// The replica's digests of every unit, over the target's own connection.
+    pub(crate) fn remote_digests(&mut self) -> io::Result<Vec<Vec<u32>>> {
+        let (layout, epoch) = (self.layout, self.epoch);
+        let r = self
+            .remote
+            .as_mut()
+            .ok_or_else(|| io::Error::other("no remote"))?;
+        let units = (layout.chunk_size / UNIT) as u32;
+        (0..layout.chunks())
+            .map(|c| r.digests(epoch, c, 0, units))
+            .collect()
+    }
+
+    /// Simulates a lost connection; the next maintain() reconnects at once.
+    pub(crate) fn drop_remote_connection(&mut self) {
+        if let Some(r) = self.remote.as_mut() {
+            r.conn = None;
+            r.next_attempt = Instant::now();
+        }
     }
 }
 

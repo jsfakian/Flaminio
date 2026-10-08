@@ -34,9 +34,9 @@ def collect(vm_dir, kind, since):
         if run.name.split("-", 1)[1] < since:
             continue
         for f in run.glob("*.json"):
-            if f.stem == "precondition":
+            if f.stem in ("precondition", "fill"):
                 continue
-            m = (fio_metrics if kind == "raw" else store_metrics)(json.loads(f.read_text()))
+            m = (store_metrics if kind == "store" else fio_metrics)(json.loads(f.read_text()))
             runs.setdefault(f.stem, []).append(m)
     return runs
 
@@ -59,22 +59,30 @@ def main():
         ("read-1m-b8", "read-1m-b8", "1M seq read, 8 (closed batches)"),
         ("read-1m-b8", "read-1m-qd8", "1M seq read, 8 vs fio continuous"),
     ]
+    # ublk results are fio runs on /dev/ublkbN: same job names as the raw disk.
+    ublk_pairs = [
+        ("randread-4k-qd1", "randread-4k-qd1", "ublk: 4K rand read, depth 1"),
+        ("randread-4k-qd32", "randread-4k-qd32", "ublk: 4K rand read, depth 32"),
+        ("read-1m-qd8", "read-1m-qd8", "ublk: 1M seq read, depth 8"),
+    ]
     for vm_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        store, raw = collect(vm_dir, "store", since), collect(vm_dir, "raw", since)
+        store, raw, ublk = (collect(vm_dir, k, since) for k in ("store", "raw", "ublk"))
         print(f"\n{vm_dir.name}")
-        print(f"  {'comparison':<36} {'store':>16} {'raw':>16} {'store/raw':>9}  {'store p50/p99 us':>18}  runs")
-        for s_job, r_job, label in pairs:
-            if s_job not in store or r_job not in raw:
+        print(f"  {'comparison':<36} {'flaminio':>16} {'raw':>16} {'ratio':>9}  {'p50/p99 us':>18}  runs")
+        rows = [(store, s, r, l) for s, r, l in pairs] + [(ublk, s, r, l) for s, r, l in ublk_pairs]
+        for source, s_job, r_job, label in rows:
+            if s_job not in source or r_job not in raw:
                 continue
+            store_runs = source[s_job]
             key = "mib_s" if "1m" in s_job else "iops"
             unit = "MiB/s" if key == "mib_s" else "IOPS"
-            sm, ss = fmt(store[s_job], key)
+            sm, ss = fmt(store_runs, key)
             rm, rs = fmt(raw[r_job], key)
-            p50 = statistics.fmean(v["p50_us"] for v in store[s_job])
-            p99 = statistics.fmean(v["p99_us"] for v in store[s_job])
+            p50 = statistics.fmean(v["p50_us"] for v in store_runs)
+            p99 = statistics.fmean(v["p99_us"] for v in store_runs)
             print(
                 f"  {label:<36} {sm:>9.0f} ±{ss / 2:>3.0f}% {rm:>9.0f} ±{rs / 2:>3.0f}% {sm / rm * 100:>8.0f}%"
-                f"  {p50:>8.0f} / {p99:<7.0f}  {len(store[s_job])}/{len(raw[r_job])} ({unit})"
+                f"  {p50:>8.0f} / {p99:<7.0f}  {len(store_runs)}/{len(raw[r_job])} ({unit})"
             )
 
 
