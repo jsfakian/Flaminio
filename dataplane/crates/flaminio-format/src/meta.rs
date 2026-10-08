@@ -522,6 +522,16 @@ impl MapPage {
         &self.csums[i * self.csums_per_cluster..(i + 1) * self.csums_per_cluster]
     }
 
+    /// Sets the location of entry `i`, leaving its checksums alone.
+    pub fn set_phys(&mut self, i: usize, phys: Phys) {
+        self.phys[i] = phys;
+    }
+
+    /// Mutable per-4 KiB checksums of entry `i`.
+    pub fn csums_mut(&mut self, i: usize) -> &mut [u32] {
+        &mut self.csums[i * self.csums_per_cluster..(i + 1) * self.csums_per_cluster]
+    }
+
     /// Sets entry `i`.
     pub fn set(&mut self, i: usize, phys: Phys, csums: &[u32]) {
         assert_eq!(csums.len(), self.csums_per_cluster, "checksum count");

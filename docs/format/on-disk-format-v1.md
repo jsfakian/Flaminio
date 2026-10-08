@@ -277,8 +277,16 @@ circular log can never be mistaken for the next one.
 
 **Write ordering.** A batch must not be written until every data-area write it depends on
 (redirect-on-write clusters, §6.3 type 5) is durable. On a device with a volatile cache, this
-means issuing a flush before the batch write and FUA on the batch itself. A cluster freed by a
-record must not be reused until that record is durable.
+means issuing a flush before the batch write and FUA on the batch itself.
+
+**Reuse of freed space.** A data cluster or page-pool pair freed by a record must not be reused
+until a checkpoint that includes the record has **completed**. Being durable in the journal is
+not enough. Replay redoes `DeferredWrite` records in place, so if a freed cluster were reused
+right away (say, for a redirect-on-write), replaying an older deferred write to it would
+overwrite the new data. A freed page pair may still be the current version of a page that the
+last checkpoint references. Once a checkpoint completes, the journal start has moved past every
+record that could write to the space. The crash-consistency tests in `flaminio-store` fail if
+this rule is broken.
 
 ### 6.3 Records
 
