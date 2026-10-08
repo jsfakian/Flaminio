@@ -32,8 +32,8 @@ session's raw runs.
   the benchmark, not of the store, as the step-2 write-up explains.
 
 On fl-b (NVMe, measured RF=1 in step 4) the stack reaches 93% at QD1 and 86% at QD32. 1M
-sequential reads cap at about 3.4 GB/s (62%), most likely the single ublk queue thread (not yet
-measured).
+sequential reads cap at about 3.4 GB/s (62%): the single ublk queue thread was measured at
+80–87% of one CPU during that job.
 
 ## Replication (correctness)
 

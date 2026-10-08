@@ -32,8 +32,9 @@ fio on `/dev/ublkb0`: the full data plane (ublk → `flaminio-io` → volume →
   driver and the event loop waited for each batch: 40% of raw at QD32 and 55% at 1M on fl-a.
   With reads planned by the store and queued straight on the ublk `io_uring`, the same jobs
   reach 93% and 98%.
-- **fl-b's sequential reads cap at about 3.4 GB/s** (62% of the NVMe's 5.5 GB/s). This is most
-  likely the single ublk queue: one thread does all the checksum verification, and the kernel
-  copies every byte between the ublk buffers and the request (no zero-copy yet). Not yet
-  measured. Next: watch `flaminio-io`'s CPU during the job, then try zero-copy
+- **fl-b's sequential reads cap at about 3.4 GB/s** (62% of the NVMe's 5.5 GB/s): the single
+  ublk queue thread is near its CPU limit. Measured on 2026-10-09 with `top -H` during 1M QD8
+  reads at 3.2 GB/s: the queue thread ran at 80–87% of one CPU, so it is close to saturated but
+  still partly waiting on I/O. It does all the checksum verification, and the kernel copies
+  every byte between the ublk buffers and the requests (no zero-copy yet). Next: zero-copy
   (`UBLK_F_AUTO_BUF_REG`) and multiple queues (one store shard per queue).
