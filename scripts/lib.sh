@@ -119,15 +119,25 @@ run_detached() {
         bash -c 'cd ~; env ${ENV_VARS:-} bash ~/.flaminio-lab/$unit.sh$args > ~/.flaminio-lab/$unit.log 2>&1;
                  echo \$? > ~/.flaminio-lab/$unit.rc'"
     log "$vm: running $(basename "$script") as unit $unit (survives SSH drops)"
-    while [[ -z $rc ]]; do
+    # shellcheck disable=SC2088 # expanded by the remote shell
+    local logf="~/.flaminio-lab/$unit.log" state
+    while true; do
         sleep 10
-        if out=$(vssh "$vm" "tail -c +$((shown + 1)) ~/.flaminio-lab/$unit.log 2>/dev/null" 2>/dev/null); then
-            [[ -n $out ]] && printf '%s\n' "$out"
-            shown=$((shown + ${#out} + (${#out} > 0 ? 1 : 0)))
-            rc=$(vssh "$vm" "cat ~/.flaminio-lab/$unit.rc 2>/dev/null" 2>/dev/null || true)
-        else
+        # Only complete lines are printed while the job runs; the exit code is read in the same
+        # round trip, and once it exists the rest of the log is printed.
+        if ! state=$(vssh "$vm" "rc=\$(cat ~/.flaminio-lab/$unit.rc 2>/dev/null); n=\$(wc -l < $logf);
+                if [ -n \"\$rc\" ]; then echo \"RC=\$rc\"; tail -n +$((shown + 1)) $logf;
+                else echo \"N=\$n\"; tail -n +$((shown + 1)) $logf | head -n \$((n - $shown)); fi" 2>/dev/null); then
             warn "$vm unreachable; still waiting for $unit"
+            continue
         fi
+        out=${state#*$'\n'}
+        [[ $out == "$state" ]] && out=""
+        [[ -n $out ]] && printf '%s\n' "$out"
+        case "${state%%$'\n'*}" in
+            RC=*) rc=${state%%$'\n'*}; rc=${rc#RC=}; break ;;
+            N=*) shown=${state%%$'\n'*}; shown=${shown#N=} ;;
+        esac
     done
     return "$rc"
 }

@@ -249,7 +249,7 @@ cmd_bench_store() {
     local vm out
     for vm in $(vms_of "${1:-all}"); do
         log "replica-store benchmark on $vm (${RUNTIME:-30}s per job)"
-        out=$(ENV_VARS="FORMAT=${FORMAT:-1}" run_detached "$vm" "$SCRIPTS/guest/store-bench.sh" "${RUNTIME:-30}" "${JOBS:-.}" |
+        out=$(ENV_VARS="FORMAT=${FORMAT:-1} JOURNAL=${JOURNAL:-}" run_detached "$vm" "$SCRIPTS/guest/store-bench.sh" "${RUNTIME:-30}" "${JOBS:-.}" |
             tee /dev/stderr | tail -1)
         mkdir -p "$LOCAL_STATE_DIR/results/$vm"
         vssh "$vm" "tar -czf - -C $(dirname "$out") $(basename "$out")" | tar -xzf - -C "$LOCAL_STATE_DIR/results/$vm"

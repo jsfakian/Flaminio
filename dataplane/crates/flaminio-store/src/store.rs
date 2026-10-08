@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use flaminio_format::FormatError;
 use flaminio_format::checksum::{block_checksums, crc32c};
 use flaminio_format::consts::{BITS_PER_BITMAP_PAGE, BLOCK_SIZE, BLOCK_SIZE_U64, MIB};
-use flaminio_format::journal::{BatchBuilder, JournalPosition, JournalScanner, place_batch};
+use flaminio_format::journal::{Batch, BatchBuilder, JournalPosition, JournalScanner, place_batch};
 use flaminio_format::layout::Layout;
 use flaminio_format::meta::{
     BitmapKind, BitmapPage, CheckpointHeader, ChunkHeader, ChunkState, MapPage, PageTable, Phys,
@@ -90,6 +90,8 @@ pub struct Stats {
     pub checkpoint_seq: u64,
     /// Journal bytes that would be replayed after a crash.
     pub journal_live_bytes: u64,
+    /// Where the next journal batch goes (offset within the journal region).
+    pub journal_head: u64,
 }
 
 /// Result of a consistency check.
@@ -361,17 +363,42 @@ impl<D: BlockDevice> Store<D> {
             offset: ckpt.journal_start_offset,
             seq: ckpt.journal_start_seq,
         };
-        let reader = Reader(&dev);
-        let mut scan = JournalScanner::new(&reader, &layout, nonce, start);
-        for batch in scan.by_ref() {
-            let batch = batch?;
+        // A batch is written together with its redirect-on-write data, followed by one flush
+        // (spec §6.2). Only the last batch of the log can therefore be missing data: every
+        // later batch was written after that flush completed. So batches are applied one
+        // behind, and the last is applied only if its data matches the checksums it carries.
+        let apply_batch = |state: &mut State, batch: &Batch| -> Result<(), StoreError> {
             for record in batch.records() {
                 for (o, d) in state.apply(&record?)? {
                     dev.write_at(o, d)?;
                 }
             }
+            Ok(())
+        };
+        let reader = Reader(&dev);
+        let mut scan = JournalScanner::new(&reader, &layout, nonce, start);
+        let mut last = None;
+        for batch in scan.by_ref() {
+            if let Some(previous) = last.replace(batch?) {
+                apply_batch(&mut state, &previous)?;
+            }
         }
-        let head = scan.position();
+        let mut head = scan.position();
+        if let Some(batch) = last {
+            if batch_data_is_durable(&dev, &layout, &batch)? {
+                apply_batch(&mut state, &batch)?;
+            } else {
+                // Its flush never completed, so nothing in it was acknowledged. Erase its header
+                // so it cannot be mistaken for a later batch with the same sequence number.
+                let h = *batch.header();
+                dev.write_at(layout.journal_offset + h.offset, &[0u8; BLOCK_SIZE])?;
+                dev.flush()?;
+                head = JournalPosition {
+                    offset: h.offset,
+                    seq: h.batch_seq,
+                };
+            }
+        }
         let journal = Journal {
             offset: layout.journal_offset,
             size: layout.journal_size,
@@ -512,23 +539,22 @@ impl<D: BlockDevice> Store<D> {
         self.execute(batch, plan)
     }
 
-    /// The commit protocol (format spec §6.2): redirect-on-write data, flush, journal batch,
-    /// flush, apply (including in-place deferred writes). Returns false, after releasing the
-    /// plan's reservations, if the journal has no room for the batch.
+    /// The commit protocol (format spec §6.2): redirect-on-write data and the journal batch
+    /// together, one flush, then apply (including in-place deferred writes). Recovery verifies
+    /// the data of the last batch against the checksums it carries, so the data needs no flush
+    /// of its own. Returns false, after releasing the plan's reservations, if the journal has
+    /// no room for the batch.
     fn execute(&mut self, batch: BatchBuilder, plan: Plan<'_>) -> Result<bool, StoreError> {
         let len = batch.total_len();
         let Some(at) = self.journal.place(len) else {
             self.release(&plan.reserved);
             return Ok(false);
         };
-        if !plan.data_writes.is_empty() {
-            let writes: Vec<(u64, &[u8])> =
-                plan.data_writes.iter().map(|(o, d)| (*o, &d[..])).collect();
-            self.dev.write_many(&writes)?;
-            self.dev.flush()?;
-        }
         let bytes = batch.finish(self.sb.format_nonce, self.journal.head.seq, at);
-        self.dev.write_at(self.journal.offset + at, &bytes)?;
+        let mut writes: Vec<(u64, &[u8])> =
+            plan.data_writes.iter().map(|(o, d)| (*o, &d[..])).collect();
+        writes.push((self.journal.offset + at, &bytes));
+        self.dev.write_many(&writes)?;
         self.dev.flush()?;
         self.journal.advance(at, len);
         let mut in_place = Vec::new();
@@ -957,24 +983,47 @@ impl<D: BlockDevice> Store<D> {
                 }
             };
             results.push(Ok(()));
+            // Plan the request as segments first, merging neighbouring clusters that are also
+            // neighbours on disk, so a sequential read becomes one device read rather than one
+            // per cluster. Then carve the buffer to match.
             let chunk = self.state.chunk(slot);
-            let mut rest: &mut [u8] = &mut *r.buf;
+            let mut segments: Vec<(Option<u64>, usize, u64, Vec<u32>)> = Vec::new(); // (device offset, len, chunk offset, checksums)
             let mut o = r.offset;
-            while !rest.is_empty() {
+            let end = r.offset + r.buf.len() as u64;
+            while o < end {
                 let (x, within) = (o / cs, o % cs);
-                let n = ((cs - within) as usize).min(rest.len());
-                let (piece, tail) = std::mem::take(&mut rest).split_at_mut(n);
-                rest = tail;
+                let n = (cs - within).min(end - o) as usize;
                 match chunk.resolve(self.state.epp, x) {
-                    Resolved::Zeros => piece.fill(0),
+                    Resolved::Zeros => match segments.last_mut() {
+                        Some((None, len, _, _)) => *len += n,
+                        _ => segments.push((None, n, o, Vec::new())),
+                    },
                     Resolved::Data { phys, csums } => {
+                        let dev = self.state.layout.data_cluster_offset(phys) + within;
                         let first = (within / BLOCK_SIZE_U64) as usize;
-                        let expected = csums[first..first + n / BLOCK_SIZE].to_vec();
-                        reads.push((self.state.layout.data_cluster_offset(phys) + within, piece));
-                        checks.push((i, chunk.key, o, expected));
+                        let sums = &csums[first..first + n / BLOCK_SIZE];
+                        match segments.last_mut() {
+                            Some((Some(d), len, _, expected)) if *d + *len as u64 == dev => {
+                                *len += n;
+                                expected.extend_from_slice(sums);
+                            }
+                            _ => segments.push((Some(dev), n, o, sums.to_vec())),
+                        }
                     }
                 }
                 o += n as u64;
+            }
+            let mut rest: &mut [u8] = &mut *r.buf;
+            for (dev, len, offset, expected) in segments {
+                let (piece, tail) = std::mem::take(&mut rest).split_at_mut(len);
+                rest = tail;
+                match dev {
+                    None => piece.fill(0),
+                    Some(dev) => {
+                        reads.push((dev, piece));
+                        checks.push((i, chunk.key, offset, expected));
+                    }
+                }
             }
         }
         self.dev.read_many(&mut reads)?;
@@ -1193,6 +1242,7 @@ impl<D: BlockDevice> Store<D> {
             chunks: self.state.by_key.len(),
             checkpoint_seq: self.state.checkpoint_seq,
             journal_live_bytes: self.journal.live_bytes(),
+            journal_head: self.journal.head.offset,
         }
     }
 
@@ -1280,6 +1330,49 @@ impl<D: BlockDevice> Store<D> {
             verified_blocks: verified,
         })
     }
+}
+
+/// Whether the redirect-on-write data of every `MapUpdate` in `batch` is on disk, according to
+/// the checksums the records carry.
+fn batch_data_is_durable<D: BlockDevice>(
+    dev: &D,
+    layout: &Layout,
+    batch: &Batch,
+) -> Result<bool, StoreError> {
+    let mut buf = vec![0u8; layout.cluster_size as usize];
+    for record in batch.records() {
+        let Record::MapUpdate {
+            count,
+            csums_per_cluster,
+            phys_first,
+            csums,
+            ..
+        } = record?
+        else {
+            continue;
+        };
+        let cpc = csums_per_cluster as usize;
+        if phys_first
+            .checked_add(u64::from(count))
+            .is_none_or(|end| end > layout.data_clusters)
+        {
+            return Err(StoreError::corrupt(
+                "journal MapUpdate points outside the data area",
+            ));
+        }
+        for i in 0..count as usize {
+            dev.read_at(layout.data_cluster_offset(phys_first + i as u64), &mut buf)?;
+            let expected = &csums[i * cpc..(i + 1) * cpc];
+            if buf
+                .chunks_exact(BLOCK_SIZE)
+                .zip(expected)
+                .any(|(b, &c)| crc32c(b) != c)
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn info(c: &Chunk) -> ChunkInfo {

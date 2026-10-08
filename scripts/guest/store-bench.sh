@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Replica-store benchmark on the data disk, with the same jobs as fio-raw.sh where they make
-# sense. Reformats the data disk unless FORMAT=0.
+# sense. Reformats the data disk unless FORMAT=0; JOURNAL=SIZE sets the journal size then.
 # Usage: store-bench.sh RUNTIME_SECONDS [JOB_REGEX]
 runtime=${1:-30}
 filter=${2:-.}
@@ -14,7 +14,8 @@ mkdir -p "$out"
 common=(--device "$disk" --chunks 32 --chunk-size 1G)
 if [[ ${FORMAT:-1} == 1 ]]; then
     log "formatting $disk and prefilling the 32 GiB working set"
-    sudo "$bench" "${common[@]}" --format --force --prefill --workload read --bs 1M --batch 8 --runtime 1 >/dev/null
+    sudo "$bench" "${common[@]}" --format --force ${JOURNAL:+--journal-size "$JOURNAL"} --prefill \
+        --workload read --bs 1M --batch 8 --runtime 1 >/dev/null
 fi
 
 # name workload bs batch

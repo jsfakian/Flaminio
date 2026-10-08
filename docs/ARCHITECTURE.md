@@ -346,7 +346,9 @@ and its reference implementation is the `flaminio-format` crate.
   one sequential, group-committed journal write.
 
 So **every write is all-or-nothing on a replica**, and checksums never disagree with data
-because of a torn write. Each replica acknowledges a write only once it is durable. A volatile
+because of a torn write. A group of writes needs **one flush**. Data and journal batch go to the device together, and
+recovery checks the last batch's data against the checksums its records carry (format spec
+§6.2). Each replica acknowledges a write only once it is durable. A volatile
 device cache is flushed with FUA or a flush command; disks with power-loss protection skip the
 flush.
 

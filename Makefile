@@ -15,6 +15,7 @@ VM        ?= all
 CASES     ?= 50000
 RUNTIME   ?= 30
 JOBS      ?= .
+JOURNAL   ?=
 IMAGE     ?= .lab/disk.img
 IMAGE_SIZE ?= 10G
 
@@ -130,5 +131,5 @@ vm-crash-test: ## Long crash-test campaign inside a VM (CASES)
 bench-raw: ## fio baseline on the raw data disks (RUNTIME, JOBS=regex); destroys data on them
 	RUNTIME=$(RUNTIME) JOBS='$(JOBS)' $(LAB) bench-raw $(VM)
 
-bench-store: ## Replica-store benchmark on the data disks (RUNTIME, JOBS=regex); reformats them
-	RUNTIME=$(RUNTIME) JOBS='$(JOBS)' $(LAB) bench-store $(VM)
+bench-store: ## Replica-store benchmark on the data disks (RUNTIME, JOBS=regex, JOURNAL=size); reformats them
+	RUNTIME=$(RUNTIME) JOBS='$(JOBS)' JOURNAL='$(JOURNAL)' $(LAB) bench-store $(VM)

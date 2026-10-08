@@ -275,9 +275,26 @@ Start at the checkpoint's (`journal_start_offset`, `journal_start_seq`). Then re
 Sequence numbers are unique and consecutive, so a valid-looking batch from an earlier lap of the
 circular log can never be mistaken for the next one.
 
-**Write ordering.** A batch must not be written until every data-area write it depends on
-(redirect-on-write clusters, §6.3 type 5) is durable. On a device with a volatile cache, this
-means issuing a flush before the batch write and FUA on the batch itself.
+**Write ordering (one flush per batch).** A batch may be written together with the data-area
+writes it depends on (the redirect-on-write clusters of its `MapUpdate` records), followed by a
+single flush. The batch is committed when that flush completes. The next batch may not be
+written before then.
+
+That order makes recovery simple. Only the **last** batch of the log can be missing data,
+because every later batch was written after the previous flush had completed. Replay therefore:
+
+1. Applies every batch except the last one, unconditionally.
+2. Reads the clusters named by the last batch's `MapUpdate` records and checks them against the
+   checksums the records carry.
+3. If they all match, applies it. If any block mismatches, rejects it: its flush never
+   completed, so nothing in it was acknowledged. The log then ends at that batch.
+4. **Zeroes the rejected batch's first block, and flushes, before anything else is written.** A
+   rejected batch still has a valid CRC. If the next batch, which reuses its sequence number,
+   had to wrap to offset 0, a later replay would find the stale batch first and lose the new
+   one. (`tests/recovery_edge_cases.rs` reproduces exactly that.)
+
+A cluster that happened to contain the right bytes already passes the check, and that is
+correct, because the contents are what the record describes.
 
 **Reuse of freed space.** A data cluster or page-pool pair freed by a record must not be reused
 until a checkpoint that includes the record has **completed**. Being durable in the journal is

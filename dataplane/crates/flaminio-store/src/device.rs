@@ -188,6 +188,21 @@ impl MemDevice {
         self.inner.borrow().mutations
     }
 
+    /// The device image after a power loss in which exactly the unflushed blocks whose byte
+    /// offset satisfies `keep` survive (whole, not torn).
+    pub fn crash_keeping(&self, keep: impl Fn(u64) -> bool) -> MemDevice {
+        let d = self.inner.borrow();
+        let mut durable = d.durable.clone();
+        for (&block, data) in &d.cache {
+            if keep(block * BLOCK_SIZE_U64) {
+                durable.insert(block, data.clone());
+            }
+        }
+        let image = MemDevice::new(d.size);
+        image.inner.borrow_mut().durable = durable;
+        image
+    }
+
     /// The device image after a power loss. `seed` chooses which cached blocks survive.
     pub fn crash(&self, seed: u64) -> MemDevice {
         let d = self.inner.borrow();

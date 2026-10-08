@@ -24,6 +24,7 @@ usage: flaminio-bench --device PATH [options]
   --format             format the device first (refuses to overwrite a Flaminio disk
                        unless --force)
   --force              allow --format to destroy an existing Flaminio disk
+  --journal-size SIZE  journal size for --format (default: the format's default for the disk)
   --chunks N           chunks in the working set (default 16)
   --chunk-size SIZE    chunk size (default 256M)
   --workload W         randread | randwrite | read | write (default randwrite)
@@ -67,6 +68,7 @@ struct Args {
     runtime: Duration,
     prefill: bool,
     buffered: bool,
+    journal_size: Option<u64>,
     name: Option<String>,
     json: Option<String>,
 }
@@ -109,6 +111,7 @@ fn parse_args() -> Result<Args> {
         runtime: Duration::from_secs(30),
         prefill: false,
         buffered: false,
+        journal_size: None,
         name: None,
         json: None,
     };
@@ -136,6 +139,7 @@ fn parse_args() -> Result<Args> {
                 a.runtime = Duration::from_secs(value()?.parse().map_err(|_| "invalid --runtime")?)
             }
             "--prefill" => a.prefill = true,
+            "--journal-size" => a.journal_size = Some(parse_size(&value()?)?),
             "--buffered" => a.buffered = true,
             "--name" => a.name = Some(value()?),
             "--json" => a.json = Some(value()?),
@@ -221,7 +225,10 @@ fn run(a: Args) -> Result<()> {
             created_unix_secs: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
-            layout: LayoutParams::default(),
+            layout: LayoutParams {
+                journal_size: a.journal_size,
+                ..LayoutParams::default()
+            },
             label: "flaminio-bench".into(),
         };
         Store::format(&dev, &options).map_err(|e| format!("format: {e}"))?;
