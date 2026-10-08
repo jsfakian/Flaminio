@@ -1,0 +1,18 @@
+[package]
+name = "flaminio-disktool"
+version = "0.1.0"
+description = "Format and inspect Flaminio disks (development tool)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "flaminio-disk"
+path = "src/main.rs"
+
+[dependencies]
+flaminio-format.workspace = true
+
+[lints]
+workspace = true

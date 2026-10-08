@@ -1,0 +1,18 @@
+[package]
+name = "flaminio-format"
+version = "0.1.0"
+description = "Flaminio on-disk format v1: superblock, metadata pages and journal encoding"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+crc32c.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

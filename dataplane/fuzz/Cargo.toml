@@ -1,0 +1,37 @@
+[package]
+name = "flaminio-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.10"
+flaminio-format = { path = "../crates/flaminio-format" }
+
+# Not part of the main workspace: build with `cargo +nightly fuzz run <target>`.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "superblock"
+path = "fuzz_targets/superblock.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "metadata_pages"
+path = "fuzz_targets/metadata_pages.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal"
+path = "fuzz_targets/journal.rs"
+test = false
+doc = false
+bench = false
