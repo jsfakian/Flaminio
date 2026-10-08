@@ -7,10 +7,13 @@ block storage pool. You add a disk and it joins the pool. You pull a disk and th
 somewhere else. You lose a node and your volumes keep serving I/O. You lose a whole cluster
 and you restore from an encrypted, immutable backup.
 
-> **Status: phase 0.** The design is under review, and implementation has started with the
-> [on-disk format](docs/format/on-disk-format-v1.md) ([`dataplane/`](dataplane/)). Nothing here
-> is production ready, and every interface may change. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-> for the design and [Roadmap](#roadmap) for the plan.
+> **Status: MVP data plane, in the lab.** A Rust data plane serves volumes as Linux block
+> devices (`/dev/ublkbN`) from its own [on-disk format](docs/format/on-disk-format-v1.md), with
+> synchronous replication to a second server. Reads through the full stack reach 86–98% of the
+> raw disk, and replication survives a replica outage with no failed writes. There is no control
+> plane yet (no Kubernetes integration, metadata service or TLS), so nothing here is ready for
+> real data. See the [MVP plan](docs/mvp-plan.md), [lab](docs/lab.md) and
+> [benchmarks](docs/benchmarks/).
 
 ---
 

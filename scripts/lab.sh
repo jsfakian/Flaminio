@@ -273,7 +273,7 @@ cmd_ublk() {
     vm=$(vms_of "${2:-a}")
     case "$action" in
         fio)
-            out=$(run_detached "$vm" "$SCRIPTS/guest/ublk.sh" fio "${RUNTIME:-30}" | tee /dev/stderr | tail -1)
+            out=$(ENV_VARS="FILL=${FILL:-1}" run_detached "$vm" "$SCRIPTS/guest/ublk.sh" fio "${RUNTIME:-30}" | tee /dev/stderr | tail -1)
             mkdir -p "$LOCAL_STATE_DIR/results/$vm"
             vssh "$vm" "tar -czf - -C $(dirname "$out") $(basename "$out")" | tar -xzf - -C "$LOCAL_STATE_DIR/results/$vm"
             log "results saved in .lab/results/$vm/$(basename "$out")"

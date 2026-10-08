@@ -85,12 +85,15 @@ bench() {
     up
     out="$HOME/results/ublk-$(date -u +%Y%m%dT%H%M%SZ)"
     mkdir -p "$out"
-    # Always fill: anything may have discarded the volume since the last run (mkfs.ext4 does, by
-    # default), and reads of discarded ranges return zeros without touching the disk.
-    log "filling the first 32 GiB of $dev (setup, not measured)"
-    sudo fio --name=fill --filename="$dev" --rw=write --bs=1m --iodepth=32 --size=32G \
-        --ioengine=io_uring --direct=1 --output-format=json --output="$out/fill.json" >/dev/null
-    jq -r '.jobs[0].write | "  filled at \(.bw_bytes/1048576|floor) MiB/s"' "$out/fill.json" >&2
+    # Fill by default: anything may have discarded the volume since the last run (mkfs.ext4
+    # does), and reads of discarded ranges return zeros without touching the disk. FILL=0 skips
+    # it, only for back-to-back runs on a volume nothing has discarded.
+    if [[ ${FILL:-1} == 1 ]]; then
+        log "filling the first 32 GiB of $dev (setup, not measured)"
+        sudo fio --name=fill --filename="$dev" --rw=write --bs=1m --iodepth=32 --size=32G \
+            --ioengine=io_uring --direct=1 --output-format=json --output="$out/fill.json" >/dev/null
+        jq -r '.jobs[0].write | "  filled at \(.bw_bytes/1048576|floor) MiB/s"' "$out/fill.json" >&2
+    fi
     local jobs=(
         "randread-4k-qd1   randread 4k 1  -"
         "randread-4k-qd32  randread 4k 32 -"
