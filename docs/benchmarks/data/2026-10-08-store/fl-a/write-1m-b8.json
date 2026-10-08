@@ -1,0 +1,1 @@
+{"name":"write-1m-b8","workload":"Write","bs":1048576,"batch":8,"chunks":32,"chunk_size":1073741824,"direct":true,"runtime_s":30.002,"ios":11984,"iops":399.4,"mib_s":399.44,"lat_us":{"p50":19454,"p99":23880,"p999":180543,"max":255167},"cpu_us_per_io":317.09,"checkpoints":0}

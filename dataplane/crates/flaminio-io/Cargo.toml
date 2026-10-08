@@ -1,0 +1,25 @@
+[package]
+name = "flaminio-io"
+version = "0.1.0"
+description = "Flaminio data-plane daemon: exposes volumes as /dev/ublkbN, backed by the replica store"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "flaminio-io"
+path = "src/main.rs"
+
+[dependencies]
+flaminio-format.workspace = true
+flaminio-store.workspace = true
+flaminio-uring.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libublk.workspace = true
+smol.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

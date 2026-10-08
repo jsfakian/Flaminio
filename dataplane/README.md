@@ -7,6 +7,9 @@ phase 0.
 |---|---|
 | [`flaminio-format`](crates/flaminio-format) | The on-disk format v1: superblock, layout, metadata pages, journal records and replay scanning. Sans-I/O, `#![forbid(unsafe_code)]`. Reference implementation of [`docs/format/on-disk-format-v1.md`](../docs/format/on-disk-format-v1.md) |
 | [`flaminio-store`](crates/flaminio-store) | The replica store: recovery (checkpoint + journal replay), chunk create/delete, redirect-on-write and deferred writes, verified reads, snapshots, discard, fencing, checkpoints, `fsck`. Synchronous and single-threaded for now, running on any `BlockDevice` |
+| [`flaminio-uring`](crates/flaminio-uring) | `io_uring` + `O_DIRECT` block device and page-aligned buffers. The only crate allowed `unsafe`, in two opt-in modules |
+| [`flaminio-bench`](crates/flaminio-bench) | fio-like microbenchmark that drives the store directly |
+| [`flaminio-io`](crates/flaminio-io) | The data-plane daemon: serves a volume as `/dev/ublkbN` through [`libublk`](https://crates.io/crates/libublk) (Linux only). MVP step 4: one local replica |
 | [`flaminio-disktool`](crates/flaminio-disktool) | `flaminio-disk`, a development tool that formats and inspects disks or disk-image files |
 | [`fuzz`](fuzz) | `cargo-fuzz` targets for every on-disk parser (outside the workspace) |
 
@@ -27,6 +30,8 @@ PROPTEST_CASES=50000 cargo test --release -p flaminio-store --test crash_consist
 ## Build and test
 
 Requires stable Rust ≥ 1.88 (let-chains).
+On Linux, building `flaminio-io` also needs libclang (`apt install libclang-dev`): `libublk`
+generates its kernel bindings with bindgen.
 
 ```bash
 cargo test                          # unit, integration and property tests

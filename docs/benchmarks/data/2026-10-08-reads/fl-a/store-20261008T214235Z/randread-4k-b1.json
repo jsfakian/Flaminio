@@ -1,0 +1,1 @@
+{"name":"randread-4k-b1","workload":"RandRead","bs":4096,"batch":1,"chunks":32,"chunk_size":1073741824,"direct":true,"runtime_s":30.000,"ios":189317,"iops":6310.5,"mib_s":24.65,"lat_us":{"p50":155,"p99":186,"p999":397,"max":13403},"cpu_us_per_io":7.92,"checkpoints":0}

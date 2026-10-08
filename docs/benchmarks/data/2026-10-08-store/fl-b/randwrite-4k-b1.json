@@ -1,0 +1,1 @@
+{"name":"randwrite-4k-b1","workload":"RandWrite","bs":4096,"batch":1,"chunks":32,"chunk_size":1073741824,"direct":true,"runtime_s":30.002,"ios":13721,"iops":457.3,"mib_s":1.79,"lat_us":{"p50":2081,"p99":5308,"p999":6131,"max":64796},"cpu_us_per_io":61.95,"checkpoints":1}

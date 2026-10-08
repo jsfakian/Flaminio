@@ -1,0 +1,1 @@
+{"name":"read-1m-b8","workload":"Read","bs":1048576,"batch":8,"chunks":32,"chunk_size":1073741824,"direct":true,"runtime_s":30.002,"ios":93912,"iops":3130.2,"mib_s":3130.21,"lat_us":{"p50":2480,"p99":3241,"p999":3916,"max":5610},"cpu_us_per_io":145.67,"checkpoints":0}

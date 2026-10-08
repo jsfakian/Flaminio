@@ -1,0 +1,16 @@
+
+fl-a
+  comparison                                      store              raw store/raw    store p50/p99 us  runs
+  4K rand read, depth 1                     6392 ±  2%      6411 ±  2%      100%       155 / 185      3/3 (IOPS)
+  4K rand read, 32 (closed batches)        67653 ±  0%     45426 ±  1%      149%       451 / 764      3/3 (IOPS)
+  4K rand read, 32 vs fio continuous       67653 ±  0%    114844 ±  1%       59%       451 / 764      3/3 (IOPS)
+  1M seq read, 8 (closed batches)            452 ±  0%       469 ±  0%       96%     17604 / 19856    3/3 (MiB/s)
+  1M seq read, 8 vs fio continuous           452 ±  0%       853 ±  1%       53%     17604 / 19856    3/3 (MiB/s)
+
+fl-b
+  comparison                                      store              raw store/raw    store p50/p99 us  runs
+  4K rand read, depth 1                    10856 ±  1%     12820 ±  0%       85%        88 / 109      3/3 (IOPS)
+  4K rand read, 32 (closed batches)       117965 ±  0%    115224 ±  0%      102%       268 / 363      3/3 (IOPS)
+  4K rand read, 32 vs fio continuous      117965 ±  0%    245308 ±  0%       48%       268 / 363      3/3 (IOPS)
+  1M seq read, 8 (closed batches)           3326 ±  2%      3602 ±  2%       92%      2372 / 2988     3/3 (MiB/s)
+  1M seq read, 8 vs fio continuous          3326 ±  2%      4983 ±  0%       67%      2372 / 2988     3/3 (MiB/s)

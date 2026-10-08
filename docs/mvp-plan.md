@@ -29,7 +29,7 @@ file** for the MVP. Every piece built here is reused later. Only the config file
 | # | Step | Runs on | Done when |
 |---|---|---|---|
 | 1 ✅ | **Replica store**: crate `flaminio-store`. Opens and recovers a formatted disk, creates and deletes chunks, writes (redirect-on-write and deferred), reads with checksum verification, snapshots, discard, fencing, checkpoints | Any machine | Crash-consistency property tests pass: random workloads, power loss at every point (including mid-checkpoint and mid-recovery), every acknowledged write survives |
-| 2 | **Linux I/O backend**: `io_uring` with `O_DIRECT`, aligned buffers, group commit (many writes per journal batch). Bench tool driving the store directly | Linux VM | Store benchmark on a VM virtual disk, compared against raw-disk fio |
+| 2 ✅ | **Linux I/O backend** (results: [benchmarks/2026-10-08-store-baseline.md](benchmarks/2026-10-08-store-baseline.md)): `io_uring` with `O_DIRECT`, aligned buffers, group commit (many writes per journal batch). Bench tool driving the store directly | Linux VM | Store benchmark on a VM virtual disk, compared against raw-disk fio |
 | 3 ✅ | **Test VMs**: one libvirt/KVM VM per server (Ubuntu 26.04 guest, kernel 7.0), a second virtual disk `/dev/vdb` for Flaminio, and VM-to-VM networking across the two servers. See [lab.md](lab.md) | Both servers | VMs reach each other; fio baseline numbers for the raw `/dev/vdb` |
 | 4 | **ublk frontend, single node**: `flaminio-io` exposes `/dev/ublkb0`, backed by a chunked volume on the local replica store (RF=1) | VM fl-a | `mkfs.ext4` + mount + fio work; data survives a `flaminio-io` restart |
 | 5 | **Replication**: volume target with star fan-out, a replication protocol over TCP, ISR and epoch fencing from static config, replica service on fl-b | Both VMs | RF=2 volume serves fio; killing the remote replica degrades the volume without errors; restarting it resyncs |
@@ -45,3 +45,17 @@ file** for the MVP. Every piece built here is reused later. Only the config file
 - **VM tooling:** decided in step 3. Both servers use libvirt/KVM (installed on rhythm by
   `make host-prep`), with identical VM definitions, so results differ only by hardware.
 - **Order:** step 3 was done before step 2, because steps 2, 4 and 5 all need Linux.
+
+## Decision needed before step 4: how to drive ublk
+
+| | A. `libublk` crate (0.4.8) | B. Our own minimal ublk driver |
+|---|---|---|
+| What it is | Rust library from the ublk-org GitHub organization (where ublk's own userspace tooling lives), MIT/Apache, MSRV 1.80, with examples for ramdisk and loop devices | The ublk control and I/O-command protocol (`/dev/ublk-control`, per-queue `io_uring` commands) implemented in `flaminio-uring` |
+| Size | About 13k lines, plus smol, async-lock, serde, serde_json, bitflags and others | Likely 1–2k lines; uses only the `io-uring` and `libc` crates we already have |
+| Time to a working `/dev/ublkb0` | Short: the examples are close to what we need | Longer: control commands, queue setup, recovery flags, zero-copy later |
+| Fit with our design | Its own async executor model (smol); we would adapt our synchronous, thread-per-core store to it | Fits the thread-per-core design and our single `unsafe` crate exactly |
+| Security review | A larger dependency tree in the most privileged data-path process | Small, and in code we already audit |
+
+**Recommendation:** A for step 4, to reach a working benchmark quickly and learn the
+interface. Keep it behind a narrow frontend trait, and plan B before anything leaves the lab,
+since the data plane's dependency tree is part of the security story (ARCHITECTURE §15.5).

@@ -20,6 +20,9 @@ jobs=(
     "randwrite-4k-qd1-sync  randwrite 4k 1  --sync=1"
     "randwrite-4k-qd32-sync randwrite 4k 32 --sync=1"
     "write-1m-qd8-sync      write     1m 8  --sync=1"
+    # Closed batches, like flaminio-bench: submit N, wait for all N. Compare store reads with these.
+    "randread-4k-b32        randread  4k 32 --iodepth_batch_submit=32,--iodepth_batch_complete_min=32"
+    "read-1m-b8             read      1m 8  --iodepth_batch_submit=8,--iodepth_batch_complete_min=8"
 )
 
 # A fresh data disk is a preallocated file on the host: never-written blocks read as zeros
@@ -39,6 +42,7 @@ for spec in "${jobs[@]}"; do
     read -r name rw bs qd extra <<<"$spec"
     [[ $name =~ $filter ]] || continue
     [[ $extra == - ]] && extra=""
+    extra=${extra//,/ }
     # shellcheck disable=SC2086 # $extra is a list of fio options
     sudo fio --name="$name" --filename="$disk" --rw="$rw" --bs="$bs" --iodepth="$qd" --numjobs=1 $extra \
         --ioengine=io_uring --direct=1 --time_based --runtime="$runtime" --ramp_time=3 \

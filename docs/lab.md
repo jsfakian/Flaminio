@@ -39,7 +39,8 @@ make lab-check          # reachability, sudo, KVM, libvirt
 make lab-up             # host-prep → vm-create → net-setup → provision → deploy → net-check
 make vm-status
 make vm-test            # test suite on Linux, in fl-a
-make bench-raw          # fio baseline of the raw data disks (destroys data on them)
+make bench-raw          # fio read baseline of the raw data disks (JOBS=. adds writes)
+make bench-store        # replica-store read benchmark (FORMAT=0 reuses the formatted disk)
 make help               # everything else
 ```
 

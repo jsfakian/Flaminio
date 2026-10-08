@@ -14,7 +14,9 @@ LAB       := scripts/lab.sh
 VM        ?= all
 CASES     ?= 50000
 RUNTIME   ?= 30
-JOBS      ?= .
+# Benchmarks measure reads by default: SSD/NVMe write results are not stable enough to rely on.
+# JOBS=. runs everything, writes included.
+JOBS      ?= read
 JOURNAL   ?=
 IMAGE     ?= .lab/disk.img
 IMAGE_SIZE ?= 10G
@@ -104,6 +106,25 @@ vm-console: ## Serial console of a VM (VM=a or VM=b; exit with Ctrl-])
 provision: ## Install the toolchain and load ublk in the VMs
 	$(LAB) provision $(VM)
 
+##@ Lab: ublk frontend (MVP step 4)
+
+.PHONY: ublk-up ublk-down ublk-status ublk-smoke bench-ublk
+UVM = $(if $(filter all,$(VM)),a,$(VM))
+ublk-up: ## Start flaminio-io serving /dev/ublkb0 in a VM (default a; FORMAT=1 reformats the disk)
+	FORMAT=$(FORMAT) $(LAB) ublk up $(UVM)
+
+ublk-down: ## Stop flaminio-io and remove the ublk device
+	$(LAB) ublk down $(UVM)
+
+ublk-status: ## flaminio-io service state, device geometry, recent log
+	$(LAB) ublk status $(UVM)
+
+ublk-smoke: ## ext4 + files + daemon restart + checksum verification on /dev/ublkb0
+	$(LAB) ublk smoke $(UVM)
+
+bench-ublk: ## fio reads on /dev/ublkb0 (RUNTIME); fills 32 GiB first, once
+	RUNTIME=$(RUNTIME) $(LAB) ublk fio $(UVM)
+
 ##@ Lab: network
 
 .PHONY: net-setup net-teardown net-check
@@ -128,8 +149,8 @@ vm-test: ## Run the test suite inside a VM on Linux (default VM a)
 vm-crash-test: ## Long crash-test campaign inside a VM (CASES)
 	PROPTEST_CASES=$(CASES) $(LAB) test $(if $(filter all,$(VM)),a,$(VM)) -p flaminio-store --test crash_consistency
 
-bench-raw: ## fio baseline on the raw data disks (RUNTIME, JOBS=regex); destroys data on them
+bench-raw: ## fio baseline on the raw data disks (RUNTIME, JOBS=regex; default reads, JOBS=. adds writes, which destroy data)
 	RUNTIME=$(RUNTIME) JOBS='$(JOBS)' $(LAB) bench-raw $(VM)
 
-bench-store: ## Replica-store benchmark on the data disks (RUNTIME, JOBS=regex, JOURNAL=size); reformats them
+bench-store: ## Replica-store benchmark (RUNTIME, JOBS=regex, default reads; FORMAT=0 reuses the disk, else reformats)
 	RUNTIME=$(RUNTIME) JOBS='$(JOBS)' JOURNAL='$(JOURNAL)' $(LAB) bench-store $(VM)

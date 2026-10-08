@@ -43,8 +43,9 @@ device, which inflates read results.
   - The PM9A1 does not. Its 28 µs writes are not durable until a cache flush.
   - Flaminio acknowledges a write only when it is durable (it issues flushes, see the format
     spec §6.2). So this baseline **overstates what a durable write costs on fl-b**.
-  - Step 2 should add a sync-write baseline (`fsync=1` or `sync=1` jobs) to compare like with
-    like.
+  - The durable-write (`O_SYNC`) baseline was added in step 2. See
+    [2026-10-08-store-baseline.md](2026-10-08-store-baseline.md). On fl-b a durable 4K write
+    costs about 3 ms.
 - **The network is not measured here.** The servers share a 1 GbE link (about 117 MB/s and
   0.44 ms round trip between hosts). Once replication arrives, that is well below either disk's
   sequential write speed, and its round trip exceeds both disks' QD1 write latency. An `iperf3`
