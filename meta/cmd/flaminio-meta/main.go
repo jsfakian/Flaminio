@@ -77,6 +77,7 @@ func serve(args []string) error {
 	fs.StringVar(&etcdFiles.Key, "etcd-key", "", "client key for etcd")
 	fs.StringVar(&etcdFiles.CA, "etcd-ca", "", "CA bundle for etcd's certificates")
 	insecureMode := fs.Bool("insecure", false, "no TLS, no authentication, no tokens: development only")
+	storeKind := fs.String("store", "etcd", "etcd, or memory (development and tests: nothing is kept)")
 	_ = fs.Parse(args)
 
 	opts := service.Options{TTL: *ttl}
@@ -94,8 +95,10 @@ func serve(args []string) error {
 		if err != nil {
 			return fmt.Errorf("server TLS: %w", err)
 		}
-		if etcdCfg.TLS, err = etcdFiles.ClientConfig(); err != nil {
-			return fmt.Errorf("etcd TLS: %w", err)
+		if *storeKind == "etcd" {
+			if etcdCfg.TLS, err = etcdFiles.ClientConfig(); err != nil {
+				return fmt.Errorf("etcd TLS: %w", err)
+			}
 		}
 		if opts.TokenKey, err = loadEd25519(*tokenKey); err != nil {
 			return fmt.Errorf("token key: %w", err)
@@ -104,11 +107,19 @@ func serve(args []string) error {
 		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(scfg)))
 	}
 
-	c, err := clientv3.New(etcdCfg)
-	if err != nil {
-		return err
+	var store kv.KV
+	switch *storeKind {
+	case "etcd":
+		c, err := clientv3.New(etcdCfg)
+		if err != nil {
+			return err
+		}
+		store = kv.NewEtcd(c)
+	case "memory":
+		store = kv.NewMem(nil)
+	default:
+		return fmt.Errorf("unknown store %q", *storeKind)
 	}
-	store := kv.NewEtcd(c)
 	defer store.Close()
 
 	lis, err := net.Listen("tcp", *listen)

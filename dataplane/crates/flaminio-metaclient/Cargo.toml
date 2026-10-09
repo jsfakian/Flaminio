@@ -1,0 +1,18 @@
+[package]
+name = "flaminio-metaclient"
+version = "0.1.0"
+description = "Flaminio data plane's client of the metadata service (gRPC over mutual TLS)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost = "0.14.4"
+tonic = { version = "0.14.6", default-features = false, features = ["transport", "tls-ring", "codegen"] }
+tonic-prost = "0.14.6"
+tokio = { version = "1.53", default-features = false, features = ["rt", "time"] }
+thiserror.workspace = true
+
+[lints]
+workspace = true

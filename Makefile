@@ -33,7 +33,7 @@ help: ## Show this help
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test sim lint fmt proto meta-vectors disk-demo clean
+.PHONY: build release test crash-test sim meta-interop lint fmt proto meta-vectors disk-demo clean
 build: ## Build the data plane (debug) and the Go services
 	cd $(DATAPLANE) && $(CARGO) build
 	$(GO) build ./...
@@ -52,12 +52,15 @@ sim: ## Replication-protocol simulation: SEEDS random runs, then every injected 
 	cd $(DATAPLANE) && $(CARGO) run --release -q -p flaminio-repl --example sim -- 0 $(SEEDS)
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
 
+meta-interop: ## The data plane's Rust metadata client against the Go service, over mutual TLS
+	CARGO=$(CARGO) scripts/dev/meta-interop.sh
+
 lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l api meta pkg control)" || { echo "gofmt needed:"; gofmt -l api meta pkg control; exit 1; }
 	$(BUF) lint
-	@if command -v shellcheck >/dev/null; then shellcheck -x scripts/*.sh scripts/host/*.sh scripts/guest/*.sh && echo "shellcheck: ok"; \
+	@if command -v shellcheck >/dev/null; then shellcheck -x scripts/*.sh scripts/host/*.sh scripts/guest/*.sh scripts/dev/*.sh && echo "shellcheck: ok"; \
 	 else echo "shellcheck not installed (brew install shellcheck); skipped"; fi
 
 fmt: ## Format Rust and Go code
