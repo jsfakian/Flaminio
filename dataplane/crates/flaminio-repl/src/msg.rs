@@ -1,66 +1,70 @@
 //! Messages between a target and replica nodes (protocol spec §3–§7).
+//!
+//! `P` is the payload: the data of an extent. The simulator uses one value per block; the data
+//! plane uses handles to buffers.
 
-use crate::types::{Block, ChunkIdx, Epoch, Value, Version, VolumeId};
+use crate::extent::Extent;
+use crate::types::{ChunkIdx, Epoch, Version, VolumeId};
 
 /// A request from a target to a replica node. Every request gets at most one reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToReplica {
+pub struct ToReplica<P> {
     pub vol: VolumeId,
     pub epoch: Epoch,
     /// Session within the epoch. A `Hello` makes it current; other sessions are ignored.
     pub session: u64,
     /// Request id, echoed in the reply.
     pub req: u64,
-    pub body: Request,
+    pub body: Request<P>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Request {
+pub enum Request<P> {
     /// Opens a session and fences the volume at `epoch`. Reply: [`Response::Fenced`].
     Hello,
     /// Confirms the epoch for the lease. Reply: [`Response::Ok`].
     Heartbeat,
-    /// A write of one block. `prune` lets the replica drop uncertain-set entries older than
+    /// A write of one extent. `prune` lets the replica drop uncertain-set entries older than
     /// it: every write below it has completed. Reconciliation writes carry no `prune`.
     Write {
         chunk: ChunkIdx,
-        block: Block,
-        value: Value,
+        ext: Extent,
+        data: P,
         version: Version,
         prune: Option<Version>,
     },
-    /// Reply: [`Response::Value`].
-    Read { chunk: ChunkIdx, block: Block },
+    /// Reply: [`Response::Data`].
+    Read { chunk: ChunkIdx, ext: Extent },
     /// Starts a resync filter for the chunk: from now on, remember which blocks got live
     /// writes, and skip copies for them.
     BeginResync { chunk: ChunkIdx },
-    /// A resync copy. Applied unless the block got a live write since `BeginResync`.
+    /// A resync copy. Applied to the blocks that got no live write since `BeginResync`.
     Copy {
         chunk: ChunkIdx,
-        block: Block,
-        value: Value,
+        ext: Extent,
+        data: P,
     },
 }
 
 /// A reply from a replica node.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FromReplica {
+pub struct FromReplica<P> {
     pub vol: VolumeId,
     pub epoch: Epoch,
     pub session: u64,
     pub req: u64,
-    pub body: Response,
+    pub body: Response<P>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Response {
+pub enum Response<P> {
     /// The volume is fenced at the request's epoch. Lists, for every chunk of the volume this
-    /// node holds, the blocks whose last write may not have completed.
+    /// node holds, the extents whose last write may not have completed.
     Fenced {
-        uncertain: Vec<(ChunkIdx, Vec<Block>)>,
+        uncertain: Vec<(ChunkIdx, Vec<Extent>)>,
     },
     Ok,
-    Value(Value),
+    Data(P),
     /// The volume is fenced at a higher epoch: the sender has been deposed.
     Stale {
         fenced: Epoch,

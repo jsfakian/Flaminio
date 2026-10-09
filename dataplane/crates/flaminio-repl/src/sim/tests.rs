@@ -43,6 +43,8 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         min_isr,
         chunks: 1,
         blocks_per_chunk: 2,
+        max_op: 1,
+        max_io: 1,
         timing: Timing {
             lease: 5 * SEC,
             drift_ppm: 0,
@@ -177,18 +179,21 @@ fn replica(f: impl FnOnce(&mut crate::replica::Bugs)) -> Bugs {
     b
 }
 
-// Each mutation test runs seeds until the bug shows (up to `FLAMINIO_MUTATION_SEEDS`,
-// default 20000). The rarest need a few thousand seeds, so these run in release builds only:
+// Each mutation test runs seeds until the bug shows, up to a budget (`FLAMINIO_MUTATION_SEEDS`
+// overrides it). The rarest need thousands of seeds, so these run in release builds only:
 // `make sim`.
 macro_rules! mutation {
     ($name:ident, $bugs:expr) => {
+        mutation!($name, $bugs, 20_000);
+    };
+    ($name:ident, $bugs:expr, $budget:expr) => {
         #[test]
         #[ignore = "slow in debug builds: run with `make sim`"]
         fn $name() {
             let budget = std::env::var("FLAMINIO_MUTATION_SEEDS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20000);
+                .unwrap_or($budget);
             let found = find_failure($bugs, budget);
             let (seed, err) = found.expect("the simulator did not catch this bug");
             eprintln!(
@@ -211,9 +216,11 @@ mutation!(
 );
 mutation!(catches_no_reconciliation, target(|b| b.no_reconcile = true));
 mutation!(catches_late_join, target(|b| b.late_join = true));
+// Rare by nature: a target must die between two repairs that are usually sent together.
 mutation!(
     catches_reconciliation_pruning,
-    target(|b| b.prune_reconcile = true)
+    target(|b| b.prune_reconcile = true),
+    60_000
 );
 mutation!(
     catches_dirty_set_missing_inflight,

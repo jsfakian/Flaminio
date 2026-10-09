@@ -3,48 +3,53 @@
 //! A target is created from the metadata service's reply to `Attach`, and lives until it is
 //! deposed or its node goes away. It holds no durable state. The caller feeds it client
 //! operations, replica replies, metadata replies and clock ticks, and collects [`Output`]s.
+//!
+//! Operations cover an extent of one chunk; the caller splits I/O at chunk boundaries. `P` is
+//! the payload type (see [`crate::msg`]): the target only stores and forwards payloads.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt::Debug;
 
+use crate::extent::{Extent, ExtentSet};
 use crate::meta::{IsrChange, MetaReply, MetaRequest, VolumeMeta};
 use crate::msg::{FromReplica, Request, Response, ToReplica};
-use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Value, Version, VolumeId};
+use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Version, VolumeId};
 
-/// A client operation on one block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Op {
+/// A client operation on one extent of one chunk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Op<P> {
     Read {
         chunk: ChunkIdx,
-        block: Block,
+        ext: Extent,
     },
     Write {
         chunk: ChunkIdx,
-        block: Block,
-        value: Value,
+        ext: Extent,
+        data: P,
     },
 }
 
-impl Op {
-    fn key(&self) -> (ChunkIdx, Block) {
+impl<P> Op<P> {
+    fn key(&self) -> (ChunkIdx, Extent) {
         match *self {
-            Op::Read { chunk, block } | Op::Write { chunk, block, .. } => (chunk, block),
+            Op::Read { chunk, ext } | Op::Write { chunk, ext, .. } => (chunk, ext),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpResult {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpResult<P> {
     Written,
-    Read(Value),
+    Read(P),
     /// The target was deposed. A write may or may not have taken effect.
     Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Output {
-    Send { to: NodeId, msg: ToReplica },
+pub enum Output<P> {
+    Send { to: NodeId, msg: ToReplica<P> },
     Meta { req: u64, body: MetaRequest },
-    Done { op: u64, result: OpResult },
+    Done { op: u64, result: OpResult<P> },
 }
 
 /// Deliberate protocol violations, for checking that the simulator catches them.
@@ -59,7 +64,7 @@ pub struct Bugs {
     pub no_takeover_wait: bool,
     /// Read from ISR members whose removal is in flight.
     pub read_from_removing: bool,
-    /// Serve without reconciling uncertain blocks.
+    /// Serve without reconciling uncertain extents.
     pub no_reconcile: bool,
     /// A joining replica counts for leases and writes only once its expansion is committed.
     pub late_join: bool,
@@ -73,9 +78,9 @@ pub struct Bugs {
 enum Phase {
     /// Waiting for the ISR to be fenced (spec §6 steps 1–2).
     Fencing,
-    /// Copying the authority's value of each uncertain block to the ISR (step 3).
+    /// Copying the authority's data of each uncertain extent to the ISR (step 3).
     Reconciling {
-        pending: BTreeSet<Block>,
+        pending: ExtentSet,
     },
     Ready,
 }
@@ -88,9 +93,9 @@ struct Resync {
     session: u64,
     started: bool,
     /// Blocks not yet copied and acknowledged.
-    todo: BTreeSet<Block>,
+    todo: ExtentSet,
     /// Blocks of live writes sent to the member since `BeginResync`.
-    live: BTreeSet<Block>,
+    live: ExtentSet,
     /// Live writes sent to the member and not yet acknowledged by it, completed or not.
     unacked: BTreeSet<u64>,
 }
@@ -104,11 +109,11 @@ struct Chunk {
     /// Replicas this target has fenced.
     fenced: BTreeSet<NodeId>,
     /// Union of the ISR members' uncertain sets.
-    uncertain: BTreeSet<Block>,
+    uncertain: ExtentSet,
     /// When the first ISR member was fenced.
     first_fence: Option<Time>,
     /// Blocks with an operation in flight.
-    locks: BTreeSet<Block>,
+    locks: ExtentSet,
     /// ISR members whose removal is (to be) proposed.
     removing: BTreeSet<NodeId>,
     /// A resynced replica whose expansion is (to be) proposed. It counts for leases and
@@ -117,7 +122,7 @@ struct Chunk {
     resync: Option<Resync>,
     /// For members this target removed during I/O: blocks they may lack. Members without an
     /// entry need a full copy.
-    dirty: BTreeMap<NodeId, BTreeSet<Block>>,
+    dirty: BTreeMap<NodeId, ExtentSet>,
 }
 
 impl Chunk {
@@ -129,29 +134,20 @@ impl Chunk {
 }
 
 #[derive(Debug)]
-enum Work {
+enum Work<P> {
     Client {
         op: u64,
-        kind: Op,
+        kind: Op<P>,
     },
     Repair {
         chunk: ChunkIdx,
-        block: Block,
+        ext: Extent,
     },
     Copy {
         chunk: ChunkIdx,
         round: u64,
-        block: Block,
+        ext: Extent,
     },
-}
-
-impl Work {
-    fn key(&self) -> (ChunkIdx, Block) {
-        match self {
-            Work::Client { kind, .. } => kind.key(),
-            Work::Repair { chunk, block } | Work::Copy { chunk, block, .. } => (*chunk, *block),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -164,16 +160,16 @@ enum ReadFor {
 #[derive(Debug)]
 struct ReadOp {
     chunk: ChunkIdx,
-    block: Block,
+    ext: Extent,
     purpose: ReadFor,
     locked: bool,
 }
 
 #[derive(Debug)]
-struct WriteOp {
+struct WriteOp<P> {
     chunk: ChunkIdx,
-    block: Block,
-    value: Value,
+    ext: Extent,
+    data: P,
     client: Option<u64>,
     sent: BTreeSet<NodeId>,
     acked: BTreeSet<NodeId>,
@@ -197,7 +193,7 @@ enum ReqKind {
     Copy {
         chunk: ChunkIdx,
         round: u64,
-        block: Block,
+        ext: Extent,
     },
 }
 
@@ -218,12 +214,14 @@ struct Peer {
 
 /// A volume target.
 #[derive(Debug)]
-pub struct Target {
+pub struct Target<P> {
     node: NodeId,
     vol: VolumeId,
     epoch: Epoch,
     min_isr: usize,
     blocks_per_chunk: Block,
+    /// Largest extent of one repair or copy.
+    max_io: Block,
     timing: Timing,
     chunks: Vec<Chunk>,
     peers: BTreeMap<NodeId, Peer>,
@@ -232,20 +230,28 @@ pub struct Target {
     next_seq: u64,
     next_read: u64,
     next_round: u64,
-    writes: BTreeMap<u64, WriteOp>,
+    writes: BTreeMap<u64, WriteOp<P>>,
     reads: BTreeMap<u64, ReadOp>,
-    queue: VecDeque<Work>,
+    queue: VecDeque<Work<P>>,
     meta_inflight: Option<(u64, Time)>,
     next_heartbeat: Time,
     deposed: bool,
-    out: Vec<Output>,
+    out: Vec<Output<P>>,
     #[cfg(test)]
     pub bugs: Bugs,
 }
 
-impl Target {
+impl<P: Clone + Debug> Target<P> {
     /// Starts a target from the metadata service's `Attach` reply, and fences every replica.
-    pub fn new(node: NodeId, vol: VolumeId, view: &VolumeMeta, timing: Timing, now: Time) -> Self {
+    /// Repairs and copies move at most `max_io` blocks at a time.
+    pub fn new(
+        node: NodeId,
+        vol: VolumeId,
+        view: &VolumeMeta,
+        timing: Timing,
+        max_io: Block,
+        now: Time,
+    ) -> Self {
         let chunks: Vec<Chunk> = view
             .chunks
             .iter()
@@ -255,9 +261,9 @@ impl Target {
                 isr_ver: m.isr_ver,
                 phase: Phase::Fencing,
                 fenced: BTreeSet::new(),
-                uncertain: BTreeSet::new(),
+                uncertain: ExtentSet::new(),
                 first_fence: None,
-                locks: BTreeSet::new(),
+                locks: ExtentSet::new(),
                 removing: BTreeSet::new(),
                 joining: None,
                 resync: None,
@@ -274,6 +280,7 @@ impl Target {
             epoch: view.epoch,
             min_isr: view.min_isr,
             blocks_per_chunk: view.blocks_per_chunk,
+            max_io: max_io.max(1),
             timing,
             chunks,
             peers,
@@ -355,7 +362,7 @@ impl Target {
             self.queue.len(),
             self.writes
                 .iter()
-                .map(|(s, w)| (*s, w.chunk, w.block, &w.acked))
+                .map(|(s, w)| (*s, w.chunk, w.ext, &w.acked))
                 .collect::<Vec<_>>(),
             self.reads.len(),
             self.meta_inflight,
@@ -365,12 +372,12 @@ impl Target {
     }
 
     /// Takes the outputs produced so far.
-    pub fn take_output(&mut self) -> Vec<Output> {
+    pub fn take_output(&mut self) -> Vec<Output<P>> {
         std::mem::take(&mut self.out)
     }
 
     /// Submits a client operation. Its result comes as an [`Output::Done`].
-    pub fn submit(&mut self, now: Time, op: u64, kind: Op) {
+    pub fn submit(&mut self, now: Time, op: u64, kind: Op<P>) {
         if self.deposed {
             self.out.push(Output::Done {
                 op,
@@ -461,7 +468,7 @@ impl Target {
     }
 
     /// Handles a reply from replica node `from`.
-    pub fn on_reply(&mut self, now: Time, from: NodeId, m: &FromReplica) {
+    pub fn on_reply(&mut self, now: Time, from: NodeId, m: &FromReplica<P>) {
         if self.deposed || m.vol != self.vol || m.epoch != self.epoch {
             return;
         }
@@ -501,30 +508,23 @@ impl Target {
                     self.check_write(seq);
                 }
             }
-            (ReqKind::Read { id }, &Response::Value(v)) => self.on_read(now, id, v),
+            (ReqKind::Read { id }, Response::Data(data)) => {
+                let data = data.clone();
+                self.on_read(now, id, data)
+            }
             (ReqKind::BeginResync { chunk, round }, Response::Ok) => {
+                let max_io = self.max_io;
                 if let Some(r) = self.resync_mut(chunk, round) {
                     r.started = true;
-                    let todo: Vec<Block> = r.todo.iter().copied().collect();
-                    for block in todo {
-                        self.queue.push_back(Work::Copy {
-                            chunk,
-                            round,
-                            block,
-                        });
+                    let pieces = r.todo.pieces(max_io);
+                    for ext in pieces {
+                        self.queue.push_back(Work::Copy { chunk, round, ext });
                     }
                 }
             }
-            (
-                ReqKind::Copy {
-                    chunk,
-                    round,
-                    block,
-                },
-                Response::Ok,
-            ) => {
+            (ReqKind::Copy { chunk, round, ext }, Response::Ok) => {
                 if let Some(r) = self.resync_mut(chunk, round) {
-                    r.todo.remove(&block);
+                    r.todo.remove(&ext);
                 }
             }
             _ => {
@@ -605,7 +605,7 @@ impl Target {
 
     /// Sends a request on the peer's session. Only `Hello` may go on a session that is not
     /// open yet. Returns false if there is no usable session.
-    fn send(&mut self, now: Time, to: NodeId, body: Request, kind: ReqKind) -> bool {
+    fn send(&mut self, now: Time, to: NodeId, body: Request<P>, kind: ReqKind) -> bool {
         let Some(s) = self.peers.get_mut(&to).and_then(|p| p.session.as_mut()) else {
             return false;
         };
@@ -650,25 +650,16 @@ impl Target {
                 && let Some(r) = self.reads.remove(&id)
             {
                 if r.locked {
-                    self.chunks[r.chunk as usize].locks.remove(&r.block);
+                    self.chunks[r.chunk as usize].locks.remove(&r.ext);
                 }
+                let (chunk, ext) = (r.chunk, r.ext);
                 let work = match r.purpose {
                     ReadFor::Client { op } => Work::Client {
                         op,
-                        kind: Op::Read {
-                            chunk: r.chunk,
-                            block: r.block,
-                        },
+                        kind: Op::Read { chunk, ext },
                     },
-                    ReadFor::Repair => Work::Repair {
-                        chunk: r.chunk,
-                        block: r.block,
-                    },
-                    ReadFor::Copy { round } => Work::Copy {
-                        chunk: r.chunk,
-                        round,
-                        block: r.block,
-                    },
+                    ReadFor::Repair => Work::Repair { chunk, ext },
+                    ReadFor::Copy { round } => Work::Copy { chunk, round, ext },
                 };
                 self.queue.push_front(work);
             }
@@ -692,8 +683,8 @@ impl Target {
         if let Some(r) = c.resync.take()
             && let Some(d) = c.dirty.get_mut(&r.member)
         {
-            d.extend(r.live);
-            d.extend(r.todo);
+            d.extend(&r.live);
+            d.extend(&r.todo);
         }
     }
 
@@ -710,7 +701,7 @@ impl Target {
         }
     }
 
-    fn on_fenced(&mut self, now: Time, from: NodeId, uncertain: &[(ChunkIdx, Vec<Block>)]) {
+    fn on_fenced(&mut self, now: Time, from: NodeId, uncertain: &[(ChunkIdx, Vec<Extent>)]) {
         for (i, c) in self.chunks.iter_mut().enumerate() {
             if !c.replicas.contains(&from) {
                 continue;
@@ -718,8 +709,12 @@ impl Target {
             c.fenced.insert(from);
             if c.phase == Phase::Fencing && c.isr.contains(&from) {
                 c.first_fence.get_or_insert(now);
-                if let Some((_, blocks)) = uncertain.iter().find(|(ci, _)| *ci as usize == i) {
-                    c.uncertain.extend(blocks.iter().copied());
+                if let Some((_, exts)) = uncertain.iter().find(|(ci, _)| *ci as usize == i) {
+                    for x in exts {
+                        if x.len > 0 && x.end() <= self.blocks_per_chunk {
+                            c.uncertain.insert(*x);
+                        }
+                    }
                 }
             }
         }
@@ -749,8 +744,8 @@ impl Target {
         let acked_below = self.writes.keys().next().copied().unwrap_or(self.next_seq);
         let body = Request::Write {
             chunk: w.chunk,
-            block: w.block,
-            value: w.value,
+            ext: w.ext,
+            data: w.data.clone(),
             version: Version {
                 epoch: self.epoch,
                 seq,
@@ -777,8 +772,8 @@ impl Target {
         &mut self,
         now: Time,
         chunk: ChunkIdx,
-        block: Block,
-        value: Value,
+        ext: Extent,
+        data: P,
         client: Option<u64>,
     ) {
         let seq = self.next_seq;
@@ -787,8 +782,8 @@ impl Target {
             seq,
             WriteOp {
                 chunk,
-                block,
-                value,
+                ext,
+                data,
                 client,
                 sent: BTreeSet::new(),
                 acked: BTreeSet::new(),
@@ -798,11 +793,11 @@ impl Target {
         let mut targets = c.required();
         if let Some(r) = c.resync.as_mut() {
             targets.insert(r.member);
-            r.live.insert(block);
+            r.live.insert(ext);
         }
         for (r, d) in c.dirty.iter_mut() {
             if !targets.contains(r) {
-                d.insert(block);
+                d.insert(ext);
             }
         }
         for n in targets {
@@ -818,7 +813,7 @@ impl Target {
         }
         let w = self.writes.remove(&seq).expect("write");
         let c = &mut self.chunks[w.chunk as usize];
-        c.locks.remove(&w.block);
+        c.locks.remove(&w.ext);
         match w.client {
             Some(op) => self.out.push(Output::Done {
                 op,
@@ -826,54 +821,43 @@ impl Target {
             }),
             None => {
                 if let Phase::Reconciling { pending } = &mut c.phase {
-                    pending.remove(&w.block);
+                    pending.remove(&w.ext);
                 }
             }
         }
     }
 
-    fn on_read(&mut self, now: Time, id: u64, value: Value) {
+    fn on_read(&mut self, now: Time, id: u64, data: P) {
         let Some(r) = self.reads.remove(&id) else {
             return;
         };
+        let (chunk, ext) = (r.chunk, r.ext);
         match r.purpose {
             ReadFor::Client { op } => {
-                self.chunks[r.chunk as usize].locks.remove(&r.block);
-                if self.lease_ok(r.chunk as usize, now) {
+                self.chunks[chunk as usize].locks.remove(&ext);
+                if self.lease_ok(chunk as usize, now) {
                     self.out.push(Output::Done {
                         op,
-                        result: OpResult::Read(value),
+                        result: OpResult::Read(data),
                     });
                 } else {
                     self.queue.push_front(Work::Client {
                         op,
-                        kind: Op::Read {
-                            chunk: r.chunk,
-                            block: r.block,
-                        },
+                        kind: Op::Read { chunk, ext },
                     });
                 }
             }
             // Keep the lock: the repair write takes it over.
-            ReadFor::Repair => self.start_write(now, r.chunk, r.block, value, None),
+            ReadFor::Repair => self.start_write(now, chunk, ext, data, None),
             ReadFor::Copy { round } => {
                 if r.locked {
-                    self.chunks[r.chunk as usize].locks.remove(&r.block);
+                    self.chunks[chunk as usize].locks.remove(&ext);
                 }
-                if let Some(rs) = self.resync_mut(r.chunk, round) {
+                if let Some(rs) = self.resync_mut(chunk, round) {
                     let (member, session) = (rs.member, rs.session);
                     if self.session_of(member) == Some(session) {
-                        let body = Request::Copy {
-                            chunk: r.chunk,
-                            block: r.block,
-                            value,
-                        };
-                        let kind = ReqKind::Copy {
-                            chunk: r.chunk,
-                            round,
-                            block: r.block,
-                        };
-                        self.send(now, member, body, kind);
+                        let body = Request::Copy { chunk, ext, data };
+                        self.send(now, member, body, ReqKind::Copy { chunk, round, ext });
                     }
                 }
             }
@@ -941,7 +925,7 @@ impl Target {
         &mut self,
         now: Time,
         i: usize,
-        block: Block,
+        ext: Extent,
         from: NodeId,
         purpose: ReadFor,
         lock: bool,
@@ -949,39 +933,40 @@ impl Target {
         let id = self.next_read;
         self.next_read += 1;
         if lock {
-            self.chunks[i].locks.insert(block);
+            self.chunks[i].locks.insert(ext);
         }
         self.reads.insert(
             id,
             ReadOp {
                 chunk: i as ChunkIdx,
-                block,
+                ext,
                 purpose,
                 locked: lock,
             },
         );
         let body = Request::Read {
             chunk: i as ChunkIdx,
-            block,
+            ext,
         };
         let sent = self.send(now, from, body, ReqKind::Read { id });
         debug_assert!(sent);
     }
 
     /// Tries to start one queued item. Returns false if it must wait.
-    fn try_start(&mut self, now: Time, w: &Work) -> bool {
-        match *w {
+    fn try_start(&mut self, now: Time, w: &Work<P>) -> bool {
+        match w {
             Work::Client { op, kind } => {
-                let (chunk, block) = kind.key();
+                let op = *op;
+                let (chunk, ext) = kind.key();
                 let i = chunk as usize;
                 let c = &self.chunks[i];
-                if c.phase != Phase::Ready || c.locks.contains(&block) {
+                if c.phase != Phase::Ready || c.locks.overlaps(&ext) {
                     return false;
                 }
                 match kind {
-                    Op::Write { value, .. } => {
-                        self.chunks[i].locks.insert(block);
-                        self.start_write(now, chunk, block, value, Some(op));
+                    Op::Write { data, .. } => {
+                        self.chunks[i].locks.insert(ext);
+                        self.start_write(now, chunk, ext, data.clone(), Some(op));
                         true
                     }
                     Op::Read { .. } => {
@@ -991,28 +976,24 @@ impl Target {
                         let Some(from) = self.source(i, None) else {
                             return false;
                         };
-                        self.start_read(now, i, block, from, ReadFor::Client { op }, true);
+                        self.start_read(now, i, ext, from, ReadFor::Client { op }, true);
                         true
                     }
                 }
             }
-            Work::Repair { chunk, block } => {
+            &Work::Repair { chunk, ext } => {
                 let i = chunk as usize;
                 let c = &self.chunks[i];
-                if !matches!(c.phase, Phase::Reconciling { .. }) || c.locks.contains(&block) {
+                if !matches!(c.phase, Phase::Reconciling { .. }) || c.locks.overlaps(&ext) {
                     return false;
                 }
                 let Some(from) = self.source(i, None) else {
                     return false;
                 };
-                self.start_read(now, i, block, from, ReadFor::Repair, true);
+                self.start_read(now, i, ext, from, ReadFor::Repair, true);
                 true
             }
-            Work::Copy {
-                chunk,
-                round,
-                block,
-            } => {
+            &Work::Copy { chunk, round, ext } => {
                 // Copies take no lock: the replica's resync filter keeps them from
                 // overwriting live writes, so a resync never stalls client I/O.
                 let i = chunk as usize;
@@ -1023,28 +1004,30 @@ impl Target {
                 let Some(from) = self.source(i, Some(member)) else {
                     return false;
                 };
-                self.start_read(now, i, block, from, ReadFor::Copy { round }, false);
+                self.start_read(now, i, ext, from, ReadFor::Copy { round }, false);
                 true
             }
         }
     }
 
-    /// Starts whatever queued work can start. Client operations on one block start in
-    /// submission order; internal work (repairs, copies) is ordered by locks alone.
+    /// Starts whatever queued work can start. Client operations on overlapping extents start
+    /// in submission order; internal work (repairs, copies) is ordered by locks alone.
     fn pump(&mut self, now: Time) {
-        let mut blocked: BTreeSet<(ChunkIdx, Block)> = BTreeSet::new();
+        let mut blocked: BTreeMap<ChunkIdx, ExtentSet> = BTreeMap::new();
         let mut keep = VecDeque::new();
         while let Some(w) = self.queue.pop_front() {
             if self.deposed {
                 return;
             }
-            let client = matches!(w, Work::Client { .. });
-            let key = w.key();
-            if client && blocked.contains(&key) {
-                keep.push_back(w);
-            } else if !self.try_start(now, &w) {
-                if client {
-                    blocked.insert(key);
+            let client = match &w {
+                Work::Client { kind, .. } => Some(kind.key()),
+                _ => None,
+            };
+            let behind =
+                client.is_some_and(|(c, x)| blocked.get(&c).is_some_and(|b| b.overlaps(&x)));
+            if behind || !self.try_start(now, &w) {
+                if let Some((c, x)) = client {
+                    blocked.entry(c).or_default().insert(x);
                 }
                 keep.push_back(w);
             }
@@ -1079,14 +1062,15 @@ impl Target {
                         let pending = c.uncertain.clone();
                         #[cfg(test)]
                         let pending = if self.bugs.no_reconcile {
-                            BTreeSet::new()
+                            ExtentSet::new()
                         } else {
                             pending
                         };
-                        for &block in &pending {
-                            self.queue.push_back(Work::Repair {
+                        // Repairs go first: client operations wait for the chunk anyway.
+                        for ext in pending.pieces(self.max_io).into_iter().rev() {
+                            self.queue.push_front(Work::Repair {
                                 chunk: i as ChunkIdx,
-                                block,
+                                ext,
                             });
                         }
                         c.phase = Phase::Reconciling { pending };
@@ -1148,7 +1132,7 @@ impl Target {
         self.next_round += 1;
         let todo = match c.dirty.get(&member) {
             Some(d) => d.clone(),
-            None => (0..self.blocks_per_chunk).collect(),
+            None => ExtentSet::of(Extent::new(0, self.blocks_per_chunk)),
         };
         self.chunks[i].resync = Some(Resync {
             member,
@@ -1156,7 +1140,7 @@ impl Target {
             session,
             started: false,
             todo,
-            live: BTreeSet::new(),
+            live: ExtentSet::new(),
             unacked: BTreeSet::new(),
         });
         let chunk = i as ChunkIdx;
@@ -1218,12 +1202,12 @@ impl Target {
             let removed: Vec<NodeId> = c.isr.difference(&m.isr).copied().collect();
             let during_io = c.phase != Phase::Fencing;
             for r in removed {
-                let mut d: BTreeSet<Block> = self
-                    .writes
-                    .values()
-                    .filter(|w| w.chunk as usize == i && !w.acked.contains(&r))
-                    .map(|w| w.block)
-                    .collect();
+                let mut d = ExtentSet::new();
+                for w in self.writes.values() {
+                    if w.chunk as usize == i && !w.acked.contains(&r) {
+                        d.insert(w.ext);
+                    }
+                }
                 #[cfg(test)]
                 if self.bugs.no_dirty_inflight {
                     d.clear();

@@ -11,11 +11,15 @@ implement and to check by simulation. The reference implementation is the crate
 | Actor | Durable state | Volatile state |
 |---|---|---|
 | **Metadata service** (linearizable; etcd) | Per volume: `epoch`, target node, `minInSyncReplicas`. Per chunk: replica nodes, `isr`, `isr_ver` | — |
-| **Replica** (one per node that holds chunk replicas) | Per volume: `fenced_epoch`. Per chunk: block contents and the **uncertain set** (§6) | Per volume: the current session, and the resync filters (§7) |
+| **Replica** (one per node that holds chunk replicas) | Per volume: `fenced_epoch`. Per chunk: block contents | Per volume: the current session and the resync filters (§7). Per chunk: the **uncertain set** (§6) |
 | **Target** (one per attached volume) | None | Epoch, cached placement and ISR, sessions, in-flight writes, lease confirmations |
 
 Write versions are `(epoch, seq)`. `seq` restarts at 0 in each epoch and increases with every
 write the target sends.
+
+Every operation covers an **extent**: a run of blocks within one chunk. A request that spans
+chunks is split at chunk boundaries. Locks, uncertain sets, dirty sets and resync filters are
+sets of extents. Rules below that speak of "a block" apply to every block of an extent.
 
 ## 2. Metadata transitions
 
@@ -119,11 +123,20 @@ reconciled. An older target can then neither read nor write:
 - it cannot complete writes, because every write needs the whole ISR to acknowledge.
 
 **The uncertain set on a replica:**
-- **Membership:** a block enters the set when a write of version `(e, s)` is applied.
+- **Membership:** a write's extent enters the set, with the write's version `(e, s)`, when the
+  write is applied.
 - **Pruning:** entries are pruned using the `acked_below` carried by writes. A write with
   `prune = (e, a)` removes entries older than `(e, a)`.
 - **Reconciliation writes** carry no `prune`, so a target that dies mid-reconciliation leaves
   the old entries for the next one.
+- **The set is volatile.** After a restart, a replica fenced at epoch `f` reports **every block
+  of its chunks** as uncertain:
+  - it cannot tell which of its recent writes completed;
+  - every write it applied had an epoch of at most `f`.
+
+  That lasts until a write prunes with an epoch above `f`. Such a target has reconciled the
+  chunk, so everything older is settled. The cost: a failover soon after a replica restart
+  reconciles whole chunks. The data plane makes that cheaper by comparing digests first.
 
 ## 7. Resync and rejoin
 
@@ -177,8 +190,9 @@ The simulator (`flaminio-repl/src/sim/`) runs the three state machines on one th
 order, from a seed. A seed reproduces a run exactly. Each run has two phases:
 
 - **Chaos.** Each run picks:
-  - its topology: 3–4 nodes, RF 2–3, `minInSyncReplicas` from 1 to RF, 1–2 chunks of 2–4
+  - its topology: 3–4 nodes, RF 2–3, `minInSyncReplicas` from 1 to RF, 1–2 chunks of 2–6
     blocks;
+  - operations of 1–3 blocks, and repairs and copies of 1–3 blocks;
   - its timing: lease 2–6 s, clock rates up to 10% apart;
   - its client pace, and a read share of 50, 80 or 95%.
 
@@ -216,18 +230,20 @@ the simulator then fails:
 
 | Broken rule | Caught by (first failing seed) |
 |---|---|
-| Acknowledge once a removal is proposed, not committed (§4) | seed 32 |
+| Acknowledge once a removal is proposed, not committed (§4) | seed 27 |
 | Accept requests from an old session (§3) | seed 0 |
-| No reconciliation after failover (§6) | seed 6 |
-| Reconciliation writes prune uncertain sets (§6) | seed 3899 |
-| No lease check on reads (§5) | seed 239, split-brain scenario |
-| No takeover wait (§6) | seed 216, split-brain scenario |
+| No reconciliation after failover (§6) | seed 1 |
+| Reconciliation writes prune uncertain sets (§6) | seed 12 049 |
+| No lease check on reads (§5) | seed 216, split-brain scenario |
+| No takeover wait (§6) | seed 81, split-brain scenario |
 | Reads from a member being removed (§5) | removal-in-flight scenario |
-| Joiner counts for leases and writes only once committed (§5, §7) | seed 175 |
-| Removed member's dirty set omits writes in flight (§7) | seed 17 |
-| No resync filter on the replica (§7) | seed 837 |
+| Joiner counts for leases and writes only once committed (§5, §7) | seed 154 |
+| Removed member's dirty set omits writes in flight (§7) | seed 14 |
+| No resync filter on the replica (§7) | seed 14 |
 
-The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds.
+The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
+and 60 000 for reconciliation pruning. That bug is rare by nature: the target must die between
+two repairs that are usually sent together.
 
 **Commands:**
 - `make test` runs the unit tests, the scenarios and a 200-seed campaign;

@@ -22,6 +22,7 @@ pub mod check;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
+use crate::extent::Extent;
 use crate::meta::{MetaReply, MetaRequest, Metadata, VolumeMeta};
 use crate::msg::{FromReplica, ToReplica};
 use crate::replica::Replica;
@@ -29,6 +30,9 @@ use crate::target::{Op, OpResult, Output, Target};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Value, VolumeId};
 
 use check::{CKind, COp, check_register};
+
+/// Payloads in the simulator: one value per block of the extent.
+pub type Data = Vec<Value>;
 
 /// SplitMix64: small, fast and good enough to drive a simulation.
 #[derive(Debug, Clone)]
@@ -78,6 +82,10 @@ pub struct Config {
     pub min_isr: usize,
     pub chunks: u32,
     pub blocks_per_chunk: Block,
+    /// Largest client operation, in blocks.
+    pub max_op: Block,
+    /// Largest repair or copy, in blocks.
+    pub max_io: Block,
     pub timing: Timing,
     /// Real time spent injecting faults.
     pub chaos: u64,
@@ -112,7 +120,9 @@ impl Config {
             rf,
             min_isr,
             chunks: r.range(1, 2) as u32,
-            blocks_per_chunk: r.range(2, 4) as Block,
+            blocks_per_chunk: r.range(2, 6) as Block,
+            max_op: r.range(1, 3) as Block,
+            max_io: r.range(1, 3) as Block,
             timing: Timing {
                 lease: r.range(2, 6) * SEC,
                 drift_ppm: r.pick(&[0, 10_000, 100_000]),
@@ -164,15 +174,15 @@ pub enum Action {
     Heal(NodeId, NodeId),
     /// Messages on the link take exactly this long.
     Slow(NodeId, NodeId, u64),
-    /// The client on `node` reads or writes a block, if the node runs a live target.
+    /// The client on `node` reads or writes one block, if the node runs a live target.
     Read(NodeId, ChunkIdx, Block),
     Write(NodeId, ChunkIdx, Block),
 }
 
 #[derive(Debug, Clone)]
 enum Body {
-    ToReplica(ToReplica),
-    FromReplica(FromReplica),
+    ToReplica(ToReplica<Data>),
+    FromReplica(FromReplica<Data>),
     MetaReq { req: u64, body: MetaRequest },
     MetaRep { req: u64, reply: MetaReply },
     Start { view: VolumeMeta },
@@ -233,9 +243,9 @@ struct Node {
     inc: u64,
     clock: Clock,
     replica: Replica,
-    target: Option<Target>,
-    /// Client operations in flight: op id → block.
-    client: BTreeMap<u64, (ChunkIdx, Block)>,
+    target: Option<Target<Data>>,
+    /// Client operations in flight: op id → extent.
+    client: BTreeMap<u64, (ChunkIdx, Extent)>,
     wake_at: Option<u64>,
 }
 
@@ -243,10 +253,10 @@ struct Node {
 struct HistOp {
     epoch: Epoch,
     chunk: ChunkIdx,
-    block: Block,
+    ext: Extent,
     write: Option<Value>,
     invoke: u64,
-    result: Option<(u64, OpResult)>,
+    result: Option<(u64, OpResult<Data>)>,
 }
 
 /// One simulated run.
@@ -314,7 +324,7 @@ impl Sim {
                 let mut replica = Replica::default();
                 for (c, r) in placement.iter().enumerate() {
                     if r.contains(&n) {
-                        replica.create_chunk(VOL, c as ChunkIdx);
+                        replica.create_chunk(VOL, c as ChunkIdx, cfg.blocks_per_chunk);
                     }
                 }
                 Node {
@@ -363,7 +373,7 @@ impl Sim {
     pub fn with_bugs(mut self, bugs: Bugs) -> Self {
         self.bugs = bugs;
         for n in &mut self.nodes {
-            n.replica.bugs = bugs.replica;
+            n.replica.core.bugs = bugs.replica;
         }
         self
     }
@@ -411,7 +421,7 @@ impl Sim {
         let mut pending = BTreeSet::new();
         for c in 0..self.cfg.chunks {
             for b in 0..self.cfg.blocks_per_chunk {
-                pending.insert(self.submit(node, c, b, None));
+                pending.insert(self.submit(node, c, Extent::new(b, 1), None));
             }
         }
         let read_deadline = self.now + 60 * SEC;
@@ -598,9 +608,9 @@ impl Sim {
                 if let Some((tc, tb)) = self.trace {
                     use crate::msg::Request as R;
                     let watched = match m.body {
-                        R::Write { chunk, block, .. }
-                        | R::Copy { chunk, block, .. }
-                        | R::Read { chunk, block } => chunk == tc && block == tb,
+                        R::Write { chunk, ext, .. }
+                        | R::Copy { chunk, ext, .. }
+                        | R::Read { chunk, ext } => chunk == tc && ext.contains(tb),
                         R::BeginResync { chunk } => chunk == tc,
                         R::Hello => true,
                         R::Heartbeat => false,
@@ -669,7 +679,7 @@ impl Sim {
         n.client.clear();
         let local = n.clock.local(self.now);
         #[allow(unused_mut)]
-        let mut t = Target::new(node, VOL, &view, timing, local);
+        let mut t = Target::new(node, VOL, &view, timing, self.cfg.max_io, local);
         #[cfg(test)]
         {
             t.bugs = self.bugs.target;
@@ -694,18 +704,18 @@ impl Sim {
         for o in out {
             match o {
                 Output::Send { to, msg } => {
-                    if let Some((tc, _)) = self.trace
+                    if let Some((tc, tb)) = self.trace
                         && let crate::msg::Request::Write {
                             chunk,
-                            block,
-                            value,
+                            ext,
+                            ref data,
                             ..
                         } = msg.body
                         && chunk == tc
-                        && Some(block) == self.trace.map(|t| t.1)
+                        && ext.contains(tb)
                     {
                         eprintln!(
-                            "{:>10} send {node}->{to} s{} write {value}",
+                            "{:>10} send {node}->{to} s{} write {ext:?} {data:?}",
                             self.now, msg.session
                         );
                     }
@@ -718,7 +728,7 @@ impl Sim {
                 Output::Done { op, result } => {
                     if let Some((tc, tb)) = self.trace {
                         let h = &self.history[op as usize];
-                        if h.chunk == tc && h.block == tb {
+                        if h.chunk == tc && h.ext.contains(tb) {
                             eprintln!(
                                 "{:>10} done op {op} on node {node}: write {:?} -> {result:?}",
                                 self.now, h.write
@@ -744,27 +754,28 @@ impl Sim {
         }
     }
 
-    fn submit(&mut self, node: NodeId, chunk: ChunkIdx, block: Block, write: Option<Value>) -> u64 {
+    /// Submits a client operation. A write puts the same value in every block of its extent.
+    fn submit(&mut self, node: NodeId, chunk: ChunkIdx, ext: Extent, write: Option<Value>) -> u64 {
         let op = self.history.len() as u64;
         let n = &mut self.nodes[node as usize];
         let t = n.target.as_mut().expect("target");
         self.history.push(HistOp {
             epoch: t.epoch(),
             chunk,
-            block,
+            ext,
             write,
             invoke: self.now,
             result: None,
         });
-        n.client.insert(op, (chunk, block));
+        n.client.insert(op, (chunk, ext));
         let local = n.clock.local(self.now);
         let kind = match write {
             Some(value) => Op::Write {
                 chunk,
-                block,
-                value,
+                ext,
+                data: vec![value; ext.len as usize],
             },
-            None => Op::Read { chunk, block },
+            None => Op::Read { chunk, ext },
         };
         t.submit(local, op, kind);
         self.after(node);
@@ -777,7 +788,7 @@ impl Sim {
             return;
         }
         let live = n.target.as_ref().is_some_and(|t| !t.is_deposed());
-        let busy: BTreeSet<(ChunkIdx, Block)> = n.client.values().copied().collect();
+        let busy: Vec<(ChunkIdx, Extent)> = n.client.values().copied().collect();
         let (lo, hi) = self.cfg.client_every;
         let next = self.now + self.rng.range(lo, hi);
         self.at(next, Ev::ClientStep { node, inc });
@@ -785,18 +796,24 @@ impl Sim {
             return;
         }
         let chunk = self.rng.range(0, self.cfg.chunks as u64 - 1) as ChunkIdx;
-        let block = self.rng.range(0, self.cfg.blocks_per_chunk as u64 - 1) as Block;
-        let per_block = self
-            .history
-            .iter()
-            .filter(|h| h.chunk == chunk && h.block == block)
-            .count();
-        if busy.contains(&(chunk, block)) || per_block >= check::MAX_OPS - 2 {
+        let bpc = self.cfg.blocks_per_chunk;
+        let start = self.rng.range(0, bpc as u64 - 1) as Block;
+        let len = self.rng.range(1, self.cfg.max_op.min(bpc - start) as u64) as Block;
+        let ext = Extent::new(start, len);
+        // One operation in flight per block, and at most MAX_OPS per block in the history.
+        let crowded = ext.blocks().any(|b| {
+            self.history
+                .iter()
+                .filter(|h| h.chunk == chunk && h.ext.contains(b))
+                .count()
+                >= check::MAX_OPS - 2
+        });
+        if crowded || busy.iter().any(|(c, x)| *c == chunk && x.overlaps(&ext)) {
             return;
         }
         // Values are unique: the operation id, plus one so that 0 stays "never written".
         let write = (!self.rng.pct(self.cfg.read_pct)).then_some(self.history.len() as Value + 1);
-        self.submit(node, chunk, block, write);
+        self.submit(node, chunk, ext, write);
     }
 
     fn script_step(&mut self, a: Action) {
@@ -822,11 +839,15 @@ impl Sim {
             }
             Action::Read(node, chunk, block) | Action::Write(node, chunk, block) => {
                 let n = &self.nodes[node as usize];
-                let busy = n.client.values().any(|&k| k == (chunk, block));
+                let ext = Extent::new(block, 1);
+                let busy = n
+                    .client
+                    .values()
+                    .any(|&(c, x)| c == chunk && x.overlaps(&ext));
                 if n.up && !busy && n.target.as_ref().is_some_and(|t| !t.is_deposed()) {
                     let write =
                         matches!(a, Action::Write(..)).then_some(self.history.len() as Value + 1);
-                    self.submit(node, chunk, block, write);
+                    self.submit(node, chunk, ext, write);
                 }
             }
         }
@@ -1063,12 +1084,12 @@ impl Sim {
         let ops: Vec<&HistOp> = self
             .history
             .iter()
-            .filter(|h| h.chunk == c && h.block == b)
+            .filter(|h| h.chunk == c && h.ext.contains(b))
             .collect();
         let mut cops = Vec::new();
         for h in &ops {
-            let kind = match (h.write, h.result) {
-                (None, Some((_, OpResult::Read(v)))) => CKind::Read(v),
+            let kind = match (h.write, &h.result) {
+                (None, Some((_, OpResult::Read(v)))) => CKind::Read(v[(b - h.ext.start) as usize]),
                 (None, _) => continue,
                 (Some(v), _) => CKind::Write(v),
             };
@@ -1080,7 +1101,7 @@ impl Sim {
                     let deadline = ops
                         .iter()
                         .filter(|o| o.epoch > h.epoch)
-                        .filter_map(|o| o.result.map(|(t, _)| t))
+                        .filter_map(|o| o.result.as_ref().map(|(t, _)| *t))
                         .min()
                         .unwrap_or(u64::MAX);
                     if deadline < h.invoke {

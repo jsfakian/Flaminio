@@ -1,28 +1,76 @@
 //! A node holding chunk replicas (protocol spec §3, §6, §7).
 //!
-//! Durable state survives [`Replica::restart`]: block contents, uncertain sets and fenced
-//! epochs. Sessions and resync filters do not.
+//! [`ReplicaCore`] holds the protocol rules without storage: fencing, sessions, uncertain sets
+//! and resync filters. For each request it returns an [`Action`] for its caller to carry out:
+//! the data plane against the replica store, the simulator against the in-memory
+//! [`Replica`].
+//!
+//! Durable state is the data and the fenced epochs. Sessions, filters and uncertain sets are
+//! volatile. After a restart a replica cannot tell which of its recent writes completed, so it
+//! reports every block of its chunks as uncertain. That lasts until a target of a newer epoch
+//! than any it had seen prunes the set: such a target has reconciled the chunk.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
+use crate::extent::{Extent, ExtentSet};
 use crate::msg::{FromReplica, Request, Response, ToReplica};
 use crate::types::{Block, ChunkIdx, Epoch, Value, Version, VolumeId};
 
-#[derive(Debug, Clone, Default)]
-struct ChunkReplica {
-    blocks: BTreeMap<Block, Value>,
-    /// Blocks whose last write may not have completed, with that write's version.
-    uncertain: BTreeMap<Block, Version>,
+/// What the caller does with a request, in the order the requests arrived on their session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action<P> {
+    /// Send this reply.
+    Reply(Response<P>),
+    /// Make the volume's fenced epoch durable, then send the reply.
+    Fence { epoch: Epoch, reply: Response<P> },
+    /// Ignore the request: it belongs to a session that is no longer current.
+    Drop,
+    /// Write the extent, then reply `Ok`.
+    Write {
+        chunk: ChunkIdx,
+        ext: Extent,
+        data: P,
+    },
+    /// Read the extent, then reply `Data`.
+    Read { chunk: ChunkIdx, ext: Extent },
+    /// Write only `parts` of the extent (the blocks without live writes since
+    /// `BeginResync`), taking each part's data from its offset in `data`, then reply `Ok`.
+    Copy {
+        chunk: ChunkIdx,
+        ext: Extent,
+        data: P,
+        parts: Vec<Extent>,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct CoreChunk {
+    blocks: Block,
+    /// Extents written by writes that may not have completed, with their versions.
+    uncertain: Vec<(Extent, Version)>,
+    /// After a restart: every block may hold an unfinished write of an epoch up to this one.
+    restarted_at: Option<Epoch>,
+}
+
+impl CoreChunk {
+    fn report(&self) -> Vec<Extent> {
+        if self.restarted_at.is_some() {
+            return vec![Extent::new(0, self.blocks)];
+        }
+        let mut s = ExtentSet::new();
+        for (x, _) in &self.uncertain {
+            s.insert(*x);
+        }
+        s.iter().collect()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
-struct Vol {
+struct CoreVol {
     fenced: Epoch,
-    chunks: BTreeMap<ChunkIdx, ChunkReplica>,
-    /// Volatile: the current `(epoch, session)`.
+    chunks: BTreeMap<ChunkIdx, CoreChunk>,
     session: Option<(Epoch, u64)>,
-    /// Volatile: per chunk under resync, the blocks that got live writes since `BeginResync`.
-    filters: BTreeMap<ChunkIdx, BTreeSet<Block>>,
+    filters: BTreeMap<ChunkIdx, ExtentSet>,
 }
 
 /// Deliberate protocol violations, for checking that the simulator catches them.
@@ -35,119 +83,215 @@ pub struct Bugs {
     pub no_resync_filter: bool,
 }
 
+/// The protocol rules of a replica node.
 #[derive(Debug, Clone, Default)]
-pub struct Replica {
-    vols: BTreeMap<VolumeId, Vol>,
+pub struct ReplicaCore {
+    vols: BTreeMap<VolumeId, CoreVol>,
     #[cfg(test)]
     pub bugs: Bugs,
 }
 
-impl Replica {
-    /// Creates an empty chunk replica.
-    pub fn create_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx) {
-        self.vols
-            .entry(vol)
-            .or_default()
-            .chunks
-            .entry(chunk)
-            .or_default();
+impl ReplicaCore {
+    /// Adds a new, empty chunk replica.
+    pub fn add_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx, blocks: Block) {
+        self.vols.entry(vol).or_default().chunks.insert(
+            chunk,
+            CoreChunk {
+                blocks,
+                uncertain: Vec::new(),
+                restarted_at: None,
+            },
+        );
     }
 
-    /// Loses volatile state, as after a process or node crash.
+    /// Adds a chunk replica found on disk at startup, with its volume's fenced epoch.
+    pub fn recover_chunk(&mut self, vol: VolumeId, fenced: Epoch, chunk: ChunkIdx, blocks: Block) {
+        let v = self.vols.entry(vol).or_default();
+        v.fenced = v.fenced.max(fenced);
+        v.chunks.insert(
+            chunk,
+            CoreChunk {
+                blocks,
+                uncertain: Vec::new(),
+                restarted_at: Some(fenced),
+            },
+        );
+    }
+
+    /// Loses the volatile state, as after a process or node crash.
     pub fn restart(&mut self) {
         for v in self.vols.values_mut() {
             v.session = None;
             v.filters.clear();
+            for c in v.chunks.values_mut() {
+                c.uncertain.clear();
+                c.restarted_at = Some(v.fenced);
+            }
         }
     }
 
-    /// Contents of a block, for checks.
-    pub fn block(&self, vol: VolumeId, chunk: ChunkIdx, block: Block) -> Option<Value> {
-        let c = self.vols.get(&vol)?.chunks.get(&chunk)?;
-        Some(c.blocks.get(&block).copied().unwrap_or(0))
+    pub fn fenced(&self, vol: VolumeId) -> Epoch {
+        self.vols.get(&vol).map_or(0, |v| v.fenced)
     }
 
-    /// Handles one request. Returns the reply, or `None` if the request is dropped.
-    pub fn handle(&mut self, m: &ToReplica) -> Option<FromReplica> {
-        let reply = |body| {
-            Some(FromReplica {
-                vol: m.vol,
-                epoch: m.epoch,
-                session: m.session,
-                req: m.req,
-                body,
-            })
-        };
+    /// Decides what to do with one request. Requests must be handled in the order they arrive
+    /// on their connection, and their actions carried out in that order.
+    pub fn handle<P: Clone>(&mut self, m: &ToReplica<P>) -> Action<P> {
         let v = self.vols.entry(m.vol).or_default();
         if m.epoch < v.fenced {
-            return reply(Response::Stale { fenced: v.fenced });
+            return Action::Reply(Response::Stale { fenced: v.fenced });
         }
-        if m.body == Request::Hello {
-            // Durable before the reply.
+        if let Request::Hello = m.body {
             v.fenced = m.epoch;
             if v.session.is_none_or(|s| s < (m.epoch, m.session)) {
                 v.session = Some((m.epoch, m.session));
                 v.filters.clear();
             }
-            let uncertain = v
-                .chunks
-                .iter()
-                .map(|(&c, r)| (c, r.uncertain.keys().copied().collect()))
-                .collect();
-            return reply(Response::Fenced { uncertain });
+            let uncertain = v.chunks.iter().map(|(&c, s)| (c, s.report())).collect();
+            return Action::Fence {
+                epoch: m.epoch,
+                reply: Response::Fenced { uncertain },
+            };
         }
         let current = v.session == Some((m.epoch, m.session));
         #[cfg(test)]
         let current = current || (self.bugs.any_session && m.epoch == v.fenced);
         if !current {
-            return None;
+            return Action::Drop;
         }
-        match m.body {
+        let in_range = |chunk: &ChunkIdx, ext: &Extent| {
+            v.chunks
+                .get(chunk)
+                .is_some_and(|c| ext.len > 0 && ext.end() <= c.blocks)
+        };
+        match &m.body {
             Request::Hello => unreachable!(),
-            Request::Heartbeat => reply(Response::Ok),
-            Request::Read { chunk, block } => {
-                let c = v.chunks.get(&chunk)?;
-                reply(Response::Value(c.blocks.get(&block).copied().unwrap_or(0)))
-            }
+            Request::Heartbeat => Action::Reply(Response::Ok),
+            Request::Read { chunk, ext } if in_range(chunk, ext) => Action::Read {
+                chunk: *chunk,
+                ext: *ext,
+            },
             Request::Write {
                 chunk,
-                block,
-                value,
+                ext,
+                data,
                 version,
                 prune,
-            } => {
-                let c = v.chunks.get_mut(&chunk)?;
-                c.blocks.insert(block, value);
-                let u = c.uncertain.entry(block).or_insert(version);
-                *u = (*u).max(version);
+            } if in_range(chunk, ext) => {
+                let c = v.chunks.get_mut(chunk).expect("in range");
+                c.uncertain.push((*ext, *version));
                 if let Some(p) = prune {
-                    c.uncertain.retain(|_, w| *w >= p);
+                    c.uncertain.retain(|(_, w)| w >= p);
+                    if c.restarted_at.is_some_and(|e| e < p.epoch) {
+                        c.restarted_at = None;
+                    }
                 }
-                if let Some(f) = v.filters.get_mut(&chunk) {
-                    f.insert(block);
+                if let Some(f) = v.filters.get_mut(chunk) {
+                    f.insert(*ext);
                 }
-                reply(Response::Ok)
+                Action::Write {
+                    chunk: *chunk,
+                    ext: *ext,
+                    data: data.clone(),
+                }
             }
-            Request::BeginResync { chunk } => {
-                v.chunks.get(&chunk)?;
-                v.filters.insert(chunk, BTreeSet::new());
-                reply(Response::Ok)
+            Request::BeginResync { chunk } if v.chunks.contains_key(chunk) => {
+                v.filters.insert(*chunk, ExtentSet::new());
+                Action::Reply(Response::Ok)
             }
-            Request::Copy {
-                chunk,
-                block,
-                value,
-            } => {
-                let skip = v.filters.get(&chunk).is_some_and(|f| f.contains(&block));
+            Request::Copy { chunk, ext, data } if in_range(chunk, ext) => {
+                let parts = match v.filters.get(chunk) {
+                    Some(f) => f.missing_from(ext),
+                    None => vec![*ext],
+                };
                 #[cfg(test)]
-                let skip = skip && !self.bugs.no_resync_filter;
-                let c = v.chunks.get_mut(&chunk)?;
-                if !skip {
-                    c.blocks.insert(block, value);
+                let parts = if self.bugs.no_resync_filter {
+                    vec![*ext]
+                } else {
+                    parts
+                };
+                Action::Copy {
+                    chunk: *chunk,
+                    ext: *ext,
+                    data: data.clone(),
+                    parts,
                 }
-                reply(Response::Ok)
             }
+            // A request for a chunk this node does not hold, or out of its range: a protocol
+            // error by the target. Dropping it makes the target's request time out.
+            _ => Action::Drop,
         }
+    }
+}
+
+/// The simulator's replica node: the core over in-memory blocks. Payloads are one value per
+/// block of the extent.
+#[derive(Debug, Clone, Default)]
+pub struct Replica {
+    pub core: ReplicaCore,
+    data: BTreeMap<(VolumeId, ChunkIdx), BTreeMap<Block, Value>>,
+}
+
+impl Replica {
+    pub fn create_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx, blocks: Block) {
+        self.core.add_chunk(vol, chunk, blocks);
+        self.data.entry((vol, chunk)).or_default();
+    }
+
+    pub fn restart(&mut self) {
+        self.core.restart();
+    }
+
+    /// Contents of a block, for checks.
+    pub fn block(&self, vol: VolumeId, chunk: ChunkIdx, block: Block) -> Option<Value> {
+        let c = self.data.get(&(vol, chunk))?;
+        Some(c.get(&block).copied().unwrap_or(0))
+    }
+
+    /// Handles one request. Returns the reply, or `None` if the request is dropped.
+    pub fn handle(&mut self, m: &ToReplica<Vec<Value>>) -> Option<FromReplica<Vec<Value>>> {
+        let body = match self.core.handle(m) {
+            Action::Reply(r) | Action::Fence { reply: r, .. } => r,
+            Action::Drop => return None,
+            Action::Write { chunk, ext, data } => {
+                assert_eq!(data.len(), ext.len as usize, "payload size");
+                let c = self.data.get_mut(&(m.vol, chunk)).expect("chunk");
+                for (b, v) in ext.blocks().zip(data) {
+                    c.insert(b, v);
+                }
+                Response::Ok
+            }
+            Action::Read { chunk, ext } => {
+                let c = &self.data[&(m.vol, chunk)];
+                Response::Data(
+                    ext.blocks()
+                        .map(|b| c.get(&b).copied().unwrap_or(0))
+                        .collect(),
+                )
+            }
+            Action::Copy {
+                chunk,
+                ext,
+                data,
+                parts,
+            } => {
+                assert_eq!(data.len(), ext.len as usize, "payload size");
+                let c = self.data.get_mut(&(m.vol, chunk)).expect("chunk");
+                for p in parts {
+                    for b in p.blocks() {
+                        c.insert(b, data[(b - ext.start) as usize]);
+                    }
+                }
+                Response::Ok
+            }
+        };
+        Some(FromReplica {
+            vol: m.vol,
+            epoch: m.epoch,
+            session: m.session,
+            req: m.req,
+            body,
+        })
     }
 }
 
@@ -155,7 +299,9 @@ impl Replica {
 mod tests {
     use super::*;
 
-    fn msg(epoch: Epoch, session: u64, body: Request) -> ToReplica {
+    type Msg = ToReplica<Vec<Value>>;
+
+    fn msg(epoch: Epoch, session: u64, body: Request<Vec<Value>>) -> Msg {
         ToReplica {
             vol: 1,
             epoch,
@@ -165,11 +311,11 @@ mod tests {
         }
     }
 
-    fn write(block: Block, value: Value, seq: u64, prune: Option<u64>) -> Request {
+    fn write(start: Block, values: &[Value], seq: u64, prune: Option<u64>) -> Request<Vec<Value>> {
         Request::Write {
             chunk: 0,
-            block,
-            value,
+            ext: Extent::new(start, values.len() as Block),
+            data: values.to_vec(),
             version: Version { epoch: 1, seq },
             prune: prune.map(|seq| Version { epoch: 1, seq }),
         }
@@ -177,12 +323,19 @@ mod tests {
 
     fn replica() -> Replica {
         let mut r = Replica::default();
-        r.create_chunk(1, 0);
+        r.create_chunk(1, 0, 8);
         r
     }
 
-    fn body(r: Option<FromReplica>) -> Option<Response> {
+    fn body(r: Option<FromReplica<Vec<Value>>>) -> Option<Response<Vec<Value>>> {
         r.map(|r| r.body)
+    }
+
+    fn uncertain(r: Option<FromReplica<Vec<Value>>>) -> Vec<Extent> {
+        match body(r) {
+            Some(Response::Fenced { uncertain }) => uncertain[0].1.clone(),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -205,10 +358,10 @@ mod tests {
         let mut r = replica();
         r.handle(&msg(1, 1, Request::Hello)).unwrap();
         r.handle(&msg(1, 2, Request::Hello)).unwrap();
-        assert_eq!(r.handle(&msg(1, 1, write(0, 5, 0, None))), None);
+        assert_eq!(r.handle(&msg(1, 1, write(0, &[5], 0, None))), None);
         assert_eq!(r.block(1, 0, 0), Some(0));
         assert_eq!(
-            body(r.handle(&msg(1, 2, write(0, 5, 0, None)))),
+            body(r.handle(&msg(1, 2, write(0, &[5], 0, None)))),
             Some(Response::Ok)
         );
         // An older session's late Hello does not take over.
@@ -223,36 +376,71 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_requests_are_dropped() {
+        let mut r = replica();
+        r.handle(&msg(1, 1, Request::Hello)).unwrap();
+        assert_eq!(r.handle(&msg(1, 1, write(7, &[1, 2], 0, None))), None);
+        let read = Request::Read {
+            chunk: 3,
+            ext: Extent::new(0, 1),
+        };
+        assert_eq!(r.handle(&msg(1, 1, read)), None);
+    }
+
+    #[test]
     fn uncertain_set_is_pruned_by_completed_writes() {
         let mut r = replica();
         r.handle(&msg(1, 1, Request::Hello)).unwrap();
-        r.handle(&msg(1, 1, write(0, 10, 0, None))).unwrap();
-        r.handle(&msg(1, 1, write(1, 11, 1, Some(0)))).unwrap();
-        r.handle(&msg(1, 1, write(2, 12, 2, Some(2)))).unwrap();
-        let fenced = body(r.handle(&msg(2, 1, Request::Hello)));
+        r.handle(&msg(1, 1, write(0, &[10, 11], 0, None))).unwrap();
+        r.handle(&msg(1, 1, write(2, &[12], 1, Some(0)))).unwrap();
+        r.handle(&msg(1, 1, write(5, &[13, 14], 2, Some(2))))
+            .unwrap();
         assert_eq!(
-            fenced,
-            Some(Response::Fenced {
-                uncertain: vec![(0, vec![2])]
-            })
+            uncertain(r.handle(&msg(2, 1, Request::Hello))),
+            vec![Extent::new(5, 2)]
         );
+    }
+
+    #[test]
+    fn after_a_restart_everything_is_uncertain_until_a_newer_epoch_prunes() {
+        let mut r = replica();
+        r.handle(&msg(1, 1, Request::Hello)).unwrap();
+        r.restart();
+        assert_eq!(
+            uncertain(r.handle(&msg(1, 2, Request::Hello))),
+            vec![Extent::new(0, 8)]
+        );
+        // Pruning by the same epoch is not enough: its unfinished writes may be anywhere.
+        r.handle(&msg(1, 2, write(0, &[1], 5, Some(5)))).unwrap();
+        assert_eq!(
+            uncertain(r.handle(&msg(2, 1, Request::Hello))),
+            vec![Extent::new(0, 8)]
+        );
+        let newer = Request::Write {
+            chunk: 0,
+            ext: Extent::new(3, 1),
+            data: vec![9],
+            version: Version { epoch: 2, seq: 0 },
+            prune: Some(Version { epoch: 2, seq: 1 }),
+        };
+        r.handle(&msg(2, 1, newer)).unwrap();
+        assert_eq!(uncertain(r.handle(&msg(3, 1, Request::Hello))), vec![]);
     }
 
     #[test]
     fn copies_skip_blocks_with_live_writes() {
         let mut r = replica();
         r.handle(&msg(1, 1, Request::Hello)).unwrap();
-        let copy = |block, value| Request::Copy {
-            chunk: 0,
-            block,
-            value,
-        };
         r.handle(&msg(1, 1, Request::BeginResync { chunk: 0 }))
             .unwrap();
-        r.handle(&msg(1, 1, write(0, 20, 0, None))).unwrap();
-        r.handle(&msg(1, 1, copy(0, 1))).unwrap();
-        r.handle(&msg(1, 1, copy(1, 2))).unwrap();
-        assert_eq!(r.block(1, 0, 0), Some(20));
-        assert_eq!(r.block(1, 0, 1), Some(2));
+        r.handle(&msg(1, 1, write(1, &[20, 21], 0, None))).unwrap();
+        let copy = Request::Copy {
+            chunk: 0,
+            ext: Extent::new(0, 4),
+            data: vec![1, 2, 3, 4],
+        };
+        r.handle(&msg(1, 1, copy)).unwrap();
+        let blocks: Vec<_> = (0..4).map(|b| r.block(1, 0, b).unwrap()).collect();
+        assert_eq!(blocks, vec![1, 20, 21, 4]);
     }
 }

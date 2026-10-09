@@ -12,9 +12,11 @@
 //! what to send. [`sim`] drives them through crashes, partitions, delays and clock drift, and
 //! checks every run for linearizability, convergence and liveness.
 //!
-//! Blocks hold a [`types::Value`] here, standing in for 4 KiB of data. The data plane maps the
-//! same decisions onto real I/O.
+//! Operations cover extents (runs of blocks) and carry an opaque payload. In the simulator a
+//! payload is one [`types::Value`] per block, standing in for 4 KiB of data; the data plane
+//! uses buffer handles, and maps the same decisions onto real I/O.
 
+pub mod extent;
 pub mod meta;
 pub mod msg;
 pub mod replica;

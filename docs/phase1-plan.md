@@ -33,6 +33,32 @@ machine into real I/O.
 | 7 | **Kubernetes**: k3s on the lab VMs, the CSI driver (provision, attach, stage, publish; block and filesystem), placement controller, failover controller | Lab | A pod with a PVC runs fio. Killing its node moves it to the other node with its data intact |
 | 8 | **Phase-1 benchmark and chaos run** | Lab | Read results for a pod against the raw disk; failover time measured; chaos run passes |
 
+## Step 4 breakdown
+
+Step 4 puts the real data plane on the step-1 core, so that production runs the code the
+simulator checked. It comes in five parts, each committed on its own:
+
+| Part | What | Done when |
+|---|---|---|
+| 4a ✅ | **Ranges and payloads in the core.** Operations, locks, uncertain sets, dirty sets and resync copies work on extents (runs of blocks) instead of single blocks. Data is an opaque payload type: per-block values in the simulator, buffer handles in the data plane. A replica's uncertain set becomes volatile: after a restart it reports the whole chunk | The simulator passes and every mutation is still caught, with multi-block operations |
+| 4b | **Transport.** Framed messages over TLS 1.3 with the step-3 identities. The capability token is presented in `Hello`, and the replica checks it against the peer certificate | Loopback tests: wrong CA, wrong node, stale epoch and bad token are all refused |
+| 4c | **Replica service on the real store.** The core's replica rules (fencing, sessions, uncertain sets, resync filters) in front of `flaminio-store`, with group commit per session | Loopback tests against a file-backed store |
+| 4d | **Target runtime.** `flaminio-io serve` attaches with a token, drives the core from ublk, sends to local and remote replicas, and makes ISR changes through the metadata service (gRPC client on its own thread) | The local end-to-end test passes |
+| 4e | **Lab.** An RF=2 volume across fl-a and fl-b, placed by the metadata service | The MVP's fault test passes, with the ISR shrink and expand visible in the metadata service; reads still at the MVP's level |
+
+## Step 4a result
+
+**What changed in the core:**
+- operations, locks, uncertain sets, dirty sets, resync copies and filters work on extents;
+- the target and replica are generic over the payload;
+- the replica is split into a sans-I/O core, which returns actions to carry out, and the
+  simulator's in-memory storage;
+- uncertain sets are volatile, as specified in
+  [replication-protocol.md §6](replication-protocol.md#6-failover-fencing-and-reconciliation).
+
+**Checks:** 120 000 seeds with multi-block operations pass, and every mutation is still caught.
+Reconciliation pruning got rarer, so its check now searches up to 60 000 seeds.
+
 ## Step 1 result
 
 The protocol core is in `dataplane/crates/flaminio-repl`. The checks:
