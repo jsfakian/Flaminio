@@ -483,7 +483,7 @@ use std::thread;
 use std::time::Instant;
 
 use flaminio_node::engine::{Input, Io, IoError, LocalRead, Output};
-use flaminio_uring::EventFd;
+use flaminio_uring::{EventFd, Staging};
 
 use crate::node::{NodeConfig, Parts, drive_until, log_output, read_token};
 
@@ -724,6 +724,13 @@ fn attach_and_serve(
 /// it is gone, so adding is tried again for a few seconds.
 fn add_device(c: &NodeConfig) -> Result<UblkCtrl, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
+    // Zero copy: the kernel registers each request's pages as fixed buffer `tag` of the
+    // queue's ring before handing the request over (see `engine_io_task_zc`).
+    let ctrl_flags = if c.zero_copy {
+        (sys::UBLK_F_AUTO_BUF_REG | sys::UBLK_F_SUPPORT_ZERO_COPY) as u64
+    } else {
+        0
+    };
     loop {
         match UblkCtrlBuilder::default()
             .name("flaminio")
@@ -731,6 +738,7 @@ fn add_device(c: &NodeConfig) -> Result<UblkCtrl, String> {
             .depth(c.depth)
             .nr_queues(1)
             .io_buf_bytes(c.io_buf)
+            .ctrl_flags(ctrl_flags)
             .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
             .build()
         {
@@ -778,9 +786,9 @@ fn run_device(
         };
         Ok(())
     };
-    let (qslot, qvol) = (slot.clone(), volume.to_string());
+    let (qslot, qvol, zero_copy) = (slot.clone(), volume.to_string(), c.zero_copy);
     let queue = move |qid: u16, dev: &UblkDev| {
-        if let Err(e) = serve_engine_queue(qid, dev, &qslot, qvol.clone(), efd.clone()) {
+        if let Err(e) = serve_engine_queue(qid, dev, &qslot, qvol.clone(), efd.clone(), zero_copy) {
             eprintln!("flaminio-io: queue {qid} stopped: {e}");
         }
     };
@@ -814,6 +822,7 @@ fn serve_engine_queue(
     slot: &Slot,
     volume: String,
     efd: Arc<EventFd>,
+    zero_copy: bool,
 ) -> Result<(), String> {
     let Some(parts) = slot.lock().expect("slot").take() else {
         return Err("only one queue is supported".into());
@@ -833,7 +842,7 @@ fn serve_engine_queue(
         volume,
         dev_id: dev.dev_info.dev_id as i32,
     };
-    let result = serve_with(qid, dev, &ctx, efd);
+    let result = serve_with(qid, dev, &ctx, efd, zero_copy);
     // Hand the engine back, whatever happened to the device.
     *slot.lock().expect("slot") = Some(Parts {
         engine: ctx.engine.into_inner(),
@@ -843,25 +852,48 @@ fn serve_engine_queue(
     result
 }
 
-fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, efd: Arc<EventFd>) -> Result<(), String> {
+fn serve_with(
+    qid: u16,
+    dev: &UblkDev,
+    ctx: &EngineCtx,
+    efd: Arc<EventFd>,
+    zero_copy: bool,
+) -> Result<(), String> {
     let q = Rc::new(UblkQueue::new(qid, dev).map_err(|e| format!("ublk queue: {e}"))?);
     let depth = dev.dev_info.queue_depth;
     let buf_bytes = dev.dev_info.max_io_buf_bytes as usize;
-    let bufs: Rc<Vec<RefCell<IoBuf<u8>>>> = Rc::new(
-        (0..depth)
-            .map(|_| RefCell::new(IoBuf::<u8>::new(buf_bytes)))
-            .collect(),
-    );
     let exe = Rc::new(smol::LocalExecutor::new());
     let mut tasks = Vec::with_capacity(depth as usize);
-    for tag in 0..depth {
-        let (q, bufs) = (q.clone(), bufs.clone());
-        tasks.push(exe.spawn(async move {
-            match engine_io_task(&q, tag, &bufs, ctx).await {
-                Ok(()) | Err(UblkError::QueueIsDown) => {}
-                Err(e) => eprintln!("flaminio-io: tag {tag}: {e}"),
-            }
-        }));
+    if zero_copy {
+        eprintln!(
+            "flaminio-io: zero copy: local reads go straight into the requests, not verified"
+        );
+        let staging =
+            Rc::new(Staging::new(depth as usize, buf_bytes).map_err(|e| format!("staging: {e}"))?);
+        for tag in 0..depth {
+            let (q, staging) = (q.clone(), staging.clone());
+            tasks.push(exe.spawn(async move {
+                match engine_io_task_zc(&q, tag, &staging, ctx).await {
+                    Ok(()) | Err(UblkError::QueueIsDown) => {}
+                    Err(e) => eprintln!("flaminio-io: tag {tag}: {e}"),
+                }
+            }));
+        }
+    } else {
+        let bufs: Rc<Vec<RefCell<IoBuf<u8>>>> = Rc::new(
+            (0..depth)
+                .map(|_| RefCell::new(IoBuf::<u8>::new(buf_bytes)))
+                .collect(),
+        );
+        for tag in 0..depth {
+            let (q, bufs) = (q.clone(), bufs.clone());
+            tasks.push(exe.spawn(async move {
+                match engine_io_task(&q, tag, &bufs, ctx).await {
+                    Ok(()) | Err(UblkError::QueueIsDown) => {}
+                    Err(e) => eprintln!("flaminio-io: tag {tag}: {e}"),
+                }
+            }));
+        }
     }
     // Other threads' inputs: wait for the eventfd to become readable on this ring.
     let _waker = {
@@ -1018,5 +1050,151 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
     ctx.engine
         .borrow_mut()
         .local_read_done(Instant::now(), &lr, None, false);
+    ctx.pump();
+}
+
+/// Copies `len` bytes at `at` from the tag's staging slot into the request's pages.
+fn stage_to_request(
+    q: &UblkQueue<'_>,
+    st: &Staging,
+    tag: u16,
+    at: usize,
+    len: usize,
+) -> impl std::future::Future<Output = bool> {
+    // The request's registered buffer is addressed by offset from its start.
+    let sqe = opcode::ReadFixed::new(types::Fd(st.fd()), at as *mut u8, len as u32, tag)
+        .offset(st.offset(tag as usize, at))
+        .build();
+    let done = q.ublk_submit_sqe(sqe);
+    async move { done.await == len as i32 }
+}
+
+/// One tag, with zero copy: the request's pages are fixed buffer `tag` of this ring.
+async fn engine_io_task_zc(
+    q: &UblkQueue<'_>,
+    tag: u16,
+    st: &Staging,
+    ctx: &EngineCtx,
+) -> Result<(), UblkError> {
+    let (done_tx, done_rx) = smol::channel::unbounded();
+    let reg = sys::ublk_auto_buf_reg {
+        index: tag,
+        ..Default::default()
+    };
+    q.submit_io_prep_cmd(tag, BufDesc::AutoReg(reg), 0, None)
+        .await?;
+    loop {
+        let (op, offset, len, flags) = {
+            let iod = q.get_iod(tag);
+            (
+                iod.op_flags & 0xff,
+                iod.start_sector << 9,
+                u64::from(iod.nr_sectors) << 9,
+                iod.op_flags,
+            )
+        };
+        let n = len as usize;
+        let res = if flags & sys::UBLK_IO_F_NEED_REG_BUF != 0 {
+            // The kernel could not register the request's pages.
+            -libc::EIO
+        } else {
+            match op {
+                sys::UBLK_IO_OP_READ if n <= st.slot_len() => {
+                    ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
+                    let mut failed = false;
+                    loop {
+                        match done_rx.recv().await {
+                            Ok(Event::Local(lr)) => local_read_zc(q, tag, st, ctx, lr).await,
+                            Ok(Event::Piece { at, data }) => {
+                                st.with_slot(tag as usize, |b| {
+                                    b[at..at + data.len()].copy_from_slice(&data)
+                                });
+                                failed |= !stage_to_request(q, st, tag, at, data.len()).await;
+                            }
+                            Ok(Event::Done(Ok(_))) if !failed => break len as i32,
+                            Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
+                            _ => break -libc::EIO,
+                        }
+                    }
+                }
+                sys::UBLK_IO_OP_WRITE if n <= st.slot_len() => {
+                    // The write's data, from the request's pages into the staging slot.
+                    let sqe = opcode::WriteFixed::new(
+                        types::Fd(st.fd()),
+                        std::ptr::null(),
+                        n as u32,
+                        tag,
+                    )
+                    .offset(st.offset(tag as usize, 0))
+                    .build();
+                    if q.ublk_submit_sqe(sqe).await != n as i32 {
+                        -libc::EIO
+                    } else {
+                        let data = st.with_slot(tag as usize, |b| b[..n].to_vec());
+                        ctx.submit(Io::Write { offset, data }, done_tx.clone());
+                        match done_rx.recv().await {
+                            Ok(Event::Done(Ok(_))) => len as i32,
+                            Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
+                            _ => -libc::EIO,
+                        }
+                    }
+                }
+                sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => 0,
+                sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
+                _ => -libc::EOPNOTSUPP,
+            }
+        };
+        q.submit_io_commit_cmd(tag, BufDesc::AutoReg(reg), res)
+            .await?;
+    }
+}
+
+/// A local read with zero copy: the device reads land in the request's pages, and the store's
+/// zero-filled ranges (never written) are copied in from the staging slot. The checksums are
+/// not verified: the data never passes through this process.
+async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCtx, lr: LocalRead) {
+    let (at, n) = (lr.at, lr.len);
+    // The plan zero-fills the never-written ranges of the slot; they are copied in below.
+    let plan = st.with_slot(tag as usize, |b| {
+        ctx.engine.borrow().plan_local_read(&lr, &mut b[at..at + n])
+    });
+    let Ok(plan) = plan else {
+        ctx.engine
+            .borrow_mut()
+            .local_read_done(Instant::now(), &lr, None, false);
+        ctx.pump();
+        return;
+    };
+    let mut pending = Vec::new();
+    let mut zeros = Vec::new();
+    let mut pos = 0;
+    for r in plan.reads() {
+        if r.buf_offset > pos {
+            zeros.push((pos, r.buf_offset - pos));
+        }
+        let sqe = opcode::ReadFixed::new(
+            types::Fd(ctx.fd),
+            (at + r.buf_offset) as *mut u8,
+            r.len as u32,
+            tag,
+        )
+        .offset(r.device_offset)
+        .build();
+        pending.push((q.ublk_submit_sqe(sqe), r.len as i32));
+        pos = r.buf_offset + r.len;
+    }
+    if pos < n {
+        zeros.push((pos, n - pos));
+    }
+    let mut ok = true;
+    for (start, len) in zeros {
+        ok &= stage_to_request(q, st, tag, at + start, len).await;
+    }
+    for (completion, expected) in pending {
+        ok &= completion.await == expected;
+    }
+    ctx.engine
+        .borrow_mut()
+        .local_read_done(Instant::now(), &lr, Some(plan), ok);
     ctx.pump();
 }

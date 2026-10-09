@@ -216,6 +216,10 @@ drain-test: ## Verified writes while fl-b is drained into fl-c; fl-c alone then 
 chaos: ## ROUNDS (4) of random faults under a verified write load; each round ends with the target killed and a verified failover
 	ROUNDS=$(or $(ROUNDS),4) $(LAB) chaos
 
+.PHONY: bench-reads
+bench-reads: ## vol1 against the same 16 GiB of the raw disk, by the rules of docs/performance-plan.md (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30)
+	MODE=$(or $(MODE),zero-copy) NODE=$(or $(NODE),b) REPS=$(or $(REPS),3) RUNTIME=$(RUNTIME) FILL=$(FILL) $(LAB) bench-reads
+
 .PHONY: bench-pod
 bench-pod: ## Reads from a pod with a 16 GiB Flaminio volume (NODE=fl-b, RUNTIME=30), against the node's raw disk
 	NODE=$(or $(NODE),fl-b) RUNTIME=$(RUNTIME) KEEP=$(KEEP) $(LAB) bench-pod

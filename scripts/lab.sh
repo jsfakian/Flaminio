@@ -653,7 +653,7 @@ meta_endpoints() {
 
 node_env() {
     local vm=$1
-    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0}"
+    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0}"
 }
 
 # node up|down|status [VM selector, default all]: the data VMs' nodes, replicas only.
@@ -1376,6 +1376,115 @@ cmd_chaos() {
     log "OK: $rounds rounds of faults under a verified write load, each ending in a crash and a verified failover"
 }
 
+# --- Reads against the raw disk, by the rules of docs/performance-plan.md ---
+
+host_drop_caches() { hsh "$(vmvar "$1" HOST)" 'sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null'; }
+
+# The host's data drive temperature (°C), where smartctl is there; "-" otherwise.
+drive_temp() {
+    hsh "$(vmvar "$1" HOST)" 'd=$(ls /dev/nvme0 2>/dev/null); [ -n "$d" ] && command -v smartctl >/dev/null &&
+        sudo -n smartctl -A "$d" 2>/dev/null | awk "/^Temperature:/ {print \$2; exit}"' 2>/dev/null | grep . || echo -
+}
+
+# MODE=zero-copy|verify, NODE (fl-b), REPS (3), RUNTIME (30): the volume vol1 (16 GiB) on NODE
+# against 16 GiB spans of NODE's raw data disk, at offsets 0, 32 and 64 GiB in turn. FILL=1
+# writes the volume again first.
+cmd_bench_reads() {
+    local node mode=${MODE:-zero-copy} reps=${REPS:-3} runtime=${RUNTIME:-30} span=16G
+    local dir raw zc=0 r spec name rw bs qd side dev off row t0 t1 since
+    node=$(vms_of "${NODE:-b}")
+    [[ $mode == zero-copy || $mode == verify ]] || die "MODE is zero-copy or verify"
+    [[ $mode == zero-copy ]] && zc=1
+    dir="$LOCAL_STATE_DIR/bench/reads-$mode-$(date +%Y%m%dT%H%M%S)"
+    mkdir -p "$dir"
+    release_lab_volume
+    # The node runs in the mode asked for: restart it if not.
+    if [[ $(vssh "$node" "systemctl show -p ExecStart --value flaminio-node | grep -c -- --zero-copy" || true) != "$zc" ]] ||
+        ! vssh "$node" "systemctl is-active --quiet flaminio-node"; then
+        log "$node: node in $mode mode"
+        ZERO_COPY=$zc cmd_node up "$(vms_of "$node")" >/dev/null
+    fi
+    ensure_nodes
+    cmd_vol attach "${node#fl-}" >/dev/null
+    since=$(vssh "$node" "date '+%Y-%m-%d %H:%M:%S'")
+    raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)
+    if [[ ${FILL:-0} == 1 ]] || ! vssh "$node" "test -f ~/.flaminio-bench-filled-$VOL"; then
+        log "filling $VOL (16 GiB, fio checksums in every block): once"
+        run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" fill /dev/ublkb1 "$span"
+        vssh "$node" "touch ~/.flaminio-bench-filled-$VOL"
+    fi
+    log "warm-up read of $VOL (waits for reconciliation after a restart)"
+    run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" warm /dev/ublkb1 "$span"
+
+    log "$node, $mode, $(vssh "$node" nproc) vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
+    printf 'rep\tside\tjob\tIOPS\tMiB/s\tp50\tp99\tfio_cpu\tqueue_cpu\ttemp\n' >"$dir/runs.tsv"
+    for r in $(seq 1 "$reps"); do
+        for spec in "randread-4k-qd1 randread 4k 1" "randread-4k-qd32 randread 4k 32" "read-1m-qd8 read 1m 8"; do
+            read -r name rw bs qd <<<"$spec"
+            for side in raw flaminio; do
+                # The raw disk reads at different speeds in different regions (6.4–6.7 GB/s
+                # sequential on fl-b), and the store's data is spread over all of them: each
+                # repetition reads raw in another region.
+                if [[ $side == raw ]]; then
+                    dev=$raw off=$(((r - 1) % 3 * 32))G
+                else
+                    dev=/dev/ublkb1 off=0
+                fi
+                host_drop_caches "$node"
+                t0=$(drive_temp "$node")
+                row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" job "$dev" "$off" "$span" "$name" "$rw" "$bs" "$qd" \
+                    "$runtime" "/tmp/bench-$side-$name-$r.json")
+                t1=$(drive_temp "$node")
+                vssh "$node" "cat /tmp/bench-$side-$name-$r.json" >"$dir/$side-$name-$r.json"
+                printf '%s\t%s\t%s\t%s\n' "$r" "$side" "$row" "$t0/$t1" >>"$dir/runs.tsv"
+                log "  rep $r $side: $(cut -f1-5,7 <<<"$row" | tr '\t' ' ')"
+            done
+        done
+    done
+    bench_summary "$dir/runs.tsv" | tee "$dir/summary.txt"
+
+    log "integrity: fio reads all of $VOL and checks every block's checksum ($mode path)"
+    run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" verify /dev/ublkb1 "$span" | tee -a "$dir/summary.txt"
+    if [[ $mode == verify ]]; then
+        local bad
+        bad=$(vssh "$node" "sudo journalctl -u flaminio-node --since '$since' -o cat | grep -c -i -E 'local read failed|checksum' || true")
+        echo "  Flaminio checksum failures during the run: $bad" | tee -a "$dir/summary.txt"
+        [[ $bad == 0 ]] || die "checksum failures: see the node's journal"
+    fi
+    log "results in $dir"
+}
+
+# Median and spread ((max - min) / median) per side and job, and Flaminio's share of raw.
+bench_summary() {
+    awk -F'\t' 'NR > 1 {
+            k = $3 "\t" $2; n[k]++; v[k, n[k]] = $4; bw[k, n[k]] = $5; p99[k, n[k]] = $7; q[k] = q[k] " " $9
+            jobs[$3] = 1
+        }
+        function med(a, k, c,   i, j, t, x) {
+            for (i = 1; i <= c; i++) x[i] = a[k, i]
+            for (i = 1; i <= c; i++) for (j = i + 1; j <= c; j++) if (x[j] < x[i]) { t = x[i]; x[i] = x[j]; x[j] = t }
+            return (c % 2) ? x[(c + 1) / 2] : (x[c / 2] + x[c / 2 + 1]) / 2
+        }
+        function spread(a, k, c,   i, lo, hi) {
+            lo = hi = a[k, 1]
+            for (i = 2; i <= c; i++) { if (a[k, i] < lo) lo = a[k, i]; if (a[k, i] > hi) hi = a[k, i] }
+            return lo ? 100 * (hi - lo) / med(a, k, c) : 0
+        }
+        END {
+            printf "%-17s %10s %7s %10s %7s %7s %9s %s\n", "job", "Flaminio", "spread", "raw", "spread", "share", "p99 (us)", "queue thread CPU %"
+            split("randread-4k-qd1 randread-4k-qd32 read-1m-qd8", order, " ")
+            for (o = 1; o <= 3; o++) {
+                j = order[o]; f = j "\tflaminio"; r = j "\traw"
+                if (!(j in jobs)) continue
+                metric = (j ~ /1m/) ? "bw" : "v"
+                if (metric == "bw") { fm = med(bw, f, n[f]); rm = med(bw, r, n[r]); fs = spread(bw, f, n[f]); rs = spread(bw, r, n[r]); unit = " MiB/s" }
+                else { fm = med(v, f, n[f]); rm = med(v, r, n[r]); fs = spread(v, f, n[f]); rs = spread(v, r, n[r]); unit = "" }
+                flag = (fs > 10 || rs > 10) ? "  UNSTABLE (spread > 10%)" : ""
+                printf "%-17s %10d %6.1f%% %10d %6.1f%% %6.0f%% %9d %s%s%s\n", j, fm, fs, rm, rs, 100 * fm / rm, med(p99, f, n[f]), q[f], unit, flag
+            }
+        }' "$1"
+}
+
 usage() {
     cat <<USAGE
 usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; cluster: a, b, w)
@@ -1418,6 +1527,7 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   data-node-up fl-c, a third data node: VM, overlay, identities, build, disk claimed by the agent, node
   drain-test   verified writes while $VM_B is drained into $VM_C; $VM_C alone then serves every byte
   chaos        ROUNDS (4) of random faults under a verified write load, each ending with a crashed target
+  bench-reads  vol1 against the same span of the raw disk: MODE=zero-copy|verify, NODE, REPS, RUNTIME
   bench-pod    reads from a pod with a Flaminio volume (NODE=fl-b, RUNTIME=30), against the raw disk
   partition    $VM_A (the target) cut off the overlay; $VM_B takes over; no stale reads, no lost writes
   pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)
@@ -1464,6 +1574,7 @@ case "$cmd" in
     node-fault) cmd_node_fault ;;
     partition) cmd_partition ;;
     bench-pod) cmd_bench_pod ;;
+    bench-reads) cmd_bench_reads ;;
     chaos) cmd_chaos ;;
     agent) cmd_agent "$@" ;;
     data-node-up) cmd_data_node_up ;;

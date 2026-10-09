@@ -8,7 +8,22 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## 1. Where reads stand (fl-b, NVMe, 2026-10-09)
+## Status (2026-10-09)
+
+R0 is done (`make bench-reads`), and zero copy is measured
+([results](benchmarks/2026-10-09-zero-copy-reads.md)): all three jobs on fl-b at 4 vCPUs, raw
+measured on the same 16 GiB span size, caches dropped before every job, medians of 3 runs.
+
+| Read job | Verify (baseline) | Zero copy | Raw |
+|---|---:|---:|---:|
+| 4K random, QD1 | 82% | 83% | 15.4k IOPS |
+| 4K random, QD32 | 74% | **88%** | 240k IOPS |
+| 1M sequential, QD8 | 51% | **≈ 100%** | 6.3–6.7 GB/s (depends on the region of the disk) |
+
+Integrity runs on both paths: fio verified 16 GiB with 0 errors, and Flaminio logged 0
+checksum failures. Next: R2 for QD1 and QD32, then the write harness (W1–W2).
+
+## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
 | Read job | Flaminio (pod or node) | Raw | Share |
 |---|---:|---:|---:|
@@ -223,7 +238,13 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
 4. **R2 → R3** (simulator first) **→ R4 → R5.**
 5. **W3 baselines**, then W4.
 
-**Decision points for you:**
-- W0's device option.
-- R6: zero-copy against verifying every read.
-- Whether R4 may be judged at 8 vCPUs, or only at 4.
+**Decisions (2026-10-09):**
+- **W0: option 3.** No spare disk exists on either server, and the hosts' filesystems are not
+  to be touched. The data disks stay files, and every layer is reset before each write run.
+- **R6: zero-copy for the numbers, and a separate integrity run.** Reads are benchmarked with
+  zero copy (`--zero-copy`: no checksum verification on that path). A second run, on the
+  verifying path, checks for corruption.
+  - In both modes, fio rereads the whole volume and checks the checksum it wrote into every
+    block, end to end.
+  - In verifying mode, Flaminio's own checksum failures are also counted, and must be zero.
+- **vCPUs: 4,** for Flaminio and for the raw baseline alike. 8 is not used for now.

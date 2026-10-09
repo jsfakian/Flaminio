@@ -43,6 +43,9 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --token FILE         the capability token from VOLUME's attach (raw bytes)
       --depth N            ublk queue depth (default 128)
       --io-buf SIZE        largest single I/O, at most 1M (default 512K)
+      --zero-copy          local reads go straight from the disk into the request's pages
+                           (ublk auto buffer registration): no copy, and so no checksum
+                           verification of those reads. For measuring; see docs/performance-plan.md
       --id N               ublk device id (default: first free)
       --control PATH       control socket for attach and detach (default /run/flaminio/node.sock)
 
@@ -67,6 +70,7 @@ pub(crate) struct NodeConfig {
     pub io_buf: u32,
     pub id: i32,
     pub control: PathBuf,
+    pub zero_copy: bool,
 }
 
 fn parse(args: &[String]) -> Result<NodeConfig, String> {
@@ -87,6 +91,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         io_buf: 512 << 10,
         id: -1,
         control: PathBuf::from("/run/flaminio/node.sock"),
+        zero_copy: false,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -116,6 +121,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
             }
             "--id" => c.id = value()?.parse().map_err(|_| "invalid --id")?,
             "--control" => c.control = value()?.into(),
+            "--zero-copy" => c.zero_copy = true,
             _ => return Err(format!("unknown argument {flag}\n\n{USAGE}")),
         }
     }

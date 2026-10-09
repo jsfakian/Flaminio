@@ -2,7 +2,8 @@
 # A phase-1 node in a lab VM: flaminio-io node as the systemd service "flaminio-node".
 # Usage: node.sh up | down | status | attach | detach
 #   up      NODE, LISTEN, META, TRUST_DOMAIN; FORMAT=1 reformats the data disk; DEVICE overrides
-#           the data disk (as the node agent claimed it)
+#           the data disk (as the node agent claimed it); ZERO_COPY=1 serves local reads
+#           without copies (and without checksum verification)
 #   attach  VOLUME, TOKEN (base64 capability token): the running node becomes VOLUME's target,
 #           at /dev/ublkb1, through its control socket (no restart)
 #   detach  VOLUME
@@ -42,6 +43,8 @@ up() {
     local args=(node --device "${DEVICE:-$(data_disk)}" --node "$NODE" --listen "$LISTEN" --meta "$META"
         --pki /etc/flaminio/pki --trust-domain "$TRUST_DOMAIN" --id "$id")
     [[ ${FORMAT:-0} == 1 ]] && args+=(--format --force)
+    # Zero copy: local reads unverified, for measuring (docs/performance-plan.md).
+    [[ ${ZERO_COPY:-0} == 1 ]] && args+=(--zero-copy)
     if [[ -n ${ATTACH:-} ]]; then
         sudo install -d -m 700 /run/flaminio
         echo "${TOKEN:?}" | base64 -d | sudo tee "/run/flaminio/$ATTACH.token" >/dev/null
