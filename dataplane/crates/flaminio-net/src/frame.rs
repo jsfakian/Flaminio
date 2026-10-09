@@ -14,16 +14,25 @@ pub const MAX_BLOCKS: u32 = 256;
 pub const MAX_BODY: usize = MAX_BLOCKS as usize * BLOCK + 128;
 /// Most extents in one `Fenced` reply.
 pub const MAX_UNCERTAIN: usize = 1 << 16;
+/// Most chunks of one volume on one node, as listed in `Hello`.
+pub const MAX_CHUNKS: usize = 1 << 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     // Requests, target → replica.
+    /// Opens the session. Besides the token, it carries the volume's geometry and the chunks
+    /// the metadata service placed on this node, so the replica can create them (and make the
+    /// fence durable) before any I/O. The token's holder controls the volume, so trusting its
+    /// geometry grants it nothing more.
     Hello {
         req: u64,
         epoch: u64,
         session: u64,
         volume: String,
         token: Vec<u8>,
+        size: u64,
+        chunk_size: u64,
+        chunks: Vec<u32>,
     },
     Heartbeat {
         req: u64,
@@ -141,13 +150,23 @@ impl Frame {
                 session,
                 volume,
                 token,
+                size,
+                chunk_size,
+                chunks,
             } => {
+                assert!(chunks.len() <= MAX_CHUNKS, "too many chunks in Hello");
                 w.u8(tag::HELLO);
                 w.u64(*req);
                 w.u64(*epoch);
                 w.u64(*session);
                 w.short_bytes(volume.as_bytes());
                 w.short_bytes(token);
+                w.u64(*size);
+                w.u64(*chunk_size);
+                w.u32(chunks.len() as u32);
+                for c in chunks {
+                    w.u32(*c);
+                }
             }
             Frame::Heartbeat { req } => {
                 w.u8(tag::HEARTBEAT);
@@ -259,14 +278,34 @@ impl Frame {
         let mut r = R(body);
         let t = r.u8()?;
         let f = match t {
-            tag::HELLO => Frame::Hello {
-                req: r.u64()?,
-                epoch: r.u64()?,
-                session: r.u64()?,
-                volume: String::from_utf8(r.short_bytes()?.to_vec())
-                    .map_err(|_| DecodeError::Invalid("volume id is not UTF-8"))?,
-                token: r.short_bytes()?.to_vec(),
-            },
+            tag::HELLO => {
+                let req = r.u64()?;
+                let epoch = r.u64()?;
+                let session = r.u64()?;
+                let volume = String::from_utf8(r.short_bytes()?.to_vec())
+                    .map_err(|_| DecodeError::Invalid("volume id is not UTF-8"))?;
+                let token = r.short_bytes()?.to_vec();
+                let size = r.u64()?;
+                let chunk_size = r.u64()?;
+                let n = r.u32()? as usize;
+                if n > MAX_CHUNKS {
+                    return Err(DecodeError::Invalid("too many chunks"));
+                }
+                let mut chunks = Vec::with_capacity(n.min(r.0.len() / 4));
+                for _ in 0..n {
+                    chunks.push(r.u32()?);
+                }
+                Frame::Hello {
+                    req,
+                    epoch,
+                    session,
+                    volume,
+                    token,
+                    size,
+                    chunk_size,
+                    chunks,
+                }
+            }
             tag::HEARTBEAT => Frame::Heartbeat { req: r.u64()? },
             tag::WRITE => {
                 let req = r.u64()?;
@@ -440,6 +479,9 @@ mod tests {
                 session: 2,
                 volume: "pvc-0b1c".into(),
                 token: vec![9; 90],
+                size: 64 << 30,
+                chunk_size: 256 << 20,
+                chunks: vec![0, 3, 255],
             },
             Frame::Heartbeat { req: 2 },
             Frame::Write {

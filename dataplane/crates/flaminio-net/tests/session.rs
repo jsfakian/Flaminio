@@ -100,6 +100,9 @@ fn hello(token: Vec<u8>, volume: &str, epoch: u64) -> Frame {
         session: 3,
         volume: volume.into(),
         token,
+        size: 4 << 30,
+        chunk_size: 1 << 30,
+        chunks: vec![0, 2],
     }
 }
 
@@ -186,6 +189,10 @@ fn a_valid_session() {
     let a = server.unwrap();
     assert_eq!((a.peer_node.as_str(), a.epoch, a.session), ("fl-a", 4, 3));
     assert_eq!(a.claims.volume, "pvc-1");
+    assert_eq!(
+        (a.size, a.chunk_size, a.chunks.clone()),
+        (4 << 30, 1 << 30, vec![0, 2])
+    );
     assert_eq!(client.unwrap(), Frame::Ok { req: 2 });
 }
 

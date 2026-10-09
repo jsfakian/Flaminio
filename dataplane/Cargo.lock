@@ -513,6 +513,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "flaminio-node"
+version = "0.1.0"
+dependencies = [
+ "flaminio-format",
+ "flaminio-net",
+ "flaminio-repl",
+ "flaminio-store",
+ "futures-lite",
+ "futures-rustls",
+ "rcgen",
+ "ring",
+ "smol",
+]
+
+[[package]]
 name = "flaminio-repl"
 version = "0.1.0"
 

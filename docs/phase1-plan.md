@@ -42,9 +42,41 @@ simulator checked. It comes in five parts, each committed on its own:
 |---|---|---|
 | 4a ✅ | **Ranges and payloads in the core.** Operations, locks, uncertain sets, dirty sets and resync copies work on extents (runs of blocks) instead of single blocks. Data is an opaque payload type: per-block values in the simulator, buffer handles in the data plane. A replica's uncertain set becomes volatile: after a restart it reports the whole chunk | The simulator passes and every mutation is still caught, with multi-block operations |
 | 4b ✅ | **Transport.** Framed messages over TLS 1.3 with the step-3 identities. The capability token is presented in `Hello`, and the replica checks it against the peer certificate | Loopback tests: wrong CA, wrong node, stale epoch and bad token are all refused |
-| 4c | **Replica service on the real store.** The core's replica rules (fencing, sessions, uncertain sets, resync filters) in front of `flaminio-store`, with group commit per session | Loopback tests against a file-backed store |
+| 4c ✅ | **Replica service on the real store.** The core's replica rules (fencing, sessions, uncertain sets, resync filters) in front of `flaminio-store`, with group commit per session | Loopback tests against a file-backed store |
 | 4d | **Target runtime.** `flaminio-io serve` attaches with a token, drives the core from ublk, sends to local and remote replicas, and makes ISR changes through the metadata service (gRPC client on its own thread) | The local end-to-end test passes |
 | 4e | **Lab.** An RF=2 volume across fl-a and fl-b, placed by the metadata service | The MVP's fault test passes, with the ISR shrink and expand visible in the metadata service; reads still at the MVP's level |
+
+## Step 4c result
+
+The crate `flaminio-node` holds two parts:
+
+- **`ReplicaService`** carries out the replica core's decisions on the store:
+  - fences are durable before the `Hello` reply;
+  - writes and copies from all sessions share one group commit, and reads see the writes
+    before them;
+  - a store failure closes the session.
+- **`server`** puts it on the network: a network thread for TLS sessions, and an engine loop
+  that batches everything that has arrived.
+
+**`Hello` now carries the volume's geometry and the chunks placed on the node.** The replica
+creates those chunks at `Hello`, so a fence is durable even before any write, and it refuses
+requests for chunks not placed on it. The token's holder controls the volume, so trusting its
+geometry grants nothing more.
+
+**Checks:**
+- **Unit tests** on an in-memory store:
+  - placed chunks are created fenced;
+  - 32 writes in one batch share a flush;
+  - after a restart, the fence holds and whole chunks are reported uncertain, including a
+    fence made before any write;
+  - old sessions are ignored;
+  - copies skip live-written blocks;
+  - geometry is kept;
+  - a second `Hello` is refused.
+- **End to end** over real TLS with a file-backed store:
+  - 64 pipelined writes are read back;
+  - a newer epoch fences the old target off (`Stale`);
+  - an older epoch cannot open a session.
 
 ## Step 4b result
 

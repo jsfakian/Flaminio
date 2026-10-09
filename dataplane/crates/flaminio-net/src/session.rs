@@ -43,24 +43,23 @@ pub struct Conn<S> {
     stream: S,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
+impl<S> Conn<S> {
+    /// Frames over `stream`. It may be one direction only (a half of a split stream): sending
+    /// needs `AsyncWrite`, receiving `AsyncRead`.
     pub fn new(stream: S) -> Self {
         Self { stream }
     }
 
+    pub fn into_inner(self) -> S {
+        self.stream
+    }
+}
+
+impl<S: AsyncWrite + Unpin> Conn<S> {
     pub async fn send(&mut self, f: &Frame) -> Result<(), SessionError> {
         self.stream.write_all(&f.encode()).await?;
         self.stream.flush().await?;
         Ok(())
-    }
-
-    pub async fn recv(&mut self) -> Result<Frame, SessionError> {
-        let mut prefix = [0u8; 4];
-        self.stream.read_exact(&mut prefix).await?;
-        let n = Frame::body_len(prefix)?;
-        let mut body = vec![0u8; n];
-        self.stream.read_exact(&mut body).await?;
-        Ok(Frame::decode(&body)?)
     }
 
     /// Sends a refusal, best effort, and returns the error to report.
@@ -72,9 +71,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Conn<S> {
             .await;
         SessionError::Refused(why)
     }
+}
 
-    pub fn into_inner(self) -> S {
-        self.stream
+impl<S: AsyncRead + Unpin> Conn<S> {
+    pub async fn recv(&mut self) -> Result<Frame, SessionError> {
+        let mut prefix = [0u8; 4];
+        self.stream.read_exact(&mut prefix).await?;
+        let n = Frame::body_len(prefix)?;
+        let mut body = vec![0u8; n];
+        self.stream.read_exact(&mut body).await?;
+        Ok(Frame::decode(&body)?)
     }
 }
 
@@ -87,6 +93,10 @@ pub struct Accepted {
     pub epoch: u64,
     pub session: u64,
     pub claims: Claims,
+    /// The volume's geometry, and the chunks placed on this node, as the `Hello` stated them.
+    pub size: u64,
+    pub chunk_size: u64,
+    pub chunks: Vec<u32>,
 }
 
 /// Accepts a session on an incoming connection (see the module documentation).
@@ -119,6 +129,9 @@ where
         session,
         volume,
         token,
+        size,
+        chunk_size,
+        chunks,
     } = conn.recv().await?
     else {
         return Err(conn.refuse("the first frame must be Hello".into()).await);
@@ -141,6 +154,9 @@ where
             epoch,
             session,
             claims,
+            size,
+            chunk_size,
+            chunks,
         },
         conn,
     ))

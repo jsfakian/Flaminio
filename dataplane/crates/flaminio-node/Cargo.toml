@@ -1,0 +1,24 @@
+[package]
+name = "flaminio-node"
+version = "0.1.0"
+description = "Flaminio node engine: the replica service and volume targets on the replica store, driven by the replication core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+flaminio-format.workspace = true
+flaminio-store.workspace = true
+flaminio-repl = { path = "../flaminio-repl" }
+flaminio-net = { path = "../flaminio-net" }
+ring = "0.17.14"
+smol.workspace = true
+futures-lite = "2"
+futures-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[lints]
+workspace = true
