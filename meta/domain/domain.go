@@ -20,8 +20,17 @@ type Chunk struct {
 	// Nodes that hold a replica, in placement order.
 	Replicas []string `json:"replicas"`
 	// In-sync replicas, sorted.
-	ISR    []string `json:"isr"`
-	ISRVer uint64   `json:"isr_ver"`
+	ISR []string `json:"isr"`
+	// Incremented on every ISR change, and on every change of Replicas.
+	ISRVer uint64 `json:"isr_ver"`
+	// A requested move, until the target completes it.
+	Moving *Move `json:"moving,omitempty"`
+}
+
+// Move is a requested move of a chunk's replica (docs/replication-protocol.md §7, moves).
+type Move struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // Header is everything about a volume except its chunks.
@@ -53,6 +62,9 @@ type IsrChange struct {
 	Chunk       uint32
 	ExpectedVer uint64
 	NewISR      []string
+	// For a move's steps only: the new replica set (ChangeReplicas set).
+	ChangeReplicas bool
+	NewReplicas    []string
 }
 
 var (
@@ -135,8 +147,15 @@ func CheckIsrChange(h *Header, chunks []Chunk, epoch uint64, changes []IsrChange
 		if ch.ISRVer != c.ExpectedVer || uint32(len(isr)) < h.MinISR {
 			return false
 		}
+		replicas := ch.Replicas
+		if c.ChangeReplicas {
+			replicas = c.NewReplicas
+			if !validMove(&ch, c.NewReplicas, isr) {
+				return false
+			}
+		}
 		for _, n := range isr {
-			if !slices.Contains(ch.Replicas, n) {
+			if !slices.Contains(replicas, n) {
 				return false
 			}
 		}
@@ -144,12 +163,43 @@ func CheckIsrChange(h *Header, chunks []Chunk, epoch uint64, changes []IsrChange
 	return true
 }
 
-// ApplyIsrChange applies a change that CheckIsrChange accepted, to the named chunks.
+// validMove reports whether a replica-set change carries out the chunk's requested move: it
+// adds the destination, or removes the source once the destination is in the new ISR.
+func validMove(ch *Chunk, replicas, isr []string) bool {
+	if ch.Moving == nil {
+		return false
+	}
+	from, to := ch.Moving.From, ch.Moving.To
+	add := append(slices.Clone(ch.Replicas), to)
+	remove := slices.DeleteFunc(slices.Clone(ch.Replicas), func(n string) bool { return n == from })
+	return (!slices.Contains(ch.Replicas, to) && slices.Equal(replicas, add)) ||
+		(slices.Contains(ch.Replicas, from) && slices.Contains(isr, to) && slices.Equal(replicas, remove))
+}
+
+// ApplyIsrChange applies a change that CheckIsrChange accepted, to the named chunks. A change
+// that drops a move's source completes the move.
 func ApplyIsrChange(chunks []Chunk, changes []IsrChange) {
 	for i, c := range changes {
 		chunks[i].ISR = sortedSet(c.NewISR)
 		chunks[i].ISRVer++
+		if c.ChangeReplicas {
+			if m := chunks[i].Moving; m != nil && !slices.Contains(c.NewReplicas, m.From) {
+				chunks[i].Moving = nil
+			}
+			chunks[i].Replicas = slices.Clone(c.NewReplicas)
+		}
 	}
+}
+
+// CheckMove reports whether a move of the chunk's replica on from to to may be requested:
+// from holds a replica, to does not, and no move is pending.
+func CheckMove(ch *Chunk, from, to string) bool {
+	return slices.Contains(ch.Replicas, from) && !slices.Contains(ch.Replicas, to) && ch.Moving == nil
+}
+
+// ApplyMove records a move that CheckMove accepted. Only the target carries it out.
+func ApplyMove(ch *Chunk, from, to string) {
+	ch.Moving = &Move{From: from, To: to}
 }
 
 func sortedSet(s []string) []string {

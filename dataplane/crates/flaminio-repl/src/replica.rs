@@ -33,6 +33,9 @@ pub enum Action<P> {
     },
     /// Read the extent, then reply `Data`.
     Read { chunk: ChunkIdx, ext: Extent },
+    /// A `BeginResync` for a chunk this node does not hold: a replica moving here. Create the
+    /// chunk, empty ([`ReplicaCore::add_chunk`]), then handle the request again.
+    CreateChunk { chunk: ChunkIdx },
     /// Write only `parts` of the extent (the blocks without live writes since
     /// `BeginResync`), taking each part's data from its offset in `data`, then reply `Ok`.
     Copy {
@@ -130,6 +133,14 @@ impl ReplicaCore {
         }
     }
 
+    /// Forgets a chunk replica that moved away. The volume's fenced epoch stays.
+    pub fn remove_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx) {
+        if let Some(v) = self.vols.get_mut(&vol) {
+            v.chunks.remove(&chunk);
+            v.filters.remove(&chunk);
+        }
+    }
+
     pub fn fenced(&self, vol: VolumeId) -> Epoch {
         self.vols.get(&vol).map_or(0, |v| v.fenced)
     }
@@ -207,6 +218,8 @@ impl ReplicaCore {
                 v.filters.insert(*chunk, ExtentSet::new());
                 Action::Reply(Response::Ok)
             }
+            // The target resyncs only replicas that the metadata service places here.
+            Request::BeginResync { chunk } => Action::CreateChunk { chunk: *chunk },
             Request::Copy { chunk, ext, data } if in_range(chunk, ext) => {
                 let parts = match v.filters.get(chunk) {
                     Some(f) => f.missing_from(ext),
@@ -238,9 +251,19 @@ impl ReplicaCore {
 pub struct Replica {
     pub core: ReplicaCore,
     data: BTreeMap<(VolumeId, ChunkIdx), BTreeMap<Block, Value>>,
+    /// Size of the chunks it creates for replicas moving here (one volume shape per run).
+    pub blocks_per_chunk: Block,
 }
 
 impl Replica {
+    /// A node whose chunks have `blocks` blocks each.
+    pub fn with_chunk_size(blocks: Block) -> Self {
+        Self {
+            blocks_per_chunk: blocks,
+            ..Self::default()
+        }
+    }
+
     pub fn create_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx, blocks: Block) {
         self.core.add_chunk(vol, chunk, blocks);
         self.data.entry((vol, chunk)).or_default();
@@ -248,6 +271,12 @@ impl Replica {
 
     pub fn restart(&mut self) {
         self.core.restart();
+    }
+
+    /// Deletes a chunk replica that moved away, data included.
+    pub fn remove_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx) {
+        self.core.remove_chunk(vol, chunk);
+        self.data.remove(&(vol, chunk));
     }
 
     /// Contents of a block, for checks.
@@ -258,7 +287,14 @@ impl Replica {
 
     /// Handles one request. Returns the reply, or `None` if the request is dropped.
     pub fn handle(&mut self, m: &ToReplica<Vec<Value>>) -> Option<FromReplica<Vec<Value>>> {
-        let body = match self.core.handle(m) {
+        let mut action = self.core.handle(m);
+        if let Action::CreateChunk { chunk } = action {
+            let blocks = self.blocks_per_chunk;
+            self.create_chunk(m.vol, chunk, blocks);
+            action = self.core.handle(m);
+        }
+        let body = match action {
+            Action::CreateChunk { .. } => unreachable!("created above"),
             Action::Reply(r) | Action::Fence { reply: r, .. } => r,
             Action::Drop => return None,
             Action::Write { chunk, ext, data } => {

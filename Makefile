@@ -202,6 +202,16 @@ vol-delete: ## Delete the test volume from the metadata service
 node-fault: ## Verified writes while fl-b's node restarts; ISR restored; failover to fl-b verified
 	$(LAB) node-fault
 
+.PHONY: data-node-up agent-disks drain-test
+data-node-up: ## fl-c, a third data node: VM, overlay, identities, build, disk claimed by the node agent, node
+	$(LAB) data-node-up
+
+agent-disks: ## Every block device of a VM with the claim policy's verdict (VM=c by default)
+	$(LAB) agent disks $(if $(filter-out all,$(VM)),$(VM),c)
+
+drain-test: ## Verified writes while fl-b is drained into fl-c; fl-c alone then serves every byte; replicas moved back
+	$(LAB) drain-test
+
 .PHONY: partition-test
 partition-test: ## fl-a (the target) cut off the overlay, fl-b takes over: no stale reads, no lost writes (HOLD=30 s)
 	HOLD=$(or $(HOLD),30) $(LAB) partition

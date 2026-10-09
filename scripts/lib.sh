@@ -28,15 +28,25 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
 # from which vm-destroy removes them.
 VM_SSH_OPTS=("${SSH_OPTS[@]}" -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new)
 
-# Expands a VM selector into VM names: a, b, w, all (the two data VMs) or cluster (all three).
+# Expands a VM selector into VM names: a, b, w, c, all (the data VMs a and b), cluster (a, b and
+# the witness w: the etcd and metadata members) or overlay (every VM on the mesh: the cluster,
+# and fl-c once it exists).
 vms_of() {
     case "${1:-all}" in
         a | "$VM_A") echo "$VM_A" ;;
         b | "$VM_B") echo "$VM_B" ;;
         w | "$VM_W") echo "$VM_W" ;;
+        c | "$VM_C") echo "$VM_C" ;;
         all | "") echo "$VM_A $VM_B" ;;
         cluster) echo "$VM_A $VM_B $VM_W" ;;
-        *) die "unknown VM '$1' (use a, b, w, all or cluster)" ;;
+        overlay)
+            if [[ -f $LOCAL_STATE_DIR/$VM_C/created ]]; then
+                echo "$VM_A $VM_B $VM_W $VM_C"
+            else
+                echo "$VM_A $VM_B $VM_W"
+            fi
+            ;;
+        *) die "unknown VM '$1' (use a, b, w, c, all, cluster or overlay)" ;;
     esac
 }
 
@@ -57,6 +67,7 @@ vmvar() {
         "$VM_A") prefix=VM_A ;;
         "$VM_B") prefix=VM_B ;;
         "$VM_W") prefix=VM_W ;;
+        "$VM_C") prefix=VM_C ;;
         *) die "unknown VM '$1'" ;;
     esac
     eval "echo \"\${${prefix}_$2}\""

@@ -210,6 +210,7 @@ fn start_node(name: &str, files: &Files, token_key: TokenKey, model: Arc<Mutex<M
             request_timeout: 500_000,
             reconnect: 200_000,
             meta_timeout: 1_000_000,
+            refresh: 1_000_000,
         },
         max_io: 64,
         heartbeat: None,
@@ -328,6 +329,7 @@ fn replicated_volume_through_a_replica_failure() {
                     replicas: both.clone(),
                     isr: both.clone(),
                     isr_ver: 0,
+                    ..Default::default()
                 })
                 .collect(),
         });
@@ -461,6 +463,7 @@ fn direct_reads_from_the_local_replica() {
                 replicas: vec!["fl-a".into()],
                 isr: vec!["fl-a".into()],
                 isr_ver: 0,
+                ..Default::default()
             })
             .collect(),
     });

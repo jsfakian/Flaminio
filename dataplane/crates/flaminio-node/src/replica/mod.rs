@@ -202,6 +202,36 @@ impl<D: BlockDevice> ReplicaService<D> {
         Ok((session, response_frame(a.req, reply)))
     }
 
+    /// Creates an empty chunk replica for a replica moving here, fenced at `epoch`.
+    fn create_moved_chunk(
+        &mut self,
+        uuid: Uuid,
+        vol: VolumeId,
+        chunk: u32,
+        epoch: u64,
+    ) -> Result<(), String> {
+        let v = self.vols.get(&uuid).ok_or("unknown volume")?;
+        let (size, chunk_size) = (v.size, v.chunk_size);
+        if u64::from(chunk) >= size.div_ceil(chunk_size) {
+            return Err("out of range".into());
+        }
+        let key = ChunkKey {
+            volume: uuid,
+            index: u64::from(chunk),
+        };
+        self.store
+            .create_chunk(key, chunk_size, size, epoch)
+            .map_err(|e| e.to_string())?;
+        self.core
+            .add_chunk(vol, chunk, (chunk_size / BLOCK as u64) as Block);
+        self.vols
+            .get_mut(&uuid)
+            .expect("volume")
+            .chunks
+            .insert(chunk);
+        Ok(())
+    }
+
     /// Handles requests from any sessions, in order, and returns one reply per request. A
     /// `Hello` here is refused: a connection carries one session, opened by [`Self::hello`].
     pub fn handle(&mut self, items: &[(SessionRef, Frame)]) -> Vec<Reply> {
@@ -223,7 +253,17 @@ impl<D: BlockDevice> ReplicaService<D> {
                 replies[i] = Some(Reply::Close("unknown volume".into()));
                 continue;
             };
-            match self.core.handle(&msg) {
+            let mut action = self.core.handle(&msg);
+            if let Action::CreateChunk { chunk } = action {
+                // A replica moving here: create the chunk, empty, then handle the request again.
+                if let Err(e) = self.create_moved_chunk(uuid, s.vol, chunk, s.epoch) {
+                    replies[i] = Some(Reply::Close(format!("create chunk {chunk}: {e}")));
+                    continue;
+                }
+                action = self.core.handle(&msg);
+            }
+            match action {
+                Action::CreateChunk { .. } => replies[i] = Some(Reply::Nothing),
                 Action::Reply(r) => replies[i] = Some(Reply::Send(response_frame(req, r))),
                 Action::Fence { .. } => unreachable!("Hello never reaches handle"),
                 Action::Drop => replies[i] = Some(Reply::Nothing),

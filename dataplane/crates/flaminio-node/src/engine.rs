@@ -264,6 +264,38 @@ struct TargetRt {
     deposed_reported: bool,
 }
 
+impl TargetRt {
+    /// The id of node `name` in this target's views, adding it if new. A new node's address
+    /// comes from the next node list ([`TargetRt::missing_addrs`]).
+    fn node_id(&mut self, name: &str) -> NodeId {
+        match self.nodes.iter().position(|n| n == name) {
+            Some(i) => i as NodeId,
+            None => {
+                self.nodes.push(name.to_string());
+                self.addrs.push(None);
+                (self.nodes.len() - 1) as NodeId
+            }
+        }
+    }
+
+    fn chunk_meta(&mut self, c: &pb::ChunkMeta) -> ChunkMeta {
+        ChunkMeta {
+            replicas: c.replicas.iter().map(|r| self.node_id(r)).collect(),
+            isr: c.isr.iter().map(|r| self.node_id(r)).collect(),
+            isr_ver: c.isr_ver,
+            moving: (!c.moving_from.is_empty())
+                .then(|| (self.node_id(&c.moving_from), self.node_id(&c.moving_to))),
+        }
+    }
+
+    fn missing_addrs(&self) -> bool {
+        self.addrs
+            .iter()
+            .enumerate()
+            .any(|(i, a)| a.is_none() && i as NodeId != self.local)
+    }
+}
+
 struct Attaching {
     token: Vec<u8>,
     volume: Option<pb::Volume>,
@@ -279,6 +311,15 @@ enum MetaWait {
         volume: String,
         sm_req: u64,
         chunks: Vec<u32>,
+    },
+    /// The target's read of its volume.
+    Refresh {
+        volume: String,
+        sm_req: u64,
+    },
+    /// Addresses of nodes the target learned of after it started (a move's destination).
+    Nodes {
+        volume: String,
     },
     Background,
 }
@@ -696,17 +737,21 @@ impl<D: BlockDevice> Engine<D> {
                 let Answer::ChangeIsr(r) = answer else { return };
                 rt.view.epoch = r.epoch;
                 for (c, m) in chunks.iter().zip(&r.chunks) {
+                    let meta = rt.chunk_meta(m);
                     if let Some(cm) = rt.view.chunks.get_mut(*c as usize) {
-                        cm.isr = m
-                            .isr
-                            .iter()
-                            .filter_map(|n| rt.nodes.iter().position(|x| x == n))
-                            .map(|i| i as NodeId)
-                            .collect();
-                        cm.isr_ver = m.isr_ver;
+                        *cm = meta;
                     }
                 }
                 let view = rt.view.clone();
+                if rt.missing_addrs() {
+                    self.meta_call(
+                        Call::ListNodes(pb::ListNodesRequest {}),
+                        MetaWait::Nodes {
+                            volume: volume.clone(),
+                        },
+                    );
+                }
+                let rt = self.targets.get_mut(&volume).expect("target");
                 let reply = if r.applied {
                     MetaReply::Applied { vol: 0, view }
                 } else {
@@ -714,6 +759,55 @@ impl<D: BlockDevice> Engine<D> {
                 };
                 rt.sm.on_meta(us, sm_req, &reply);
                 self.drain(now, &volume);
+            }
+            MetaWait::Refresh { volume, sm_req } => {
+                let us = self.us(now);
+                let Some(rt) = self.targets.get_mut(&volume) else {
+                    return;
+                };
+                // Without an answer the target's read times out, and it reads again later.
+                let Answer::GetVolume(r) = answer else { return };
+                let Some(v) = r.volume else { return };
+                let mut view = rt.view.clone();
+                view.epoch = v.epoch;
+                view.target = (!v.target.is_empty()).then(|| rt.node_id(&v.target));
+                view.chunks = v.chunks.iter().map(|c| rt.chunk_meta(c)).collect();
+                // Keep the newest view per chunk for Hello's chunk lists: the reply may be
+                // older than what an ISR change already showed.
+                if view.epoch == rt.view.epoch {
+                    for (cur, new) in rt.view.chunks.iter_mut().zip(&view.chunks) {
+                        if new.isr_ver > cur.isr_ver
+                            || (new.isr_ver == cur.isr_ver && new.moving != cur.moving)
+                        {
+                            *cur = new.clone();
+                        }
+                    }
+                }
+                if rt.missing_addrs() {
+                    self.meta_call(
+                        Call::ListNodes(pb::ListNodesRequest {}),
+                        MetaWait::Nodes {
+                            volume: volume.clone(),
+                        },
+                    );
+                }
+                let rt = self.targets.get_mut(&volume).expect("target");
+                rt.sm
+                    .on_meta(us, sm_req, &MetaReply::Applied { vol: 0, view });
+                self.drain(now, &volume);
+            }
+            MetaWait::Nodes { volume } => {
+                let Some(rt) = self.targets.get_mut(&volume) else {
+                    return;
+                };
+                let Answer::ListNodes(r) = answer else { return };
+                for (i, name) in rt.nodes.iter().enumerate() {
+                    if rt.addrs[i].is_none()
+                        && let Some(n) = r.nodes.iter().find(|n| &n.id == name)
+                    {
+                        rt.addrs[i] = n.address.parse().ok();
+                    }
+                }
             }
         }
     }
@@ -750,6 +844,8 @@ impl<D: BlockDevice> Engine<D> {
                 replicas: c.replicas.iter().map(|r| id(r, &mut nodes)).collect(),
                 isr: c.isr.iter().map(|r| id(r, &mut nodes)).collect(),
                 isr_ver: c.isr_ver,
+                moving: (!c.moving_from.is_empty())
+                    .then(|| (id(&c.moving_from, &mut nodes), id(&c.moving_to, &mut nodes))),
             })
             .collect();
         let all = a.nodes.unwrap_or_default();
@@ -884,6 +980,18 @@ impl<D: BlockDevice> Engine<D> {
         for o in outs {
             match o {
                 TOut::Send { to, msg } => self.send_from_target(now, volume, to, msg),
+                TOut::Meta {
+                    req,
+                    body: MetaRequest::Get { .. },
+                } => self.meta_call(
+                    Call::GetVolume(pb::GetVolumeRequest {
+                        id: volume.to_string(),
+                    }),
+                    MetaWait::Refresh {
+                        volume: volume.to_string(),
+                        sm_req: req,
+                    },
+                ),
                 TOut::Meta { req, body } => {
                     let MetaRequest::ChangeIsr { epoch, changes, .. } = body else {
                         continue;
@@ -912,6 +1020,13 @@ impl<D: BlockDevice> Engine<D> {
                                 chunk: c.chunk,
                                 expected_ver: c.expected_ver,
                                 new_isr: names(&c.new_isr),
+                                change_replicas: c.new_replicas.is_some(),
+                                new_replicas: c
+                                    .new_replicas
+                                    .iter()
+                                    .flatten()
+                                    .map(|n| rt.nodes[*n as usize].clone())
+                                    .collect(),
                             })
                             .collect(),
                     };

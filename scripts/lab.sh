@@ -71,6 +71,7 @@ cmd_create() {
         log "creating $vm on $host"
         upload_vm_files "$vm"
         ENV_VARS=$(host_env "$vm") run_on_host "$host" "$SCRIPTS/host/create-vm.sh"
+        touch "$LOCAL_STATE_DIR/$vm/created"
     done
     for vm in $(vms_of "${1:-all}"); do
         wait_for "SSH on $vm" 600 vssh "$vm" true
@@ -348,7 +349,7 @@ forward_rules() {
     if [[ $host == "$HOST_B" ]]; then
         rules+=("tcp/$REPL_PORT/$VM_B_IP/$REPL_PORT/$HOST_A_IP")
     fi
-    for vm in $(vms_of cluster); do
+    for vm in $(vms_of overlay); do
         [[ $(vmvar "$vm" HOST) == "$host" ]] || continue
         other=$HOST_A_IP
         [[ $host == "$HOST_A" ]] && other=$HOST_B_IP
@@ -407,16 +408,16 @@ cmd_mesh() {
     declare -A pub
     case "$action" in
         up)
-            for vm in $(vms_of cluster); do
+            for vm in $(vms_of overlay); do
                 pub[$vm]=$(run_on_vm "$vm" "$SCRIPTS/guest/wg.sh" key | tail -1)
             done
-            for vm in $(vms_of cluster); do
+            for vm in $(vms_of overlay); do
                 conf="[Interface]
 Address = $(vmvar "$vm" WG)/24
 ListenPort = $WG_PORT
 PostUp = wg set %i private-key /etc/wireguard/wg0.key
 "
-                for peer in $(vms_of cluster); do
+                for peer in $(vms_of overlay); do
                     [[ $peer == "$vm" ]] && continue
                     conf+="
 [Peer]
@@ -433,8 +434,8 @@ PersistentKeepalive = 25
             ;;
         check)
             local bad=0
-            for vm in $(vms_of cluster); do
-                for peer in $(vms_of cluster); do
+            for vm in $(vms_of overlay); do
+                for peer in $(vms_of overlay); do
                     [[ $peer == "$vm" ]] && continue
                     if vssh "$vm" "ping -c 3 -i 0.3 -W 2 -q $(vmvar "$peer" WG) >/dev/null"; then
                         log "$vm -> $peer ($(vmvar "$peer" WG)): ok"
@@ -447,7 +448,7 @@ PersistentKeepalive = 25
             ((bad == 0)) || die "overlay incomplete (make net-setup? make mesh-up?)"
             ;;
         down | status)
-            for vm in $(vms_of cluster); do run_on_vm "$vm" "$SCRIPTS/guest/wg.sh" "$action"; done
+            for vm in $(vms_of overlay); do run_on_vm "$vm" "$SCRIPTS/guest/wg.sh" "$action"; done
             ;;
         *) die "usage: mesh up|down|status|check" ;;
     esac
@@ -1115,6 +1116,101 @@ csi_failover() {
     }
 }
 
+# --- Phase 1 step 6: the node agent's disks, and drains ---
+
+# agent disks|claim VM: builds flaminio-agent for Linux, installs it, and runs it in the VM.
+cmd_agent() {
+    local action=${1:-disks} vm bin="$LOCAL_STATE_DIR/bin/flaminio-agent"
+    vm=$(vms_of "${2:-c}")
+    (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$bin" ./control/cmd/flaminio-agent)
+    vssh "$vm" 'f=$(mktemp) && cat >"$f" && sudo install -m 755 "$f" /usr/local/bin/flaminio-agent; rc=$?; rm -f "$f"; exit $rc' <"$bin"
+    run_on_vm "$vm" "$SCRIPTS/guest/agent.sh" "$action"
+}
+
+# fl-c from nothing to a running data node: VM, overlay, identities, build, its disk claimed by
+# the node agent, and its node (replicas only).
+cmd_data_node_up() {
+    local dev
+    cmd_create c
+    cmd_provision c
+    cmd_net_setup
+    cmd_mesh up
+    cmd_pki issue c
+    cmd_deploy c
+    log "$VM_C's devices, as the node agent sees them:"
+    cmd_agent disks c
+    dev=$(cmd_agent claim c | tail -1)
+    [[ $dev == /dev/* ]] || die "the node agent claimed no disk on $VM_C"
+    log "$VM_C's data disk: $dev"
+    vssh "$VM_C" "sudo modprobe ublk_drv"
+    ENV_VARS="$(node_env "$VM_C") DEVICE=$dev" run_on_vm "$VM_C" "$SCRIPTS/guest/node.sh" up
+}
+
+# Replica nodes on fl-c too, if it exists (it is started like the others, never reformatted).
+ensure_node_c() {
+    [[ -f $LOCAL_STATE_DIR/$VM_C/created ]] || die "no $VM_C: make data-node-up"
+    if ! vssh "$VM_C" "systemctl is-active --quiet flaminio-node"; then
+        local dev
+        dev=$(cmd_agent claim c | tail -1)
+        ENV_VARS="$(node_env "$VM_C") DEVICE=$dev" run_on_vm "$VM_C" "$SCRIPTS/guest/node.sh" up
+    fi
+}
+
+# Chunks of the test volume with a replica on node $1.
+chunks_on() {
+    metactl "$VM_A" "$VM_A" get "$VOL" | jq --arg n "$1" '[.volume.chunks[] | select(.replicas | index($n))] | length'
+}
+
+# Step 6: fio writes and verifies on the target (fl-a) while every replica on fl-b moves to
+# fl-c. Then fl-c alone must serve every byte: fl-a's and fl-b's nodes stop, the volume fails
+# over to fl-c, and fio verifies there. Finally the replicas move back (fl-c drained to fl-b),
+# which restores the usual layout and drains a second time.
+cmd_drain_test() {
+    local load_pid rc=0 start
+    ensure_nodes
+    ensure_node_c
+    cmd_vol attach a
+    log "waiting for full ISRs before the drain"
+    wait_isr_full
+    log "$VOL: $(chunks_on "$VM_B") chunks on $VM_B, $(chunks_on "$VM_C") on $VM_C"
+
+    log "verified write load on $VM_A; draining $VM_B into $VM_C meanwhile"
+    ENV_VARS="DEV=/dev/ublkb1" run_detached "$VM_A" "$SCRIPTS/guest/write-load.sh" &
+    load_pid=$!
+    sleep 5
+    start=$SECONDS
+    metactl "$VM_A" "$VM_A" drain "$VM_B" >/dev/null
+    log "$VM_B drained in $((SECONDS - start)) s"
+    wait "$load_pid" || rc=$?
+    ((rc == 0)) || die "write load failed (exit $rc): writes must not fail during a drain"
+    [[ $(chunks_on "$VM_B") == 0 ]] || die "$VM_B still holds replicas of $VOL"
+    wait_isr_full 300
+    cmd_vol show
+
+    log "nothing may depend on $VM_B now: stopping it and $VM_A, failing over to $VM_C"
+    cmd_node down b
+    cmd_node down a
+    cmd_vol attach c
+    ENV_VARS="DEV=/dev/ublkb1 VERIFY_ONLY=1" run_detached "$VM_C" "$SCRIPTS/guest/write-load.sh" ||
+        die "verification on $VM_C failed"
+    log "$VM_C served every byte from its own replicas"
+
+    log "restoring: nodes back, target on $VM_A, replicas moved from $VM_C back to $VM_B"
+    ENV_VARS="VOLUME=$VOL" run_on_vm "$VM_C" "$SCRIPTS/guest/node.sh" detach || true
+    cmd_node up a
+    cmd_node up b
+    metactl "$VM_A" "$VM_A" undrain "$VM_B" >/dev/null
+    cmd_vol attach a
+    wait_isr_full
+    start=$SECONDS
+    metactl "$VM_A" "$VM_A" drain "$VM_C" >/dev/null
+    log "$VM_C drained in $((SECONDS - start)) s"
+    metactl "$VM_A" "$VM_A" undrain "$VM_C" >/dev/null
+    wait_isr_full 300
+    cmd_vol show
+    log "OK: drained under a verified write load, $VM_C alone served every byte, and the replicas moved back"
+}
+
 usage() {
     cat <<USAGE
 usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; cluster: a, b, w)
@@ -1153,6 +1249,9 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   k8s ACTION   k3s: up (server on $VM_W, agents on a and b) | down | status | smoke | kubeconfig | tunnel | uninstall
   kubectl ARGS kubectl on $VM_W
   csi ACTION   CSI driver: deploy (build, import, apply) | status | logs | test | undeploy
+  agent ACTION [VM]  node agent: disks (the claim policy's verdict on each device) | claim (default VM c)
+  data-node-up fl-c, a third data node: VM, overlay, identities, build, disk claimed by the agent, node
+  drain-test   verified writes while $VM_B is drained into $VM_C; $VM_C alone then serves every byte
   partition    $VM_A (the target) cut off the overlay; $VM_B takes over; no stale reads, no lost writes
   pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)
   ssh|console  interactive shell or serial console (default: a)
@@ -1197,6 +1296,9 @@ case "$cmd" in
     vol) cmd_vol "$@" ;;
     node-fault) cmd_node_fault ;;
     partition) cmd_partition ;;
+    agent) cmd_agent "$@" ;;
+    data-node-up) cmd_data_node_up ;;
+    drain-test) cmd_drain_test ;;
     k8s) cmd_k8s "$@" ;;
     kubectl) kubectl_w "$@" ;;
     csi) cmd_csi "$@" ;;

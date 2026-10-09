@@ -12,6 +12,7 @@ type vectorChunk struct {
 	Replicas []string `json:"replicas"`
 	ISR      []string `json:"isr"`
 	ISRVer   uint64   `json:"isr_ver"`
+	Moving   []string `json:"moving"`
 }
 
 type vector struct {
@@ -20,10 +21,14 @@ type vector struct {
 	Placement [][]string `json:"placement"`
 	Node      string     `json:"node"`
 	Epoch     uint64     `json:"epoch"`
+	Chunk     uint32     `json:"chunk"`
+	From      string     `json:"from"`
+	To        string     `json:"to"`
 	Changes   []struct {
 		Chunk       uint32   `json:"chunk"`
 		ExpectedVer uint64   `json:"expected_ver"`
 		NewISR      []string `json:"new_isr"`
+		NewReplicas []string `json:"new_replicas"`
 	} `json:"changes"`
 	Applied bool `json:"applied"`
 	After   struct {
@@ -56,11 +61,20 @@ func TestVectors(t *testing.T) {
 			continue
 		case "attach":
 			v.Attach(x.Node)
+		case "move":
+			ok := CheckMove(&v.Chunks[x.Chunk], x.From, x.To)
+			if ok != x.Applied {
+				t.Fatalf("line %d: move applied %v, Rust model says %v", line, ok, x.Applied)
+			}
+			if ok {
+				ApplyMove(&v.Chunks[x.Chunk], x.From, x.To)
+			}
 		case "change_isr":
 			changes := make([]IsrChange, len(x.Changes))
 			named := make([]Chunk, len(x.Changes))
 			for i, c := range x.Changes {
-				changes[i] = IsrChange{Chunk: c.Chunk, ExpectedVer: c.ExpectedVer, NewISR: c.NewISR}
+				changes[i] = IsrChange{Chunk: c.Chunk, ExpectedVer: c.ExpectedVer, NewISR: c.NewISR,
+					ChangeReplicas: c.NewReplicas != nil, NewReplicas: c.NewReplicas}
 				named[i] = v.Chunks[c.Chunk]
 			}
 			ok := CheckIsrChange(&v.Header, named, x.Epoch, changes)
@@ -84,7 +98,12 @@ func TestVectors(t *testing.T) {
 		}
 		for i, c := range x.After.Chunks {
 			got := v.Chunks[i]
-			if !slices.Equal(got.ISR, c.ISR) || got.ISRVer != c.ISRVer || !slices.Equal(got.Replicas, c.Replicas) {
+			var moving []string
+			if got.Moving != nil {
+				moving = []string{got.Moving.From, got.Moving.To}
+			}
+			if !slices.Equal(got.ISR, c.ISR) || got.ISRVer != c.ISRVer || !slices.Equal(got.Replicas, c.Replicas) ||
+				!slices.Equal(moving, c.Moving) {
 				t.Fatalf("line %d chunk %d: %+v, want %+v", line, i, got, c)
 			}
 		}

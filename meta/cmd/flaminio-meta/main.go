@@ -8,6 +8,10 @@
 //	flaminio-meta [--server host:7400] get <volume>
 //	flaminio-meta [--server host:7400] attach <volume> <node> [unless-target|only-if-target]
 //	flaminio-meta [--server host:7400] delete <volume>
+//	flaminio-meta [--server host:7400] volumes
+//	flaminio-meta [--server host:7400] move <volume> <chunk> <from> <to>
+//	flaminio-meta [--server host:7400] drain <node> [timeout]     (default 30m; waits until done)
+//	flaminio-meta [--server host:7400] undrain <node>
 //
 // Sizes take K, M, G and T suffixes (powers of 1024).
 //
@@ -43,6 +47,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"github.com/flaminio/flaminio/control/drain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/service"
 	"github.com/flaminio/flaminio/pkg/pki"
@@ -202,7 +207,7 @@ func client(args []string) error {
 	_ = fs.Parse(args)
 	args = fs.Args()
 	if len(args) == 0 {
-		return fmt.Errorf("usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete ...")
+		return fmt.Errorf("usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete|volumes|move|drain|undrain ...")
 	}
 	creds := insecure.NewCredentials()
 	if files.Cert != "" {
@@ -218,7 +223,16 @@ func client(args []string) error {
 	}
 	defer conn.Close()
 	c := metav1.NewMetadataServiceClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	timeout := 30 * time.Second
+	if args[0] == "drain" {
+		timeout = 30 * time.Minute
+		if len(args) > 2 {
+			if timeout, err = time.ParseDuration(args[2]); err != nil {
+				return err
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	need := func(n int) error {
@@ -284,6 +298,27 @@ func client(args []string) error {
 	case "delete":
 		if err = need(1); err == nil {
 			out, err = c.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: args[1]})
+		}
+	case "volumes":
+		out, err = c.ListVolumes(ctx, &metav1.ListVolumesRequest{})
+	case "move":
+		if err = need(4); err == nil {
+			var chunk uint64
+			if chunk, err = strconv.ParseUint(args[2], 10, 32); err == nil {
+				out, err = c.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: args[1], Chunk: uint32(chunk), From: args[3], To: args[4]})
+			}
+		}
+	case "drain":
+		if err = need(1); err == nil {
+			start := time.Now()
+			err = drain.Run(ctx, c, args[1], 5*time.Second, func(p drain.Progress) {
+				fmt.Fprintf(os.Stderr, "%4.0fs %s: %s\n", time.Since(start).Seconds(), args[1], p)
+			})
+			out = &metav1.DrainNodeResponse{}
+		}
+	case "undrain":
+		if err = need(1); err == nil {
+			out, err = c.DrainNode(ctx, &metav1.DrainNodeRequest{Node: args[1], Draining: false})
 		}
 	default:
 		err = fmt.Errorf("unknown command %q", args[0])

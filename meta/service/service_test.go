@@ -321,3 +321,100 @@ func TestGRPC(t *testing.T) {
 		t.Fatalf("bad id: %v", err)
 	}
 }
+
+// TestMoveAndDrain requests a move, carries it out as the target would (add, join, drop),
+// and checks that a draining node gets no new volumes.
+func TestMoveAndDrain(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		ctx := context.Background()
+		addNodes(t, s, "a", "b")
+		if _, err := create(s, "v", 1, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		addNodes(t, s, "c")
+		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if l, err := s.ListVolumes(ctx, &metav1.ListVolumesRequest{}); err != nil || len(l.Ids) != 1 || l.Ids[0] != "v" {
+			t.Fatalf("volumes: %v %v", l, err)
+		}
+		move := func(from, to string) bool {
+			t.Helper()
+			r, err := s.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: "v", Chunk: 0, From: from, To: to})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return r.Applied
+		}
+		if move("c", "b") || move("a", "b") {
+			t.Fatal("a move from a node without a replica, or to one with a replica, was applied")
+		}
+		if _, err := s.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: "v", From: "b", To: "nope"}); code(err) != codes.NotFound {
+			t.Fatalf("a move to an unregistered node: %v", err)
+		}
+		if !move("b", "c") || move("a", "c") {
+			t.Fatal("one move, then no second one while it is pending")
+		}
+		g, _ := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
+		c0 := g.Volume.Chunks[0]
+		if c0.MovingFrom != "b" || c0.MovingTo != "c" || c0.IsrVer != 0 {
+			t.Fatalf("after the request: %+v", c0)
+		}
+		step := func(ver uint64, isr []string, replicas []string) bool {
+			t.Helper()
+			ch := &metav1.IsrChange{Chunk: 0, ExpectedVer: ver, NewIsr: isr}
+			if replicas != nil {
+				ch.ChangeReplicas, ch.NewReplicas = true, replicas
+			}
+			r, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: 1, Changes: []*metav1.IsrChange{ch}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return r.Applied
+		}
+		rep := c0.Replicas // placement order
+		if step(0, []string{"a"}, []string{"a"}) {
+			t.Fatal("the source dropped before the destination joined")
+		}
+		if !step(0, c0.Isr, append(append([]string{}, rep...), "c")) {
+			t.Fatal("add the destination")
+		}
+		if !step(1, []string{"a", "b", "c"}, nil) {
+			t.Fatal("the destination joins")
+		}
+		without := []string{}
+		for _, n := range append(append([]string{}, rep...), "c") {
+			if n != "b" {
+				without = append(without, n)
+			}
+		}
+		if !step(2, []string{"a", "c"}, without) {
+			t.Fatal("drop the source")
+		}
+		g, _ = s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
+		if c := g.Volume.Chunks[0]; c.MovingFrom != "" || len(c.Replicas) != 2 || c.IsrVer != 3 {
+			t.Fatalf("after the move: %+v", c)
+		}
+
+		// A draining node gets no new volumes, and stays draining when it registers again.
+		if _, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "c", Draining: true}); err != nil {
+			t.Fatal(err)
+		}
+		addNodes(t, s, "c")
+		if _, err := create(s, "w", 4, 3, 1); code(err) != codes.FailedPrecondition {
+			t.Fatalf("3 replicas with a draining node among 3: %v", err)
+		}
+		n, _ := s.ListNodes(ctx, &metav1.ListNodesRequest{})
+		for _, x := range n.Nodes {
+			if x.Draining != (x.Id == "c") {
+				t.Fatalf("draining flags: %v", n.Nodes)
+			}
+		}
+		if _, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "c", Draining: false}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := create(s, "w", 4, 3, 1); err != nil {
+			t.Fatalf("after undrain: %v", err)
+		}
+	})
+}

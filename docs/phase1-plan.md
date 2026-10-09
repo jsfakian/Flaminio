@@ -29,7 +29,7 @@ machine into real I/O.
 | 3 ✅ | **Identity and mTLS for the control plane**: a development CA; mTLS on etcd and the metadata service, with per-method authorization; capability tokens signed by the metadata service. Replication TLS and token checks in the replica move to step 4, which replaces the MVP's replication transport | Lab | Unauthenticated and unauthorized callers are refused; tokens verify |
 | 4 | **Data plane on the protocol core**:<br>• `flaminio-io` hosts many volumes and chunk replicas;<br>• the target uses placement and ISR from the metadata service, and the step-1 state machine;<br>• one heartbeat per node pair;<br>• replication over mutual TLS (step-3 identities), with the replica checking capability tokens | Lab | • The MVP's fault test passes, with ISR shrink and expand going through the metadata service.<br>• The replica refuses unauthenticated peers and stale tokens.<br>• Read results unchanged (reads stay local) |
 | 5 ✅ | **Failover in the lab**: attach on the other VM with an epoch bump, fencing and reconciliation; partition tests (the old target must neither write nor read stale data) | Lab | Scripted failover and partition tests pass, and the data is verified |
-| 6 | **Node agent**: device discovery, the claim policy (never claim a device with a signature), format, drain by moving chunk replicas | Lab | Adding and draining a disk while fio runs, with the data verified |
+| 6 ✅ | **Node agent**: device discovery, the claim policy (never claim a device with a signature), format, drain by moving chunk replicas | Lab | Adding and draining a disk while fio runs, with the data verified |
 | 7 (mostly ✅) | **Kubernetes**: k3s on the lab VMs, the CSI driver (provision, attach, stage, publish; block and filesystem), placement controller, failover controller | Lab | A pod with a PVC runs fio. Killing its node moves it to the other node with its data intact |
 | 8 | **Phase-1 benchmark and chaos run** | Lab | Read results for a pod against the raw disk; failover time measured; chaos run passes |
 
@@ -82,6 +82,49 @@ simulator checked. It comes in five parts, each committed on its own:
   4. The target gets a "placed" reply and checks the lease before completing.
 
   Ticks run on the 10 ms timer only, not on every I/O event.
+
+## Step 6 result (lab, 2026-10-09)
+
+`make drain-test` passes: a node is drained while fio writes and verifies, and the destination
+then serves every byte alone.
+
+**Moves in the protocol first.** A chunk's replica set used to be fixed at creation. Draining
+needs it to change while the volume serves I/O, so moves went into the verified core before any
+lab code ([protocol](replication-protocol.md) §7, moves):
+- an administrator only *requests* a move (`MoveReplica`);
+- the target carries it out under its epoch:
+  1. it adds the destination, outside the ISR;
+  2. it resyncs the destination, which then joins the ISR;
+  3. it drops the source.
+- In the simulator, a dropped source's copy is deleted at once. Two new mutations (a move
+  without a resync, a drop before the join) are caught, and 220 000 seeds pass.
+- The simulator found two bugs in the first version: a drop that commits under pending
+  removals could leave the ISR stuck below its minimum; and the volume poll delayed urgent
+  ISR changes.
+
+**Node agent** (`flaminio-agent`): device discovery and the claim policy. It refuses any
+device that holds anything: a known signature, or any non-zero byte in its first or last MiB.
+It uses an existing Flaminio disk as it is, and formats the one blank disk matching its
+selector. The policy's unit tests cover every kind of refusal.
+
+**Lab:**
+- A third data VM, fl-c (`make data-node-up`). Its agent refused the root disk and the CD-ROM,
+  and claimed and formatted the blank data disk.
+- `vol1` (16 GiB, 64 chunks, RF 2) with its target on fl-a, under a verified write load (fio,
+  4 GiB of random 64 KiB writes with checksums).
+
+| Test | Result |
+|---|---|
+| `flaminio-meta drain fl-b`, fl-b → fl-c, under the write load | all 64 chunks moved in about 115 s; **fio verified all 4096 MiB, 0 errors** |
+| fl-a's and fl-b's nodes stopped; vol1 failed over to fl-c | **fio verified all 4096 MiB** from fl-c's replicas alone |
+| `drain fl-c`, back to fl-b (16 GiB over 1 GbE) | 157 s, about the link's rate |
+
+**Found on the way:**
+- A volume without a target cannot be drained: nothing carries its moves out. A leftover
+  1 GiB volume from an interrupted `meta-smoke` run held the first drain until it was deleted.
+  The drain reports such volumes, and they move at their next attach.
+- A drained node keeps its old chunks on disk: that is replica garbage collection
+  ([follow-ups](followups.md) item 8).
 
 ## Step 7 result so far (lab, 2026-10-09)
 

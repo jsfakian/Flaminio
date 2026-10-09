@@ -9,7 +9,9 @@
 //! - partitions of single links or whole nodes;
 //! - metadata outages;
 //! - message delay spikes;
-//! - failovers at random moments.
+//! - failovers at random moments;
+//! - requested replica moves (drain). When a move drops its source, the source's copy of the
+//!   chunk is deleted at once: nothing may still depend on it.
 //!
 //! During the **settle** phase it heals everything and waits for the current target to finish
 //! resyncing. Then it reads every block and checks the run:
@@ -108,6 +110,8 @@ pub struct Config {
     pub detect: (u64, u64),
     /// Percent of client operations that are reads.
     pub read_pct: u64,
+    /// Percent chance that a controller round requests a replica move.
+    pub move_pct: u64,
 }
 
 impl Config {
@@ -133,6 +137,7 @@ impl Config {
                 request_timeout: r.range(1000, 3000) * MS,
                 reconnect: r.range(100, 800) * MS,
                 meta_timeout: r.range(500, 2000) * MS,
+                refresh: r.range(500, 3000) * MS,
             },
             chaos: r.range(20, 60) * SEC,
             settle_limit: 600 * SEC,
@@ -143,6 +148,7 @@ impl Config {
             client_every: r.pick(&[(200, 5 * MS), (MS, 30 * MS), (5 * MS, 150 * MS)]),
             detect: r.pick(&[(100 * MS, 2 * SEC), (SEC, 10 * SEC)]),
             read_pct: r.pick(&[50, 80, 95]),
+            move_pct: r.pick(&[0, 10, 30]),
         }
     }
 }
@@ -273,7 +279,6 @@ pub struct Sim {
     nodes: Vec<Node>,
     meta: Metadata,
     meta_up: bool,
-    placement: Vec<Vec<NodeId>>,
     down_links: BTreeSet<(NodeId, NodeId)>,
     /// Links with high latency for a while (gray failure): range of extra delay.
     slow_links: BTreeMap<(NodeId, NodeId), (u64, u64)>,
@@ -324,7 +329,7 @@ impl Sim {
         let drift = cfg.timing.drift_ppm;
         let nodes = (0..cfg.nodes)
             .map(|n| {
-                let mut replica = Replica::default();
+                let mut replica = Replica::with_chunk_size(cfg.blocks_per_chunk);
                 for (c, r) in placement.iter().enumerate() {
                     if r.contains(&n) {
                         replica.create_chunk(VOL, c as ChunkIdx, cfg.blocks_per_chunk);
@@ -354,7 +359,6 @@ impl Sim {
             nodes,
             meta,
             meta_up: true,
-            placement,
             down_links: BTreeSet::new(),
             slow_links: BTreeMap::new(),
             last_delivery: BTreeMap::new(),
@@ -651,7 +655,30 @@ impl Sim {
                 self.after(p.to);
             }
             Body::MetaReq { req, body } => {
+                let before: Vec<Vec<NodeId>> = self
+                    .meta
+                    .volume(VOL)
+                    .expect("volume")
+                    .chunks
+                    .iter()
+                    .map(|c| c.replicas.clone())
+                    .collect();
                 let reply = self.meta.handle(&body);
+                // A move dropped its source: that copy is gone for good.
+                let after = &self.meta.volume(VOL).expect("volume").chunks;
+                for (c, old) in before.iter().enumerate() {
+                    for &n in old.iter().filter(|n| !after[c].replicas.contains(n)) {
+                        if self.trace.is_some() {
+                            eprintln!(
+                                "{:>10} chunk {c} moved off node {n}: deleted there",
+                                self.now
+                            );
+                        }
+                        self.nodes[n as usize]
+                            .replica
+                            .remove_chunk(VOL, c as ChunkIdx);
+                    }
+                }
                 if self.trace.is_some() {
                     eprintln!(
                         "{:>10} meta from {}: {body:?} -> {reply:?}",
@@ -990,6 +1017,9 @@ impl Sim {
             return;
         }
         let epoch = self.meta.volume(VOL).expect("volume").epoch;
+        if self.chaos && self.rng.pct(self.cfg.move_pct) {
+            self.request_move();
+        }
         if !self.target_alive() {
             let (lo, hi) = self.cfg.detect;
             let at = self.now
@@ -1001,6 +1031,35 @@ impl Sim {
             self.at(at, Ev::Failover { epoch });
         } else if self.chaos && self.rng.pct(self.cfg.failover_pct) {
             self.at(self.now, Ev::Failover { epoch });
+        }
+    }
+
+    /// Requests a move of a random chunk's replica to a node without one (drain).
+    fn request_move(&mut self) {
+        let chunk = self.rng.range(0, self.cfg.chunks as u64 - 1) as ChunkIdx;
+        let replicas = self.meta.volume(VOL).expect("volume").chunks[chunk as usize]
+            .replicas
+            .clone();
+        let spare: Vec<NodeId> = (0..self.cfg.nodes)
+            .filter(|n| !replicas.contains(n))
+            .collect();
+        if spare.is_empty() {
+            return;
+        }
+        let from = self.rng.pick(&replicas);
+        let to = self.rng.pick(&spare);
+        let reply = self.meta.handle(&MetaRequest::MoveReplica {
+            vol: VOL,
+            chunk,
+            from,
+            to,
+        });
+        if self.trace.is_some() {
+            eprintln!(
+                "{:>10} move chunk {chunk} from {from} to {to}: {}",
+                self.now,
+                matches!(reply, MetaReply::Applied { .. })
+            );
         }
     }
 
@@ -1070,7 +1129,8 @@ impl Sim {
         for c in 0..self.cfg.chunks {
             for b in 0..self.cfg.blocks_per_chunk {
                 self.check_block(c, b)?;
-                let values: BTreeSet<Option<Value>> = self.placement[c as usize]
+                let values: BTreeSet<Option<Value>> = v.chunks[c as usize]
+                    .replicas
                     .iter()
                     .map(|&n| self.nodes[n as usize].replica.block(VOL, c, b))
                     .collect();

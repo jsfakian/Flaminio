@@ -31,11 +31,14 @@ const (
 	MetadataService_RegisterNode_FullMethodName  = "/flaminio.meta.v1.MetadataService/RegisterNode"
 	MetadataService_NodeHeartbeat_FullMethodName = "/flaminio.meta.v1.MetadataService/NodeHeartbeat"
 	MetadataService_ListNodes_FullMethodName     = "/flaminio.meta.v1.MetadataService/ListNodes"
+	MetadataService_DrainNode_FullMethodName     = "/flaminio.meta.v1.MetadataService/DrainNode"
 	MetadataService_CreateVolume_FullMethodName  = "/flaminio.meta.v1.MetadataService/CreateVolume"
 	MetadataService_GetVolume_FullMethodName     = "/flaminio.meta.v1.MetadataService/GetVolume"
+	MetadataService_ListVolumes_FullMethodName   = "/flaminio.meta.v1.MetadataService/ListVolumes"
 	MetadataService_DeleteVolume_FullMethodName  = "/flaminio.meta.v1.MetadataService/DeleteVolume"
 	MetadataService_Attach_FullMethodName        = "/flaminio.meta.v1.MetadataService/Attach"
 	MetadataService_ChangeIsr_FullMethodName     = "/flaminio.meta.v1.MetadataService/ChangeIsr"
+	MetadataService_MoveReplica_FullMethodName   = "/flaminio.meta.v1.MetadataService/MoveReplica"
 )
 
 // MetadataServiceClient is the client API for MetadataService service.
@@ -50,11 +53,16 @@ type MetadataServiceClient interface {
 	NodeHeartbeat(ctx context.Context, in *NodeHeartbeatRequest, opts ...grpc.CallOption) (*NodeHeartbeatResponse, error)
 	// Caller: any authenticated identity.
 	ListNodes(ctx context.Context, in *ListNodesRequest, opts ...grpc.CallOption) (*ListNodesResponse, error)
+	// Marks a node as draining, or not: new volumes are not placed on a draining node. Moving its
+	// replicas away is up to the caller (MoveReplica). Caller: an administrator.
+	DrainNode(ctx context.Context, in *DrainNodeRequest, opts ...grpc.CallOption) (*DrainNodeResponse, error)
 	// Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
 	// administrator.
 	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
 	// Caller: any authenticated identity.
 	GetVolume(ctx context.Context, in *GetVolumeRequest, opts ...grpc.CallOption) (*GetVolumeResponse, error)
+	// Caller: any authenticated identity.
+	ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error)
 	// Deletes a volume. The caller makes sure that no target serves it any more. Caller: an
 	// administrator.
 	DeleteVolume(ctx context.Context, in *DeleteVolumeRequest, opts ...grpc.CallOption) (*DeleteVolumeResponse, error)
@@ -62,9 +70,14 @@ type MetadataServiceClient interface {
 	// Caller: an administrator (the CSI controller, the failover controller); or, with
 	// only_if_target, the node's agent for itself.
 	Attach(ctx context.Context, in *AttachRequest, opts ...grpc.CallOption) (*AttachResponse, error)
-	// Changes ISRs atomically, only under the current epoch and the expected ISR versions.
-	// Caller: the data plane of the volume's current target node.
+	// Changes ISRs atomically, only under the current epoch and the expected ISR versions. It
+	// also carries out requested moves (change_replicas). Caller: the data plane of the volume's
+	// current target node.
 	ChangeIsr(ctx context.Context, in *ChangeIsrRequest, opts ...grpc.CallOption) (*ChangeIsrResponse, error)
+	// Requests that a chunk's replica move from one node to another. Only the request is
+	// recorded: the volume's target carries it out, under its epoch, with ChangeIsr
+	// (docs/replication-protocol.md §7, moves). Caller: an administrator.
+	MoveReplica(ctx context.Context, in *MoveReplicaRequest, opts ...grpc.CallOption) (*MoveReplicaResponse, error)
 }
 
 type metadataServiceClient struct {
@@ -105,6 +118,16 @@ func (c *metadataServiceClient) ListNodes(ctx context.Context, in *ListNodesRequ
 	return out, nil
 }
 
+func (c *metadataServiceClient) DrainNode(ctx context.Context, in *DrainNodeRequest, opts ...grpc.CallOption) (*DrainNodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DrainNodeResponse)
+	err := c.cc.Invoke(ctx, MetadataService_DrainNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *metadataServiceClient) CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateVolumeResponse)
@@ -119,6 +142,16 @@ func (c *metadataServiceClient) GetVolume(ctx context.Context, in *GetVolumeRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetVolumeResponse)
 	err := c.cc.Invoke(ctx, MetadataService_GetVolume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *metadataServiceClient) ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListVolumesResponse)
+	err := c.cc.Invoke(ctx, MetadataService_ListVolumes_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +188,16 @@ func (c *metadataServiceClient) ChangeIsr(ctx context.Context, in *ChangeIsrRequ
 	return out, nil
 }
 
+func (c *metadataServiceClient) MoveReplica(ctx context.Context, in *MoveReplicaRequest, opts ...grpc.CallOption) (*MoveReplicaResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MoveReplicaResponse)
+	err := c.cc.Invoke(ctx, MetadataService_MoveReplica_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MetadataServiceServer is the server API for MetadataService service.
 // All implementations must embed UnimplementedMetadataServiceServer
 // for forward compatibility.
@@ -167,11 +210,16 @@ type MetadataServiceServer interface {
 	NodeHeartbeat(context.Context, *NodeHeartbeatRequest) (*NodeHeartbeatResponse, error)
 	// Caller: any authenticated identity.
 	ListNodes(context.Context, *ListNodesRequest) (*ListNodesResponse, error)
+	// Marks a node as draining, or not: new volumes are not placed on a draining node. Moving its
+	// replicas away is up to the caller (MoveReplica). Caller: an administrator.
+	DrainNode(context.Context, *DrainNodeRequest) (*DrainNodeResponse, error)
 	// Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
 	// administrator.
 	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
 	// Caller: any authenticated identity.
 	GetVolume(context.Context, *GetVolumeRequest) (*GetVolumeResponse, error)
+	// Caller: any authenticated identity.
+	ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error)
 	// Deletes a volume. The caller makes sure that no target serves it any more. Caller: an
 	// administrator.
 	DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error)
@@ -179,9 +227,14 @@ type MetadataServiceServer interface {
 	// Caller: an administrator (the CSI controller, the failover controller); or, with
 	// only_if_target, the node's agent for itself.
 	Attach(context.Context, *AttachRequest) (*AttachResponse, error)
-	// Changes ISRs atomically, only under the current epoch and the expected ISR versions.
-	// Caller: the data plane of the volume's current target node.
+	// Changes ISRs atomically, only under the current epoch and the expected ISR versions. It
+	// also carries out requested moves (change_replicas). Caller: the data plane of the volume's
+	// current target node.
 	ChangeIsr(context.Context, *ChangeIsrRequest) (*ChangeIsrResponse, error)
+	// Requests that a chunk's replica move from one node to another. Only the request is
+	// recorded: the volume's target carries it out, under its epoch, with ChangeIsr
+	// (docs/replication-protocol.md §7, moves). Caller: an administrator.
+	MoveReplica(context.Context, *MoveReplicaRequest) (*MoveReplicaResponse, error)
 	mustEmbedUnimplementedMetadataServiceServer()
 }
 
@@ -201,11 +254,17 @@ func (UnimplementedMetadataServiceServer) NodeHeartbeat(context.Context, *NodeHe
 func (UnimplementedMetadataServiceServer) ListNodes(context.Context, *ListNodesRequest) (*ListNodesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListNodes not implemented")
 }
+func (UnimplementedMetadataServiceServer) DrainNode(context.Context, *DrainNodeRequest) (*DrainNodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DrainNode not implemented")
+}
 func (UnimplementedMetadataServiceServer) CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateVolume not implemented")
 }
 func (UnimplementedMetadataServiceServer) GetVolume(context.Context, *GetVolumeRequest) (*GetVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetVolume not implemented")
+}
+func (UnimplementedMetadataServiceServer) ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListVolumes not implemented")
 }
 func (UnimplementedMetadataServiceServer) DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteVolume not implemented")
@@ -215,6 +274,9 @@ func (UnimplementedMetadataServiceServer) Attach(context.Context, *AttachRequest
 }
 func (UnimplementedMetadataServiceServer) ChangeIsr(context.Context, *ChangeIsrRequest) (*ChangeIsrResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ChangeIsr not implemented")
+}
+func (UnimplementedMetadataServiceServer) MoveReplica(context.Context, *MoveReplicaRequest) (*MoveReplicaResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method MoveReplica not implemented")
 }
 func (UnimplementedMetadataServiceServer) mustEmbedUnimplementedMetadataServiceServer() {}
 func (UnimplementedMetadataServiceServer) testEmbeddedByValue()                         {}
@@ -291,6 +353,24 @@ func _MetadataService_ListNodes_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MetadataService_DrainNode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DrainNodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetadataServiceServer).DrainNode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetadataService_DrainNode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetadataServiceServer).DrainNode(ctx, req.(*DrainNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MetadataService_CreateVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateVolumeRequest)
 	if err := dec(in); err != nil {
@@ -323,6 +403,24 @@ func _MetadataService_GetVolume_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(MetadataServiceServer).GetVolume(ctx, req.(*GetVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MetadataService_ListVolumes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListVolumesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetadataServiceServer).ListVolumes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetadataService_ListVolumes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetadataServiceServer).ListVolumes(ctx, req.(*ListVolumesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -381,6 +479,24 @@ func _MetadataService_ChangeIsr_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MetadataService_MoveReplica_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MoveReplicaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetadataServiceServer).MoveReplica(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetadataService_MoveReplica_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetadataServiceServer).MoveReplica(ctx, req.(*MoveReplicaRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MetadataService_ServiceDesc is the grpc.ServiceDesc for MetadataService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -401,12 +517,20 @@ var MetadataService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _MetadataService_ListNodes_Handler,
 		},
 		{
+			MethodName: "DrainNode",
+			Handler:    _MetadataService_DrainNode_Handler,
+		},
+		{
 			MethodName: "CreateVolume",
 			Handler:    _MetadataService_CreateVolume_Handler,
 		},
 		{
 			MethodName: "GetVolume",
 			Handler:    _MetadataService_GetVolume_Handler,
+		},
+		{
+			MethodName: "ListVolumes",
+			Handler:    _MetadataService_ListVolumes_Handler,
 		},
 		{
 			MethodName: "DeleteVolume",
@@ -419,6 +543,10 @@ var MetadataService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ChangeIsr",
 			Handler:    _MetadataService_ChangeIsr_Handler,
+		},
+		{
+			MethodName: "MoveReplica",
+			Handler:    _MetadataService_MoveReplica_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

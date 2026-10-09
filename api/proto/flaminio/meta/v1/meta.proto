@@ -21,12 +21,17 @@ service MetadataService {
   rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse);
   // Caller: any authenticated identity.
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  // Marks a node as draining, or not: new volumes are not placed on a draining node. Moving its
+  // replicas away is up to the caller (MoveReplica). Caller: an administrator.
+  rpc DrainNode(DrainNodeRequest) returns (DrainNodeResponse);
 
   // Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
   // administrator.
   rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
   // Caller: any authenticated identity.
   rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
+  // Caller: any authenticated identity.
+  rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
   // Deletes a volume. The caller makes sure that no target serves it any more. Caller: an
   // administrator.
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
@@ -35,9 +40,14 @@ service MetadataService {
   // Caller: an administrator (the CSI controller, the failover controller); or, with
   // only_if_target, the node's agent for itself.
   rpc Attach(AttachRequest) returns (AttachResponse);
-  // Changes ISRs atomically, only under the current epoch and the expected ISR versions.
-  // Caller: the data plane of the volume's current target node.
+  // Changes ISRs atomically, only under the current epoch and the expected ISR versions. It
+  // also carries out requested moves (change_replicas). Caller: the data plane of the volume's
+  // current target node.
   rpc ChangeIsr(ChangeIsrRequest) returns (ChangeIsrResponse);
+  // Requests that a chunk's replica move from one node to another. Only the request is
+  // recorded: the volume's target carries it out, under its epoch, with ChangeIsr
+  // (docs/replication-protocol.md §7, moves). Caller: an administrator.
+  rpc MoveReplica(MoveReplicaRequest) returns (MoveReplicaResponse);
 }
 
 message Node {
@@ -48,7 +58,16 @@ message Node {
   map<string, string> labels = 3;
   // Whether the node's liveness record is current.
   bool alive = 4;
+  // New volumes are not placed on a draining node.
+  bool draining = 5;
 }
+
+message DrainNodeRequest {
+  string node = 1;
+  bool draining = 2;
+}
+
+message DrainNodeResponse {}
 
 message RegisterNodeRequest {
   Node node = 1;
@@ -76,8 +95,12 @@ message ChunkMeta {
   repeated string replicas = 1;
   // In-sync replicas: those known to hold every acknowledged write. Sorted.
   repeated string isr = 2;
-  // Incremented on every ISR change.
+  // Incremented on every ISR change, and on every change of replicas.
   uint64 isr_ver = 3;
+  // A requested move of the replica on moving_from to moving_to, until the target completes
+  // it. Empty if none.
+  string moving_from = 4;
+  string moving_to = 5;
 }
 
 message Volume {
@@ -112,6 +135,12 @@ message GetVolumeResponse {
   Volume volume = 1;
 }
 
+message ListVolumesRequest {}
+
+message ListVolumesResponse {
+  repeated string ids = 1;
+}
+
 message DeleteVolumeRequest {
   string id = 1;
 }
@@ -142,6 +171,11 @@ message IsrChange {
   uint32 chunk = 1;
   uint64 expected_ver = 2;
   repeated string new_isr = 3;
+  // A step of the chunk's requested move: the new replica set is new_replicas. Either the
+  // current one plus the destination, or the current one minus the source, with the
+  // destination in new_isr.
+  bool change_replicas = 4;
+  repeated string new_replicas = 5;
 }
 
 message ChangeIsrRequest {
@@ -157,4 +191,17 @@ message ChangeIsrResponse {
   uint64 epoch = 2;
   // Current state of the chunks named in the request, in request order.
   repeated ChunkMeta chunks = 3;
+}
+
+message MoveReplicaRequest {
+  string volume = 1;
+  uint32 chunk = 2;
+  string from = 3;
+  string to = 4;
+}
+
+message MoveReplicaResponse {
+  // False if refused: from holds no replica, to already holds one, or a move is pending.
+  bool applied = 1;
+  ChunkMeta chunk = 2;
 }

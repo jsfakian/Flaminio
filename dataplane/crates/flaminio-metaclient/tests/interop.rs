@@ -57,6 +57,7 @@ fn interop_with_the_go_service() {
                 chunk: 0,
                 expected_ver,
                 new_isr,
+                ..Default::default()
             }],
         })
     };

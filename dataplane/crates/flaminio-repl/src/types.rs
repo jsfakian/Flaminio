@@ -38,6 +38,9 @@ pub struct Timing {
     pub reconnect: Time,
     /// A metadata request without a reply after this long is sent again.
     pub meta_timeout: Time,
+    /// How often the target reads its volume from the metadata service, to learn of
+    /// requested replica moves.
+    pub refresh: Time,
 }
 
 impl Timing {
@@ -57,6 +60,7 @@ impl Default for Timing {
             request_timeout: 3_000_000,
             reconnect: 500_000,
             meta_timeout: 2_000_000,
+            refresh: 2_000_000,
         }
     }
 }

@@ -12,6 +12,8 @@ pub struct Node {
     pub labels: std::collections::HashMap<String, String>,
     #[prost(bool, tag = "4")]
     pub alive: bool,
+    #[prost(bool, tag = "5")]
+    pub draining: bool,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -43,6 +45,11 @@ pub struct ChunkMeta {
     pub isr: Vec<String>,
     #[prost(uint64, tag = "3")]
     pub isr_ver: u64,
+    /// A requested move: empty if none.
+    #[prost(string, tag = "4")]
+    pub moving_from: String,
+    #[prost(string, tag = "5")]
+    pub moving_to: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -85,6 +92,10 @@ pub struct IsrChange {
     pub expected_ver: u64,
     #[prost(string, repeated, tag = "3")]
     pub new_isr: Vec<String>,
+    #[prost(bool, tag = "4")]
+    pub change_replicas: bool,
+    #[prost(string, repeated, tag = "5")]
+    pub new_replicas: Vec<String>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]

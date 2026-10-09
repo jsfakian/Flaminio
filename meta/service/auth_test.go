@@ -147,6 +147,16 @@ func TestAuthorization(t *testing.T) {
 		t.Fatalf("token %+v %v", claims, err)
 	}
 
+	// Only administrators request moves and drains.
+	_, err = nodeA.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: "v", From: "fl-a", To: "fl-b"})
+	expect("node requests a move", err, codes.PermissionDenied)
+	_, err = agentA.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a", Draining: true})
+	expect("agent drains its node", err, codes.PermissionDenied)
+	_, err = admin.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a"})
+	expect("admin undrains", err, codes.OK)
+	_, err = nodeB.ListVolumes(ctx, &metav1.ListVolumesRequest{})
+	expect("node lists volumes", err, codes.OK)
+
 	// Anyone authenticated reads.
 	_, err = nodeB.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
 	expect("node reads", err, codes.OK)

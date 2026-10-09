@@ -139,6 +139,15 @@ func (s *Service) nodes(ctx context.Context) ([]*metav1.Node, error) {
 	for _, e := range alive {
 		live[strings.TrimPrefix(e.Key, prefix+"alive/")] = true
 	}
+	// Kept apart from the node record, which the node rewrites whenever it registers.
+	drains, err := s.kv.List(ctx, prefix+"drain/")
+	if err != nil {
+		return nil, err
+	}
+	draining := map[string]bool{}
+	for _, e := range drains {
+		draining[strings.TrimPrefix(e.Key, prefix+"drain/")] = true
+	}
 	var out []*metav1.Node
 	for _, e := range entries {
 		var rec nodeRecord
@@ -146,7 +155,7 @@ func (s *Service) nodes(ctx context.Context) ([]*metav1.Node, error) {
 			return nil, err
 		}
 		id := strings.TrimPrefix(e.Key, prefix+"nodes/")
-		out = append(out, &metav1.Node{Id: id, Address: rec.Address, Labels: rec.Labels, Alive: live[id]})
+		out = append(out, &metav1.Node{Id: id, Address: rec.Address, Labels: rec.Labels, Alive: live[id], Draining: draining[id]})
 	}
 	return out, nil
 }
@@ -192,7 +201,11 @@ func (s *Service) readVolume(ctx context.Context, id string) (*domain.Volume, er
 }
 
 func chunkPB(c domain.Chunk) *metav1.ChunkMeta {
-	return &metav1.ChunkMeta{Replicas: c.Replicas, Isr: c.ISR, IsrVer: c.ISRVer}
+	out := &metav1.ChunkMeta{Replicas: c.Replicas, Isr: c.ISR, IsrVer: c.ISRVer}
+	if c.Moving != nil {
+		out.MovingFrom, out.MovingTo = c.Moving.From, c.Moving.To
+	}
+	return out
 }
 
 func volumePB(v *domain.Volume) *metav1.Volume {
@@ -241,7 +254,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	}
 	var candidates []domain.NodeLoad
 	for _, n := range nodes {
-		if _, witness := n.GetLabels()[WitnessLabel]; n.GetAlive() && !witness {
+		if _, witness := n.GetLabels()[WitnessLabel]; n.GetAlive() && !witness && !n.GetDraining() {
 			candidates = append(candidates, domain.NodeLoad{ID: n.GetId(), Replicas: load[n.GetId()]})
 		}
 	}
@@ -411,7 +424,8 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 	}
 	changes := make([]domain.IsrChange, len(r.GetChanges()))
 	for i, c := range r.GetChanges() {
-		changes[i] = domain.IsrChange{Chunk: c.GetChunk(), ExpectedVer: c.GetExpectedVer(), NewISR: c.GetNewIsr()}
+		changes[i] = domain.IsrChange{Chunk: c.GetChunk(), ExpectedVer: c.GetExpectedVer(), NewISR: c.GetNewIsr(),
+			ChangeReplicas: c.GetChangeReplicas(), NewReplicas: c.GetNewReplicas()}
 	}
 	for attempt := range retries {
 		if attempt > 0 {
@@ -469,6 +483,94 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 		}
 		if ok {
 			return reply(true), nil
+		}
+	}
+	return nil, status.Error(codes.Aborted, "too much contention")
+}
+
+func drainKey(node string) string { return prefix + "drain/" + node }
+
+func (s *Service) DrainNode(ctx context.Context, r *metav1.DrainNodeRequest) (*metav1.DrainNodeResponse, error) {
+	if !domain.ValidID(r.GetNode()) {
+		return nil, errStatus(fmt.Errorf("%w: node id %q", domain.ErrInvalid, r.GetNode()))
+	}
+	op := kv.Op{Key: drainKey(r.GetNode()), Delete: !r.GetDraining()}
+	if r.GetDraining() {
+		if _, ok, err := s.kv.Get(ctx, nodeKey(r.GetNode())); err != nil || !ok {
+			if err == nil {
+				err = fmt.Errorf("%w: node %q is not registered", domain.ErrNotFound, r.GetNode())
+			}
+			return nil, errStatus(err)
+		}
+		op.Value = []byte("1")
+	}
+	_, err := s.kv.Txn(ctx, nil, []kv.Op{op})
+	return &metav1.DrainNodeResponse{}, errStatus(err)
+}
+
+func (s *Service) ListVolumes(ctx context.Context, _ *metav1.ListVolumesRequest) (*metav1.ListVolumesResponse, error) {
+	entries, err := s.kv.List(ctx, prefix+"volumes/")
+	if err != nil {
+		return nil, errStatus(err)
+	}
+	out := &metav1.ListVolumesResponse{}
+	for _, e := range entries {
+		var h domain.Header
+		if json.Unmarshal(e.Value, &h) == nil && !h.Creating {
+			out.Ids = append(out.Ids, h.ID)
+		}
+	}
+	return out, nil
+}
+
+// MoveReplica records a requested move on the chunk, conditional on the chunk record it read.
+// It changes neither replicas nor ISR, and bumps no version: the target does that, under its
+// epoch, and a concurrent ISR change of the target's fails its compare and is tried again.
+func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest) (*metav1.MoveReplicaResponse, error) {
+	if !domain.ValidID(r.GetFrom()) || !domain.ValidID(r.GetTo()) {
+		return nil, errStatus(fmt.Errorf("%w: node ids %q, %q", domain.ErrInvalid, r.GetFrom(), r.GetTo()))
+	}
+	if _, ok, err := s.kv.Get(ctx, nodeKey(r.GetTo())); err != nil || !ok {
+		if err == nil {
+			err = fmt.Errorf("%w: node %q is not registered", domain.ErrNotFound, r.GetTo())
+		}
+		return nil, errStatus(err)
+	}
+	for attempt := range retries {
+		if attempt > 0 {
+			if err := backoff(ctx, attempt); err != nil {
+				return nil, errStatus(err)
+			}
+		}
+		h, _, err := s.readHeader(ctx, r.GetVolume())
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if int(r.GetChunk()) >= h.ChunkCount() {
+			return nil, errStatus(fmt.Errorf("%w: chunk %d out of range", domain.ErrInvalid, r.GetChunk()))
+		}
+		e, ok, err := s.kv.Get(ctx, chunkKey(h.ID, r.GetChunk()))
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if !ok {
+			return nil, status.Errorf(codes.Internal, "volume %q: chunk %d missing", h.ID, r.GetChunk())
+		}
+		var c domain.Chunk
+		if err := json.Unmarshal(e.Value, &c); err != nil {
+			return nil, errStatus(err)
+		}
+		if !domain.CheckMove(&c, r.GetFrom(), r.GetTo()) {
+			return &metav1.MoveReplicaResponse{Applied: false, Chunk: chunkPB(c)}, nil
+		}
+		domain.ApplyMove(&c, r.GetFrom(), r.GetTo())
+		b, _ := json.Marshal(c)
+		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Value: b}})
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if ok {
+			return &metav1.MoveReplicaResponse{Applied: true, Chunk: chunkPB(c)}, nil
 		}
 	}
 	return nil, status.Error(codes.Aborted, "too much contention")

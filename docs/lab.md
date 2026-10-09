@@ -153,6 +153,48 @@ A node is `flaminio-io node` as the systemd unit `flaminio-node`:
 
   Nothing restarts, so the replicas keep their state.
 
+### A third data node, and drains (step 6)
+
+```bash
+make data-node-up                 # fl-c: VM, overlay, identities, build; its disk claimed by the agent
+make agent-disks VM=c             # every device of a VM, with the claim policy's verdict
+make drain-test                   # drain fl-b into fl-c under a verified write load; back again
+```
+
+**fl-c** is a data VM on rhythm, beside fl-a and fl-w: 4 vCPU, 8 GiB, a 100 GiB data disk. It
+gives drains a destination; it adds no failure independence. It is on the overlay, but it is
+not an etcd member.
+
+**The node agent** (`flaminio-agent`, [`control/agent`](../control/agent)) finds the node's
+block devices and applies the claim policy:
+- it **refuses** anything read-only, removable, virtual (loop, device mapper, ublk…), mounted,
+  partitioned, in use by another device, smaller than 1 GiB, or not matching the serial
+  selector (`data` in the lab);
+- it **refuses any device that holds anything**: a signature lsblk or blkid knows
+  (filesystems, partition tables, RAID, LVM), or any non-zero byte in the first or last MiB;
+- a device with a Flaminio superblock is **ours**, used as it is;
+- otherwise the one blank device is formatted, and the node starts on it.
+
+**Drains** (`flaminio-meta drain <node>`, [`control/drain`](../control/drain)):
+1. The node is marked draining, so no new volume is placed on it.
+2. A move is requested for each of its chunk replicas, to the least loaded node that may take
+   it.
+3. Each volume's target carries the moves out, under its epoch: it adds the destination,
+   resyncs it, and drops the source once the destination is in sync
+   ([protocol](replication-protocol.md) §7, moves).
+
+The command waits until the node holds nothing. A volume that is not attached has no target to
+move it, and waits for its next attach.
+
+**`make drain-test`:**
+1. fio writes 4 GiB of verified data to vol1 on fl-a while fl-b is drained into fl-c.
+2. fl-a's and fl-b's nodes stop, vol1 fails over to fl-c, and fio verifies every byte there,
+   from fl-c's replicas alone.
+3. Everything restarts, and fl-c is drained back into fl-b, so vol1 is back on fl-a and fl-b.
+
+A drained node's chunks stay on its disk until replica garbage collection exists
+([follow-ups](followups.md) item 8).
+
 ### Partition test (step 5)
 
 ```bash
@@ -271,6 +313,7 @@ imported into each node's containerd; nothing is pushed to a registry.
 | `make meta-smoke` | lab | 2 min | metadata through etcd member loss; refusal of unauthenticated callers |
 | `make node-fault` | lab | 5–10 min | verified writes through a replica restart; ISR restored; failover |
 | `make partition-test` | lab | 3–5 min | the old target, cut off, serves no stale reads and loses no acknowledged write |
+| `make drain-test` | lab | 15–25 min | a node drained under a verified write load; the destination then serves every byte alone (needs `make data-node-up`) |
 | `make k8s-smoke` | lab | 1 min | Kubernetes over the overlay |
 | `make csi-test` | lab | 3 min | a PVC provisioned, formatted, written, moved to the other node, verified |
 | `make csi-failover` | lab | 10 min | a data VM powered off: the failover controller marks it, the pod moves with its data; the VM comes back and rejoins |

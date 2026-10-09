@@ -53,6 +53,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
             request_timeout: SEC,
             reconnect: 200 * MS,
             meta_timeout: 5 * SEC,
+            refresh: SEC,
         },
         chaos: 15 * SEC,
         settle_limit: 120 * SEC,
@@ -63,6 +64,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         client_every: (0, 0),
         detect: (0, 0),
         read_pct: 0,
+        move_pct: 0,
     }
 }
 
@@ -240,4 +242,12 @@ mutation!(
 mutation!(
     catches_copies_over_live_writes,
     replica(|b| b.no_resync_filter = true)
+);
+mutation!(
+    catches_move_without_resync,
+    target(|b| b.move_without_resync = true)
+);
+mutation!(
+    catches_drop_before_join,
+    target(|b| b.drop_before_join = true)
 );

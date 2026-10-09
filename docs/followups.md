@@ -16,6 +16,7 @@ belongs to.
 | 8 | Deleting a volume's replicas | `DeleteVolume` removes the metadata only; the chunk replicas stay on the nodes' disks | With the node agent (step 6) |
 | 9 | The data plane in Kubernetes | `flaminio-io node` runs as a systemd unit beside k3s; the CSI node plugin drives it through its control socket | With the node agent (step 6) |
 | 10 | A faster first attach after a restart | An attach answers once the device exists, but the kernel's partition scan and udev's probe read the device and wait for the whole-volume reconciliation (item 2) | With item 2 |
+| 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator |
 
 ## 1. Read performance
 
@@ -144,3 +145,15 @@ wait for it, including the kernel's partition scan and udev's probe of the new d
   - the device is created with partition scanning off (`UBLK_F_NO_AUTO_PART_SCAN` where the kernel has it; to be checked on 7.0);
   - the CSI node plugin's timeouts allow for a whole-volume reconciliation (150 s on the 1 GbE lab
     for 16 GiB).
+
+## 11. Draining volumes that are not attached
+
+Moves are carried out by the volume's target, so a volume without one keeps its replicas on a
+draining node until it is next attached. The drain lists such volumes.
+
+**Steps:**
+1. **A maintenance target.** The drain attaches the volume to a node that can serve it but has
+   no device for it: a target without a ublk device, which resyncs and moves, then detaches.
+   That needs targets without devices, which come with item 5 (several volumes per node).
+2. *Done when:* draining a node that holds replicas of unattached volumes completes, and
+   attaching those volumes afterwards finds their data on the new nodes.

@@ -74,6 +74,11 @@ pub struct Bugs {
     pub no_dirty_inflight: bool,
     /// Settle uncertain sets as soon as reconciliation starts, not once it is done.
     pub early_settle: bool,
+    /// A moving replica joins the ISR as it is added, without a resync.
+    pub move_without_resync: bool,
+    /// Drop a move's source once the destination is a replica, not once it is in the ISR
+    /// (counting the destination in the ISR).
+    pub drop_before_join: bool,
 }
 
 /// Something worth logging that the target did on its own.
@@ -139,6 +144,11 @@ struct Chunk {
     /// For members this target removed during I/O: blocks they may lack. Members without an
     /// entry need a full copy.
     dirty: BTreeMap<NodeId, ExtentSet>,
+    /// A requested move of the replica on `.0` to `.1` (spec §7, moves).
+    moving: Option<(NodeId, NodeId)>,
+    /// The move's next step, to be proposed: add the destination, or drop the source.
+    add_replica: Option<NodeId>,
+    drop_replica: Option<NodeId>,
 }
 
 impl Chunk {
@@ -146,6 +156,13 @@ impl Chunk {
         let mut s = self.isr.clone();
         s.extend(self.joining);
         s
+    }
+
+    fn change_pending(&self) -> bool {
+        !self.removing.is_empty()
+            || self.joining.is_some()
+            || self.add_replica.is_some()
+            || self.drop_replica.is_some()
     }
 }
 
@@ -257,6 +274,10 @@ pub struct Target<P> {
     queue: VecDeque<Work<P>>,
     meta_inflight: Option<(u64, Time)>,
     next_heartbeat: Time,
+    /// When to read the volume from the metadata service next, and the read in flight. It has
+    /// its own slot: an ISR change must never wait behind it.
+    next_refresh: Time,
+    refresh_inflight: Option<(u64, Time)>,
     deposed: bool,
     out: Vec<Output<P>>,
     events: Vec<Event>,
@@ -294,6 +315,9 @@ impl<P: Clone + Debug> Target<P> {
                 joining: None,
                 resync: None,
                 dirty: BTreeMap::new(),
+                moving: m.moving,
+                add_replica: None,
+                drop_replica: None,
             })
             .collect();
         let peers = chunks
@@ -322,6 +346,8 @@ impl<P: Clone + Debug> Target<P> {
             queue: VecDeque::new(),
             meta_inflight: None,
             next_heartbeat: now,
+            next_refresh: now + timing.refresh,
+            refresh_inflight: None,
             deposed: false,
             out: Vec::new(),
             events: Vec::new(),
@@ -374,8 +400,8 @@ impl<P: Clone + Debug> Target<P> {
             && self.chunks.iter().all(|c| {
                 c.phase == Phase::Ready
                     && c.isr.len() == c.replicas.len()
-                    && c.removing.is_empty()
-                    && c.joining.is_none()
+                    && !c.change_pending()
+                    && c.moving.is_none()
             })
     }
 
@@ -386,12 +412,14 @@ impl<P: Clone + Debug> Target<P> {
             .iter()
             .map(|c| {
                 format!(
-                    "{:?} isr {:?} fenced {:?} removing {:?} joining {:?} resync {:?} locks {:?}",
+                    "{:?} replicas {:?} isr {:?} fenced {:?} removing {:?} joining {:?} moving {:?} resync {:?} locks {:?}",
                     c.phase,
+                    c.replicas,
                     c.isr,
                     c.fenced,
                     c.removing,
                     c.joining,
+                    c.moving,
                     c.resync.as_ref().map(|r| (r.member, r.started, &r.todo)),
                     c.locks
                 )
@@ -468,11 +496,14 @@ impl<P: Clone + Debug> Target<P> {
         });
         let meta = self
             .meta_inflight
-            .map(|(_, t)| t + self.timing.meta_timeout);
+            .iter()
+            .chain(&self.refresh_inflight)
+            .map(|(_, t)| t + self.timing.meta_timeout)
+            .min();
         requests
             .chain(fences)
             .chain(meta)
-            .chain([self.next_heartbeat])
+            .chain([self.next_heartbeat, self.next_refresh])
             .filter(|&t| t > now)
             .min()
     }
@@ -527,7 +558,30 @@ impl<P: Clone + Debug> Target<P> {
         {
             self.meta_inflight = None;
         }
+        if self
+            .refresh_inflight
+            .is_some_and(|(_, t)| t + self.timing.meta_timeout <= now)
+        {
+            self.refresh_inflight = None;
+        }
         self.progress(now);
+        self.refresh(now);
+    }
+
+    /// Reads the volume: the reply goes through [`Target::on_meta`] like any other view. A
+    /// view older than what this target knows changes nothing (versions only grow).
+    fn refresh(&mut self, now: Time) {
+        if self.deposed || self.refresh_inflight.is_some() || now < self.next_refresh {
+            return;
+        }
+        self.next_refresh = now + self.timing.refresh;
+        let req = self.next_req;
+        self.next_req += 1;
+        self.refresh_inflight = Some((req, now));
+        self.out.push(Output::Meta {
+            req,
+            body: MetaRequest::Get { vol: self.vol },
+        });
     }
 
     /// Handles a reply from replica node `from`.
@@ -621,10 +675,16 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Handles the reply to metadata request `req`.
     pub fn on_meta(&mut self, now: Time, req: u64, reply: &MetaReply) {
-        if self.deposed || self.meta_inflight.is_none_or(|(r, _)| r != req) {
+        if self.deposed {
             return;
         }
-        self.meta_inflight = None;
+        if self.refresh_inflight.is_some_and(|(r, _)| r == req) {
+            self.refresh_inflight = None;
+        } else if self.meta_inflight.is_some_and(|(r, _)| r == req) {
+            self.meta_inflight = None;
+        } else {
+            return;
+        }
         match reply {
             MetaReply::Applied { view, .. } | MetaReply::Rejected { view, .. } => {
                 if view.epoch > self.epoch {
@@ -673,6 +733,7 @@ impl<P: Clone + Debug> Target<P> {
         self.writes.clear();
         self.peers.clear();
         self.meta_inflight = None;
+        self.refresh_inflight = None;
         self.bulk = 0;
     }
 
@@ -1226,7 +1287,33 @@ impl<P: Clone + Debug> Target<P> {
             let c = &self.chunks[i];
             if c.phase == Phase::Ready {
                 self.drive_resync(now, i);
+                self.drive_move(i);
             }
+        }
+    }
+
+    /// The next step of a requested move: add the destination as a replica outside the ISR
+    /// (it is then resynced and joins like any replica out of the ISR); once it is in the ISR,
+    /// drop the source. [`Target::send_meta`] checks each step against the current state.
+    fn drive_move(&mut self, i: usize) {
+        #[cfg(test)]
+        let early = self.bugs.drop_before_join;
+        #[cfg(not(test))]
+        let early = false;
+        let c = &mut self.chunks[i];
+        let Some((from, to)) = c.moving else {
+            return;
+        };
+        if c.add_replica.is_some() || c.drop_replica.is_some() || !c.replicas.contains(&from) {
+            return;
+        }
+        if !c.replicas.contains(&to) {
+            c.add_replica = Some(to);
+        } else if (c.isr.contains(&to) || early)
+            && c.joining.is_none()
+            && c.resync.as_ref().is_none_or(|r| r.member != from)
+        {
+            c.drop_replica = Some(from);
         }
     }
 
@@ -1250,11 +1337,16 @@ impl<P: Clone + Debug> Target<P> {
             }
             return;
         }
-        let Some(member) = c
-            .replicas
-            .iter()
-            .copied()
-            .find(|n| !c.isr.contains(n) && self.session_of(*n).is_some())
+        // A move's source out of the ISR is not worth a resync once the destination is a
+        // replica: it is about to go.
+        let leaving = c
+            .moving
+            .filter(|(_, to)| c.replicas.contains(to))
+            .map(|(from, _)| from);
+        let Some(member) =
+            c.replicas.iter().copied().find(|n| {
+                !c.isr.contains(n) && Some(*n) != leaving && self.session_of(*n).is_some()
+            })
         else {
             return;
         };
@@ -1288,27 +1380,75 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Proposes the pending ISR changes, one request at a time.
     fn send_meta(&mut self, now: Time) {
-        if self.meta_inflight.is_some()
-            || !self
-                .chunks
-                .iter()
-                .any(|c| !c.removing.is_empty() || c.joining.is_some())
-        {
+        if self.meta_inflight.is_some() {
             return;
         }
+        // A move's step goes only while it still applies: the destination not yet a replica;
+        // or the destination in the ISR, staying, and the ISR minimum kept without the source.
+        let min = self.min_isr;
+        #[cfg(test)]
+        let early = self.bugs.drop_before_join;
+        #[cfg(not(test))]
+        let early = false;
+        for c in &mut self.chunks {
+            let Some((from, to)) = c.moving else {
+                c.add_replica = None;
+                c.drop_replica = None;
+                continue;
+            };
+            if c.add_replica.is_some() && c.replicas.contains(&to) {
+                c.add_replica = None;
+            }
+            if c.drop_replica.is_some() {
+                let after = c
+                    .isr
+                    .iter()
+                    .filter(|n| !c.removing.contains(n) && **n != from)
+                    .count()
+                    + usize::from(early && !c.isr.contains(&to));
+                let joined = (c.isr.contains(&to) || early) && !c.removing.contains(&to);
+                if !c.replicas.contains(&from) || !joined || after < min {
+                    c.drop_replica = None;
+                }
+            }
+        }
+        if !self.chunks.iter().any(Chunk::change_pending) {
+            return;
+        }
+        #[cfg(test)]
+        let skip_resync = self.bugs.move_without_resync;
+        #[cfg(not(test))]
+        let skip_resync = false;
         let changes: Vec<IsrChange> = self
             .chunks
             .iter()
             .enumerate()
-            .filter(|(_, c)| !c.removing.is_empty() || c.joining.is_some())
+            .filter(|(_, c)| c.change_pending())
             .map(|(i, c)| {
                 let mut new_isr: BTreeSet<NodeId> =
                     c.isr.difference(&c.removing).copied().collect();
                 new_isr.extend(c.joining);
+                let new_replicas = if let Some(to) = c.add_replica {
+                    if skip_resync {
+                        new_isr.insert(to);
+                    }
+                    let mut r = c.replicas.clone();
+                    r.push(to);
+                    Some(r)
+                } else if let Some(from) = c.drop_replica {
+                    new_isr.remove(&from);
+                    if early && let Some((_, to)) = c.moving {
+                        new_isr.insert(to);
+                    }
+                    Some(c.replicas.iter().copied().filter(|&n| n != from).collect())
+                } else {
+                    None
+                };
                 IsrChange {
                     chunk: i as ChunkIdx,
                     expected_ver: c.isr_ver,
                     new_isr,
+                    new_replicas,
                 }
             })
             .collect();
@@ -1362,7 +1502,11 @@ impl<P: Clone + Debug> Target<P> {
 
     fn apply_view(&mut self, now: Time, view: &VolumeMeta) {
         for (i, m) in view.chunks.iter().enumerate() {
-            let c = &self.chunks[i];
+            let c = &mut self.chunks[i];
+            // Requested moves change no version: any view at least as new as ours tells.
+            if m.isr_ver >= c.isr_ver {
+                c.moving = m.moving;
+            }
             if m.isr_ver <= c.isr_ver {
                 continue;
             }
@@ -1398,6 +1542,21 @@ impl<P: Clone + Debug> Target<P> {
             c.isr_ver = m.isr_ver;
             let isr = c.isr.clone();
             c.removing.retain(|n| isr.contains(n));
+            // A move's drop may have shrunk the ISR under removals decided against the larger
+            // one: keep only as many as the minimum allows. Writes wait for the others, as
+            // for any member that cannot be removed (spec §4); they are proposed again if
+            // still failed once that is possible.
+            while c.isr.len() - c.removing.len() < self.min_isr.min(c.isr.len()) {
+                let last = *c
+                    .removing
+                    .iter()
+                    .next_back()
+                    .expect("removing is not empty");
+                c.removing.remove(&last);
+            }
+            if m.replicas != c.replicas {
+                self.adopt_replicas(now, i, &m.replicas);
+            }
             if let Some(j) = joined {
                 // The joiner holds what the ISR holds: its older entries are settled too.
                 let below = self.settled_below(i);
@@ -1412,9 +1571,52 @@ impl<P: Clone + Debug> Target<P> {
                 );
             }
         }
+        // Nodes that hold none of this volume's chunks any more: their sessions end.
+        let gone: Vec<NodeId> = self
+            .peers
+            .keys()
+            .copied()
+            .filter(|n| !self.chunks.iter().any(|c| c.replicas.contains(n)))
+            .collect();
+        for n in gone {
+            self.fail_peer(now, n);
+            self.peers.remove(&n);
+        }
         let seqs: Vec<u64> = self.writes.keys().copied().collect();
         for seq in seqs {
             self.check_write(seq);
+        }
+    }
+
+    /// A move's step committed: chunk `i`'s replica set is now `replicas`.
+    fn adopt_replicas(&mut self, now: Time, i: usize, replicas: &[NodeId]) {
+        let c = &mut self.chunks[i];
+        let added: Vec<NodeId> = replicas
+            .iter()
+            .copied()
+            .filter(|n| !c.replicas.contains(n))
+            .collect();
+        let removed: Vec<NodeId> = c
+            .replicas
+            .iter()
+            .copied()
+            .filter(|n| !replicas.contains(n))
+            .collect();
+        for r in &removed {
+            c.dirty.remove(r);
+            c.removing.remove(r);
+            if c.resync.as_ref().is_some_and(|x| x.member == *r) {
+                c.resync = None;
+            }
+        }
+        c.replicas = replicas.to_vec();
+        c.add_replica = None;
+        c.drop_replica = None;
+        for n in added {
+            if let std::collections::btree_map::Entry::Vacant(e) = self.peers.entry(n) {
+                e.insert(Peer::default());
+                self.open_session(now, n);
+            }
         }
     }
 }

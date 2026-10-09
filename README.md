@@ -23,7 +23,9 @@ and you restore from an encrypted, immutable backup.
 > - a partitioned target serves no read after its lease and loses no acknowledged write;
 > - Kubernetes (k3s) uses Flaminio volumes through its CSI driver;
 > - when a node is powered off, its pod comes back on the other node with its data in about
->   two minutes.
+>   two minutes;
+> - a node can be drained while it serves I/O: its replicas move to another node, verified
+>   under load.
 
 ---
 

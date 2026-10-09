@@ -196,6 +196,37 @@ starts over: a livelock. That happened in the lab, not in the first simulator (�
 A failure of `r` during resync aborts it, with no metadata change. The target keeps its dirty
 set and tries again later.
 
+### Moves (drain)
+
+Draining a node moves its chunk replicas elsewhere, one chunk at a time, while the volume
+serves I/O.
+- **An administrator only requests a move.** `MoveReplica{chunk, from, to}` records
+  `moving = (from, to)` on the chunk. It is refused unless `from` holds a replica, `to` does
+  not, and no move is pending. It changes neither the replica set nor the ISR, and bumps no
+  version.
+- **The target carries it out, under its epoch,** with conditional `ChangeIsr` requests (§2),
+  which may now also change the replica set. It polls its volume (`refresh`, 2 s) to learn of
+  requests; the poll has its own slot, so an ISR change never waits behind it.
+  1. **Add.** The new replica set is the old one plus `to`; the ISR is unchanged. `to` is now a
+     replica outside the ISR. The ordinary resync (above) copies the whole chunk to it (a
+     `BeginResync` for a chunk it does not hold makes it create the chunk, empty) and joins it.
+  2. **Drop.** Once `to` is in the ISR, the new replica set is the old one minus `from`, and the
+     new ISR excludes `from`. The metadata service refuses a drop whose new ISR lacks `to`, and
+     clears `moving` when it applies one.
+- **Keeping the ISR minimum.** A drop goes only while the ISR without `from` (and without
+  members being removed) stays at the minimum. When any committed change shrinks the ISR, the
+  target trims its pending removals to what the minimum allows; writes then wait for those
+  members (§4).
+- **Reads and writes during a drop.** Until the drop commits, `from` is an ordinary ISR member:
+  every write still needs its acknowledgement.
+- **After the drop**, nothing depends on `from`'s copy. The simulator deletes it at that
+  moment, so a move that dropped its source too early loses data visibly.
+- **A target that dies mid-move** leaves the request in place: the next target finds `to`
+  either still outside the replica set, or outside the ISR (it resyncs it in full), or in the
+  ISR (it drops `from`).
+
+A move needs a running target; a volume that is not attached moves when it is next attached.
+
 ## 8. Timing assumptions
 
 - **Delays:** none are bounded. Messages may be delayed arbitrarily or lost with their
@@ -229,7 +260,8 @@ order, from a seed. A seed reproduces a run exactly. Each run has two phases:
 
   The failover controller attaches the volume elsewhere when its target is gone or cut off
   from the metadata service, after a detection delay of 0.1–10 s. It also fails over at random
-  moments with the old target alive.
+  moments with the old target alive. In two thirds of the runs it also requests replica moves
+  (§7), and the moved-away copies are deleted as soon as a drop commits.
 - **Settle and check.** Heal everything, wait until the current target has full ISRs and
   nothing in flight, read every block, and settle again.
 
@@ -251,17 +283,19 @@ the simulator then fails:
 
 | Broken rule | Caught by (first failing seed) |
 |---|---|
-| Acknowledge once a removal is proposed, not committed (§4) | seed 27 |
-| Accept requests from an old session (§3) | seed 0 |
+| Acknowledge once a removal is proposed, not committed (§4) | seed 19 |
+| Accept requests from an old session (§3) | seed 1 |
 | No reconciliation after failover (§6) | seed 1 |
-| Reconciliation writes prune uncertain sets (§6) | seed 778 |
-| Settling before the repairs are done (§6) | seed 71 |
-| No lease check on reads (§5) | seed 216, split-brain scenario |
-| No takeover wait (§6) | seed 81, split-brain scenario |
+| Reconciliation writes prune uncertain sets (§6) | seed 71 |
+| Settling before the repairs are done (§6) | seed 109 |
+| No lease check on reads (§5) | seed 288, split-brain scenario |
+| No takeover wait (§6) | seed 161, split-brain scenario |
 | Reads from a member being removed (§5) | removal-in-flight scenario |
-| Joiner counts for leases and writes only once committed (§5, §7) | seed 154 |
-| Removed member's dirty set omits writes in flight (§7) | seed 14 |
-| No resync filter on the replica (§7) | seed 14 |
+| Joiner counts for leases and writes only once committed (§5, §7) | seed 177 |
+| Removed member's dirty set omits writes in flight (§7) | seed 36 |
+| No resync filter on the replica (§7) | seed 7 |
+| A move's destination joins the ISR without a resync (§7, moves) | seed 1 |
+| A move drops its source before the destination is in the ISR (§7, moves) | seed 1; in 400 seeds, 49 runs show lost or stale data, 60 a stall |
 
 The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
 and 60 000 for reconciliation pruning. That bug is rare by nature: the target must die between
@@ -311,6 +345,18 @@ a scenario for it:
      a performance bug cannot show there.
    - Fix: `Settle` (§6). A move between running nodes now serves its first read in 15 ms.
      Its mutation (settling before the repairs are done) is caught.
+7. **A drop under pending removals** (moves, phase 1 step 6). A move's drop was proposed
+   while the chunk had four ISR members; two members then failed, and their removals were
+   allowed against four. Once the drop committed, the removals would have left one member,
+   below the minimum, and the metadata service refused the combined request forever.
+   - Before moves, the ISR shrank only through the target's own removals, so this could not
+     happen.
+   - Fix: trim pending removals to what the minimum allows after any change that shrinks the
+     ISR (§7, moves).
+8. **The volume poll delayed ISR changes** (found by the removal-in-flight scenario). The
+   target's poll first shared the single slot of its ISR changes, so a poll on a slow
+   metadata link held back an urgent removal. The poll now has its own slot.
 
-**Results:** 320 000 random seeds pass (on average 4 failovers, 2.5 crashes and 7 partitions per
-run), all scenarios pass, and every mutation above is caught.
+**Results:** 320 000 random seeds passed before moves (on average 4 failovers, 2.5 crashes and
+7 partitions per run). With moves, 220 000 seeds pass (seeds 0–219 999, 2026-10-09), all
+scenarios pass, and every mutation above is caught.

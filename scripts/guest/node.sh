@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # A phase-1 node in a lab VM: flaminio-io node as the systemd service "flaminio-node".
 # Usage: node.sh up | down | status | attach | detach
-#   up      NODE, LISTEN, META, TRUST_DOMAIN; FORMAT=1 reformats the data disk
+#   up      NODE, LISTEN, META, TRUST_DOMAIN; FORMAT=1 reformats the data disk; DEVICE overrides
+#           the data disk (as the node agent claimed it)
 #   attach  VOLUME, TOKEN (base64 capability token): the running node becomes VOLUME's target,
 #           at /dev/ublkb1, through its control socket (no restart)
 #   detach  VOLUME
@@ -38,7 +39,7 @@ up() {
     [[ -x $bin ]] || die "flaminio-io not built; run make deploy"
     sudo modprobe ublk_drv
     systemctl is-active --quiet "$unit" && down
-    local args=(node --device "$(data_disk)" --node "$NODE" --listen "$LISTEN" --meta "$META"
+    local args=(node --device "${DEVICE:-$(data_disk)}" --node "$NODE" --listen "$LISTEN" --meta "$META"
         --pki /etc/flaminio/pki --trust-domain "$TRUST_DOMAIN" --id "$id")
     [[ ${FORMAT:-0} == 1 ]] && args+=(--format --force)
     if [[ -n ${ATTACH:-} ]]; then
