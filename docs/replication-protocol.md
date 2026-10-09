@@ -172,6 +172,12 @@ the ordered-session argument. It must send those writes to `r` as well.
 - **Otherwise:** every block of the chunk. In the real data plane this becomes a digest
   comparison, as in the MVP.
 
+**Bulk work is bounded.** Repairs (§6) and resync copies share each replica's ordered session
+with client writes and heartbeats. A target therefore keeps at most a few of them in flight (4
+by default, each at most `max_io` blocks). Unbounded, a resync queues so much data ahead of
+the heartbeats that their requests time out. The session then fails, the resync aborts, and it
+starts over: a livelock. That happened in the lab, not in the first simulator (§10).
+
 A failure of `r` during resync aborts it, with no metadata change. The target keeps its dirty
 set and tries again later.
 
@@ -274,6 +280,14 @@ a scenario for it:
    - Copies are now lock-free, as ARCHITECTURE §11.4 describes, and the filter is checked.
 4. **Liveness:** reconciliation work could queue behind client operations that were waiting for
    it. Only client operations are now ordered per block.
+5. **Livelock under real bandwidth** (found in the lab, step 4e). A resync issued all its
+   copies at once.
+   - Over 1 GbE, gigabytes queued ahead of the heartbeats on the replica's session.
+   - The heartbeats timed out, the session failed, the resync aborted, and it started again,
+     every 8 s.
+   - The simulator's links have no bandwidth, so it could not see this.
+   - Fix: repairs and copies in flight are bounded (§7). The simulator now runs with bounds
+     of 1–4, which also made the reconciliation-pruning mutation easier to catch.
 
 **Results:** 320 000 random seeds pass (on average 4 failovers, 2.5 crashes and 7 partitions per
 run), all scenarios pass, and every mutation above is caught.

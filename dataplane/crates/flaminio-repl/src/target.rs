@@ -230,6 +230,11 @@ pub struct Target<P> {
     next_seq: u64,
     next_read: u64,
     next_round: u64,
+    /// Repairs and resync copies in flight, and the most allowed. Bulk work shares the
+    /// sessions with client I/O and heartbeats, so it is bounded: unbounded, it would queue
+    /// enough data ahead of them to make their requests time out.
+    bulk: usize,
+    max_bulk: usize,
     writes: BTreeMap<u64, WriteOp<P>>,
     reads: BTreeMap<u64, ReadOp>,
     queue: VecDeque<Work<P>>,
@@ -240,6 +245,9 @@ pub struct Target<P> {
     #[cfg(test)]
     pub bugs: Bugs,
 }
+
+/// Repairs and resync copies in flight per target, unless set otherwise.
+pub const DEFAULT_MAX_BULK: usize = 4;
 
 impl<P: Clone + Debug> Target<P> {
     /// Starts a target from the metadata service's `Attach` reply, and fences every replica.
@@ -289,6 +297,8 @@ impl<P: Clone + Debug> Target<P> {
             next_seq: 0,
             next_read: 0,
             next_round: 0,
+            bulk: 0,
+            max_bulk: DEFAULT_MAX_BULK,
             writes: BTreeMap::new(),
             reads: BTreeMap::new(),
             queue: VecDeque::new(),
@@ -305,6 +315,16 @@ impl<P: Clone + Debug> Target<P> {
 
     pub fn epoch(&self) -> Epoch {
         self.epoch
+    }
+
+    /// Sets how many repairs and resync copies may be in flight at once (at least one).
+    pub fn set_max_bulk(&mut self, n: usize) {
+        self.max_bulk = n.max(1);
+    }
+
+    fn release_bulk(&mut self) {
+        debug_assert!(self.bulk > 0, "bulk accounting");
+        self.bulk = self.bulk.saturating_sub(1);
     }
 
     pub fn is_deposed(&self) -> bool {
@@ -523,6 +543,7 @@ impl<P: Clone + Debug> Target<P> {
                 }
             }
             (ReqKind::Copy { chunk, round, ext }, Response::Ok) => {
+                self.release_bulk();
                 if let Some(r) = self.resync_mut(chunk, round) {
                     r.todo.remove(&ext);
                 }
@@ -589,6 +610,7 @@ impl<P: Clone + Debug> Target<P> {
         self.writes.clear();
         self.peers.clear();
         self.meta_inflight = None;
+        self.bulk = 0;
     }
 
     fn open_session(&mut self, now: Time, to: NodeId) {
@@ -646,9 +668,15 @@ impl<P: Clone + Debug> Target<P> {
         };
         peer.retry_at = now + self.timing.reconnect;
         for (_, kind) in s.inflight.into_values().rev() {
+            if let ReqKind::Copy { .. } = kind {
+                self.release_bulk();
+            }
             if let ReqKind::Read { id } = kind
                 && let Some(r) = self.reads.remove(&id)
             {
+                if !matches!(r.purpose, ReadFor::Client { .. }) {
+                    self.release_bulk();
+                }
                 if r.locked {
                     self.chunks[r.chunk as usize].locks.remove(&r.ext);
                 }
@@ -823,6 +851,7 @@ impl<P: Clone + Debug> Target<P> {
                 if let Phase::Reconciling { pending } = &mut c.phase {
                     pending.remove(&w.ext);
                 }
+                self.release_bulk();
             }
         }
     }
@@ -853,12 +882,18 @@ impl<P: Clone + Debug> Target<P> {
                 if r.locked {
                     self.chunks[chunk as usize].locks.remove(&ext);
                 }
-                if let Some(rs) = self.resync_mut(chunk, round) {
-                    let (member, session) = (rs.member, rs.session);
-                    if self.session_of(member) == Some(session) {
-                        let body = Request::Copy { chunk, ext, data };
-                        self.send(now, member, body, ReqKind::Copy { chunk, round, ext });
+                let sent = match self.resync_mut(chunk, round) {
+                    Some(rs) => {
+                        let (member, session) = (rs.member, rs.session);
+                        self.session_of(member) == Some(session) && {
+                            let body = Request::Copy { chunk, ext, data };
+                            self.send(now, member, body, ReqKind::Copy { chunk, round, ext })
+                        }
                     }
+                    None => false,
+                };
+                if !sent {
+                    self.release_bulk();
                 }
             }
         }
@@ -984,12 +1019,16 @@ impl<P: Clone + Debug> Target<P> {
             &Work::Repair { chunk, ext } => {
                 let i = chunk as usize;
                 let c = &self.chunks[i];
-                if !matches!(c.phase, Phase::Reconciling { .. }) || c.locks.overlaps(&ext) {
+                if !matches!(c.phase, Phase::Reconciling { .. })
+                    || c.locks.overlaps(&ext)
+                    || self.bulk >= self.max_bulk
+                {
                     return false;
                 }
                 let Some(from) = self.source(i, None) else {
                     return false;
                 };
+                self.bulk += 1;
                 self.start_read(now, i, ext, from, ReadFor::Repair, true);
                 true
             }
@@ -1001,9 +1040,13 @@ impl<P: Clone + Debug> Target<P> {
                     return true; // resync aborted or finished: drop
                 };
                 let member = r.member;
+                if self.bulk >= self.max_bulk {
+                    return false;
+                }
                 let Some(from) = self.source(i, Some(member)) else {
                     return false;
                 };
+                self.bulk += 1;
                 self.start_read(now, i, ext, from, ReadFor::Copy { round }, false);
                 true
             }

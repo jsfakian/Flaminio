@@ -4,8 +4,11 @@
 //!   store, optionally mirrored to a remote replica (MVP steps 4 and 5).
 //! - `replica`: this disk as the remote replica of a volume.
 //! - `digest`: per-chunk checksums of a volume, to compare replicas offline.
+//! - `node`: a phase-1 node: replicas served over mutual TLS, and optionally a volume target
+//!   (`--attach`), on the replication core and the metadata service.
 
 mod cli;
+mod node;
 mod proto;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 mod remote;
@@ -21,6 +24,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some(cmd @ ("replica" | "digest")) => cli::main(cmd, &args[1..]),
+        Some("node") => node::main(&args[1..]),
         #[cfg(target_os = "linux")]
         _ => ublk::main(args),
         #[cfg(not(target_os = "linux"))]

@@ -516,6 +516,10 @@ name = "flaminio-io"
 version = "0.1.0"
 dependencies = [
  "flaminio-format",
+ "flaminio-metaclient",
+ "flaminio-net",
+ "flaminio-node",
+ "flaminio-repl",
  "flaminio-store",
  "flaminio-uring",
  "io-uring",

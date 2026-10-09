@@ -129,6 +129,25 @@ make meta-smoke      # register nodes, create and attach a volume, lose one then
    - etcd without a client certificate;
    - etcd with a node's workload certificate.
 
+### Phase-1 nodes and a replicated volume
+
+```bash
+make deploy                       # build flaminio-io on fl-a and fl-b
+FORMAT=1 make node-up             # both nodes serve replicas (FORMAT=1 reformats the data disks)
+make vol-create                   # vol1: 16 GiB, RF 2, placed by the metadata service
+make vol-attach VM=a              # fl-a becomes vol1's target: /dev/ublkb1
+make vol-show                     # epoch, target, ISR per chunk
+make node-fault                   # verified writes through a replica restart, then failover
+```
+
+A node is `flaminio-io node` as the systemd unit `flaminio-node`:
+- it replicates on port 7411 of the overlay, over mutual TLS with the identities in
+  `/etc/flaminio/pki`;
+- a volume target serves ublk id 1 (`/dev/ublkb1`), so it never collides with the MVP
+  commands, which use id 0;
+- `vol attach` asks the metadata service (as the lab administrator) for the attach, and
+  passes the capability token to the node in `/run/flaminio/<volume>.token`.
+
 ## Long-running jobs
 
 `bench-raw` and `bench-store` run inside the VM as a transient systemd unit. The workstation

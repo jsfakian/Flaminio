@@ -177,6 +177,31 @@ net-check: ## End-to-end check: fl-a -> rhythm-backup -> fl-b
 
 ##@ Lab: metadata (phase 1; VM=w is the witness, VM=cluster all three)
 
+.PHONY: node-up node-down node-status vol-create vol-attach vol-show vol-delete node-fault
+node-up: ## Phase-1 nodes on the data VMs, replicas only (FORMAT=1 reformats the disks)
+	FORMAT=$(or $(FORMAT),0) $(LAB) node up $(VM)
+
+node-down: ## Stop the phase-1 nodes
+	$(LAB) node down $(VM)
+
+node-status: ## Phase-1 node state
+	$(LAB) node status $(VM)
+
+vol-create: ## Create the test volume (VOL, VOL_SIZE, VOL_CHUNK in lab.conf)
+	$(LAB) vol create
+
+vol-attach: ## Attach the test volume to a node, which serves it at /dev/ublkb1 (VM=a|b)
+	$(LAB) vol attach $(if $(filter-out all,$(VM)),$(VM),a)
+
+vol-show: ## The test volume: epoch, target, ISR per chunk
+	$(LAB) vol show
+
+vol-delete: ## Delete the test volume from the metadata service
+	$(LAB) vol delete
+
+node-fault: ## Verified writes while fl-b's node restarts; ISR restored; failover to fl-b verified
+	$(LAB) node-fault
+
 .PHONY: pki-issue mesh-up mesh-down mesh-check etcd-up etcd-down etcd-status meta-up meta-down meta-status meta-smoke cluster-up
 cluster-up: ## fl-w, overlay, identities, etcd and the metadata service on a, b and w
 	$(LAB) create w

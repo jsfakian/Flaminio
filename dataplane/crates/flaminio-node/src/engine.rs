@@ -134,6 +134,7 @@ pub enum Output {
     Attached {
         volume: String,
         epoch: u64,
+        size: u64,
     },
     AttachFailed {
         volume: String,
@@ -569,10 +570,14 @@ impl<D: BlockDevice> Engine<D> {
                 if a.volume.is_some() && a.nodes.is_some() {
                     let a = self.attaching.remove(&volume).expect("attaching");
                     match self.start_target(now, &volume, a) {
-                        Ok(epoch) => self.out.push(Output::Attached {
-                            volume: volume.clone(),
-                            epoch,
-                        }),
+                        Ok(epoch) => {
+                            let size = self.targets[&volume].size;
+                            self.out.push(Output::Attached {
+                                volume: volume.clone(),
+                                epoch,
+                                size,
+                            })
+                        }
                         Err(why) => self.out.push(Output::AttachFailed {
                             volume: volume.clone(),
                             why,

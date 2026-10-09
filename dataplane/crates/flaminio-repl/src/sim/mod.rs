@@ -86,6 +86,8 @@ pub struct Config {
     pub max_op: Block,
     /// Largest repair or copy, in blocks.
     pub max_io: Block,
+    /// Repairs and copies in flight per target.
+    pub max_bulk: usize,
     pub timing: Timing,
     /// Real time spent injecting faults.
     pub chaos: u64,
@@ -123,6 +125,7 @@ impl Config {
             blocks_per_chunk: r.range(2, 6) as Block,
             max_op: r.range(1, 3) as Block,
             max_io: r.range(1, 3) as Block,
+            max_bulk: r.range(1, 4) as usize,
             timing: Timing {
                 lease: r.range(2, 6) * SEC,
                 drift_ppm: r.pick(&[0, 10_000, 100_000]),
@@ -680,6 +683,7 @@ impl Sim {
         let local = n.clock.local(self.now);
         #[allow(unused_mut)]
         let mut t = Target::new(node, VOL, &view, timing, self.cfg.max_io, local);
+        t.set_max_bulk(self.cfg.max_bulk);
         #[cfg(test)]
         {
             t.bugs = self.bugs.target;

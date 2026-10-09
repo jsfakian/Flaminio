@@ -45,6 +45,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         blocks_per_chunk: 2,
         max_op: 1,
         max_io: 1,
+        max_bulk: 4,
         timing: Timing {
             lease: 5 * SEC,
             drift_ppm: 0,

@@ -637,6 +637,97 @@ cmd_meta_smoke() {
     log "  etcd with a node's workload certificate: refused"
 }
 
+# --- Phase 1: nodes (flaminio-io node) and a replicated volume ---
+
+meta_endpoints() {
+    local vm parts=()
+    for vm in $(vms_of cluster); do parts+=("$(vmvar "$vm" WG):$META_PORT"); done
+    (IFS=,; echo "${parts[*]}")
+}
+
+node_env() {
+    local vm=$1
+    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0}"
+}
+
+# node up|down|status [VM selector, default all]: the data VMs' nodes, replicas only.
+cmd_node() {
+    local action=${1:-status} vm
+    for vm in $(vms_of "${2:-all}"); do
+        case "$action" in
+            up) ENV_VARS=$(node_env "$vm") run_on_vm "$vm" "$SCRIPTS/guest/node.sh" up ;;
+            down | status)
+                [[ $action == status ]] && log "$vm"
+                run_on_vm "$vm" "$SCRIPTS/guest/node.sh" "$action"
+                ;;
+            *) die "usage: node up|down|status [VM]" ;;
+        esac
+    done
+}
+
+# vol create|attach VM|show: the test volume, as the lab administrator.
+cmd_vol() {
+    local out vm tok
+    case "${1:-show}" in
+        create)
+            out=$(metactl "$VM_A" "$VM_A" create "$VOL" "$VOL_SIZE" 2 1 "$VOL_CHUNK")
+            log "created $VOL: $(jq -r '[.volume.chunks[].replicas | join("+")] | group_by(.) | map("\(length)×\(.[0])") | join(", ")' <<<"$out")"
+            ;;
+        attach)
+            vm=$(vms_of "${2:-a}")
+            out=$(metactl "$VM_A" "$VM_A" attach "$VOL" "$vm")
+            tok=$(jq -r .token <<<"$out")
+            log "attached $VOL to $vm at epoch $(jq -r .volume.epoch <<<"$out")"
+            ENV_VARS="$(node_env "$vm") ATTACH=$VOL TOKEN=$tok" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" up
+            ;;
+        delete)
+            metactl "$VM_A" "$VM_A" delete "$VOL" >/dev/null
+            log "deleted $VOL from the metadata service"
+            ;;
+        show)
+            metactl "$VM_A" "$VM_A" get "$VOL" | jq -r '"epoch \(.volume.epoch), target \(.volume.target)",
+                ([.volume.chunks[] | (.isr | join("+"))] | group_by(.) | map("  ISR \(.[0]): \(length) chunks") | .[])'
+            ;;
+        *) die "usage: vol create|attach VM|show|delete" ;;
+    esac
+}
+
+# Chunks whose ISR has fewer members than replicas.
+vol_degraded() {
+    metactl "$VM_A" "$VM_A" get "$VOL" | jq '[.volume.chunks[] | select((.isr | length) < (.replicas | length))] | length'
+}
+
+# Verified writes on the target while fl-b's node is stopped and restarted; then fl-b must
+# rejoin every ISR, and a failover to fl-b must read back everything (from fl-b's replica).
+cmd_node_fault() {
+    local load_pid rc=0 start
+    log "write load with verification on $VM_A; $VM_B's node stops after 10 s, restarts 20 s later"
+    ENV_VARS="DEV=/dev/ublkb1" run_detached "$VM_A" "$SCRIPTS/guest/write-load.sh" &
+    load_pid=$!
+    sleep 10
+    cmd_node down b
+    sleep 5
+    log "$VM_B down: $(vol_degraded) chunks degraded"; cmd_vol show
+    sleep 15
+    cmd_node up b
+    wait "$load_pid" || rc=$?
+    ((rc == 0)) || die "write load failed (exit $rc): writes must not fail while a replica is down"
+    start=$SECONDS
+    while [[ $(vol_degraded) != 0 ]]; do
+        ((SECONDS - start < 900)) || die "ISR not full after 15 min"
+        sleep 5
+    done
+    log "every ISR full again $((SECONDS - start)) s after the load ended"; cmd_vol show
+
+    log "failover: stop $VM_A's node, attach $VOL to $VM_B, verify everything there"
+    cmd_node down a
+    cmd_vol attach b
+    ENV_VARS="DEV=/dev/ublkb1 VERIFY_ONLY=1" run_detached "$VM_B" "$SCRIPTS/guest/write-load.sh" ||
+        die "verification on $VM_B failed"
+    cmd_vol show
+    log "OK: no failed writes, ISR restored, and $VM_B serves every byte after the failover"
+}
+
 usage() {
     cat <<USAGE
 usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; cluster: a, b, w)
@@ -669,6 +760,9 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   etcd ACTION [VM]  metadata etcd (default: all three): up | down | status | wipe (CONFIRM=yes)
   meta ACTION [VM]  metadata service (default: all three): up | down | status
   meta-smoke   end-to-end metadata check: etcd member loss, and refusal of unauthenticated callers
+  node ACTION [VM]  phase-1 nodes (replicas only): up (FORMAT=1 reformats) | down | status
+  vol ACTION   the test volume \$VOL: create | attach VM (that node becomes its target) | show | delete
+  node-fault   verified writes while $VM_B's node restarts; ISR restored; failover to $VM_B verified
   pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)
   ssh|console  interactive shell or serial console (default: a)
   exec VM CMD  run a command in a VM
@@ -708,6 +802,9 @@ case "$cmd" in
     meta) cmd_meta "$@" ;;
     meta-smoke) cmd_meta_smoke ;;
     pki) cmd_pki "$@" ;;
+    node) cmd_node "$@" ;;
+    vol) cmd_vol "$@" ;;
+    node-fault) cmd_node_fault ;;
     ssh) cmd_ssh "$@" ;;
     console) cmd_console "$@" ;;
     exec) cmd_exec "$@" ;;

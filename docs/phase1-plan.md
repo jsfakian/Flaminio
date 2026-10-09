@@ -43,8 +43,8 @@ simulator checked. It comes in five parts, each committed on its own:
 | 4a ✅ | **Ranges and payloads in the core.** Operations, locks, uncertain sets, dirty sets and resync copies work on extents (runs of blocks) instead of single blocks. Data is an opaque payload type: per-block values in the simulator, buffer handles in the data plane. A replica's uncertain set becomes volatile: after a restart it reports the whole chunk | The simulator passes and every mutation is still caught, with multi-block operations |
 | 4b ✅ | **Transport.** Framed messages over TLS 1.3 with the step-3 identities. The capability token is presented in `Hello`, and the replica checks it against the peer certificate | Loopback tests: wrong CA, wrong node, stale epoch and bad token are all refused |
 | 4c ✅ | **Replica service on the real store.** The core's replica rules (fencing, sessions, uncertain sets, resync filters) in front of `flaminio-store`, with group commit per session | Loopback tests against a file-backed store |
-| 4d | **Target runtime.** `flaminio-io serve` attaches with a token, drives the core from ublk, sends to local and remote replicas, and makes ISR changes through the metadata service (gRPC client on its own thread) | The local end-to-end test passes |
-| 4e | **Lab.** An RF=2 volume across fl-a and fl-b, placed by the metadata service | The MVP's fault test passes, with the ISR shrink and expand visible in the metadata service; reads still at the MVP's level |
+| 4d (i–iii ✅) | **Target runtime.** `flaminio-io serve` attaches with a token, drives the core from ublk, sends to local and remote replicas, and makes ISR changes through the metadata service (gRPC client on its own thread) | The local end-to-end test passes |
+| 4e (correctness ✅, reads pending) | **Lab.** An RF=2 volume across fl-a and fl-b, placed by the metadata service | The MVP's fault test passes, with the ISR shrink and expand visible in the metadata service; reads still at the MVP's level |
 
 ## Step 4d progress
 
@@ -67,8 +67,49 @@ simulator checked. It comes in five parts, each committed on its own:
     shrinks.
   - After the replica recovers, it is resynced and rejoins within 3.6 s, holding the write it
     missed.
-- **(iii) Next:** the ublk frontend on the engine, with local reads kept on the MVP's
-  asynchronous, zero-copy path; then the lab (4e).
+- **(iii) ublk on the engine:** `flaminio-io node` runs a node.
+  - **Every node** serves its replicas over mutual TLS on the overlay, registers itself, and
+    sends liveness heartbeats.
+  - **With `--attach VOLUME --token FILE`,** it is also the volume's target and serves
+    `/dev/ublkbN`. The engine lives on the ublk queue thread, woken by an eventfd and a 10 ms
+    tick.
+- **(iv) Next: asynchronous local reads.** Local reads still go through the engine
+  synchronously and are copied twice. The MVP's path, with the store planning the read and
+  the device reading straight into the ublk buffer, must come back (see the 4e results).
+
+## Step 4e results (lab, 2026-10-09)
+
+**Setup.** `vol1` is 16 GiB in 64 chunks of 256 MiB, RF 2 with `minInSyncReplicas` 1. The
+metadata service placed every chunk on fl-a and fl-b, none on the witness. Both nodes
+registered themselves and stay alive through their heartbeats.
+
+**`make node-fault`:**
+1. **Writes:** fio wrote 4 GiB of random 64 KiB blocks with checksums on fl-a's
+   `/dev/ublkb1`, while fl-b's node was stopped and restarted 20 s later.
+2. **No failed writes:** fio verified all 4096 MiB with 0 errors. During the outage, all 64
+   ISRs shrank to fl-a alone (visible in the metadata service).
+3. **Resync during the load:** every ISR was full again by the time the load ended.
+4. **Failover:** fl-a's node stopped, and `vol1` was attached to fl-b at epoch 2. fio verified
+   all 4096 MiB again on fl-b's `/dev/ublkb1`, served from fl-b's replica alone.
+   - A control run over a never-written range fails verification ("bad magic header 0"), so
+     verify-only does not rewrite the data.
+
+**The first run livelocked** (resync copies flooding the replica's session); see
+[replication-protocol.md §10](replication-protocol.md#10-what-the-simulator-found). Bulk work
+is now bounded, and the run above is the second one.
+
+**Reads on fl-b through the engine** (NVMe; the raw disk did about 12 800, 245 000 and 4 980
+in the MVP's measurements):
+
+| Job | Result | Share of raw |
+|---|---:|---:|
+| 4K random, depth 1 | 12 427 IOPS, p50 77 µs | ~97% |
+| 4K random, depth 32 | 13 459 IOPS | ~5% |
+| 1M sequential, depth 8 | 1 154 MiB/s | ~23% |
+
+At depth 1 the engine adds little. At depth 32 it gets no further than at depth 1: local reads
+are served synchronously, one batch at a time, on the engine's thread. Step 4d (iv) restores
+the MVP's asynchronous, zero-copy read path, which reached 86–98% of raw.
 
 ## Step 4c result
 

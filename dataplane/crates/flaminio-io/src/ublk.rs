@@ -472,3 +472,279 @@ async fn drive(
         }
     }
 }
+
+// --- Phase 1: a volume served by the node engine (flaminio-io node --attach) ---------------
+
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use flaminio_node::engine::{Input, Io, IoError, Output};
+use flaminio_uring::EventFd;
+
+use crate::node::{NodeConfig, Parts, drive_until, log_output, read_token};
+
+type Waiter = smol::channel::Sender<Result<Option<Vec<u8>>, IoError>>;
+
+/// What the queue thread's tasks share: the engine and the completions they wait for.
+struct EngineCtx {
+    engine: RefCell<flaminio_node::engine::Engine<UringDevice>>,
+    inputs: std::sync::mpsc::Receiver<Input>,
+    waiters: RefCell<HashMap<u64, Waiter>>,
+    next_op: Cell<u64>,
+    volume: String,
+}
+
+impl EngineCtx {
+    /// Feeds the engine what other threads sent, runs a turn, and delivers completions.
+    fn pump(&self) {
+        let now = Instant::now();
+        let outputs = {
+            let mut e = self.engine.borrow_mut();
+            while let Ok(i) = self.inputs.try_recv() {
+                e.handle(now, i);
+            }
+            e.turn(now);
+            e.take_output()
+        };
+        for o in outputs {
+            match o {
+                Output::Done { op, result } => {
+                    if let Some(tx) = self.waiters.borrow_mut().remove(&op) {
+                        let _ = tx.try_send(result);
+                    }
+                }
+                other => log_output(&other),
+            }
+        }
+    }
+
+    fn submit(&self, io: Io, waiter: Waiter) {
+        let op = self.next_op.get();
+        self.next_op.set(op + 1);
+        self.waiters.borrow_mut().insert(op, waiter);
+        self.engine.borrow_mut().handle(
+            Instant::now(),
+            Input::Io {
+                volume: self.volume.clone(),
+                op,
+                io,
+            },
+        );
+        self.pump();
+    }
+}
+
+/// Attaches `volume` through the engine, then serves it as a ublk device whose queue thread
+/// runs the engine.
+pub fn serve_volume(
+    c: &NodeConfig,
+    mut parts: Parts<UringDevice>,
+    volume: String,
+    efd: Arc<EventFd>,
+) -> Result<(), String> {
+    let token = read_token(c.token.as_ref().expect("checked with --attach"))?;
+    parts.engine.handle(
+        Instant::now(),
+        Input::Attach {
+            volume: volume.clone(),
+            token,
+        },
+    );
+    let attached = drive_until(&mut parts, Duration::from_secs(60), |o| {
+        matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
+    });
+    let size = match attached {
+        Some(Output::Attached { size, .. }) => size,
+        Some(Output::AttachFailed { why, .. }) => return Err(format!("attach {volume}: {why}")),
+        _ => {
+            return Err(format!(
+                "attach {volume}: no answer from the metadata service"
+            ));
+        }
+    };
+
+    let ctrl = UblkCtrlBuilder::default()
+        .name("flaminio")
+        .id(c.id)
+        .depth(c.depth)
+        .nr_queues(1)
+        .io_buf_bytes(c.io_buf)
+        .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+        .build()
+        .map_err(|e| format!("create ublk device (is ublk_drv loaded, and are we root?): {e}"))?;
+    let tgt_init = move |dev: &mut UblkDev| {
+        let max = dev.dev_info.max_io_buf_bytes;
+        dev.tgt.dev_size = size;
+        dev.tgt.params = sys::ublk_params {
+            types: sys::UBLK_PARAM_TYPE_BASIC,
+            basic: sys::ublk_param_basic {
+                // No volatile cache: a completed write is durable on the whole ISR.
+                attrs: 0,
+                logical_bs_shift: 12,
+                physical_bs_shift: 12,
+                io_min_shift: 12,
+                io_opt_shift: 16,
+                max_sectors: max >> 9,
+                dev_sectors: size >> 9,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Ok(())
+    };
+    let parts = Arc::new(Mutex::new(Some(parts)));
+    let queue = move |qid: u16, dev: &UblkDev| {
+        let Some(parts) = parts.lock().expect("parts").take() else {
+            eprintln!("flaminio-io: only one queue is supported");
+            return;
+        };
+        if let Err(e) = serve_engine_queue(qid, dev, parts, volume.clone(), efd.clone()) {
+            eprintln!("flaminio-io: queue {qid} stopped: {e}");
+        }
+    };
+    let ready = move |ctrl: &UblkCtrl| {
+        println!(
+            "flaminio-io: serving {} MiB at {} (ublk id {})",
+            size >> 20,
+            ctrl.get_bdev_path(),
+            ctrl.dev_info().dev_id
+        );
+    };
+    ctrl.run_target(tgt_init, queue, ready)
+        .map_err(|e| format!("ublk: {e}"))?;
+    Ok(())
+}
+
+fn serve_engine_queue(
+    qid: u16,
+    dev: &UblkDev,
+    parts: Parts<UringDevice>,
+    volume: String,
+    efd: Arc<EventFd>,
+) -> Result<(), String> {
+    let Parts {
+        engine,
+        inputs,
+        sender: _keep_open,
+    } = parts;
+    let ctx = EngineCtx {
+        engine: RefCell::new(engine),
+        inputs,
+        waiters: RefCell::new(HashMap::new()),
+        next_op: Cell::new(1),
+        volume,
+    };
+    let ctx = &ctx;
+    let q = Rc::new(UblkQueue::new(qid, dev).map_err(|e| format!("ublk queue: {e}"))?);
+    let depth = dev.dev_info.queue_depth;
+    let buf_bytes = dev.dev_info.max_io_buf_bytes as usize;
+    let bufs: Rc<Vec<RefCell<IoBuf<u8>>>> = Rc::new(
+        (0..depth)
+            .map(|_| RefCell::new(IoBuf::<u8>::new(buf_bytes)))
+            .collect(),
+    );
+    let exe = Rc::new(smol::LocalExecutor::new());
+    let mut tasks = Vec::with_capacity(depth as usize);
+    for tag in 0..depth {
+        let (q, bufs) = (q.clone(), bufs.clone());
+        tasks.push(exe.spawn(async move {
+            match engine_io_task(&q, tag, &bufs, ctx).await {
+                Ok(()) | Err(UblkError::QueueIsDown) => {}
+                Err(e) => eprintln!("flaminio-io: tag {tag}: {e}"),
+            }
+        }));
+    }
+    // Other threads' inputs: wait for the eventfd to become readable on this ring.
+    let _waker = {
+        let q = q.clone();
+        let fd = efd.as_raw_fd();
+        exe.spawn(async move {
+            loop {
+                let sqe = opcode::PollAdd::new(types::Fd(fd), libc::POLLIN as u32).build();
+                let _ = q.ublk_submit_sqe(sqe).await;
+                efd.drain();
+                ctx.pump();
+            }
+        })
+    };
+    // Timeouts, heartbeats and leases: a turn every 10 ms.
+    let _ticker = {
+        let q = q.clone();
+        exe.spawn(async move {
+            let ts = types::Timespec::new().nsec(10_000_000);
+            loop {
+                let _ = q.ublk_submit_sqe(opcode::Timeout::new(&ts).build()).await;
+                ctx.pump();
+            }
+        })
+    };
+    let runner = exe.clone();
+    let result = smol::block_on(exe.run(async move {
+        let run_ops = || while runner.try_tick() {};
+        let is_done = || tasks.iter().all(|t| t.is_finished());
+        libublk::wait_and_handle_io_events(&q, Some(20), run_ops, is_done).await
+    }));
+    result.map_err(|e| format!("event loop: {e}"))
+}
+
+/// One tag: fetch a request, hand it to the engine, commit the result, repeat. The buffer
+/// discipline is `io_task`'s: see there.
+#[allow(clippy::await_holding_refcell_ref)]
+async fn engine_io_task(
+    q: &UblkQueue<'_>,
+    tag: u16,
+    bufs: &[RefCell<IoBuf<u8>>],
+    ctx: &EngineCtx,
+) -> Result<(), UblkError> {
+    let (done_tx, done_rx) = smol::channel::bounded(1);
+    {
+        let buf = bufs[tag as usize].borrow();
+        q.submit_io_prep_cmd(tag, BufDesc::Slice(buf.as_slice()), 0, Some(&*buf))
+            .await?;
+    }
+    loop {
+        let (op, offset, len) = {
+            let iod = q.get_iod(tag);
+            (
+                iod.op_flags & 0xff,
+                iod.start_sector << 9,
+                u64::from(iod.nr_sectors) << 9,
+            )
+        };
+        let n = len as usize;
+        let res = match op {
+            sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE
+                if n <= bufs[tag as usize].borrow().len() =>
+            {
+                let io = if op == sys::UBLK_IO_OP_READ {
+                    Io::Read { offset, len }
+                } else {
+                    Io::Write {
+                        offset,
+                        data: bufs[tag as usize].borrow()[..n].to_vec(),
+                    }
+                };
+                ctx.submit(io, done_tx.clone());
+                match done_rx.recv().await {
+                    Ok(Ok(Some(data))) if data.len() == n => {
+                        bufs[tag as usize].borrow_mut()[..n].copy_from_slice(&data);
+                        len as i32
+                    }
+                    Ok(Ok(None)) => len as i32,
+                    Ok(Err(IoError::Invalid)) => -libc::EINVAL,
+                    _ => -libc::EIO,
+                }
+            }
+            // Writes are durable when acknowledged; the protocol has no discard yet, and a
+            // discard is only a hint.
+            sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => 0,
+            sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
+            _ => -libc::EOPNOTSUPP,
+        };
+        let buf = bufs[tag as usize].borrow();
+        q.submit_io_commit_cmd(tag, BufDesc::Slice(buf.as_slice()), res)
+            .await?;
+    }
+}
