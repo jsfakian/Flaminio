@@ -30,8 +30,8 @@ machine into real I/O.
 | 4 | **Data plane on the protocol core**:<br>• `flaminio-io` hosts many volumes and chunk replicas;<br>• the target uses placement and ISR from the metadata service, and the step-1 state machine;<br>• one heartbeat per node pair;<br>• replication over mutual TLS (step-3 identities), with the replica checking capability tokens | Lab | • The MVP's fault test passes, with ISR shrink and expand going through the metadata service.<br>• The replica refuses unauthenticated peers and stale tokens.<br>• Read results unchanged (reads stay local) |
 | 5 ✅ | **Failover in the lab**: attach on the other VM with an epoch bump, fencing and reconciliation; partition tests (the old target must neither write nor read stale data) | Lab | Scripted failover and partition tests pass, and the data is verified |
 | 6 ✅ | **Node agent**: device discovery, the claim policy (never claim a device with a signature), format, drain by moving chunk replicas | Lab | Adding and draining a disk while fio runs, with the data verified |
-| 7 (mostly ✅) | **Kubernetes**: k3s on the lab VMs, the CSI driver (provision, attach, stage, publish; block and filesystem), placement controller, failover controller | Lab | A pod with a PVC runs fio. Killing its node moves it to the other node with its data intact |
-| 8 | **Phase-1 benchmark and chaos run** | Lab | Read results for a pod against the raw disk; failover time measured; chaos run passes |
+| 7 ✅ | **Kubernetes**: k3s on the lab VMs, the CSI driver (provision, attach, stage, publish; block and filesystem), placement controller, failover controller | Lab | A pod with a PVC runs fio. Killing its node moves it to the other node with its data intact |
+| 8 ✅ | **Phase-1 benchmark and chaos run** | Lab | Read results for a pod against the raw disk; failover time measured; chaos run passes |
 
 ## Step 4 breakdown
 
@@ -83,6 +83,46 @@ simulator checked. It comes in five parts, each committed on its own:
 
   Ticks run on the 10 ms timer only, not on every I/O event.
 
+## Step 8 result (lab, 2026-10-09)
+
+**Reads from a pod** (`make bench-pod`, [details](benchmarks/2026-10-09-phase1-pod.md)). A
+16 GiB volume, as a raw block device in a pod on fl-b. With CSI topology, every chunk has a
+replica on the pod's node. The raw disk was read in the same session.
+
+| Read job | Pod | Raw disk | Share |
+|---|---:|---:|---:|
+| 4K random, QD1 | 12 681 IOPS, p99 87 µs | 13 854 | **91%** |
+| 4K random, QD32 | 184 134 IOPS, p99 268 µs | 266 507 | 69% |
+| 1M sequential, QD8 | 3 456 MiB/s | 6 277 | 55% |
+
+Kubernetes adds nothing measurable: the same jobs on the node's device gave the same numbers.
+QD32 and 1M are follow-ups item 1.
+
+**Failover time:**
+
+| Measure | Time |
+|---|---:|
+| Target killed (SIGKILL) to the new target's device up (`make chaos`) | 3–4 s |
+| …its first I/O also waits for the takeover wait: the dead target's lease must run out | L(1+ρ) = 5.5 s by default |
+| Partition to the new target's first read, including 2 s before the attach (`make partition-test`) | 12.8 s |
+| Node powered off to its pod Ready elsewhere, data verified (`make csi-failover`) | 126 s, of which 86 s detection: Kubernetes (46 s) and the failover controller's grace period (40 s) |
+
+**Chaos run** (`make chaos`, 4 rounds) passes:
+
+| Round | Faults during the load | fio load on the target | Failover after SIGKILL | fio verify on the new target |
+|---|---:|---|---:|---|
+| 1 (fl-a → fl-b) | 3 | 4096 MiB written and verified, 0 errors | 4 s | 4096 MiB, 0 errors |
+| 2 (fl-b → fl-a) | 7 | 4096 MiB, 0 errors | 3 s | 4096 MiB, 0 errors |
+| 3 (fl-a → fl-b) | 2 | 4096 MiB, 0 errors | 3 s | 4096 MiB, 0 errors |
+| 4 (fl-b → fl-a) | 9 | 4096 MiB, 0 errors | 3 s | 4096 MiB, 0 errors |
+
+The 21 faults: restarts of the replica's node, partitions of the replica, the witness's etcd
+member and metadata service down, and 100 ms on every packet of the replica.
+
+**Found on the way:** a node could not add its ublk device right after its previous device was
+stopped by another thread (a deposed target). The kernel refuses the id until the old device
+is gone. Adding is now tried again for up to 10 s.
+
 ## Step 6 result (lab, 2026-10-09)
 
 `make drain-test` passes: a node is drained while fio writes and verifies, and the destination
@@ -126,7 +166,7 @@ selector. The policy's unit tests cover every kind of refusal.
 - A drained node keeps its old chunks on disk: that is replica garbage collection
   ([follow-ups](followups.md) item 8).
 
-## Step 7 result so far (lab, 2026-10-09)
+## Step 7 result (lab, 2026-10-09)
 
 **Done:**
 - k3s on the lab VMs;
@@ -136,8 +176,8 @@ selector. The policy's unit tests cover every kind of refusal.
 Placement stays in the metadata service's `CreateVolume`; a separate placement controller
 comes with failure domains ([follow-ups](followups.md) item 4).
 
-**Left for step 8:** the pod running fio. The tests below write and verify 256 MiB with
-checksums instead.
+**The pod running fio** came with step 8 (`make bench-pod`). With CSI topology, a new
+volume's chunks each get a replica on its first pod's node, so its reads are local.
 
 **Kubernetes (`make k8s-up`, `make k8s-smoke`):** k3s v1.36.5. The server is on the witness
 fl-w (tainted, so no workloads run there) and agents are on fl-a and fl-b. Every node address

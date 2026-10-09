@@ -630,12 +630,15 @@ func (x *Volume) GetChunks() []*ChunkMeta {
 }
 
 type CreateVolumeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	SizeBytes     uint64                 `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	ChunkBytes    uint64                 `protobuf:"varint,3,opt,name=chunk_bytes,json=chunkBytes,proto3" json:"chunk_bytes,omitempty"`
-	Replicas      uint32                 `protobuf:"varint,4,opt,name=replicas,proto3" json:"replicas,omitempty"`
-	MinIsr        uint32                 `protobuf:"varint,5,opt,name=min_isr,json=minIsr,proto3" json:"min_isr,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Id         string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	SizeBytes  uint64                 `protobuf:"varint,2,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	ChunkBytes uint64                 `protobuf:"varint,3,opt,name=chunk_bytes,json=chunkBytes,proto3" json:"chunk_bytes,omitempty"`
+	Replicas   uint32                 `protobuf:"varint,4,opt,name=replicas,proto3" json:"replicas,omitempty"`
+	MinIsr     uint32                 `protobuf:"varint,5,opt,name=min_isr,json=minIsr,proto3" json:"min_isr,omitempty"`
+	// If set and eligible, every chunk has a replica on this node: the node the volume will
+	// first be attached to, whose reads then stay local.
+	PreferNode    string `protobuf:"bytes,6,opt,name=prefer_node,json=preferNode,proto3" json:"prefer_node,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -703,6 +706,13 @@ func (x *CreateVolumeRequest) GetMinIsr() uint32 {
 		return x.MinIsr
 	}
 	return 0
+}
+
+func (x *CreateVolumeRequest) GetPreferNode() string {
+	if x != nil {
+		return x.PreferNode
+	}
+	return ""
 }
 
 type CreateVolumeResponse struct {
@@ -1494,7 +1504,7 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\amin_isr\x18\x05 \x01(\rR\x06minIsr\x12\x14\n" +
 	"\x05epoch\x18\x06 \x01(\x04R\x05epoch\x12\x16\n" +
 	"\x06target\x18\a \x01(\tR\x06target\x123\n" +
-	"\x06chunks\x18\b \x03(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x06chunks\"\x9a\x01\n" +
+	"\x06chunks\x18\b \x03(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x06chunks\"\xbb\x01\n" +
 	"\x13CreateVolumeRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -1502,7 +1512,9 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\vchunk_bytes\x18\x03 \x01(\x04R\n" +
 	"chunkBytes\x12\x1a\n" +
 	"\breplicas\x18\x04 \x01(\rR\breplicas\x12\x17\n" +
-	"\amin_isr\x18\x05 \x01(\rR\x06minIsr\"H\n" +
+	"\amin_isr\x18\x05 \x01(\rR\x06minIsr\x12\x1f\n" +
+	"\vprefer_node\x18\x06 \x01(\tR\n" +
+	"preferNode\"H\n" +
 	"\x14CreateVolumeResponse\x120\n" +
 	"\x06volume\x18\x01 \x01(\v2\x18.flaminio.meta.v1.VolumeR\x06volume\"\"\n" +
 	"\x10GetVolumeRequest\x12\x0e\n" +

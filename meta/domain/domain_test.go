@@ -142,7 +142,7 @@ func TestSpecValidate(t *testing.T) {
 
 func TestPlaceSpreadsLoad(t *testing.T) {
 	nodes := []NodeLoad{{"a", 0}, {"b", 0}, {"c", 5}, {"d", 0}}
-	p, err := Place(nodes, 6, 2)
+	p, err := Place(nodes, 6, 2, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,29 @@ func TestPlaceSpreadsLoad(t *testing.T) {
 	if count["a"] != 4 || count["b"] != 4 || count["d"] != 4 || count["c"] != 0 {
 		t.Fatalf("unbalanced: %v", count)
 	}
-	if _, err := Place(nodes[:1], 1, 2); err == nil {
+	if _, err := Place(nodes[:1], 1, 2, ""); err == nil {
 		t.Fatal("placed 2 replicas on 1 node")
+	}
+}
+
+func TestPlacePreferredNode(t *testing.T) {
+	nodes := []NodeLoad{{ID: "a", Replicas: 10}, {ID: "b"}, {ID: "c"}}
+	p, err := Place(nodes, 4, 2, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	load := map[string]int{}
+	for _, r := range p {
+		if r[0] != "a" {
+			t.Fatalf("chunk without a replica on the preferred node: %v", p)
+		}
+		load[r[1]]++
+	}
+	if load["b"] != 2 || load["c"] != 2 {
+		t.Fatalf("the other replicas do not spread: %v", p)
+	}
+	// An ineligible preference (not among the nodes) is ignored.
+	if p, err := Place(nodes, 1, 2, "w"); err != nil || p[0][0] == "w" {
+		t.Fatalf("%v %v", p, err)
 	}
 }

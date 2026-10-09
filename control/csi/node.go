@@ -31,7 +31,11 @@ type Node struct {
 func (n *Node) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
 	// A node serves one attached volume at a time in this version (docs/followups.md, item 5);
 	// the scheduler places pods accordingly.
-	return &csi.NodeGetInfoResponse{NodeId: n.NodeID, MaxVolumesPerNode: 1}, nil
+	return &csi.NodeGetInfoResponse{
+		NodeId:             n.NodeID,
+		MaxVolumesPerNode:  1,
+		AccessibleTopology: &csi.Topology{Segments: map[string]string{TopologyKey: n.NodeID}},
+	}, nil
 }
 
 func (n *Node) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRequest) (*csi.NodeGetCapabilitiesResponse, error) {

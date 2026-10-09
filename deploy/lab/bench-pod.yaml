@@ -1,0 +1,75 @@
+# Read benchmark of a Flaminio volume from a pod (make bench-pod). A template: {{NODE}},
+# {{FIO_IMAGE}}, {{SIZE}} and {{RUNTIME}} are filled in by scripts/lab.sh.
+#
+# The volume is a raw block device in the pod. It is written once in full (never-written blocks
+# would read as zeros without touching a disk), then read with the jobs of `make bench-raw`, so
+# the two compare. Each job's fio JSON is printed between "BEGIN <job>" and "END <job>".
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flaminio-bench
+  labels:
+    # fio opens the device as root: the volume's device node is root's.
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bench
+  namespace: flaminio-bench
+data:
+  run.sh: |
+    set -eu
+    dev=/dev/flaminio
+    job() { # name rw bs iodepth [fio options...]
+      name=$1 rw=$2 bs=$3 qd=$4
+      shift 4
+      echo "BEGIN $name"
+      fio --name="$name" --filename="$dev" --rw="$rw" --bs="$bs" --iodepth="$qd" --numjobs=1 \
+          --ioengine=io_uring --direct=1 --invalidate=0 --group_reporting --output-format=json "$@"
+      echo "END $name"
+    }
+    job fill write 1m 32
+    for spec in "randread-4k-qd1 randread 4k 1" "randread-4k-qd32 randread 4k 32" "read-1m-qd8 read 1m 8"; do
+      # shellcheck disable=SC2086
+      job $spec --time_based --runtime={{RUNTIME}} --ramp_time=3
+    done
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bench
+  namespace: flaminio-bench
+spec:
+  accessModes: [ReadWriteOncePod]
+  volumeMode: Block
+  storageClassName: flaminio
+  resources:
+    requests: {storage: {{SIZE}}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fio
+  namespace: flaminio-bench
+spec:
+  nodeSelector: {kubernetes.io/hostname: {{NODE}}}
+  restartPolicy: Never
+  containers:
+    - name: fio
+      image: {{FIO_IMAGE}}
+      imagePullPolicy: Never
+      command: [sh, /bench/run.sh]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      volumeDevices:
+        - {name: data, devicePath: /dev/flaminio}
+      volumeMounts:
+        - {name: script, mountPath: /bench}
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: bench}
+    - name: script
+      configMap: {name: bench}

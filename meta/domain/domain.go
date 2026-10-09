@@ -89,6 +89,8 @@ type Spec struct {
 	ChunkBytes uint64
 	Replicas   uint32
 	MinISR     uint32
+	// Optional: a node to hold a replica of every chunk.
+	PreferNode string
 }
 
 // Validate checks a volume specification.
@@ -215,16 +217,23 @@ type NodeLoad struct {
 }
 
 // Place picks replicas distinct nodes for each of n chunks, preferring the least loaded, so a
-// volume's chunks spread over as many nodes as possible (ARCHITECTURE §9). Failure domains
-// above the node level are not considered yet.
-func Place(nodes []NodeLoad, n int, replicas int) ([][]string, error) {
+// volume's chunks spread over as many nodes as possible (ARCHITECTURE §9). If prefer is one of
+// the nodes, every chunk has its first replica there: the node the volume is attached to reads
+// locally. Failure domains above the node level are not considered yet.
+func Place(nodes []NodeLoad, n int, replicas int, prefer string) ([][]string, error) {
 	if len(nodes) < replicas {
 		return nil, fmt.Errorf("%w: %d live nodes, %d replicas", ErrPlacement, len(nodes), replicas)
+	}
+	if !slices.ContainsFunc(nodes, func(x NodeLoad) bool { return x.ID == prefer }) {
+		prefer = ""
 	}
 	load := slices.Clone(nodes)
 	out := make([][]string, 0, n)
 	for range n {
 		sort.SliceStable(load, func(i, j int) bool {
+			if (load[i].ID == prefer) != (load[j].ID == prefer) {
+				return load[i].ID == prefer
+			}
 			if load[i].Replicas != load[j].Replicas {
 				return load[i].Replicas < load[j].Replicas
 			}

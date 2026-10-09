@@ -121,6 +121,9 @@ message CreateVolumeRequest {
   uint64 chunk_bytes = 3;
   uint32 replicas = 4;
   uint32 min_isr = 5;
+  // If set and eligible, every chunk has a replica on this node: the node the volume will
+  // first be attached to, whose reads then stay local.
+  string prefer_node = 6;
 }
 
 message CreateVolumeResponse {

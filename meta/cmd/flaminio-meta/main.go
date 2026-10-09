@@ -4,7 +4,7 @@
 //	flaminio-meta [--server host:7400] nodes
 //	flaminio-meta [--server host:7400] register <node> <address> [label=value...]
 //	flaminio-meta [--server host:7400] heartbeat <node>
-//	flaminio-meta [--server host:7400] create <volume> <size> [replicas] [min-isr] [chunk]
+//	flaminio-meta [--server host:7400] create <volume> <size> [replicas] [min-isr] [chunk] [prefer-node]
 //	flaminio-meta [--server host:7400] get <volume>
 //	flaminio-meta [--server host:7400] attach <volume> <node> [unless-target|only-if-target]
 //	flaminio-meta [--server host:7400] delete <volume>
@@ -278,6 +278,7 @@ func client(args []string) error {
 		}
 		out, err = c.CreateVolume(ctx, &metav1.CreateVolumeRequest{
 			Id: args[1], SizeBytes: size, ChunkBytes: chunk, Replicas: uint32(rf), MinIsr: uint32(min),
+			PreferNode: argOr(args, 6, ""),
 		})
 	case "get":
 		if err = need(1); err == nil {

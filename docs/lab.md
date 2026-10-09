@@ -301,6 +301,36 @@ The StorageClass `flaminio` takes `replicas` (default 2), `minIsr` (1) and `chun
 device. The image is built without a container engine (`crane`, on a pinned Ubuntu base) and
 imported into each node's containerd; nothing is pushed to a registry.
 
+### Phase-1 benchmark and chaos run (step 8)
+
+```bash
+make bench-pod                    # NODE=fl-b RUNTIME=30: reads from a pod, against the raw disk
+make chaos                        # ROUNDS=4: faults under a verified write load, then a crash
+```
+
+**`make bench-pod`.** A pod on `NODE` gets a 16 GiB Flaminio volume as a raw block device.
+1. With topology (`WaitForFirstConsumer`), the CSI controller learns the pod's node, and the
+   metadata service puts a replica of every chunk there, so reads are local.
+2. The pod writes the whole volume once (never-written blocks would read as zeros), then runs
+   the read jobs of `make bench-raw`.
+3. The same jobs then read the node's raw data disk, read-only.
+
+The table shows both, and the pod's share of raw. fio in the pod is built statically from the
+`FIO_VERSION` tag of fio's repository (in fl-a), on the same pinned base image as the CSI
+driver.
+
+**`make chaos`.** `ROUNDS` rounds, alternating the target between fl-a and fl-b. Each round:
+1. fio writes 4 GiB of verified data on the target.
+2. Meanwhile, random faults hit the rest, one after another, until the load ends:
+   - a restart of the replica's node;
+   - the replica cut off the overlay for 15 s;
+   - fl-w's etcd member and metadata service down for 20 s;
+   - 100 ms added to every packet of the replica's for 20 s.
+
+   The load must finish with no errors.
+3. Once every ISR is full again, the target's node is killed with SIGKILL, like a crash. The
+   volume fails over to the other node, and fio verifies every byte there.
+
 ## Running the tests yourself
 
 | Command | Where | Duration | What it checks |
@@ -313,6 +343,8 @@ imported into each node's containerd; nothing is pushed to a registry.
 | `make meta-smoke` | lab | 2 min | metadata through etcd member loss; refusal of unauthenticated callers |
 | `make node-fault` | lab | 5–10 min | verified writes through a replica restart; ISR restored; failover |
 | `make partition-test` | lab | 3–5 min | the old target, cut off, serves no stale reads and loses no acknowledged write |
+| `make bench-pod` | lab | 10 min | reads from a pod with a Flaminio volume against the raw disk |
+| `make chaos` | lab | 20–30 min | random faults under a verified write load; each round ends with a crashed target and a verified failover |
 | `make drain-test` | lab | 15–25 min | a node drained under a verified write load; the destination then serves every byte alone (needs `make data-node-up`) |
 | `make k8s-smoke` | lab | 1 min | Kubernetes over the overlay |
 | `make csi-test` | lab | 3 min | a PVC provisioned, formatted, written, moved to the other node, verified |

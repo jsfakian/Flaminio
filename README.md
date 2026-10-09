@@ -25,7 +25,11 @@ and you restore from an encrypted, immutable backup.
 > - when a node is powered off, its pod comes back on the other node with its data in about
 >   two minutes;
 > - a node can be drained while it serves I/O: its replicas move to another node, verified
->   under load.
+>   under load;
+> - a pod reads its volume at 91% of the raw disk at QD1 (69% at QD32, 55% for 1M sequential:
+>   [work in progress](docs/followups.md));
+> - a chaos run (replica restarts, partitions, metadata outages, slow links, crashed targets)
+>   loses no byte.
 
 ---
 

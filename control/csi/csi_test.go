@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -98,6 +99,17 @@ func TestController(t *testing.T) {
 	_, err = create("pvc-1", 2<<30, nil)
 	wantCode(t, "same name, other size", err, codes.AlreadyExists)
 
+	// The node of the volume's first pod holds a replica of every chunk.
+	if _, err := c.CreateVolume(ctx, &csi.CreateVolumeRequest{
+		Name: "pvc-local", CapacityRange: &csi.CapacityRange{RequiredBytes: 4 << 30},
+		VolumeCapabilities: []*csi.VolumeCapability{mountCap("")}, Parameters: map[string]string{"replicas": "1"},
+		AccessibilityRequirements: &csi.TopologyRequirement{Preferred: []*csi.Topology{{Segments: map[string]string{TopologyKey: "b"}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := m.GetVolume(ctx, "pvc-local"); len(v.Chunks) != 16 || slices.ContainsFunc(v.Chunks, func(c *metav1.ChunkMeta) bool { return c.Replicas[0] != "b" }) {
+		t.Fatalf("chunks of pvc-local not all on b: %v", v.Chunks)
+	}
 	_, err = create("pvc-2", 1<<30, map[string]string{"replica": "2"})
 	wantCode(t, "misspelt parameter", err, codes.InvalidArgument)
 	_, err = create("pvc-2", 1<<30, map[string]string{"replicas": "3"})

@@ -62,7 +62,10 @@ spec:
             - {name: tls, mountPath: /etc/flaminio/tls, readOnly: true}
         - name: csi-provisioner
           image: registry.k8s.io/sig-storage/csi-provisioner:v6.2.1
-          args: [--csi-address=/csi/csi.sock, --leader-election, --leader-election-namespace=flaminio-system, --timeout=60s]
+          # Topology: CreateVolume learns the node of the volume's first pod, which then holds
+          # a replica of every chunk (local reads).
+          args: [--csi-address=/csi/csi.sock, --leader-election, --leader-election-namespace=flaminio-system, --timeout=60s,
+                 --feature-gates=Topology=true]
           securityContext: *restricted
           volumeMounts: [{name: socket-dir, mountPath: /csi}]
         - name: csi-attacher

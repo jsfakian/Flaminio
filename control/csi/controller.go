@@ -31,7 +31,11 @@ func (Identity) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi.
 }
 
 func (i Identity) GetPluginCapabilities(context.Context, *csi.GetPluginCapabilitiesRequest) (*csi.GetPluginCapabilitiesResponse, error) {
-	var caps []*csi.PluginCapability
+	// Topology tells the controller which node a new volume's first pod will run on
+	// (WaitForFirstConsumer), so that node gets a replica of every chunk.
+	caps := []*csi.PluginCapability{{Type: &csi.PluginCapability_Service_{
+		Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_VOLUME_ACCESSIBILITY_CONSTRAINTS},
+	}}}
 	if i.Controller {
 		caps = append(caps, &csi.PluginCapability{Type: &csi.PluginCapability_Service_{
 			Service: &csi.PluginCapability_Service{Type: csi.PluginCapability_Service_CONTROLLER_SERVICE},
@@ -42,6 +46,22 @@ func (i Identity) GetPluginCapabilities(context.Context, *csi.GetPluginCapabilit
 
 func (Identity) Probe(context.Context, *csi.ProbeRequest) (*csi.ProbeResponse, error) {
 	return &csi.ProbeResponse{Ready: wrapperspb.Bool(true)}, nil
+}
+
+// TopologyKey is the topology segment each node reports: its own name. Volumes are reachable
+// from every node; the segment only says where a new volume's pod will run.
+const TopologyKey = "flaminio.io/node"
+
+// preferredNode is the node Kubernetes picked for the volume's first pod, if any.
+func preferredNode(t *csi.TopologyRequirement) string {
+	for _, list := range [][]*csi.Topology{t.GetPreferred(), t.GetRequisite()} {
+		for _, top := range list {
+			if n := top.GetSegments()[TopologyKey]; n != "" {
+				return n
+			}
+		}
+	}
+	return ""
 }
 
 // StorageClass parameters, and their defaults.
@@ -179,6 +199,7 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	}
 	_, err = c.Meta.CreateVolume(ctx, &metav1.CreateVolumeRequest{
 		Id: req.GetName(), SizeBytes: size, ChunkBytes: p.chunk, Replicas: p.replicas, MinIsr: p.minISR,
+		PreferNode: preferredNode(req.GetAccessibilityRequirements()),
 	})
 	switch status.Code(err) {
 	case codes.OK:
@@ -196,6 +217,8 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	default:
 		return nil, err
 	}
+	// No accessible topology: the volume is reachable from every node, so its pods can move
+	// anywhere (CSI: unset means equally accessible from all nodes).
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
 		VolumeId:      req.GetName(),
 		CapacityBytes: int64(size),

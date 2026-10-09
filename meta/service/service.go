@@ -222,7 +222,7 @@ func volumePB(v *domain.Volume) *metav1.Volume {
 func (s *Service) CreateVolume(ctx context.Context, r *metav1.CreateVolumeRequest) (*metav1.CreateVolumeResponse, error) {
 	spec := domain.Spec{
 		ID: r.GetId(), SizeBytes: r.GetSizeBytes(), ChunkBytes: r.GetChunkBytes(),
-		Replicas: r.GetReplicas(), MinISR: r.GetMinIsr(),
+		Replicas: r.GetReplicas(), MinISR: r.GetMinIsr(), PreferNode: r.GetPreferNode(),
 	}
 	if err := spec.Validate(); err != nil {
 		return nil, errStatus(err)
@@ -259,7 +259,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		}
 	}
 	h := domain.Header{ID: spec.ID, SizeBytes: spec.SizeBytes, ChunkBytes: spec.ChunkBytes}
-	placement, err := domain.Place(candidates, h.ChunkCount(), int(spec.Replicas))
+	placement, err := domain.Place(candidates, h.ChunkCount(), int(spec.Replicas), spec.PreferNode)
 	if err != nil {
 		return nil, err
 	}

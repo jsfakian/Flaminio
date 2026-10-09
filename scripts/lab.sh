@@ -1211,6 +1211,171 @@ cmd_drain_test() {
     log "OK: drained under a verified write load, $VM_C alone served every byte, and the replicas moved back"
 }
 
+# --- Phase 1 step 8: benchmark and chaos ---
+
+# The fio image: fio built statically in fl-a, on the pinned base, imported on every node.
+fio_image() {
+    local bin tag="docker.io/flaminio/fio:$FIO_VERSION"
+    if ! vssh "$VM_A" "sudo k3s ctr -n k8s.io images ls -q | grep -qx $tag" 2>/dev/null; then
+        bin=$(ENV_VARS="FIO_VERSION=$FIO_VERSION" run_on_vm "$VM_A" "$SCRIPTS/guest/fio-static.sh" | tail -1)
+        vssh "$VM_A" "cat $bin" >"$LOCAL_STATE_DIR/bin/fio"
+        "$SCRIPTS/dev/image.sh" "$LOCAL_STATE_DIR/fio-image.tar" "$tag" "$LOCAL_STATE_DIR/bin/fio" >&2
+        local vm
+        for vm in $(vms_of all); do
+            vssh "$vm" "sudo k3s ctr -n k8s.io images import -" <"$LOCAL_STATE_DIR/fio-image.tar" >/dev/null
+        done
+    fi
+    echo "$tag"
+}
+
+# Splits the pod's log into one fio JSON file per job (BEGIN name ... END; anything fio prints
+# before its JSON is dropped), and prints a row per read job: job, IOPS, MiB/s, p50 and p99
+# completion latency (us).
+fio_table() {
+    awk '/^BEGIN /{n=$2; f="'"$LOCAL_STATE_DIR"'/bench/" n ".json"; printf "" > f; json=0; next}
+         /^END /{close(f); f=""; next} f && /^\{/ {json=1} f && json {print >> f}' "$1"
+    local j
+    for j in randread-4k-qd1 randread-4k-qd32 read-1m-qd8; do
+        jq -r --arg n "$j" '.jobs[0].read | [$n, (.iops|floor), ((.bw_bytes/1048576)*10|floor/10),
+            ((.clat_ns.percentile["50.000000"] // 0)/1000|floor), ((.clat_ns.percentile["99.000000"] // 0)/1000|floor)] | @tsv' \
+            "$LOCAL_STATE_DIR/bench/$j.json"
+    done
+}
+
+# Reads from a pod with a Flaminio volume on NODE (default b), against the raw disk of that node
+# the same day. RUNTIME seconds per job.
+cmd_bench_pod() {
+    local node=${NODE:-$VM_B} image runtime=${RUNTIME:-30} log="$LOCAL_STATE_DIR/bench/pod.log" start
+    mkdir -p "$LOCAL_STATE_DIR/bench"
+    image=$(fio_image)
+    release_lab_volume
+    kubectl_w delete namespace flaminio-bench --ignore-not-found --wait=true >/dev/null
+    NODE=$node FIO_IMAGE=$image SIZE=16Gi RUNTIME=$runtime render "$REPO_ROOT/deploy/lab/bench-pod.yaml" |
+        vssh "$VM_W" "sudo k3s kubectl apply -f -" >/dev/null
+    log "fio pod on $node: fills 16 GiB once, then reads ${runtime}s per job"
+    start=$SECONDS
+    until [[ $(kubectl_w get pod -n flaminio-bench fio -o jsonpath='{.status.phase}' 2>/dev/null) =~ ^(Succeeded|Failed)$ ]]; do
+        ((SECONDS - start < 1800)) || die "the benchmark pod did not finish in 30 min"
+        sleep 10
+    done
+    kubectl_w logs -n flaminio-bench fio >"$log"
+    [[ $(kubectl_w get pod -n flaminio-bench fio -o jsonpath='{.status.phase}') == Succeeded ]] ||
+        { tail -20 "$log"; die "the benchmark pod failed"; }
+    local vol
+    vol=$(kubectl_w get pvc -n flaminio-bench bench -o jsonpath='{.spec.volumeName}')
+    log "volume $vol: $(metactl "$VM_A" "$VM_A" get "$vol" | jq -r --arg n "$node" \
+        '"target \(.volume.target), \([.volume.chunks[] | select(.replicas | index($n))] | length) of \(.volume.chunks | length) chunks with a replica on \($n)"')"
+    fio_table "$log" >"$LOCAL_STATE_DIR/bench/pod.tsv"
+    jq -r '.jobs[0].write | "fill: \(.io_bytes/1073741824|floor) GiB at \(.bw_bytes/1048576|floor) MiB/s (writes: indicative only)"' \
+        "$LOCAL_STATE_DIR/bench/fill.json"
+
+    # The raw disk, read only. Never precondition it here: that would overwrite the store.
+    if vssh "$node" "test -f ~/.flaminio-preconditioned-\$(lsblk -dn -o NAME,SERIAL | awk '\$2 ~ /data/ {print \$1; exit}')"; then
+        log "raw data disk of $node, same jobs"
+        run_on_vm "$node" "$SCRIPTS/guest/fio-raw.sh" "$runtime" '^(randread-4k-qd1|randread-4k-qd32|read-1m-qd8)$' |
+            awk 'NF == 5 && $1 ~ /^(randread|read)/ {print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5}' >"$LOCAL_STATE_DIR/bench/raw.tsv"
+    else
+        warn "$node's raw disk was never preconditioned: no raw comparison (make bench-raw first, before node-up)"
+        : >"$LOCAL_STATE_DIR/bench/raw.tsv"
+    fi
+    printf '%-18s %10s %10s %10s %10s %10s %8s\n' job IOPS MiB/s "p50(us)" "p99(us)" "raw IOPS" share
+    join -t $'\t' -a 1 "$LOCAL_STATE_DIR/bench/pod.tsv" "$LOCAL_STATE_DIR/bench/raw.tsv" |
+        awk -F'\t' '{share = ($6 > 0) ? sprintf("%d%%", 100 * $2 / $6) : "-";
+            printf "%-18s %10s %10s %10s %10s %10s %8s\n", $1, $2, $3, $4, $5, ($6 ? $6 : "-"), share}'
+    [[ ${KEEP:-0} == 1 ]] || kubectl_w delete namespace flaminio-bench --wait=false >/dev/null
+}
+
+# One fault on the replica node $1 (not the target), for about 15–25 s; prints what it was.
+chaos_fault() {
+    local other=$1 kind=$((RANDOM % 4))
+    case $kind in
+        0)
+            echo "restart of $other's node"
+            cmd_node down "$(vms_of "$other")" >/dev/null 2>&1
+            sleep 10
+            cmd_node up "$(vms_of "$other")" >/dev/null 2>&1
+            ;;
+        1)
+            echo "$other cut off the overlay for 15 s"
+            run_on_vm "$other" "$SCRIPTS/guest/partition.sh" on >/dev/null
+            sleep 15
+            run_on_vm "$other" "$SCRIPTS/guest/partition.sh" off >/dev/null
+            ;;
+        2)
+            echo "$VM_W's etcd member and metadata service down for 20 s"
+            cmd_meta down w >/dev/null 2>&1
+            cmd_etcd down w >/dev/null 2>&1
+            sleep 20
+            cmd_etcd up w >/dev/null 2>&1
+            cmd_meta up w >/dev/null 2>&1
+            ;;
+        3)
+            echo "100 ms on every packet to and from $other for 20 s"
+            run_on_vm "$other" "$SCRIPTS/guest/chaos.sh" slow on 100ms
+            sleep 20
+            run_on_vm "$other" "$SCRIPTS/guest/chaos.sh" slow off
+            ;;
+    esac
+}
+
+# Step 8: ROUNDS rounds (default 4). Each: a verified fio write load on the target while random
+# faults hit the rest (replica restarts, partitions, a metadata member down, slow links); the
+# load must complete with no errors. Then the target's node is killed (SIGKILL), the volume
+# fails over to the other replica, and fio verifies every byte there. The new target starts
+# the next round.
+cmd_chaos() {
+    local rounds=${ROUNDS:-4} target=$VM_A other=$VM_B r load_pid rc start faults t0 summary=()
+    ensure_nodes
+    trap 'warn "chaos run interrupted: healing"; for v in $(vms_of all); do
+            run_on_vm "$v" "$SCRIPTS/guest/partition.sh" off >/dev/null 2>&1
+            run_on_vm "$v" "$SCRIPTS/guest/chaos.sh" slow off >/dev/null 2>&1; done' EXIT
+    # Attached once: after each failover the new target is already serving, and another attach
+    # would depose it.
+    cmd_vol attach "${target#fl-}" >/dev/null
+    for r in $(seq 1 "$rounds"); do
+        log "round $r/$rounds: target $target, replica $other"
+        wait_isr_full
+        ENV_VARS="DEV=/dev/ublkb1" run_detached "$target" "$SCRIPTS/guest/write-load.sh" >"$LOCAL_STATE_DIR/chaos-load.log" 2>&1 &
+        load_pid=$!
+        faults=0
+        sleep 5
+        while kill -0 "$load_pid" 2>/dev/null; do
+            log "  fault: $(chaos_fault "$other")"
+            faults=$((faults + 1))
+            sleep 5
+        done
+        rc=0
+        wait "$load_pid" || rc=$?
+        ((rc == 0)) || { cat "$LOCAL_STATE_DIR/chaos-load.log"; die "round $r: the write load failed under faults"; }
+        log "  load: $(grep -o 'wrote .*' "$LOCAL_STATE_DIR/chaos-load.log")"
+        # A failover needs an in-sync copy elsewhere: a replica still resyncing has none.
+        t0=$SECONDS
+        wait_isr_full
+        log "  every ISR full $((SECONDS - t0)) s after the load"
+
+        log "  killing $target's node (SIGKILL); failing over to $other"
+        t0=$SECONDS
+        run_on_vm "$target" "$SCRIPTS/guest/chaos.sh" kill-node
+        cmd_vol attach "${other#fl-}" >/dev/null
+        start=$((SECONDS - t0))
+        ENV_VARS="DEV=/dev/ublkb1 VERIFY_ONLY=1" run_detached "$other" "$SCRIPTS/guest/write-load.sh" \
+            >"$LOCAL_STATE_DIR/chaos-verify.log" 2>&1 ||
+            { cat "$LOCAL_STATE_DIR/chaos-verify.log"; die "round $r: verification on $other failed"; }
+        log "  attached on $other ${start} s after the kill; $(grep -o 'verified .*' "$LOCAL_STATE_DIR/chaos-verify.log")"
+        summary+=("round $r: $faults faults during the load, failover $target -> $other in ${start} s, every byte verified")
+        cmd_node up "$(vms_of "$target")" >/dev/null 2>&1
+        local tmp=$target
+        target=$other
+        other=$tmp
+    done
+    trap - EXIT
+    # Back to the usual layout, without deposing a target that is already there.
+    [[ $target == "$VM_A" ]] || cmd_vol attach a >/dev/null
+    wait_isr_full
+    printf '  %s\n' "${summary[@]}"
+    log "OK: $rounds rounds of faults under a verified write load, each ending in a crash and a verified failover"
+}
+
 usage() {
     cat <<USAGE
 usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; cluster: a, b, w)
@@ -1252,6 +1417,8 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   agent ACTION [VM]  node agent: disks (the claim policy's verdict on each device) | claim (default VM c)
   data-node-up fl-c, a third data node: VM, overlay, identities, build, disk claimed by the agent, node
   drain-test   verified writes while $VM_B is drained into $VM_C; $VM_C alone then serves every byte
+  chaos        ROUNDS (4) of random faults under a verified write load, each ending with a crashed target
+  bench-pod    reads from a pod with a Flaminio volume (NODE=fl-b, RUNTIME=30), against the raw disk
   partition    $VM_A (the target) cut off the overlay; $VM_B takes over; no stale reads, no lost writes
   pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)
   ssh|console  interactive shell or serial console (default: a)
@@ -1296,6 +1463,8 @@ case "$cmd" in
     vol) cmd_vol "$@" ;;
     node-fault) cmd_node_fault ;;
     partition) cmd_partition ;;
+    bench-pod) cmd_bench_pod ;;
+    chaos) cmd_chaos ;;
     agent) cmd_agent "$@" ;;
     data-node-up) cmd_data_node_up ;;
     drain-test) cmd_drain_test ;;

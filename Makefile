@@ -212,6 +212,14 @@ agent-disks: ## Every block device of a VM with the claim policy's verdict (VM=c
 drain-test: ## Verified writes while fl-b is drained into fl-c; fl-c alone then serves every byte; replicas moved back
 	$(LAB) drain-test
 
+.PHONY: chaos
+chaos: ## ROUNDS (4) of random faults under a verified write load; each round ends with the target killed and a verified failover
+	ROUNDS=$(or $(ROUNDS),4) $(LAB) chaos
+
+.PHONY: bench-pod
+bench-pod: ## Reads from a pod with a 16 GiB Flaminio volume (NODE=fl-b, RUNTIME=30), against the node's raw disk
+	NODE=$(or $(NODE),fl-b) RUNTIME=$(RUNTIME) KEEP=$(KEEP) $(LAB) bench-pod
+
 .PHONY: partition-test
 partition-test: ## fl-a (the target) cut off the overlay, fl-b takes over: no stale reads, no lost writes (HOLD=30 s)
 	HOLD=$(or $(HOLD),30) $(LAB) partition

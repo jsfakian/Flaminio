@@ -719,6 +719,35 @@ fn attach_and_serve(
     result
 }
 
+/// Adds the node's ublk device. The previous device with the same id may still be going away
+/// (a deposed target's device is stopped by another thread): the kernel refuses the id until
+/// it is gone, so adding is tried again for a few seconds.
+fn add_device(c: &NodeConfig) -> Result<UblkCtrl, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match UblkCtrlBuilder::default()
+            .name("flaminio")
+            .id(c.id)
+            .depth(c.depth)
+            .nr_queues(1)
+            .io_buf_bytes(c.io_buf)
+            .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+            .build()
+        {
+            Ok(ctrl) => return Ok(ctrl),
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("flaminio-io: add ublk device {}: {e}; trying again", c.id);
+                thread::sleep(Duration::from_millis(250));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "create ublk device (is ublk_drv loaded, and are we root?): {e}"
+                ));
+            }
+        }
+    }
+}
+
 fn run_device(
     c: &NodeConfig,
     slot: &Slot,
@@ -728,15 +757,7 @@ fn run_device(
     efd: Arc<EventFd>,
     reply: &mpsc::Sender<String>,
 ) -> Result<(), String> {
-    let ctrl = UblkCtrlBuilder::default()
-        .name("flaminio")
-        .id(c.id)
-        .depth(c.depth)
-        .nr_queues(1)
-        .io_buf_bytes(c.io_buf)
-        .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
-        .build()
-        .map_err(|e| format!("create ublk device (is ublk_drv loaded, and are we root?): {e}"))?;
+    let ctrl = add_device(c)?;
     let tgt_init = move |dev: &mut UblkDev| {
         let max = dev.dev_info.max_io_buf_bytes;
         dev.tgt.dev_size = size;
