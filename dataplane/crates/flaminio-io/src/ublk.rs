@@ -480,16 +480,30 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use flaminio_node::engine::{Input, Io, IoError, Output};
+use flaminio_node::engine::{Input, Io, IoError, LocalRead, Output};
 use flaminio_uring::EventFd;
 
 use crate::node::{NodeConfig, Parts, drive_until, log_output, read_token};
 
-type Waiter = smol::channel::Sender<Result<Option<Vec<u8>>, IoError>>;
+/// What a tag task waits for while the engine serves its request.
+enum Event {
+    /// A piece to read from the local store, into the tag's buffer.
+    Local(LocalRead),
+    /// A piece that came from another replica.
+    Piece {
+        at: usize,
+        data: Arc<Vec<u8>>,
+    },
+    Done(Result<Option<Vec<u8>>, IoError>),
+}
+
+type Waiter = smol::channel::Sender<Event>;
 
 /// What the queue thread's tasks share: the engine and the completions they wait for.
 struct EngineCtx {
     engine: RefCell<flaminio_node::engine::Engine<UringDevice>>,
+    /// The store's device, for the local reads the tag tasks perform.
+    fd: RawFd,
     inputs: std::sync::mpsc::Receiver<Input>,
     waiters: RefCell<HashMap<u64, Waiter>>,
     next_op: Cell<u64>,
@@ -497,27 +511,47 @@ struct EngineCtx {
 }
 
 impl EngineCtx {
-    /// Feeds the engine what other threads sent, runs a turn, and delivers completions.
-    fn pump(&self) {
+    /// Feeds the engine what other threads sent, flushes it (a full turn with ticks when
+    /// `tick`), and delivers completions.
+    fn pump_with(&self, tick: bool) {
         let now = Instant::now();
         let outputs = {
             let mut e = self.engine.borrow_mut();
             while let Ok(i) = self.inputs.try_recv() {
                 e.handle(now, i);
             }
-            e.turn(now);
+            if tick {
+                e.turn(now);
+            } else {
+                e.flush(now);
+            }
             e.take_output()
         };
         for o in outputs {
             match o {
                 Output::Done { op, result } => {
                     if let Some(tx) = self.waiters.borrow_mut().remove(&op) {
-                        let _ = tx.try_send(result);
+                        let _ = tx.try_send(Event::Done(result));
+                    }
+                }
+                Output::LocalRead(lr) => {
+                    if let Some(tx) = self.waiters.borrow().get(&lr.op) {
+                        let _ = tx.try_send(Event::Local(lr));
+                    }
+                }
+                Output::Piece { op, at, data } => {
+                    if let Some(tx) = self.waiters.borrow().get(&op) {
+                        let _ = tx.try_send(Event::Piece { at, data });
                     }
                 }
                 other => log_output(&other),
             }
         }
+    }
+
+    /// After an I/O event: no tick.
+    fn pump(&self) {
+        self.pump_with(false);
     }
 
     fn submit(&self, io: Io, waiter: Waiter) {
@@ -629,8 +663,10 @@ fn serve_engine_queue(
         inputs,
         sender: _keep_open,
     } = parts;
+    let fd = engine.device().as_raw_fd();
     let ctx = EngineCtx {
         engine: RefCell::new(engine),
+        fd,
         inputs,
         waiters: RefCell::new(HashMap::new()),
         next_op: Cell::new(1),
@@ -676,7 +712,7 @@ fn serve_engine_queue(
             let ts = types::Timespec::new().nsec(10_000_000);
             loop {
                 let _ = q.ublk_submit_sqe(opcode::Timeout::new(&ts).build()).await;
-                ctx.pump();
+                ctx.pump_with(true);
             }
         })
     };
@@ -698,7 +734,7 @@ async fn engine_io_task(
     bufs: &[RefCell<IoBuf<u8>>],
     ctx: &EngineCtx,
 ) -> Result<(), UblkError> {
-    let (done_tx, done_rx) = smol::channel::bounded(1);
+    let (done_tx, done_rx) = smol::channel::unbounded();
     {
         let buf = bufs[tag as usize].borrow();
         q.submit_io_prep_cmd(tag, BufDesc::Slice(buf.as_slice()), 0, Some(&*buf))
@@ -715,6 +751,23 @@ async fn engine_io_task(
         };
         let n = len as usize;
         let res = match op {
+            // Reads land in the tag's buffer directly: pieces from the local replica are read
+            // here, on this ring, as the engine admits them; other pieces are copied.
+            sys::UBLK_IO_OP_READ if n <= bufs[tag as usize].borrow().len() => {
+                ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
+                loop {
+                    match done_rx.recv().await {
+                        Ok(Event::Local(lr)) => local_read(q, &bufs[tag as usize], ctx, lr).await,
+                        Ok(Event::Piece { at, data }) => {
+                            bufs[tag as usize].borrow_mut()[at..at + data.len()]
+                                .copy_from_slice(&data);
+                        }
+                        Ok(Event::Done(Ok(_))) => break len as i32,
+                        Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
+                        _ => break -libc::EIO,
+                    }
+                }
+            }
             sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE
                 if n <= bufs[tag as usize].borrow().len() =>
             {
@@ -728,12 +781,12 @@ async fn engine_io_task(
                 };
                 ctx.submit(io, done_tx.clone());
                 match done_rx.recv().await {
-                    Ok(Ok(Some(data))) if data.len() == n => {
+                    Ok(Event::Done(Ok(Some(data)))) if data.len() == n => {
                         bufs[tag as usize].borrow_mut()[..n].copy_from_slice(&data);
                         len as i32
                     }
-                    Ok(Ok(None)) => len as i32,
-                    Ok(Err(IoError::Invalid)) => -libc::EINVAL,
+                    Ok(Event::Done(Ok(None))) => len as i32,
+                    Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
                     _ => -libc::EIO,
                 }
             }
@@ -747,4 +800,52 @@ async fn engine_io_task(
         q.submit_io_commit_cmd(tag, BufDesc::Slice(buf.as_slice()), res)
             .await?;
     }
+}
+
+/// Reads one piece from the local store into the tag's buffer, on this ring, as the MVP's
+/// reads did: the engine plans it, the device reads run while the event loop keeps going, and
+/// the checksums are verified at the end. A mismatch is planned and read once more before the
+/// read counts as failed (which makes the target treat the local replica as failed).
+async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx, lr: LocalRead) {
+    let (at, n) = (lr.at, lr.len);
+    for attempt in 0..2 {
+        let plan = {
+            let mut b = buf.borrow_mut();
+            match ctx.engine.borrow().plan_local_read(&lr, &mut b[at..at + n]) {
+                Ok(p) => p,
+                Err(_) => break,
+            }
+        };
+        // The kernel gave us this tag's buffer; nothing else touches it until the request is
+        // committed, and every read queued here is awaited before it is used.
+        let base = buf.borrow_mut().as_mut_ptr().wrapping_add(at);
+        let mut pending = Vec::new();
+        for r in plan.reads() {
+            let sqe = opcode::Read::new(
+                types::Fd(ctx.fd),
+                base.wrapping_add(r.buf_offset),
+                r.len as u32,
+            )
+            .offset(r.device_offset)
+            .build();
+            pending.push((q.ublk_submit_sqe(sqe), r.len as i32));
+        }
+        let mut io_ok = true;
+        for (completion, expected) in pending {
+            io_ok &= completion.await == expected;
+        }
+        let verified = io_ok && plan.verify(&buf.borrow()[at..at + n]).is_ok();
+        if verified || !io_ok || attempt == 1 {
+            ctx.engine
+                .borrow_mut()
+                .local_read_done(Instant::now(), &lr, Some(plan), verified);
+            ctx.pump();
+            return;
+        }
+        ctx.engine.borrow().finish_plan(plan);
+    }
+    ctx.engine
+        .borrow_mut()
+        .local_read_done(Instant::now(), &lr, None, false);
+    ctx.pump();
 }

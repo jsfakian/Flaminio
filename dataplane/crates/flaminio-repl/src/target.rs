@@ -317,6 +317,20 @@ impl<P: Clone + Debug> Target<P> {
         self.epoch
     }
 
+    /// The client operation that request `req` to node `to` reads for, if it is a client's
+    /// read. The data plane serves such reads from the local replica straight into the
+    /// client's buffer.
+    pub fn client_read_of(&self, to: NodeId, req: u64) -> Option<u64> {
+        let s = self.peers.get(&to)?.session.as_ref()?;
+        let ReqKind::Read { id } = s.inflight.get(&req)?.1 else {
+            return None;
+        };
+        match self.reads.get(&id)?.purpose {
+            ReadFor::Client { op } => Some(op),
+            _ => None,
+        }
+    }
+
     /// Sets how many repairs and resync copies may be in flight at once (at least one).
     pub fn set_max_bulk(&mut self, n: usize) {
         self.max_bulk = n.max(1);

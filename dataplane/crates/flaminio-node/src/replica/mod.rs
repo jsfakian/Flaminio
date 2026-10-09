@@ -31,6 +31,20 @@ pub struct SessionRef {
     pub session: u64,
 }
 
+/// The outcome of [`ReplicaService::admit_read`].
+#[derive(Debug)]
+pub enum Admit {
+    /// Read `len` bytes at `offset` of chunk `key`, with the session's `epoch`.
+    Read {
+        key: ChunkKey,
+        offset: u64,
+        len: usize,
+        epoch: u64,
+    },
+    /// Do not read: answer with this.
+    Reply(Reply),
+}
+
 /// What to do with a request's connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
@@ -311,6 +325,51 @@ impl<D: BlockDevice> ReplicaService<D> {
             }
         }
         pending.clear();
+    }
+
+    /// Admits a read through the replica rules without performing it: for a caller that
+    /// reads the store asynchronously itself ([`Self::plan_read`]). Returns where to read, or
+    /// the reply to give instead.
+    pub fn admit_read(&mut self, s: SessionRef, req: u64, chunk: u32, ext: Extent) -> Admit {
+        let Some(uuid) = self.uuid_of(s.vol) else {
+            return Admit::Reply(Reply::Close("unknown volume".into()));
+        };
+        let msg = ToReplica {
+            vol: s.vol,
+            epoch: s.epoch,
+            session: s.session,
+            req,
+            body: Request::<()>::Read { chunk, ext },
+        };
+        match self.core.handle(&msg) {
+            Action::Read { chunk, ext } => Admit::Read {
+                key: key(uuid, chunk),
+                offset: offset(ext),
+                len: ext.len as usize * BLOCK,
+                epoch: s.epoch,
+            },
+            Action::Reply(r) => Admit::Reply(Reply::Send(response_frame(req, r))),
+            Action::Drop => Admit::Reply(Reply::Nothing),
+            other => Admit::Reply(Reply::Close(format!(
+                "unexpected action for a read: {other:?}"
+            ))),
+        }
+    }
+
+    /// Plans an admitted read into `buf` (see `Store::plan_read`).
+    pub fn plan_read(
+        &self,
+        key: ChunkKey,
+        offset: u64,
+        buf: &mut [u8],
+        epoch: u64,
+    ) -> Result<flaminio_store::ReadPlan, StoreError> {
+        self.store.plan_read(key, offset, buf, epoch)
+    }
+
+    /// Ends a planned read.
+    pub fn finish_read(&self, plan: flaminio_store::ReadPlan) {
+        self.store.finish_read(plan);
     }
 
     /// The chunk size of a volume known here.

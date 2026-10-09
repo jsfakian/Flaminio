@@ -73,9 +73,15 @@ simulator checked. It comes in five parts, each committed on its own:
   - **With `--attach VOLUME --token FILE`,** it is also the volume's target and serves
     `/dev/ublkbN`. The engine lives on the ublk queue thread, woken by an eventfd and a 10 ms
     tick.
-- **(iv) Next: asynchronous local reads.** Local reads still go through the engine
-  synchronously and are copied twice. The MVP's path, with the store planning the read and
-  the device reading straight into the ublk buffer, must come back (see the 4e results).
+- **(iv) Asynchronous local reads** ✅. A client read whose source is the local replica
+  works like this:
+  1. The target state machine still decides: lock, lease, source.
+  2. The engine admits the read through the replica rules, and the store plans it.
+  3. The ublk task reads the device straight into the ublk buffer, on its own ring, and
+     verifies the checksums.
+  4. The target gets a "placed" reply and checks the lease before completing.
+
+  Ticks run on the 10 ms timer only, not on every I/O event.
 
 ## Step 4e results (lab, 2026-10-09)
 
@@ -108,8 +114,37 @@ in the MVP's measurements):
 | 1M sequential, depth 8 | 1 154 MiB/s | ~23% |
 
 At depth 1 the engine adds little. At depth 32 it gets no further than at depth 1: local reads
-are served synchronously, one batch at a time, on the engine's thread. Step 4d (iv) restores
-the MVP's asynchronous, zero-copy read path, which reached 86–98% of raw.
+are served synchronously, one batch at a time, on the engine's thread.
+
+**After 4d (iv)** (same disk, same jobs):
+
+| Job | Result | Share of raw | The MVP got |
+|---|---:|---:|---:|
+| 4K random, depth 1 | 12 303 IOPS | ~96% | 93% |
+| 4K random, depth 32 | 127 135 IOPS | ~52% | 86% |
+| 1M sequential, depth 8 | 3 030 MiB/s | ~61% | 62% |
+
+Depth 1 and the sequential job are at the MVP's level; the sequential job is limited by the
+single queue thread, as it was then. Depth 32 still trails, and the engine's per-I/O CPU on
+that thread is next.
+
+**Found while measuring: reconciling after a replica restart is expensive.**
+- A replica that restarts reports whole chunks as uncertain. The next new target then
+  reconciles all of them.
+- Here that was the entire 16 GiB volume over 1 GbE: the first read after an attach waited
+  152 s.
+- The lab made it worse: `vol attach` restarts the node, because `--attach` exists only at
+  startup.
+
+Two follow-ups:
+1. **Attach without restarting the node.** A local control socket, which the CSI node plugin
+   needs anyway. Then a failover finds surviving replicas with exact, small uncertain sets.
+2. **Reconcile by comparing digests first.** The store keeps a CRC-32C per 4 KiB block in its
+   metadata, so replicas can compare their blocks without reading data, and repair only what
+   differs. That keeps genuine whole-volume cases, such as a power loss, cheap.
+
+The same applies to resyncs and repairs copying unwritten ranges as data: `vol1` occupies 16
+GiB on fl-b for 4 GiB written.
 
 ## Step 4c result
 

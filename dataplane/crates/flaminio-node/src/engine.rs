@@ -43,13 +43,38 @@ use smol::channel;
 use crate::net::{ConnId, Key, Net, NetCommand, NetEvent};
 use crate::replica::{ReplicaService, Reply, SessionRef};
 
-/// Data in flight: a shared, immutable buffer.
+/// Data in flight.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Payload(pub Arc<Vec<u8>>);
+pub enum Payload {
+    /// A shared, immutable buffer.
+    Bytes(Arc<Vec<u8>>),
+    /// A client read's data, already placed in the client's buffer by the frontend.
+    Placed(usize),
+}
+
+impl Payload {
+    pub fn len(&self) -> usize {
+        match self {
+            Payload::Bytes(b) => b.len(),
+            Payload::Placed(n) => *n,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Payload::Bytes(b) => b,
+            Payload::Placed(_) => unreachable!("placed data is never forwarded"),
+        }
+    }
+}
 
 impl std::fmt::Debug for Payload {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "<{} bytes>", self.0.len())
+        write!(f, "<{} bytes>", self.len())
     }
 }
 
@@ -80,8 +105,33 @@ pub struct EngineConfig {
 /// Client I/O on a volume. Offsets and lengths are 4 KiB-aligned.
 #[derive(Debug, Clone)]
 pub enum Io {
-    Read { offset: u64, len: u64 },
-    Write { offset: u64, data: Vec<u8> },
+    Read {
+        offset: u64,
+        len: u64,
+    },
+    /// A read whose data the frontend places itself: pieces from the local replica come as
+    /// [`Output::LocalRead`] to carry out, pieces from other replicas as [`Output::Piece`],
+    /// and `Done` carries no data.
+    ReadDirect {
+        offset: u64,
+        len: u64,
+    },
+    Write {
+        offset: u64,
+        data: Vec<u8>,
+    },
+}
+
+/// A piece of a direct read to serve from the local replica: plan it with
+/// [`Engine::plan_local_read`] into the client's buffer at `at`, read it, verify it, and report
+/// with [`Engine::local_read_done`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalRead {
+    pub op: u64,
+    /// Byte offset of the piece within the operation.
+    pub at: usize,
+    pub len: usize,
+    token: u64,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
@@ -144,6 +194,25 @@ pub enum Output {
     Deposed {
         volume: String,
     },
+    /// A piece of a direct read to read from the local store (see [`LocalRead`]).
+    LocalRead(LocalRead),
+    /// A piece of a direct read that came from another replica: copy it to the operation's
+    /// buffer at `at`.
+    Piece {
+        op: u64,
+        at: usize,
+        data: Arc<Vec<u8>>,
+    },
+}
+
+/// An admitted local read, waiting for the frontend.
+struct PendingLocal {
+    volume: String,
+    session: u64,
+    req: u64,
+    key: flaminio_store::ChunkKey,
+    offset: u64,
+    epoch: u64,
 }
 
 /// A client operation, split into one target operation per chunk it touches.
@@ -151,6 +220,7 @@ struct ClientOp {
     pending: usize,
     failed: Option<IoError>,
     read: Option<Vec<u8>>,
+    direct: bool,
 }
 
 enum Sess {
@@ -224,6 +294,10 @@ pub struct Engine<D: BlockDevice> {
     next_sub: u64,
     local: Vec<(LocalFrom, SessionRef, Frame)>,
     out: Vec<Output>,
+    local_reads: BTreeMap<u64, PendingLocal>,
+    next_token: u64,
+    draining: bool,
+    pending_drain: std::collections::BTreeSet<String>,
     next_heartbeat: Instant,
     deaf_until: Option<Instant>,
 }
@@ -252,6 +326,10 @@ impl<D: BlockDevice> Engine<D> {
             next_sub: 1,
             local: Vec::new(),
             out: Vec::new(),
+            local_reads: BTreeMap::new(),
+            next_token: 1,
+            draining: false,
+            pending_drain: std::collections::BTreeSet::new(),
             next_heartbeat: now,
             deaf_until: None,
         };
@@ -372,6 +450,13 @@ impl<D: BlockDevice> Engine<D> {
             }
             self.drain(now, &v);
         }
+        self.flush_local(now);
+    }
+
+    /// Sends what queued for the local replica and routes the targets' outputs, without
+    /// ticking: for after an I/O event. Ticks (timeouts, heartbeats, leases) scan every
+    /// request in flight, so they belong on a timer, not on every I/O.
+    pub fn flush(&mut self, now: Instant) {
         self.flush_local(now);
     }
 
@@ -703,7 +788,7 @@ impl<D: BlockDevice> Engine<D> {
             return;
         };
         let (offset, len) = match &io {
-            Io::Read { offset, len } => (*offset, *len),
+            Io::Read { offset, len } | Io::ReadDirect { offset, len } => (*offset, *len),
             Io::Write { offset, data } => (*offset, data.len() as u64),
         };
         let b = BLOCK as u64;
@@ -738,6 +823,7 @@ impl<D: BlockDevice> Engine<D> {
                 pending: pieces.len(),
                 failed: None,
                 read: matches!(io, Io::Read { .. }).then(|| vec![0u8; len as usize]),
+                direct: matches!(io, Io::ReadDirect { .. }),
             },
         );
         for (chunk, ext, at, n) in pieces {
@@ -745,11 +831,11 @@ impl<D: BlockDevice> Engine<D> {
             self.next_sub += 1;
             rt.subs.insert(sub, (op, at, n));
             let kind = match &io {
-                Io::Read { .. } => Op::Read { chunk, ext },
+                Io::Read { .. } | Io::ReadDirect { .. } => Op::Read { chunk, ext },
                 Io::Write { data, .. } => Op::Write {
                     chunk,
                     ext,
-                    data: Payload(Arc::new(data[at..at + n].to_vec())),
+                    data: Payload::Bytes(Arc::new(data[at..at + n].to_vec())),
                 },
             };
             rt.sm.submit(us, sub, kind);
@@ -757,8 +843,22 @@ impl<D: BlockDevice> Engine<D> {
         self.drain(now, volume);
     }
 
-    /// Routes a target's outputs.
+    /// Routes a target's outputs. Not reentrant: routing can produce replies that make the
+    /// same or another target output more, and those wait for the current outputs to be
+    /// routed, so every session's messages leave in the order the target produced them.
     fn drain(&mut self, now: Instant, volume: &str) {
+        self.pending_drain.insert(volume.to_string());
+        if self.draining {
+            return;
+        }
+        self.draining = true;
+        while let Some(v) = self.pending_drain.pop_first() {
+            self.drain_one(now, &v);
+        }
+        self.draining = false;
+    }
+
+    fn drain_one(&mut self, now: Instant, volume: &str) {
         let Some(rt) = self.targets.get_mut(volume) else {
             return;
         };
@@ -825,10 +925,17 @@ impl<D: BlockDevice> Engine<D> {
         let Some(c) = rt.ops.get_mut(&op) else { return };
         match result {
             OpResult::Written => {}
-            OpResult::Read(p) => match c.read.as_mut() {
-                Some(buf) if p.0.len() == n => buf[at..at + n].copy_from_slice(&p.0),
-                _ => c.failed = Some(IoError::Invalid),
+            OpResult::Read(p) if p.len() != n => c.failed = Some(IoError::Invalid),
+            // Already in the client's buffer.
+            OpResult::Read(Payload::Placed(_)) if c.direct => {}
+            OpResult::Read(Payload::Bytes(b)) if c.direct => {
+                self.out.push(Output::Piece { op, at, data: b })
+            }
+            OpResult::Read(Payload::Bytes(b)) => match c.read.as_mut() {
+                Some(buf) => buf[at..at + n].copy_from_slice(&b),
+                None => c.failed = Some(IoError::Invalid),
             },
+            OpResult::Read(Payload::Placed(_)) => c.failed = Some(IoError::Invalid),
             OpResult::Failed => c.failed = Some(IoError::Deposed),
         }
         c.pending -= 1;
@@ -941,6 +1048,54 @@ impl<D: BlockDevice> Engine<D> {
             });
             return;
         }
+        // A direct client read from the local replica: admitted by the replica rules here,
+        // carried out by the frontend straight into the client's buffer.
+        if let Request::Read { chunk, ext } = msg.body
+            && to == rt.local
+            && let Some(Sess::Local {
+                session,
+                sref: Some(sref),
+            }) = rt.sessions.get(&to)
+            && *session == msg.session
+            && let Some(sub) = rt.sm.client_read_of(to, msg.req)
+            && let Some(&(op, at, n)) = rt.subs.get(&sub)
+            && rt.ops.get(&op).is_some_and(|c| c.direct)
+        {
+            let sref = *sref;
+            // No flush of earlier local requests is needed: the target holds the blocks'
+            // lock, so any earlier write to them has completed here already.
+            match self.service.admit_read(sref, msg.req, chunk, ext) {
+                crate::replica::Admit::Read {
+                    key, offset, epoch, ..
+                } => {
+                    let token = self.next_token;
+                    self.next_token += 1;
+                    self.local_reads.insert(
+                        token,
+                        PendingLocal {
+                            volume: volume.to_string(),
+                            session: msg.session,
+                            req: msg.req,
+                            key,
+                            offset,
+                            epoch,
+                        },
+                    );
+                    self.out.push(Output::LocalRead(LocalRead {
+                        op,
+                        at,
+                        len: n,
+                        token,
+                    }));
+                }
+                crate::replica::Admit::Reply(Reply::Send(frame)) => {
+                    let local = self.targets[volume].local;
+                    self.reply_to_target(now, volume, local, msg.session, frame);
+                }
+                crate::replica::Admit::Reply(_) => {} // the target's timeout handles it
+            }
+            return;
+        }
         let frame = to_frame(&msg);
         match rt.sessions.get(&to) {
             Some(Sess::Local {
@@ -982,7 +1137,7 @@ impl<D: BlockDevice> Engine<D> {
         if let Response::Data(p) = &body {
             // Exactly the length asked for, or the reply is dropped.
             match rt.reads.remove(&(from, req)) {
-                Some(n) if n == p.0.len() => {}
+                Some(n) if n == p.len() => {}
                 _ => return,
             }
         }
@@ -994,6 +1149,73 @@ impl<D: BlockDevice> Engine<D> {
             body,
         };
         rt.sm.on_reply(us, from, &m);
+    }
+}
+
+impl<D: BlockDevice> Engine<D> {
+    /// Plans a local read into `buf` (exactly `lr.len` bytes): the device reads for the
+    /// frontend to perform. Unmapped ranges are zero-filled now.
+    pub fn plan_local_read(
+        &self,
+        lr: &LocalRead,
+        buf: &mut [u8],
+    ) -> Result<flaminio_store::ReadPlan, IoError> {
+        let p = self.local_reads.get(&lr.token).ok_or(IoError::Invalid)?;
+        if buf.len() != lr.len {
+            return Err(IoError::Invalid);
+        }
+        self.service
+            .plan_read(p.key, p.offset, buf, p.epoch)
+            .map_err(|_| IoError::Invalid)
+    }
+
+    /// Ends a local read: `ok` if its device reads completed and verified. A failed read gets
+    /// no reply, so the target treats the local replica as failed.
+    pub fn local_read_done(
+        &mut self,
+        now: Instant,
+        lr: &LocalRead,
+        plan: Option<flaminio_store::ReadPlan>,
+        ok: bool,
+    ) {
+        if let Some(plan) = plan {
+            self.service.finish_read(plan);
+        }
+        let Some(p) = self.local_reads.remove(&lr.token) else {
+            return;
+        };
+        if !ok {
+            eprintln!("flaminio-node: {}: local read failed", p.volume);
+            return;
+        }
+        let us = self.us(now);
+        let Some(rt) = self.targets.get_mut(&p.volume) else {
+            return;
+        };
+        let local = rt.local;
+        match rt.reads.remove(&(local, p.req)) {
+            Some(n) if n == lr.len => {}
+            _ => return,
+        }
+        let m = FromReplica {
+            vol: 0,
+            epoch: rt.sm.epoch(),
+            session: p.session,
+            req: p.req,
+            body: Response::Data(Payload::Placed(lr.len)),
+        };
+        rt.sm.on_reply(us, local, &m);
+        self.drain(now, &p.volume);
+    }
+
+    /// Releases a plan without ending its local read, to plan it again.
+    pub fn finish_plan(&self, plan: flaminio_store::ReadPlan) {
+        self.service.finish_read(plan);
+    }
+
+    /// The device the store reads from, for the frontend's own reads.
+    pub fn device(&self) -> &D {
+        self.service.store().device()
     }
 }
 
@@ -1014,7 +1236,7 @@ fn to_frame(m: &ToReplica<Payload>) -> Frame {
             ext: *ext,
             version: *version,
             prune: *prune,
-            data: data.0.to_vec(),
+            data: data.bytes().to_vec(),
         },
         Request::Read { chunk, ext } => Frame::Read {
             req,
@@ -1026,7 +1248,7 @@ fn to_frame(m: &ToReplica<Payload>) -> Frame {
             req,
             chunk: *chunk,
             ext: *ext,
-            data: data.0.to_vec(),
+            data: data.bytes().to_vec(),
         },
     }
 }
@@ -1035,7 +1257,7 @@ fn from_frame(f: Frame) -> Option<(u64, Response<Payload>)> {
     Some(match f {
         Frame::Fenced { req, uncertain } => (req, Response::Fenced { uncertain }),
         Frame::Ok { req } => (req, Response::Ok),
-        Frame::Data { req, data } => (req, Response::Data(Payload(Arc::new(data)))),
+        Frame::Data { req, data } => (req, Response::Data(Payload::Bytes(Arc::new(data)))),
         Frame::Stale { req, fenced } => (req, Response::Stale { fenced }),
         _ => return None,
     })

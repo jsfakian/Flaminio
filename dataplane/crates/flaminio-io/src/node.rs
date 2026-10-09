@@ -279,7 +279,7 @@ pub(crate) fn log_output(o: &Output) {
         Output::Deposed { volume } => {
             eprintln!("flaminio-io: deposed as the target of {volume}: it moved to another node")
         }
-        Output::Done { .. } => {}
+        Output::Done { .. } | Output::LocalRead(_) | Output::Piece { .. } => {}
     }
 }
 

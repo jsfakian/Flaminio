@@ -402,3 +402,166 @@ fn replicated_volume_through_a_replica_failure() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// One node, its engine driven by hand, with a single-replica volume: direct reads, as the
+/// ublk frontend performs them, planned by the engine and read from the store's device into
+/// the caller's buffer.
+#[test]
+fn direct_reads_from_the_local_replica() {
+    use flaminio_node::engine::LocalRead;
+    use flaminio_store::BlockDevice;
+
+    let dir = std::env::temp_dir().join(format!("flaminio-direct-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let files = &ids["fl-a"];
+    let model = Arc::new(Mutex::new(Model::default()));
+    let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = mpsc::channel::<Input>();
+    let sink_tx = Mutex::new(tx.clone());
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[6; 32]).unwrap();
+    let net = net::spawn(
+        NetConfig {
+            trust_domain: TD.into(),
+            server: Some(ServerSide {
+                listener,
+                tls: files.server_config().unwrap(),
+                token_key: TokenKey::from_raw(signer.public_key().as_ref()).unwrap(),
+            }),
+            client: Some(files.client_config().unwrap()),
+        },
+        Arc::new(move |e| {
+            let _ = sink_tx.lock().unwrap().send(Input::Net(e));
+        }),
+    )
+    .unwrap();
+    let cfg = EngineConfig {
+        node: "fl-a".into(),
+        address: addr.to_string(),
+        timing: Timing::default(),
+        max_io: 64,
+        heartbeat: None,
+    };
+    let meta = Box::new(FakeMeta {
+        model: model.clone(),
+        inbox: tx.clone(),
+    });
+    let mut engine = Engine::new(cfg, ReplicaService::new(store()), net, meta);
+    model.lock().unwrap().volume = Some(pb::Volume {
+        id: "v".into(),
+        size_bytes: 2 * CHUNK,
+        chunk_bytes: CHUNK,
+        replicas: 1,
+        min_isr: 1,
+        epoch: 1,
+        target: "fl-a".into(),
+        chunks: (0..2)
+            .map(|_| pb::ChunkMeta {
+                replicas: vec!["fl-a".into()],
+                isr: vec!["fl-a".into()],
+                isr_ver: 0,
+            })
+            .collect(),
+    });
+
+    // Drives the engine until `want` returns a value, playing the ublk frontend for local
+    // reads into `buf`.
+    let mut buf = vec![0u8; 2 * MIB as usize];
+    let run = |engine: &mut Engine<MemDevice>,
+               buf: &mut Vec<u8>,
+               want: &dyn Fn(&Output) -> bool|
+     -> Output {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "timed out");
+            let now = Instant::now();
+            while let Ok(i) = rx.try_recv() {
+                engine.handle(now, i);
+            }
+            engine.turn(now);
+            for o in engine.take_output() {
+                if let Output::LocalRead(lr) = &o {
+                    let lr: LocalRead = lr.clone();
+                    let piece = &mut buf[lr.at..lr.at + lr.len];
+                    let plan = engine.plan_local_read(&lr, piece).unwrap();
+                    let mut reads: Vec<(u64, &mut [u8])> = Vec::new();
+                    let mut rest: &mut [u8] = piece;
+                    let mut base = 0;
+                    for r in plan.reads() {
+                        let (_, tail) = rest.split_at_mut(r.buf_offset - base);
+                        let (this, tail) = tail.split_at_mut(r.len);
+                        reads.push((r.device_offset, this));
+                        rest = tail;
+                        base = r.buf_offset + r.len;
+                    }
+                    engine.device().read_many(&mut reads).unwrap();
+                    let ok = plan.verify(&buf[lr.at..lr.at + lr.len]).is_ok();
+                    engine.local_read_done(Instant::now(), &lr, Some(plan), ok);
+                    continue;
+                }
+                if want(&o) {
+                    return o;
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    engine.handle(
+        Instant::now(),
+        Input::Attach {
+            volume: "v".into(),
+            token: token(&signer, "v", 1, "fl-a"),
+        },
+    );
+    run(&mut engine, &mut buf, &|o| {
+        matches!(o, Output::Attached { .. })
+    });
+    let off = CHUNK - MIB; // across the chunk boundary
+    engine.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op: 1,
+            io: Io::Write {
+                offset: off,
+                data: pattern(9, 2 * MIB),
+            },
+        },
+    );
+    let w = run(&mut engine, &mut buf, &|o| {
+        matches!(o, Output::Done { op: 1, .. })
+    });
+    assert_eq!(
+        w,
+        Output::Done {
+            op: 1,
+            result: Ok(None)
+        }
+    );
+    engine.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op: 2,
+            io: Io::ReadDirect {
+                offset: off,
+                len: 2 * MIB,
+            },
+        },
+    );
+    let r = run(&mut engine, &mut buf, &|o| {
+        matches!(o, Output::Done { op: 2, .. })
+    });
+    assert_eq!(
+        r,
+        Output::Done {
+            op: 2,
+            result: Ok(None)
+        },
+        "data placed, not returned"
+    );
+    assert!(buf == pattern(9, 2 * MIB), "both pieces read into place");
+    let _ = std::fs::remove_dir_all(&dir);
+}
