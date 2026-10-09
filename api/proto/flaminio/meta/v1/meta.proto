@@ -1,0 +1,138 @@
+// The metadata service API (ARCHITECTURE §5.4, docs/replication-protocol.md §2).
+//
+// The metadata service is the system of record for nodes, volumes, chunk placement, ISRs and
+// epochs. It is consulted on attach, failover and ISR changes, never on normal reads and
+// writes.
+syntax = "proto3";
+
+package flaminio.meta.v1;
+
+option go_package = "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1;metav1";
+
+service MetadataService {
+  // Registers a node, or updates its address and failure domain.
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+  // Renews a node's liveness record. Liveness only decides when to fail over; it never grants
+  // permission to serve I/O (ARCHITECTURE §8.5).
+  rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+
+  // Creates a volume and places its chunks. Every replica starts in the ISR.
+  rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+  rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
+  // Deletes a volume that is not attached.
+  rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+
+  // Makes a node the volume's target under a new epoch.
+  rpc Attach(AttachRequest) returns (AttachResponse);
+  // Changes ISRs atomically, only under the current epoch and the expected ISR versions.
+  rpc ChangeIsr(ChangeIsrRequest) returns (ChangeIsrResponse);
+}
+
+message Node {
+  string id = 1;
+  // Address of the node's data plane, host:port.
+  string address = 2;
+  // Failure domain labels, e.g. zone and rack.
+  map<string, string> labels = 3;
+  // Whether the node's liveness record is current.
+  bool alive = 4;
+}
+
+message RegisterNodeRequest {
+  Node node = 1;
+}
+
+message RegisterNodeResponse {}
+
+message NodeHeartbeatRequest {
+  string node = 1;
+}
+
+message NodeHeartbeatResponse {
+  // How long the liveness record lasts without another heartbeat.
+  uint32 ttl_seconds = 1;
+}
+
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated Node nodes = 1;
+}
+
+message ChunkMeta {
+  // Nodes holding a replica of the chunk.
+  repeated string replicas = 1;
+  // In-sync replicas: those known to hold every acknowledged write. Sorted.
+  repeated string isr = 2;
+  // Incremented on every ISR change.
+  uint64 isr_ver = 3;
+}
+
+message Volume {
+  string id = 1;
+  uint64 size_bytes = 2;
+  uint64 chunk_bytes = 3;
+  uint32 replicas = 4;
+  uint32 min_isr = 5;
+  uint64 epoch = 6;
+  // Node of the current target; empty if never attached.
+  string target = 7;
+  repeated ChunkMeta chunks = 8;
+}
+
+message CreateVolumeRequest {
+  string id = 1;
+  uint64 size_bytes = 2;
+  uint64 chunk_bytes = 3;
+  uint32 replicas = 4;
+  uint32 min_isr = 5;
+}
+
+message CreateVolumeResponse {
+  Volume volume = 1;
+}
+
+message GetVolumeRequest {
+  string id = 1;
+}
+
+message GetVolumeResponse {
+  Volume volume = 1;
+}
+
+message DeleteVolumeRequest {
+  string id = 1;
+}
+
+message DeleteVolumeResponse {}
+
+message AttachRequest {
+  string volume = 1;
+  string node = 2;
+}
+
+message AttachResponse {
+  Volume volume = 1;
+}
+
+message IsrChange {
+  uint32 chunk = 1;
+  uint64 expected_ver = 2;
+  repeated string new_isr = 3;
+}
+
+message ChangeIsrRequest {
+  string volume = 1;
+  uint64 epoch = 2;
+  repeated IsrChange changes = 3;
+}
+
+message ChangeIsrResponse {
+  // False if the request was refused and nothing changed.
+  bool applied = 1;
+  // The volume's current epoch. Higher than the request's: the caller has been deposed.
+  uint64 epoch = 2;
+  // Current state of the chunks named in the request, in request order.
+  repeated ChunkMeta chunks = 3;
+}

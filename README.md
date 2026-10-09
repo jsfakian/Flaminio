@@ -18,7 +18,8 @@ and you restore from an encrypted, immutable backup.
 > **Phase 1 under way** ([plan](docs/phase1-plan.md)). The failover and consistency rules
 > (in-sync replica sets, epoch fencing, replica-confirmed leases, reconciliation after
 > failover) are implemented as a pure state machine and checked by a deterministic simulator
-> ([protocol](docs/replication-protocol.md)).
+> ([protocol](docs/replication-protocol.md)). The metadata service (Go, on a dedicated etcd)
+> runs in the lab on a 3-member etcd cluster with a witness node.
 
 ---
 

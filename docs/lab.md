@@ -1,7 +1,8 @@
 # Test lab
 
-Two servers, one KVM VM on each, driven from a workstation with `make`. The VMs are where the
-data plane is built, tested and benchmarked on Linux (see [mvp-plan.md](mvp-plan.md)).
+Two servers with KVM VMs, driven from a workstation with `make`. The VMs are where the data
+plane is built, tested and benchmarked on Linux (see [mvp-plan.md](mvp-plan.md)). Phase 1 adds a
+small witness VM and a metadata cluster (see [below](#phase-1-witness-overlay-and-metadata)).
 
 ```
  workstation ── ssh ──▶ rhythm (147.52.71.227)              rhythm-backup (147.52.71.226)
@@ -44,7 +45,7 @@ make bench-store        # replica-store read benchmark (FORMAT=0 reuses the form
 make help               # everything else
 ```
 
-Lab targets take `VM=a|b|all`. Settings live in [`scripts/lab.conf`](../scripts/lab.conf), and
+Lab targets take `VM=a|b|w|all|cluster` (`all` is the two data VMs, `cluster` adds fl-w). Settings live in [`scripts/lab.conf`](../scripts/lab.conf), and
 any of them can be overridden from the environment (for example `VM_A_CPUS=16 make vm-create`).
 
 ## What the scripts change on the servers
@@ -56,10 +57,58 @@ All of it is idempotent, and everything Flaminio-specific is named or tagged `fl
 | `host-prep` | Installs `qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils` where missing. Adds the user to the `libvirt` and `kvm` groups. Defines and autostarts the `default` storage pool and network if needed | Remove the packages manually |
 | `host-prep` | ufw: allows traffic in on `virbr0` (DHCP/DNS for VMs) and, where routed traffic is denied by default, routes in and out of `virbr0` | `sudo ufw status numbered`, then delete the `flaminio-lab` rules |
 | `vm-create` | Volumes `fl-*-root.qcow2`, `fl-*-data.img`, `fl-*-seed.iso` and the cached `flaminio-resolute-base.qcow2` in the `default` pool. A DHCP reservation in the `default` network. The domain itself. `~/flaminio-lab/` | `make vm-destroy CONFIRM=yes` (keeps the base image) |
-| `net-setup` | On rhythm-backup: one `nat PREROUTING` DNAT rule and one `FORWARD` accept rule, both restricted to source 147.52.71.227 and port 7410 | `make net-teardown` |
+| `net-setup` | `nat PREROUTING` DNAT rules with matching `FORWARD` accept rules, each restricted to the other server's address:<br>• rhythm-backup: TCP 7410 to fl-b (replication) and UDP 51822 to fl-b's WireGuard port<br>• rhythm: UDP 51821 and 51823 to fl-a and fl-w | `make net-teardown` |
+| `mesh-up` | In the VMs: `wireguard-tools`, `/etc/wireguard/wg0.{key,conf}`, `wg-quick@wg0` enabled | `make mesh-down` |
+| `etcd-up` | In the VMs: etcd in `/usr/local/bin`, `flaminio-etcd.service`, data in `/var/lib/flaminio-etcd` | `make etcd-down`; `lab.sh etcd wipe cluster` with `CONFIRM=yes` deletes the data |
+| `meta-up` | In the VMs: `/usr/local/bin/flaminio-meta`, `flaminio-meta.service` | `make meta-down` |
 
-The `net-setup` iptables rules are **not persistent**. After rhythm-backup reboots, run
-`make net-setup` again (it is idempotent). `make net-check` tells you whether the path works.
+`net-setup` makes the tagged rules exactly the configured set: it removes every `flaminio-lab`
+rule, then adds them again. The rules are **not persistent**: after a server reboots, run
+`make net-setup` again. `make net-check` and `make mesh-check` tell you whether the paths work.
+
+## Phase 1: witness, overlay and metadata
+
+```
+ rhythm                                              rhythm-backup
+   fl-a 192.168.122.50  wg 10.77.0.1  ◀── UDP ──▶       fl-b 192.168.122.51  wg 10.77.0.2
+   fl-w 192.168.122.52  wg 10.77.0.3  (witness)
+   each VM:  etcd :2379/:2380  ·  flaminio-meta :7400   (bound to the overlay address)
+```
+
+- **fl-w** (2 vCPU, 4 GiB) is the third etcd member: the 2-node + witness topology of
+  ARCHITECTURE §1.2. It is registered with the label `flaminio.io/witness`, so placement never
+  puts volume data on it. It shares rhythm with fl-a, so losing rhythm loses two of three
+  members: it demonstrates quorum behavior, not failure independence.
+- **Overlay.** The two servers' libvirt networks are separate NATs on the same subnet. A
+  WireGuard mesh (10.77.0.0/24) joins the three VMs:
+  - fl-a and fl-w reach each other directly on rhythm's bridge;
+  - across the servers, each VM's WireGuard port is forwarded from its host's uplink, for the
+    other server's address only;
+  - all inter-VM traffic of the cluster (etcd, metadata service, later Kubernetes) is
+    encrypted.
+
+  Each private key is generated in its VM and never leaves it.
+- **etcd** 3.7.2: the official release, checked against its published SHA-256 sums. It runs as
+  one member per VM, listening on the overlay address only. Not yet TLS between members or
+  clients: that is phase 1 step 3. The overlay already encrypts the traffic.
+- **flaminio-meta** runs on every VM against all three etcd members. It is a sandboxed systemd
+  service with a dynamic, unprivileged user. It is built on the workstation
+  (`GOOS=linux`) and copied in by `make meta-up`.
+
+```bash
+make cluster-up      # fl-w, port forwards, overlay, etcd and flaminio-meta on all three
+make mesh-check      # ping every VM pair over the overlay
+make etcd-status     # one line per member: leader, raft term and index
+make meta-smoke      # register nodes, create and attach a volume, lose one then two etcd members
+```
+
+`make meta-smoke` (2026-10-09):
+1. Registers the three nodes, with fl-w as a witness.
+2. Creates a 1 GiB volume (RF 2, 256 MiB chunks), with every replica on fl-a and fl-b.
+3. Attaches it through fl-b's service (epoch 1).
+4. Stops etcd on fl-w and attaches again: it works (epoch 2).
+5. Stops etcd on fl-b as well: the service refuses, without quorum.
+6. Restarts both members: the state is intact (epoch 2).
 
 ## Long-running jobs
 
@@ -110,6 +159,8 @@ corrupt without a kernel bug.
 - VMs accept SSH key logins only (no passwords). The `ubuntu` user has passwordless sudo inside
   the VM.
 - The VMs sit on each host's NAT network, so nothing else on the campus network can reach them.
+- Overlay traffic between the VMs (etcd, the metadata service) is encrypted by WireGuard. The
+  forwarded UDP ports accept only the other server's address.
 - Replication traffic in the MVP is **not yet encrypted**. mTLS comes with the replication
   protocol (ARCHITECTURE §15.2). Until then, don't put real data in the lab.
 

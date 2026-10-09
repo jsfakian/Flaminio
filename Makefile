@@ -9,6 +9,8 @@ SHELL := $(shell command -v bash)
 .DEFAULT_GOAL := help
 
 CARGO     ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
+GO        ?= go
+BUF       := $(GO) run github.com/bufbuild/buf/cmd/buf@v1.73.0
 DATAPLANE := dataplane
 LAB       := scripts/lab.sh
 VM        ?= all
@@ -27,19 +29,21 @@ help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} \
 	    /^##@/ {printf "\n\033[1m%s\033[0m\n", substr($$0, 5)} \
 	    /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
-	@printf '\nLab targets take VM=a|b|all (default all). Example: make vm-status VM=b\n'
+	@printf '\nLab targets take VM=a|b|w|all|cluster (default all: a and b). Example: make vm-status VM=b\n'
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test sim lint fmt disk-demo clean
-build: ## Build the data plane (debug)
+.PHONY: build release test crash-test sim lint fmt proto meta-vectors disk-demo clean
+build: ## Build the data plane (debug) and the Go services
 	cd $(DATAPLANE) && $(CARGO) build
+	$(GO) build ./...
 
 release: ## Build the data plane (release)
 	cd $(DATAPLANE) && $(CARGO) build --release
 
-test: ## Run all tests
+test: ## Run all tests (Rust and Go)
 	cd $(DATAPLANE) && $(CARGO) test
+	$(GO) test ./...
 
 crash-test: ## Long crash-consistency campaign (CASES=50000)
 	cd $(DATAPLANE) && PROPTEST_CASES=$(CASES) $(CARGO) test --release -p flaminio-store --test crash_consistency
@@ -48,13 +52,24 @@ sim: ## Replication-protocol simulation: SEEDS random runs, then every injected 
 	cd $(DATAPLANE) && $(CARGO) run --release -q -p flaminio-repl --example sim -- 0 $(SEEDS)
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
 
-lint: ## clippy (warnings are errors), rustfmt check, shellcheck
+lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
+	$(GO) vet ./...
+	@test -z "$$(gofmt -l api meta)" || { echo "gofmt needed:"; gofmt -l api meta; exit 1; }
+	$(BUF) lint
 	@if command -v shellcheck >/dev/null; then shellcheck -x scripts/*.sh scripts/host/*.sh scripts/guest/*.sh && echo "shellcheck: ok"; \
 	 else echo "shellcheck not installed (brew install shellcheck); skipped"; fi
 
-fmt: ## Format Rust code
+fmt: ## Format Rust and Go code
 	cd $(DATAPLANE) && $(CARGO) fmt
+	gofmt -w meta
+
+proto: ## Regenerate Go code from api/proto (buf and plugins run at pinned versions)
+	$(BUF) lint
+	$(BUF) generate
+
+meta-vectors: ## Regenerate the metadata transition vectors from the Rust model
+	cd $(DATAPLANE) && $(CARGO) run -q -p flaminio-repl --example meta_vectors > ../meta/testdata/isr-vectors.jsonl
 
 disk-demo: release ## Format and inspect a sparse disk image (IMAGE, IMAGE_SIZE)
 	@mkdir -p $(dir $(IMAGE))
@@ -148,14 +163,55 @@ repl-fault: ## Verified writes while the replica is stopped and restarted; then 
 ##@ Lab: network
 
 .PHONY: net-setup net-teardown net-check
-net-setup: ## Forward the replication port on rhythm-backup to fl-b (from rhythm only)
+net-setup: ## Port forwards on both hosts: replication to fl-b, overlay (UDP) to every VM
 	$(LAB) net-setup
 
-net-teardown: ## Remove the replication port forward
+net-teardown: ## Remove the port forwards
 	$(LAB) net-teardown
 
 net-check: ## End-to-end check: fl-a -> rhythm-backup -> fl-b
 	$(LAB) net-check
+
+##@ Lab: metadata (phase 1; VM=w is the witness, VM=cluster all three)
+
+.PHONY: mesh-up mesh-down mesh-check etcd-up etcd-down etcd-status meta-up meta-down meta-status meta-smoke cluster-up
+cluster-up: ## fl-w, overlay, etcd and the metadata service on a, b and w
+	$(LAB) create w
+	$(LAB) provision w
+	$(LAB) net-setup
+	$(LAB) mesh up
+	$(LAB) etcd up
+	$(LAB) meta up
+
+mesh-up: ## WireGuard overlay between fl-a, fl-b and fl-w (10.77.0.0/24)
+	$(LAB) mesh up
+
+mesh-down: ## Stop the overlay
+	$(LAB) mesh down
+
+mesh-check: ## Ping every VM pair over the overlay
+	$(LAB) mesh check
+
+etcd-up: ## etcd member on each VM (default all three)
+	$(LAB) etcd up $(if $(filter-out all,$(VM)),$(VM),cluster)
+
+etcd-down: ## Stop etcd members
+	$(LAB) etcd down $(if $(filter-out all,$(VM)),$(VM),cluster)
+
+etcd-status: ## etcd member status
+	$(LAB) etcd status $(if $(filter-out all,$(VM)),$(VM),cluster)
+
+meta-up: ## Build flaminio-meta for Linux and run it on each VM
+	$(LAB) meta up $(if $(filter-out all,$(VM)),$(VM),cluster)
+
+meta-down: ## Stop the metadata service
+	$(LAB) meta down $(if $(filter-out all,$(VM)),$(VM),cluster)
+
+meta-status: ## Metadata service state
+	$(LAB) meta status $(if $(filter-out all,$(VM)),$(VM),cluster)
+
+meta-smoke: ## End-to-end metadata check, including the loss of one and two etcd members
+	$(LAB) meta-smoke
 
 ##@ Lab: build, test, benchmark
 

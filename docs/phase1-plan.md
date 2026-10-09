@@ -25,7 +25,7 @@ machine into real I/O.
 | # | Step | Runs on | Done when |
 |---|---|---|---|
 | 1 ✅ | **Replication protocol core + deterministic simulator**: crate `flaminio-repl`. Target, replica and metadata state machines without I/O, covering: per-chunk ISR; epochs and fencing; replica-confirmed leases; shrinking the ISR before acknowledging; resync and rejoin; reconciling in-flight writes after failover. A seeded simulator injects crashes, partitions, delays, lost metadata and clock drift, and a linearizability checker judges every run. Protocol spec: [replication-protocol.md](replication-protocol.md) | Any machine | Thousands of seeds pass; each safety rule, deliberately broken, is caught by the simulator |
-| 2 | **Metadata service** (Go, `meta/`): the domain service over a dedicated etcd. It handles nodes, disks, volumes, placement, epoch issuance, conditional ISR transitions and node liveness, over gRPC. Its ISR and epoch rules are checked against the same transition table as step 1 | Any machine, then a 3-member etcd in the lab | Unit tests against embedded etcd; lab etcd on fl-a, fl-b and a small third VM (fl-w, a witness) |
+| 2 ✅ | **Metadata service** (Go, `meta/`): the domain service over a dedicated etcd. It handles nodes, disks, volumes, placement, epoch issuance, conditional ISR transitions and node liveness, over gRPC. Its ISR and epoch rules are checked against the same transition table as step 1 | Any machine, then a 3-member etcd in the lab | Unit tests against embedded etcd; lab etcd on fl-a, fl-b and a small third VM (fl-w, a witness) |
 | 3 | **Identity and mTLS**: a development CA; mTLS on replication and on control gRPC; capability tokens signed by the metadata service and checked by replicas | Lab | The replica refuses unauthenticated peers and stale tokens. Read results unchanged (reads stay local) |
 | 4 | **Data plane on the protocol core**: `flaminio-io` hosts many volumes and chunk replicas; the target uses placement and ISR from the metadata service and the step-1 state machine; one heartbeat per node pair | Lab | The MVP's fault test passes with the ISR shrink and expand going through the metadata service |
 | 5 | **Failover in the lab**: attach on the other VM with an epoch bump, fencing and reconciliation; partition tests (the old target must neither write nor read stale data) | Lab | Scripted failover and partition tests pass, and the data is verified |
@@ -44,6 +44,33 @@ The simulator found three flaws in the first draft, all fixed. The worst: a repl
 rejoin the ISR without a write it had missed. Its findings also simplified one rule. The details
 are in [replication-protocol.md §10](replication-protocol.md#10-what-the-simulator-found). Run it
 with `make sim`.
+
+## Step 2 result
+
+The metadata service is in `meta/`, with its API in `api/proto/flaminio/meta/v1`. It is built
+in three layers:
+- a pure domain package with the same transitions as the Rust model;
+- a narrow key-value interface (ADR 0002), implemented on etcd and in memory;
+- a gRPC service.
+
+The checks:
+- **Rust vectors:** the Go domain replays 4 463 transitions recorded from the Rust model (2 902
+  applied, 1 561 rejected), and agrees on every one (`make meta-vectors` regenerates them).
+- **Service tests**, on the in-memory store and on a real embedded etcd:
+  - the volume lifecycle;
+  - deposed targets;
+  - liveness expiry;
+  - witness exclusion;
+  - a race of 8 goroutines attaching and changing ISRs, after which every applied change and
+    every attach is accounted for exactly once.
+
+  That race test found a double epoch bump in the first `Attach`, now fixed.
+- **Lab:** the metadata service runs on a 3-member etcd cluster across fl-a, fl-b and the new
+  witness fl-w, joined by a WireGuard overlay. It survives the loss of one member, refuses
+  without quorum, and recovers intact (`make meta-smoke`; see [lab.md](lab.md#phase-1-witness-overlay-and-metadata)).
+
+Not yet: TLS and authentication (step 3), and a watch API for targets (not needed while each
+target is the only writer of its volume's ISRs).
 
 ## Lab changes this phase needs
 

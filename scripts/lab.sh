@@ -13,7 +13,7 @@ host_env() {
     done
     if [[ -n $vm ]]; then
         pairs+=("VM=$vm")
-        for v in CPUS MEM_GIB MAC IP; do
+        for v in CPUS MEM_GIB MAC IP DATA_GIB; do
             pairs+=("VM_$v=$(printf %q "$(vmvar "$vm" "$v")")")
         done
     fi
@@ -341,8 +341,33 @@ cmd_repl_fault() {
     cmd_repl_verify
 }
 
-cmd_net_setup() { ENV_VARS="$(host_env "$VM_B")" run_on_host "$HOST_B" "$SCRIPTS/host/net-forward.sh" up; }
-cmd_net_teardown() { ENV_VARS="$(host_env "$VM_B")" run_on_host "$HOST_B" "$SCRIPTS/host/net-forward.sh" down; }
+# The port forwards each host needs, as forward.sh rules: replication to VM b (TCP), and the
+# overlay port of every VM (UDP), each open to the other server only.
+forward_rules() {
+    local host=$1 vm other rules=()
+    if [[ $host == "$HOST_B" ]]; then
+        rules+=("tcp/$REPL_PORT/$VM_B_IP/$REPL_PORT/$HOST_A_IP")
+    fi
+    for vm in $(vms_of cluster); do
+        [[ $(vmvar "$vm" HOST) == "$host" ]] || continue
+        other=$HOST_A_IP
+        [[ $host == "$HOST_A" ]] && other=$HOST_B_IP
+        rules+=("udp/$(vmvar "$vm" WG_FWD)/$(vmvar "$vm" IP)/$WG_PORT/$other")
+    done
+    echo "${rules[*]}"
+}
+
+net_forward() {
+    local host iface
+    for host in $HOST_A $HOST_B; do
+        iface=$HOST_B_IFACE
+        [[ $host == "$HOST_A" ]] && iface=$HOST_A_IFACE
+        ENV_VARS="IFACE=$iface LIBVIRT_BRIDGE=$LIBVIRT_BRIDGE RULES=$(printf %q "$(forward_rules "$host")")" \
+            run_on_host "$host" "$SCRIPTS/host/forward.sh" "$1"
+    done
+}
+cmd_net_setup() { net_forward up; }
+cmd_net_teardown() { net_forward down; }
 
 # Sends a message from VM a to HOST_B:REPL_PORT and checks that VM b receives it.
 cmd_net_check() {
@@ -364,9 +389,177 @@ cmd_net_check() {
     rm -f "$got"
 }
 
+# --- Phase 1: overlay, etcd and the metadata service on all three VMs ---
+
+# The address at which VM $1 reaches VM $2's WireGuard port.
+wg_endpoint() {
+    local from=$1 to=$2
+    if [[ $(vmvar "$from" HOST) == "$(vmvar "$to" HOST)" ]]; then
+        echo "$(vmvar "$to" IP):$WG_PORT"
+    else
+        echo "$(host_ip "$(vmvar "$to" HOST)"):$(vmvar "$to" WG_FWD)"
+    fi
+}
+
+# mesh up|down|status|check
+cmd_mesh() {
+    local action=${1:-status} vm peer conf
+    declare -A pub
+    case "$action" in
+        up)
+            for vm in $(vms_of cluster); do
+                pub[$vm]=$(run_on_vm "$vm" "$SCRIPTS/guest/wg.sh" key | tail -1)
+            done
+            for vm in $(vms_of cluster); do
+                conf="[Interface]
+Address = $(vmvar "$vm" WG)/24
+ListenPort = $WG_PORT
+PostUp = wg set %i private-key /etc/wireguard/wg0.key
+"
+                for peer in $(vms_of cluster); do
+                    [[ $peer == "$vm" ]] && continue
+                    conf+="
+[Peer]
+# $peer
+PublicKey = ${pub[$peer]}
+AllowedIPs = $(vmvar "$peer" WG)/32
+Endpoint = $(wg_endpoint "$vm" "$peer")
+PersistentKeepalive = 25
+"
+                done
+                ENV_VARS="WG_CONF=$(printf '%s' "$conf" | base64 | tr -d '\n')" run_on_vm "$vm" "$SCRIPTS/guest/wg.sh" up
+            done
+            cmd_mesh check
+            ;;
+        check)
+            local bad=0
+            for vm in $(vms_of cluster); do
+                for peer in $(vms_of cluster); do
+                    [[ $peer == "$vm" ]] && continue
+                    if vssh "$vm" "ping -c 3 -i 0.3 -W 2 -q $(vmvar "$peer" WG) >/dev/null"; then
+                        log "$vm -> $peer ($(vmvar "$peer" WG)): ok"
+                    else
+                        warn "$vm -> $peer ($(vmvar "$peer" WG)): no reply"
+                        bad=1
+                    fi
+                done
+            done
+            ((bad == 0)) || die "overlay incomplete (make net-setup? make mesh-up?)"
+            ;;
+        down | status)
+            for vm in $(vms_of cluster); do run_on_vm "$vm" "$SCRIPTS/guest/wg.sh" "$action"; done
+            ;;
+        *) die "usage: mesh up|down|status|check" ;;
+    esac
+}
+
+etcd_cluster() {
+    local vm parts=()
+    for vm in $(vms_of cluster); do parts+=("$vm=http://$(vmvar "$vm" WG):2380"); done
+    (IFS=,; echo "${parts[*]}")
+}
+
+etcd_endpoints() {
+    local vm parts=()
+    for vm in $(vms_of cluster); do parts+=("http://$(vmvar "$vm" WG):2379"); done
+    (IFS=,; echo "${parts[*]}")
+}
+
+# etcd up|down|status|wipe [VM selector, default cluster]
+cmd_etcd() {
+    local action=${1:-status} vm
+    for vm in $(vms_of "${2:-cluster}"); do
+        case "$action" in
+            up)
+                ENV_VARS="ETCD_VERSION=$ETCD_VERSION" run_on_vm "$vm" "$SCRIPTS/guest/etcd.sh" install
+                ENV_VARS="NAME=$vm IP=$(vmvar "$vm" WG) CLUSTER=$(etcd_cluster)" run_on_vm "$vm" "$SCRIPTS/guest/etcd.sh" up
+                ;;
+            wipe)
+                [[ ${CONFIRM:-} == yes ]] || die "this deletes the metadata; rerun with CONFIRM=yes"
+                run_on_vm "$vm" "$SCRIPTS/guest/etcd.sh" wipe
+                ;;
+            down | status)
+                [[ $action == status ]] && log "$vm"
+                run_on_vm "$vm" "$SCRIPTS/guest/etcd.sh" "$action"
+                ;;
+            *) die "usage: etcd up|down|status|wipe [VM]" ;;
+        esac
+    done
+}
+
+# meta up|down|status [VM selector, default cluster]: builds flaminio-meta for Linux here, and
+# runs it on each VM against the whole etcd cluster.
+cmd_meta() {
+    local action=${1:-status} vm bin="$LOCAL_STATE_DIR/bin/flaminio-meta"
+    if [[ $action == up ]]; then
+        log "building flaminio-meta for linux/amd64"
+        (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$bin" ./meta/cmd/flaminio-meta)
+    fi
+    for vm in $(vms_of "${2:-cluster}"); do
+        case "$action" in
+            up)
+                vssh "$vm" "cat > ~/flaminio-meta" <"$bin"
+                ENV_VARS="LISTEN=$(vmvar "$vm" WG):$META_PORT ETCD=$(etcd_endpoints)" run_on_vm "$vm" "$SCRIPTS/guest/meta.sh" up
+                ;;
+            down | status) run_on_vm "$vm" "$SCRIPTS/guest/meta.sh" "$action" ;;
+            *) die "usage: meta up|down|status [VM]" ;;
+        esac
+    done
+}
+
+# Runs flaminio-meta's client in VM $1 against the metadata service on VM $2.
+metactl() {
+    local vm=$1 server=$2
+    shift 2
+    vssh "$vm" "/usr/local/bin/flaminio-meta --server $(vmvar "$server" WG):$META_PORT $(printf '%q ' "$@")"
+}
+
+# End-to-end check of the metadata service: nodes, a volume, attach and ISR, then the loss of
+# one and of two etcd members.
+cmd_meta_smoke() {
+    local vm vol out
+    vol="smoke-$(date +%s)"
+    for vm in $(vms_of cluster); do
+        local labels=()
+        [[ $vm == "$VM_W" ]] && labels=(flaminio.io/witness=)
+        metactl "$VM_A" "$vm" register "$vm" "$(vmvar "$vm" WG):$REPL_PORT" "${labels[@]}" >/dev/null
+        metactl "$VM_A" "$vm" heartbeat "$vm" >/dev/null
+    done
+    log "nodes: $(metactl "$VM_A" "$VM_A" nodes | jq -c '[.nodes[] | {id, alive, witness: (.labels // {} | has("flaminio.io/witness"))}]')"
+    out=$(metactl "$VM_A" "$VM_A" create "$vol" 1G 2 1 256M)
+    log "created $vol: $(jq -c '[.volume.chunks[].replicas]' <<<"$out")"
+    if jq -e --arg w "$VM_W" '[.volume.chunks[].replicas[]] | index($w)' <<<"$out" >/dev/null; then
+        die "a replica was placed on the witness $VM_W"
+    fi
+    out=$(metactl "$VM_B" "$VM_B" attach "$vol" "$VM_B")
+    log "attached through $VM_B's service: epoch $(jq -r .volume.epoch <<<"$out"), target $(jq -r .volume.target <<<"$out")"
+
+    log "stopping etcd on $VM_W: 2 of 3 members left, quorum holds"
+    cmd_etcd down w
+    out=$(metactl "$VM_A" "$VM_A" attach "$vol" "$VM_A")
+    log "attach with 2 members: epoch $(jq -r .volume.epoch <<<"$out")"
+
+    log "stopping etcd on $VM_B too: 1 of 3, no quorum"
+    cmd_etcd down b
+    if metactl "$VM_A" "$VM_A" get "$vol" >/dev/null 2>&1; then
+        warn "read succeeded without quorum (expected a refusal)"
+    else
+        log "without quorum the service refuses, as it must"
+    fi
+
+    log "restarting both members"
+    cmd_etcd up b
+    cmd_etcd up w
+    wait_for "the metadata service to answer" 60 metactl "$VM_A" "$VM_W" get "$vol"
+    out=$(metactl "$VM_A" "$VM_W" get "$vol")
+    [[ $(jq -r .volume.epoch <<<"$out") == 2 ]] || die "unexpected state after recovery: $out"
+    metactl "$VM_A" "$VM_A" delete "$vol" >/dev/null
+    log "OK: metadata survived the loss of one member, refused without quorum, recovered (epoch 2)"
+}
+
 usage() {
     cat <<USAGE
-usage: scripts/lab.sh COMMAND [a|b|all]
+usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; cluster: a, b, w)
 
   check        host reachability and prerequisites
   host-prep    install KVM/libvirt, storage pool, network, ufw rules (idempotent)
@@ -389,9 +582,13 @@ usage: scripts/lab.sh COMMAND [a|b|all]
   repl-down    stop both sides
   repl-verify  stop both sides and compare the replicas' checksums
   repl-fault   verified writes while the replica is stopped and restarted, then repl-verify
-  net-setup    forward $HOST_B_IP:$REPL_PORT to $VM_B (from $HOST_A_IP only)
-  net-teardown remove that forward
+  net-setup    port forwards on both hosts: replication to $VM_B, overlay (UDP) to every VM
+  net-teardown remove them
   net-check    end-to-end check: $VM_A -> $HOST_B -> $VM_B
+  mesh ACTION  WireGuard overlay between a, b and w: up | down | status | check
+  etcd ACTION [VM]  metadata etcd (default: all three): up | down | status | wipe (CONFIRM=yes)
+  meta ACTION [VM]  metadata service (default: all three): up | down | status
+  meta-smoke   end-to-end metadata check, including the loss of etcd members
   ssh|console  interactive shell or serial console (default: a)
   exec VM CMD  run a command in a VM
 USAGE
@@ -425,6 +622,10 @@ case "$cmd" in
     net-setup) cmd_net_setup ;;
     net-teardown) cmd_net_teardown ;;
     net-check) cmd_net_check ;;
+    mesh) cmd_mesh "$@" ;;
+    etcd) cmd_etcd "$@" ;;
+    meta) cmd_meta "$@" ;;
+    meta-smoke) cmd_meta_smoke ;;
     ssh) cmd_ssh "$@" ;;
     console) cmd_console "$@" ;;
     exec) cmd_exec "$@" ;;

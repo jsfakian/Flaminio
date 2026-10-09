@@ -24,13 +24,15 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
 # from which vm-destroy removes them.
 VM_SSH_OPTS=("${SSH_OPTS[@]}" -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new)
 
-# Expands "a", "b" or "all" into VM names.
+# Expands a VM selector into VM names: a, b, w, all (the two data VMs) or cluster (all three).
 vms_of() {
     case "${1:-all}" in
         a | "$VM_A") echo "$VM_A" ;;
         b | "$VM_B") echo "$VM_B" ;;
+        w | "$VM_W") echo "$VM_W" ;;
         all | "") echo "$VM_A $VM_B" ;;
-        *) die "unknown VM '$1' (use a, b or all)" ;;
+        cluster) echo "$VM_A $VM_B $VM_W" ;;
+        *) die "unknown VM '$1' (use a, b, w, all or cluster)" ;;
     esac
 }
 
@@ -47,9 +49,17 @@ hosts_of() {
 # Per-VM setting: vmvar VM FIELD, e.g. vmvar fl-a CPUS -> $VM_A_CPUS.
 vmvar() {
     local prefix
-    if [[ $1 == "$VM_A" ]]; then prefix=VM_A; else prefix=VM_B; fi
+    case "$1" in
+        "$VM_A") prefix=VM_A ;;
+        "$VM_B") prefix=VM_B ;;
+        "$VM_W") prefix=VM_W ;;
+        *) die "unknown VM '$1'" ;;
+    esac
     eval "echo \"\${${prefix}_$2}\""
 }
+
+# The address of a host on its uplink.
+host_ip() { if [[ $1 == "$HOST_A" ]]; then echo "$HOST_A_IP"; else echo "$HOST_B_IP"; fi; }
 
 # The relay (-J) for reaching a host: HOST_A_JUMP for HOST_A when set, otherwise none.
 host_jump() {

@@ -123,7 +123,14 @@ impl Metadata {
                 let Some(v) = self.volumes.get_mut(vol) else {
                     return MetaReply::NotFound { vol: *vol };
                 };
+                let distinct = changes
+                    .iter()
+                    .map(|c| c.chunk)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == changes.len();
                 let valid = *epoch == v.epoch
+                    && distinct
                     && changes.iter().all(|c| {
                         v.chunks.get(c.chunk as usize).is_some_and(|m| {
                             m.isr_ver == c.expected_ver
@@ -203,6 +210,8 @@ mod tests {
             req(1, vec![change(0, 0, &[1, 4])]),
             // Atomic: the valid first change is not applied either.
             req(1, vec![change(0, 0, &[1, 2]), change(1, 0, &[2])]),
+            // The same chunk twice.
+            req(1, vec![change(0, 0, &[1, 2]), change(0, 0, &[1, 3])]),
         ] {
             assert!(
                 matches!(m.handle(&bad), MetaReply::Rejected { .. }),
