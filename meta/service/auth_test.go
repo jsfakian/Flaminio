@@ -83,6 +83,8 @@ func TestAuthorization(t *testing.T) {
 	nodeA := as("a", pki.NodeID(td, "fl-a", "io"))
 	nodeB := as("b", pki.NodeID(td, "fl-b", "io"))
 	metaA := as("meta-a", pki.NodeID(td, "fl-a", "meta"))
+	agentA := as("agent-a", pki.NodeID(td, "fl-a", "agent"))
+	agentB := as("agent-b", pki.NodeID(td, "fl-b", "agent"))
 	foreign := as("foreign", "spiffe://other/flaminio/admin/ops")
 	ctx := context.Background()
 
@@ -122,10 +124,26 @@ func TestAuthorization(t *testing.T) {
 	expect("node attaches itself", err, codes.PermissionDenied)
 	att, err := admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("admin attaches", err, codes.OK)
+	// A node's agent restarts its own target, and nothing else.
+	_, err = agentB.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-b", OnlyIfTarget: true})
+	expect("agent restarts a target it is not", err, codes.FailedPrecondition)
+	_, err = agentB.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a", OnlyIfTarget: true})
+	expect("agent restarts another node's target", err, codes.PermissionDenied)
+	_, err = agentA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
+	expect("agent attaches without only_if_target", err, codes.PermissionDenied)
+	_, err = nodeA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a", OnlyIfTarget: true})
+	expect("data plane restarts its target", err, codes.PermissionDenied)
+	restart, err := agentA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a", OnlyIfTarget: true})
+	expect("agent restarts its own target", err, codes.OK)
+	if restart.Volume.GetEpoch() != 2 {
+		t.Fatalf("restart epoch %d, want 2", restart.Volume.GetEpoch())
+	}
+	att, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
+	expect("admin attaches again", err, codes.OK)
 
 	// The token names the volume, the epoch and the node.
 	claims, err := captoken.Verify(pub, att.Token)
-	if err != nil || claims.Volume != "v" || claims.Epoch != 1 || claims.Node != "fl-a" {
+	if err != nil || claims.Volume != "v" || claims.Epoch != 3 || claims.Node != "fl-a" {
 		t.Fatalf("token %+v %v", claims, err)
 	}
 
@@ -135,7 +153,7 @@ func TestAuthorization(t *testing.T) {
 
 	// Only the target's data plane changes the ISR, even with the right epoch and version.
 	c0 := att.Volume.Chunks[0]
-	change := &metav1.ChangeIsrRequest{Volume: "v", Epoch: 1, Changes: []*metav1.IsrChange{{Chunk: 0, ExpectedVer: c0.IsrVer, NewIsr: c0.Replicas[:1]}}}
+	change := &metav1.ChangeIsrRequest{Volume: "v", Epoch: 3, Changes: []*metav1.IsrChange{{Chunk: 0, ExpectedVer: c0.IsrVer, NewIsr: c0.Replicas[:1]}}}
 	r, err := nodeB.ChangeIsr(ctx, change)
 	if err != nil || r.Applied {
 		t.Fatalf("non-target changed the ISR: %v %v", r, err)

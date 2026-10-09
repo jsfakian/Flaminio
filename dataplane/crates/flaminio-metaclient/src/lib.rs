@@ -105,7 +105,7 @@ impl MetaClient {
                     rt.block_on(async { channels.into_iter().map(|e| e.connect_lazy()).collect() });
                 let mut preferred = 0;
                 while let Ok((id, call)) = rx.recv() {
-                    let answer = rt.block_on(call_any(&chans, &mut preferred, call));
+                    let answer = rt.block_on(call_any(&chans, &mut preferred, cfg.timeout, call));
                     on_answer(id, answer);
                 }
             })?;
@@ -118,19 +118,36 @@ impl MetaClient {
     }
 }
 
-/// Tries the preferred endpoint, then the others, until one answers.
-async fn call_any(chans: &[Channel], preferred: &mut usize, call: Call) -> Answer {
+/// Tries the preferred endpoint, then the others, until one answers. Each gets `timeout` for
+/// the whole call: the channel's own timeouts cover connecting and the request, but not the
+/// TLS handshake, which an endpoint that accepts connections and then hangs never finishes.
+async fn call_any(
+    chans: &[Channel],
+    preferred: &mut usize,
+    timeout: Duration,
+    call: Call,
+) -> Answer {
     let mut last = Answer::Failed {
         code: tonic::Code::Unavailable,
         message: "no endpoint answered".into(),
     };
     for k in 0..chans.len() {
         let i = (*preferred + k) % chans.len();
-        match call_one(chans[i].clone(), call.clone()).await {
+        let answer = tokio::time::timeout(timeout, call_one(chans[i].clone(), call.clone()))
+            .await
+            .unwrap_or_else(|_| Answer::Failed {
+                code: tonic::Code::DeadlineExceeded,
+                message: format!("no answer within {timeout:?}"),
+            });
+        match answer {
+            // tonic reports its own call and connect timeouts as Cancelled: an endpoint that
+            // is unreachable without refusing (a partition) shows up as that.
             Answer::Failed { code, message }
                 if matches!(
                     code,
-                    tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                    tonic::Code::Unavailable
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::Cancelled
                 ) =>
             {
                 last = Answer::Failed { code, message };

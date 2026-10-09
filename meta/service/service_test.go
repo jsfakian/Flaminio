@@ -120,7 +120,25 @@ func TestVolumeLifecycle(t *testing.T) {
 		if r := change(1, 2, c0.Replicas[0]); r.Applied || r.Epoch != 2 {
 			t.Fatalf("old epoch: %+v", r)
 		}
-		if _, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: 2, Changes: []*metav1.IsrChange{{Chunk: 9}}}); code(err) != codes.InvalidArgument {
+		// unless_target: a repeated publish to the target changes nothing and issues no token;
+		// to another node it attaches as usual.
+		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", UnlessTarget: true}); err != nil || r.Volume.Epoch != 2 || r.Token != nil {
+			t.Fatalf("unless_target, already the target: %v %v", r, err)
+		}
+		// only_if_target: the target restarts under a new epoch; another node is refused.
+		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a", OnlyIfTarget: true}); code(err) != codes.FailedPrecondition {
+			t.Fatalf("only_if_target, not the target: %v", err)
+		}
+		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", OnlyIfTarget: true}); err != nil || r.Volume.Epoch != 3 || r.Volume.Target != "b" {
+			t.Fatalf("only_if_target: %v %v", r, err)
+		}
+		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", OnlyIfTarget: true, UnlessTarget: true}); code(err) != codes.InvalidArgument {
+			t.Fatalf("both modes: %v", err)
+		}
+		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a", UnlessTarget: true}); err != nil || r.Volume.Epoch != 4 || r.Volume.Target != "a" {
+			t.Fatalf("unless_target, another node: %v %v", r, err)
+		}
+		if _, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: 4, Changes: []*metav1.IsrChange{{Chunk: 9}}}); code(err) != codes.InvalidArgument {
 			t.Fatalf("chunk out of range: %v", err)
 		}
 

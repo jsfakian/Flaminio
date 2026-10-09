@@ -82,7 +82,7 @@ func errStatus(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, domain.ErrExists):
 		return status.Error(codes.AlreadyExists, err.Error())
-	case errors.Is(err, domain.ErrPlacement):
+	case errors.Is(err, domain.ErrPlacement), errors.Is(err, domain.ErrNotTarget):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return status.FromContextError(err).Err()
@@ -350,6 +350,9 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 	if !domain.ValidID(r.GetNode()) {
 		return nil, errStatus(fmt.Errorf("%w: node id %q", domain.ErrInvalid, r.GetNode()))
 	}
+	if r.GetUnlessTarget() && r.GetOnlyIfTarget() {
+		return nil, errStatus(fmt.Errorf("%w: unless_target and only_if_target together", domain.ErrInvalid))
+	}
 	for attempt := range retries {
 		if attempt > 0 {
 			if err := backoff(ctx, attempt); err != nil {
@@ -359,6 +362,16 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 		h, rev, err := s.readHeader(ctx, r.GetVolume())
 		if err != nil {
 			return nil, errStatus(err)
+		}
+		switch {
+		case r.GetOnlyIfTarget() && h.Target != r.GetNode():
+			return nil, errStatus(fmt.Errorf("%w: %s's target is %q, not %s", domain.ErrNotTarget, h.ID, h.Target, r.GetNode()))
+		case r.GetUnlessTarget() && h.Target == r.GetNode():
+			v, err := s.readVolume(ctx, h.ID)
+			if err != nil {
+				return nil, errStatus(err)
+			}
+			return &metav1.AttachResponse{Volume: volumePB(v)}, nil
 		}
 		h.Attach(r.GetNode())
 		b, _ := json.Marshal(h)

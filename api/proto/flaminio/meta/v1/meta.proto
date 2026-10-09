@@ -32,7 +32,8 @@ service MetadataService {
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
 
   // Makes a node the volume's target under a new epoch, and issues its capability token.
-  // Caller: an administrator (the CSI controller, the failover controller).
+  // Caller: an administrator (the CSI controller, the failover controller); or, with
+  // only_if_target, the node's agent for itself.
   rpc Attach(AttachRequest) returns (AttachResponse);
   // Changes ISRs atomically, only under the current epoch and the expected ISR versions.
   // Caller: the data plane of the volume's current target node.
@@ -120,6 +121,14 @@ message DeleteVolumeResponse {}
 message AttachRequest {
   string volume = 1;
   string node = 2;
+  // If the node is already the target, change nothing and issue no token. For the CSI
+  // controller's publish, which Kubernetes may repeat while the node serves the volume.
+  bool unless_target = 3;
+  // Refuse with FAILED_PRECONDITION unless the node is already the target. A node's agent may
+  // make this call for itself, to start its own target again under a new epoch; it cannot take
+  // a volume from another node. A target never restarts under the epoch it had: replicas order
+  // a target's sessions by epoch and session number, and a new process numbers from 1 again.
+  bool only_if_target = 4;
 }
 
 message AttachResponse {

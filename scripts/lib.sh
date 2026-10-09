@@ -6,6 +6,10 @@ if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); 
     exit 1
 fi
 
+# Numbers with a decimal point, whatever the workstation's locale: awk and printf read
+# timestamps such as 1791544816.62 as text in locales with a decimal comma.
+export LC_ALL=C
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS="$REPO_ROOT/scripts"
 # shellcheck source=lab.conf

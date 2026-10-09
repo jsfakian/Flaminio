@@ -19,7 +19,11 @@ and you restore from an encrypted, immutable backup.
 > (in-sync replica sets, epoch fencing, replica-confirmed leases, reconciliation after
 > failover) are implemented as a pure state machine and checked by a deterministic simulator
 > ([protocol](docs/replication-protocol.md)). The metadata service (Go, on a dedicated etcd)
-> runs in the lab on a 3-member etcd cluster with a witness node.
+> runs in the lab on a 3-member etcd cluster with a witness node. In the lab:
+> - a partitioned target serves no read after its lease and loses no acknowledged write;
+> - Kubernetes (k3s) uses Flaminio volumes through its CSI driver;
+> - when a node is powered off, its pod comes back on the other node with its data in about
+>   two minutes.
 
 ---
 

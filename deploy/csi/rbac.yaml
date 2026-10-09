@@ -1,0 +1,120 @@
+# Flaminio CSI driver: namespace, service accounts and the permissions of the Kubernetes
+# sidecars (external-provisioner, external-attacher, node-driver-registrar). Flaminio's own
+# containers call no Kubernetes API; they talk to the metadata service with their own
+# identities (mutual TLS).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flaminio-system
+  labels:
+    # The node plugin mounts devices on the host: it must be privileged.
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flaminio-csi-controller
+  namespace: flaminio-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flaminio-csi-node
+  namespace: flaminio-system
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flaminio-csi-controller
+rules:
+  # external-provisioner
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, watch, update]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses, csinodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [list, watch, create, update, patch]
+  # external-attacher
+  - apiGroups: [storage.k8s.io]
+    resources: [volumeattachments]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [storage.k8s.io]
+    resources: [volumeattachments/status]
+    verbs: [patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flaminio-csi-controller
+subjects:
+  - kind: ServiceAccount
+    name: flaminio-csi-controller
+    namespace: flaminio-system
+roleRef:
+  kind: ClusterRole
+  name: flaminio-csi-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+# Leader election of the controller's sidecars.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flaminio-csi-controller
+  namespace: flaminio-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, watch, list, delete, update, create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flaminio-csi-controller
+  namespace: flaminio-system
+subjects:
+  - kind: ServiceAccount
+    name: flaminio-csi-controller
+    namespace: flaminio-system
+roleRef:
+  kind: Role
+  name: flaminio-csi-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flaminio-failover
+  namespace: flaminio-system
+---
+# The failover controller reads nodes and sets or clears the out-of-service taint.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flaminio-failover
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flaminio-failover
+subjects:
+  - kind: ServiceAccount
+    name: flaminio-failover
+    namespace: flaminio-system
+roleRef:
+  kind: ClusterRole
+  name: flaminio-failover
+  apiGroup: rbac.authorization.k8s.io

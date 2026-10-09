@@ -2,12 +2,45 @@ package kv
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+// Each request to etcd gets AttemptTimeout, and is tried again while the caller's context
+// lasts, up to attempts times. A request sent on the connection to a member cut off by a
+// partition, which drops packets, waits on a connection that still looks open; the client's
+// keepalives (see flaminio-meta) take that connection out of rotation, and meanwhile the next
+// attempt goes to another member. A transaction whose commit was not seen and is tried again
+// fails its compare: callers already treat that as contention, and read again.
+const (
+	AttemptTimeout = 3 * time.Second
+	attempts       = 4
+)
+
+func retry[T any](ctx context.Context, f func(context.Context) (T, error)) (T, error) {
+	var (
+		v   T
+		err error
+	)
+	for range attempts {
+		actx, cancel := context.WithTimeout(ctx, AttemptTimeout)
+		v, err = f(actx)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			return v, err
+		}
+		if c := status.Code(err); !errors.Is(err, context.DeadlineExceeded) && c != codes.DeadlineExceeded && c != codes.Unavailable {
+			return v, err
+		}
+	}
+	return v, err
+}
 
 // Etcd is the KV on a dedicated etcd cluster.
 type Etcd struct {
@@ -23,7 +56,7 @@ func NewEtcd(c *clientv3.Client) *Etcd {
 }
 
 func (e *Etcd) Get(ctx context.Context, key string) (Entry, bool, error) {
-	r, err := e.c.Get(ctx, key)
+	r, err := retry(ctx, func(ctx context.Context) (*clientv3.GetResponse, error) { return e.c.Get(ctx, key) })
 	if err != nil {
 		return Entry{}, false, err
 	}
@@ -35,7 +68,9 @@ func (e *Etcd) Get(ctx context.Context, key string) (Entry, bool, error) {
 }
 
 func (e *Etcd) List(ctx context.Context, prefix string) ([]Entry, error) {
-	r, err := e.c.Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
+	r, err := retry(ctx, func(ctx context.Context) (*clientv3.GetResponse, error) {
+		return e.c.Get(ctx, prefix, clientv3.WithPrefix(), clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend))
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +97,9 @@ func (e *Etcd) Txn(ctx context.Context, cmps []Cmp, ops []Op) (bool, error) {
 			os[i] = clientv3.OpPut(o.Key, string(o.Value))
 		}
 	}
-	r, err := e.c.Txn(ctx).If(cs...).Then(os...).Commit()
+	r, err := retry(ctx, func(ctx context.Context) (*clientv3.TxnResponse, error) {
+		return e.c.Txn(ctx).If(cs...).Then(os...).Commit()
+	})
 	if err != nil {
 		return false, err
 	}
@@ -74,8 +111,12 @@ func (e *Etcd) PutTTL(ctx context.Context, key string, value []byte, ttl time.Du
 	id, ok := e.leases[key]
 	e.mu.Unlock()
 	if ok {
-		if _, err := e.c.KeepAliveOnce(ctx, id); err == nil {
-			_, err = e.c.Put(ctx, key, string(value), clientv3.WithLease(id))
+		if _, err := retry(ctx, func(ctx context.Context) (*clientv3.LeaseKeepAliveResponse, error) {
+			return e.c.KeepAliveOnce(ctx, id)
+		}); err == nil {
+			_, err = retry(ctx, func(ctx context.Context) (*clientv3.PutResponse, error) {
+				return e.c.Put(ctx, key, string(value), clientv3.WithLease(id))
+			})
 			return err
 		}
 		// The lease expired: grant a new one.
@@ -84,11 +125,13 @@ func (e *Etcd) PutTTL(ctx context.Context, key string, value []byte, ttl time.Du
 	if secs < 1 {
 		secs = 1
 	}
-	g, err := e.c.Grant(ctx, secs)
+	g, err := retry(ctx, func(ctx context.Context) (*clientv3.LeaseGrantResponse, error) { return e.c.Grant(ctx, secs) })
 	if err != nil {
 		return err
 	}
-	if _, err := e.c.Put(ctx, key, string(value), clientv3.WithLease(g.ID)); err != nil {
+	if _, err := retry(ctx, func(ctx context.Context) (*clientv3.PutResponse, error) {
+		return e.c.Put(ctx, key, string(value), clientv3.WithLease(g.ID))
+	}); err != nil {
 		return err
 	}
 	e.mu.Lock()

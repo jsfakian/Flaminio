@@ -61,8 +61,13 @@ func (s *Service) Authorize(ctx context.Context, req any, info *grpc.UnaryServer
 	method := info.FullMethod[strings.LastIndex(info.FullMethod, "/")+1:]
 	var allowed bool
 	switch method {
-	case "CreateVolume", "DeleteVolume", "Attach":
+	case "CreateVolume", "DeleteVolume":
 		allowed = admin
+	case "Attach":
+		// A node's agent restarts its own target under a new epoch; the service checks that
+		// it is the target.
+		r := req.(*metav1.AttachRequest)
+		allowed = admin || (r.GetOnlyIfTarget() && id.Node == r.GetNode() && id.Component == "agent")
 	case "RegisterNode":
 		allowed = admin || isNode(req.(*metav1.RegisterNodeRequest).GetNode().GetId())
 	case "NodeHeartbeat":

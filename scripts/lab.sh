@@ -566,10 +566,15 @@ cmd_pki() {
                 issue "$vm" meta-etcd "$dir/etcd" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/meta" --client
                 issue "$vm" meta "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/meta" --server --ip "$ip"
                 issue "$vm" io "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/io" --server --client --ip "$ip"
+                # The node's agent (the CSI node plugin, for now): it restarts the targets
+                # the metadata service places on its node.
+                [[ $vm == "$VM_W" ]] || issue "$vm" agent "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/agent" --client
             done
-            if [[ " $(vms_of "${2:-cluster}") " == *" $VM_A "* ]]; then
-                issue "$VM_A" admin "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/admin/lab" --client
-            fi
+            # The lab administrator works from fl-a, and from fl-w when fl-a is cut off.
+            for vm in $(vms_of "${2:-cluster}"); do
+                [[ $vm == "$VM_A" || $vm == "$VM_W" ]] || continue
+                issue "$vm" admin "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/admin/lab" --client
+            done
             ;;
         *) die "usage: pki init|issue [VM]" ;;
     esac
@@ -738,6 +743,370 @@ cmd_node_fault() {
     log "OK: no failed writes, ISR restored, and $VM_B serves every byte after the failover"
 }
 
+# Starts the nodes of the data VMs that are not running (a running node is left alone: a
+# restart would cost a reconciliation).
+ensure_nodes() {
+    local vm
+    for vm in $(vms_of all); do
+        vssh "$vm" "systemctl is-active --quiet flaminio-node" || cmd_node up "$(vms_of "$vm")"
+    done
+}
+
+wait_isr_full() {
+    local start=$SECONDS
+    while [[ $(vol_degraded) != 0 ]]; do
+        ((SECONDS - start < ${1:-900})) || die "ISR not full after ${1:-900} s"
+        sleep 5
+    done
+}
+
+probe() { run_on_vm "$1" "$SCRIPTS/guest/probe.sh" "${@:2}"; }
+
+# Step 5: the target's node (fl-a) is cut off the overlay while a reader and a writer run on
+# its device; fl-b is made the target from the majority side. The old target must neither
+# return a read it started after its lease ran out, nor acknowledge a write it started after
+# the cut; fl-b must see every write fl-a acknowledged. Then the overlay heals: fl-a learns it
+# was deposed, and rejoins every ISR as a replica. Checks use one clock at a time.
+cmd_partition() {
+    local dev=/dev/ublkb1 x=$((1 << 30)) y=$((2 << 30)) lease=5 hold=${HOLD:-30}
+    local t_cut t_heal out tok line v first acked
+
+    vssh "$VM_W" "sudo test -f /etc/flaminio/pki/admin.crt" || cmd_pki issue w
+    ensure_nodes
+    cmd_vol attach a
+    log "waiting for full ISRs before the cut"
+    wait_isr_full
+    out=$(probe "$VM_A" write "$dev" "$x" gen-1)
+    [[ $out == *" ok gen-1" ]] || die "write on $VM_A failed: $out"
+    probe "$VM_A" start reader reader "$dev" "$x"
+    probe "$VM_A" start writer writer "$dev" "$y"
+    sleep 5
+
+    # Whatever happens from here, fl-a ends up connected and the probes stopped.
+    trap 'warn "healing $VM_A after a failure"; run_on_vm "$VM_A" "$SCRIPTS/guest/partition.sh" off >/dev/null 2>&1;
+          probe "$VM_A" stop reader; probe "$VM_A" stop writer' EXIT
+    t_cut=$(run_on_vm "$VM_A" "$SCRIPTS/guest/partition.sh" on)
+    log "$VM_A cut off the overlay at $t_cut; making $VM_B the target from $VM_W"
+    sleep 2
+    out=$(metactl "$VM_W" "$VM_W" attach "$VOL" "$VM_B")
+    tok=$(jq -r .token <<<"$out")
+    log "$VOL attached to $VM_B at epoch $(jq -r .volume.epoch <<<"$out")"
+    ENV_VARS="VOLUME=$VOL TOKEN=$tok" run_on_vm "$VM_B" "$SCRIPTS/guest/node.sh" attach
+
+    first=$(probe "$VM_B" read "$dev" "$x")
+    log "$VM_B first read: $first"
+    [[ $first == *" ok gen-1" ]] || die "$VM_B read $first at offset $x, expected gen-1"
+    log "$VM_B served its first read $(awk -v s="${first%% *}" -v t="$t_cut" 'BEGIN {printf "%.1f", s - t}') s after the cut (clocks of two VMs)"
+    line=$(probe "$VM_B" read "$dev" "$y")
+    [[ $line == *" ok "* ]] || die "$VM_B read $line at offset $y"
+    v=${line##* }
+    out=$(probe "$VM_B" write "$dev" "$x" gen-2)
+    [[ $out == *" ok gen-2" ]] || die "write on $VM_B failed: $out"
+    [[ $(probe "$VM_B" read "$dev" "$x") == *" ok gen-2" ]] || die "$VM_B does not read back gen-2"
+    log "$VM_B wrote gen-2; holding the partition for ${hold} s"
+    sleep "$hold"
+
+    t_heal=$(run_on_vm "$VM_A" "$SCRIPTS/guest/partition.sh" off)
+    trap - EXIT
+    log "overlay healed at $t_heal"
+    local start=$SECONDS
+    until vssh "$VM_A" "sudo journalctl -u flaminio-node --since=-10min -o cat | grep -q 'deposed as the target of $VOL'"; do
+        ((SECONDS - start < 120)) || die "$VM_A was not told it was deposed within 120 s of the heal"
+        sleep 2
+    done
+    log "$VM_A deposed $((SECONDS - start)) s after the heal"
+    sleep 3
+    probe "$VM_A" stop reader
+    probe "$VM_A" stop writer
+    probe "$VM_A" log reader >"$LOCAL_STATE_DIR/partition-reader.log"
+    probe "$VM_A" log writer >"$LOCAL_STATE_DIR/partition-writer.log"
+    ENV_VARS="VOLUME=$VOL" run_on_vm "$VM_A" "$SCRIPTS/guest/node.sh" detach || true
+
+    # Reads on fl-a: none started after the lease ran out (fl-a's clock) may succeed.
+    awk -v t="$t_cut" -v l="$lease" '
+        $1 < t && $3 == "ok" {before++}
+        $1 >= t && $1 < t + l && $3 == "ok" {within++}
+        $1 >= t + l && $3 == "ok" {bad++; print "  VIOLATION: read started " $1 - t " s after the cut returned " $4}
+        $3 == "err" {err++}
+        END {printf "  reader on fl-a: %d reads before the cut, %d after it within the lease, %d failed, %d after the lease (must be 0)\n", before, within, err, bad; exit bad > 0}
+    ' "$LOCAL_STATE_DIR/partition-reader.log" || die "the old target served a read after its lease expired"
+    # Writes on fl-a: none started after the cut may be acknowledged; fl-b must hold the last
+    # acknowledged one (or the one in flight at the cut).
+    acked=$(awk -v t="$t_cut" '
+        $3 == "ok" && $1 < t {split($4, p, "-"); last = p[2]}
+        $3 == "ok" && $1 >= t {bad++; print "  VIOLATION: write started " $1 - t " s after the cut was acknowledged" > "/dev/stderr"}
+        END {print last + 0; exit bad > 0}
+    ' "$LOCAL_STATE_DIR/partition-writer.log") || die "the old target acknowledged a write after the cut"
+    log "  writer on fl-a: last acknowledged writer-$acked; $VM_B reads $v"
+    [[ $v =~ ^writer-([0-9]+)$ ]] || die "$VM_B holds '$v' at offset $y"
+    ((BASH_REMATCH[1] == acked || BASH_REMATCH[1] == acked + 1)) ||
+        die "$VM_B holds $v, but $VM_A acknowledged writer-$acked: an acknowledged write was lost"
+
+    log "waiting for $VM_A to rejoin every ISR as a replica"
+    start=$SECONDS
+    wait_isr_full 900
+    log "every ISR full again $((SECONDS - start)) s later"
+    cmd_vol show
+    log "OK: the cut-off target stopped reading at its lease and never acknowledged a write; $VM_B took over with every acknowledged write"
+}
+
+# --- Phase 1 step 7: Kubernetes (k3s) over the overlay ---
+
+kubectl_w() { vssh "$VM_W" "sudo k3s kubectl $(printf '%q ' "$@")"; }
+
+# k8s up|down|status|uninstall|smoke|kubeconfig|tunnel: the k3s server (control plane) on the
+# witness, agents on the data VMs.
+cmd_k8s() {
+    local action=${1:-status} vm token
+    case "$action" in
+        up)
+            vssh "$VM_A" "ping -c 1 -W 2 -q $VM_W_WG >/dev/null" || die "no overlay (make mesh-up)"
+            ENV_VARS="K3S_VERSION=$K3S_VERSION NODE_IP=$VM_W_WG" run_on_vm "$VM_W" "$SCRIPTS/guest/k3s.sh" server
+            token=$(run_on_vm "$VM_W" "$SCRIPTS/guest/k3s.sh" token)
+            for vm in $(vms_of all); do
+                ENV_VARS="K3S_VERSION=$K3S_VERSION NODE_IP=$(vmvar "$vm" WG) SERVER_IP=$VM_W_WG TOKEN=$token" \
+                    run_on_vm "$vm" "$SCRIPTS/guest/k3s.sh" agent
+            done
+            local start=$SECONDS
+            until [[ $(kubectl_w get nodes --no-headers 2>/dev/null | awk '$2 == "Ready"' | wc -l) -eq 3 ]]; do
+                ((SECONDS - start < 300)) || die "not every node Ready after 300 s: $(kubectl_w get nodes 2>&1)"
+                sleep 5
+            done
+            cmd_k8s kubeconfig
+            cmd_k8s status
+            ;;
+        down | uninstall)
+            [[ $action == uninstall && ${CONFIRM:-} != yes ]] && die "this removes k3s and its state; rerun with CONFIRM=yes"
+            for vm in $(vms_of all) "$VM_W"; do run_on_vm "$vm" "$SCRIPTS/guest/k3s.sh" "$action"; done
+            ;;
+        status)
+            for vm in $(vms_of cluster); do log "$vm"; run_on_vm "$vm" "$SCRIPTS/guest/k3s.sh" status; done
+            kubectl_w get nodes -o wide 2>/dev/null || warn "the API server does not answer"
+            kubectl_w get pods -A 2>/dev/null || true
+            ;;
+        smoke)
+            kubectl_w delete namespace flaminio-smoke --ignore-not-found --wait=true >/dev/null
+            vssh "$VM_W" "sudo k3s kubectl apply -f -" <"$REPO_ROOT/deploy/lab/k8s-smoke.yaml" >/dev/null
+            log "waiting for the client on $VM_B to reach the server on $VM_A"
+            if ! kubectl_w wait -n flaminio-smoke --for=jsonpath='{.status.phase}'=Succeeded pod/client --timeout=180s >/dev/null; then
+                kubectl_w get pods -n flaminio-smoke -o wide || true
+                kubectl_w logs -n flaminio-smoke client || true
+                die "the client pod did not succeed"
+            fi
+            log "client: $(kubectl_w logs -n flaminio-smoke client | tail -1)"
+            if vssh "$VM_W" "sudo k3s kubectl run -n flaminio-smoke privileged --image=busybox:1.37 --restart=Never \
+                    --overrides='{\"spec\":{\"containers\":[{\"name\":\"p\",\"image\":\"busybox:1.37\",\"securityContext\":{\"privileged\":true}}]}}'" >/dev/null 2>&1; then
+                die "a privileged pod was admitted in a restricted namespace"
+            fi
+            log "a privileged pod in the restricted namespace: refused"
+            [[ $(kubectl_w get node "$VM_W" -o jsonpath='{.spec.taints[*].effect}') == *NoSchedule* ]] ||
+                die "the witness $VM_W takes workloads"
+            log "the witness $VM_W takes no workloads"
+            kubectl_w delete namespace flaminio-smoke --wait=false >/dev/null
+            log "OK: pods on two servers talk through a service over the overlay"
+            ;;
+        kubeconfig)
+            # For kubectl on this workstation, through `make k8s-tunnel`.
+            vssh "$VM_W" "sudo cat /etc/rancher/k3s/k3s.yaml" |
+                sed "s#server: https://.*:6443#server: https://127.0.0.1:$K8S_TUNNEL_PORT#" >"$LOCAL_STATE_DIR/kubeconfig"
+            chmod 600 "$LOCAL_STATE_DIR/kubeconfig"
+            log "wrote $LOCAL_STATE_DIR/kubeconfig (API at 127.0.0.1:$K8S_TUNNEL_PORT while make k8s-tunnel runs)"
+            ;;
+        tunnel)
+            log "API server of $VM_W at 127.0.0.1:$K8S_TUNNEL_PORT; export KUBECONFIG=$LOCAL_STATE_DIR/kubeconfig. Ctrl-C ends it."
+            ssh "${VM_SSH_OPTS[@]}" -N -J "$(vm_jump "$VM_W")" -L "$K8S_TUNNEL_PORT:$VM_W_WG:6443" "$VM_USER@$VM_W_IP"
+            ;;
+        *) die "usage: k8s up|down|status|uninstall|smoke|kubeconfig|tunnel" ;;
+    esac
+}
+
+# --- Phase 1 step 7: the CSI driver ---
+
+# csi deploy|status|logs|test|failover|undeploy
+cmd_csi() {
+    local dir="$LOCAL_STATE_DIR/pki" vm tag
+    case "${1:-status}" in
+        deploy)
+            kubectl_w get nodes >/dev/null 2>&1 || die "no Kubernetes (make k8s-up)"
+            # Identities: each data node's agent (node plugin), and the controller's, made on
+            # fl-w and kept only there and in a Secret (Kubernetes encrypts Secrets at rest).
+            for vm in $(vms_of all); do
+                vssh "$vm" "sudo test -f /etc/flaminio/pki/agent.crt" ||
+                    issue "$vm" agent "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/agent" --client
+            done
+            vssh "$VM_W" "sudo k3s kubectl apply -f -" <"$REPO_ROOT/deploy/csi/rbac.yaml" >/dev/null
+            if ! kubectl_w get secret -n flaminio-system flaminio-csi-controller-tls >/dev/null 2>&1; then
+                issue "$VM_W" csi-controller "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/admin/csi-controller" --client
+                vssh "$VM_W" "sudo k3s kubectl create secret generic -n flaminio-system flaminio-csi-controller-tls \
+                    --from-file=tls.crt=/etc/flaminio/pki/csi-controller.crt \
+                    --from-file=tls.key=/etc/flaminio/pki/csi-controller.key \
+                    --from-file=ca.crt=/etc/flaminio/pki/ca.crt" >/dev/null
+                log "controller identity in Secret flaminio-system/flaminio-csi-controller-tls"
+            fi
+            # The image goes straight into each node's containerd: no registry. The controllers
+            # run on the witness, the node plugin on the data VMs.
+            tag="docker.io/flaminio/csi:dev-$(date +%Y%m%d%H%M%S)"
+            "$SCRIPTS/dev/csi-image.sh" "$LOCAL_STATE_DIR/csi-image.tar" "$tag"
+            for vm in $(vms_of cluster); do
+                vssh "$vm" "sudo k3s ctr -n k8s.io images import -" <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null
+                log "$vm: imported $tag"
+            done
+            CSI_IMAGE=$tag META_ENDPOINTS=$(meta_endpoints) render "$REPO_ROOT/deploy/csi/driver.yaml" |
+                vssh "$VM_W" "sudo k3s kubectl apply -f -"
+            kubectl_w rollout status -n flaminio-system deploy/flaminio-csi-controller --timeout=180s
+            kubectl_w rollout status -n flaminio-system deploy/flaminio-failover --timeout=180s
+            kubectl_w rollout status -n flaminio-system ds/flaminio-csi-node --timeout=180s
+            ;;
+        status)
+            kubectl_w get pods -n flaminio-system -o wide
+            kubectl_w get storageclass,pv,volumeattachments
+            kubectl_w get pvc,pods -n flaminio-test -o wide 2>/dev/null || true
+            ;;
+        logs)
+            kubectl_w logs -n flaminio-system deploy/flaminio-csi-controller -c flaminio-csi --tail=30
+            log "failover controller"
+            kubectl_w logs -n flaminio-system deploy/flaminio-failover --tail=10
+            for vm in $(vms_of all); do
+                log "node plugin on $vm"
+                kubectl_w logs -n flaminio-system "$(kubectl_w get pods -n flaminio-system -l app=flaminio-csi-node \
+                    --field-selector "spec.nodeName=$vm" -o name)" -c flaminio-csi --tail=30 || true
+            done
+            ;;
+        test) csi_test ;;
+        failover) csi_failover ;;
+        undeploy)
+            kubectl_w delete namespace flaminio-test --ignore-not-found --wait=true
+            render_csi_placeholder | vssh "$VM_W" "sudo k3s kubectl delete --ignore-not-found -f -"
+            ;;
+        *) die "usage: csi deploy|status|logs|test|failover|undeploy" ;;
+    esac
+}
+
+# The driver manifest with dummy values, for deleting what it created.
+render_csi_placeholder() {
+    CSI_IMAGE=none META_ENDPOINTS=none render "$REPO_ROOT/deploy/csi/driver.yaml"
+}
+
+# The data VMs' nodes hold one attached volume at a time: the lab's test volume lets go.
+release_lab_volume() {
+    local vm
+    for vm in $(vms_of all); do
+        ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach 2>/dev/null || true
+    done
+}
+
+# The test pod's node, and its log's last line.
+data_pod_node() { kubectl_w get pod -n flaminio-test data-0 -o jsonpath='{.spec.nodeName}'; }
+data_pod_says() { kubectl_w logs -n flaminio-test data-0 | tail -1; }
+
+wait_data_pod() {
+    kubectl_w wait -n flaminio-test --for=condition=Ready pod/data-0 --timeout="${1:-300}s" >/dev/null || {
+        kubectl_w describe pod -n flaminio-test data-0 | tail -15
+        die "the test pod did not become Ready"
+    }
+}
+
+# A pod writes 256 MiB with its checksum to a Flaminio volume, then moves to the other node
+# (its node cordoned, the pod deleted) and must find the same data there.
+csi_test() {
+    local first second start
+    release_lab_volume
+    kubectl_w delete namespace flaminio-test --ignore-not-found --wait=true >/dev/null
+    vssh "$VM_W" "sudo k3s kubectl apply -f -" <"$REPO_ROOT/deploy/lab/csi-test.yaml" >/dev/null
+    start=$SECONDS
+    wait_data_pod 300
+    first=$(data_pod_node)
+    log "pod Ready on $first after $((SECONDS - start)) s: $(data_pod_says)"
+    [[ $(data_pod_says) == "created on $first" ]] || die "unexpected first start: $(data_pod_says)"
+    log "volume $(kubectl_w get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}'): $(
+        metactl "$VM_A" "$VM_A" get "$(kubectl_w get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}')" |
+            jq -r '"epoch \(.volume.epoch), target \(.volume.target), replicas \([.volume.chunks[].replicas | join("+")] | unique | join(" "))"')"
+
+    log "moving the pod off $first"
+    kubectl_w cordon "$first" >/dev/null
+    trap 'kubectl_w uncordon "'"$first"'" >/dev/null 2>&1' EXIT
+    kubectl_w delete pod -n flaminio-test data-0 --wait=true >/dev/null
+    start=$SECONDS
+    wait_data_pod 300
+    second=$(data_pod_node)
+    kubectl_w uncordon "$first" >/dev/null
+    trap - EXIT
+    log "pod Ready on $second after $((SECONDS - start)) s: $(data_pod_says)"
+    [[ $second != "$first" ]] || die "the pod did not move"
+    [[ $(data_pod_says) == "verified on $second" ]] || die "after the move: $(data_pod_says)"
+    log "OK: provisioned, attached, formatted, written on $first; moved to $second with its data intact"
+    [[ ${KEEP:-0} == 1 ]] || {
+        kubectl_w delete namespace flaminio-test --wait=true >/dev/null
+        log "test namespace and volume deleted"
+    }
+}
+
+# Seconds since the test started, for the timeline.
+since() { echo "$((SECONDS - ${1:?}))s"; }
+
+# The test pod's data VM is powered off. The failover controller must mark it out of service,
+# and the pod come back on the other data VM with its data. Then the VM is started again, its
+# node rejoins, and the mark comes off.
+csi_failover() {
+    local lost other start vol taint
+    if ! kubectl_w get pod -n flaminio-test data-0 >/dev/null 2>&1; then
+        release_lab_volume
+        vssh "$VM_W" "sudo k3s kubectl apply -f -" <"$REPO_ROOT/deploy/lab/csi-test.yaml" >/dev/null
+    fi
+    wait_data_pod 300
+    lost=$(data_pod_node)
+    other=$(vms_of all | tr ' ' '\n' | grep -vx "$lost")
+    vol=$(kubectl_w get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}')
+    log "pod on $lost ($(data_pod_says)); volume $vol"
+
+    log "powering $lost off (virsh destroy: no shutdown, no flush)"
+    hsh "$(vmvar "$lost" HOST)" "virsh -c qemu:///system destroy $lost" >/dev/null
+    start=$SECONDS
+    # Restore the lab whatever happens.
+    trap 'warn "starting $lost again after a failure"; hsh "$(vmvar "'"$lost"'" HOST)" "virsh -c qemu:///system start '"$lost"'" >/dev/null 2>&1' EXIT
+
+    until [[ $(kubectl_w get node "$lost" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') != True ]]; do
+        ((SECONDS - start < 300)) || die "$lost still Ready after 300 s"
+        sleep 2
+    done
+    log "$(since "$start"): Kubernetes sees $lost not Ready"
+    until taint=$(kubectl_w get node "$lost" -o jsonpath='{.spec.taints[*].key}') && [[ $taint == *out-of-service* ]]; do
+        ((SECONDS - start < 400)) || die "$lost not marked out of service after 400 s"
+        sleep 2
+    done
+    log "$(since "$start"): the failover controller marked $lost out of service"
+    until [[ $(data_pod_node 2>/dev/null) == "$other" ]] &&
+        kubectl_w wait -n flaminio-test --for=condition=Ready pod/data-0 --timeout=5s >/dev/null 2>&1; do
+        ((SECONDS - start < 900)) || {
+            kubectl_w describe pod -n flaminio-test data-0 | tail -15
+            die "the pod is not Ready on $other after 900 s"
+        }
+        sleep 3
+    done
+    log "$(since "$start"): pod Ready on $other: $(data_pod_says)"
+    [[ $(data_pod_says) == "verified on $other" ]] || die "after the failover: $(data_pod_says)"
+    log "volume $vol: $(metactl "$VM_W" "$VM_W" get "$vol" | jq -r '"epoch \(.volume.epoch), target \(.volume.target), ISR \([.volume.chunks[].isr | join("+")] | unique | join(" "))"')"
+
+    log "starting $lost again"
+    hsh "$(vmvar "$lost" HOST)" "virsh -c qemu:///system start $lost" >/dev/null
+    trap - EXIT
+    wait_for "SSH on $lost" 300 vssh "$lost" true
+    cmd_node up "$(vms_of "$lost")"
+    start=$SECONDS
+    until [[ $(kubectl_w get node "$lost" -o jsonpath='{.spec.taints[*].key}') != *out-of-service* ]]; do
+        ((SECONDS - start < 300)) || die "the out-of-service mark is still on $lost after 300 s"
+        sleep 3
+    done
+    log "$(since "$start"): $lost is back, and the mark is off"
+    until metactl "$VM_W" "$VM_W" get "$vol" |
+        jq -e '[.volume.chunks[] | select((.isr | length) < (.replicas | length))] | length == 0' >/dev/null; do
+        ((SECONDS - start < 900)) || die "$vol's ISRs are not full after 900 s"
+        sleep 5
+    done
+    log "$(since "$start"): $lost's replicas of $vol are back in every ISR"
+    log "OK: $lost lost without warning; the pod came back on $other with its data; $lost rejoined"
+}
+
 usage() {
     cat <<USAGE
 usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; cluster: a, b, w)
@@ -773,6 +1142,10 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   node ACTION [VM]  phase-1 nodes (replicas only): up (FORMAT=1 reformats) | down | status
   vol ACTION   the test volume \$VOL: create | attach VM (that node becomes its target) | show | delete
   node-fault   verified writes while $VM_B's node restarts; ISR restored; failover to $VM_B verified
+  k8s ACTION   k3s: up (server on $VM_W, agents on a and b) | down | status | smoke | kubeconfig | tunnel | uninstall
+  kubectl ARGS kubectl on $VM_W
+  csi ACTION   CSI driver: deploy (build, import, apply) | status | logs | test | undeploy
+  partition    $VM_A (the target) cut off the overlay; $VM_B takes over; no stale reads, no lost writes
   pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)
   ssh|console  interactive shell or serial console (default: a)
   exec VM CMD  run a command in a VM
@@ -815,6 +1188,10 @@ case "$cmd" in
     node) cmd_node "$@" ;;
     vol) cmd_vol "$@" ;;
     node-fault) cmd_node_fault ;;
+    partition) cmd_partition ;;
+    k8s) cmd_k8s "$@" ;;
+    kubectl) kubectl_w "$@" ;;
+    csi) cmd_csi "$@" ;;
     ssh) cmd_ssh "$@" ;;
     console) cmd_console "$@" ;;
     exec) cmd_exec "$@" ;;

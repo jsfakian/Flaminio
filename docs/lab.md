@@ -153,6 +153,138 @@ A node is `flaminio-io node` as the systemd unit `flaminio-node`:
 
   Nothing restarts, so the replicas keep their state.
 
+### Partition test (step 5)
+
+```bash
+make partition-test               # HOLD=30: seconds the partition lasts after fl-b took over
+```
+
+It needs the nodes and vol1 from the section above, and the administrator identity on fl-w
+(`make pki-issue VM=w`; the test issues it if it is missing). Starting nodes that are down
+is part of the test; running nodes are left alone. The test:
+
+1. Makes fl-a the target, waits for full ISRs, and writes `gen-1` at 1 GiB.
+2. Starts two probes on fl-a's `/dev/ublkb1`, one O_DIRECT 4 KiB operation at a time, each
+   logged with its start and end time:
+   - a reader at 1 GiB;
+   - a writer of `writer-1`, `writer-2`, … at 2 GiB.
+3. Cuts fl-a off the overlay with iptables on `wg0` (both ways; SSH is unaffected). fl-a keeps
+   its local etcd member and metadata service, which have no quorum alone.
+4. From fl-w, as the administrator, attaches vol1 to fl-b. fl-b must:
+   - read `gen-1`;
+   - read at 2 GiB the last write fl-a acknowledged, or the one in flight at the cut;
+   - write `gen-2` and read it back.
+5. Heals the overlay after `HOLD` seconds. fl-a must be told it was deposed, and then rejoin
+   every ISR as a replica.
+
+Checks, each on one VM's clock:
+- no read on fl-a that started 5 s (the lease) or more after the cut succeeded;
+- no write on fl-a that started after the cut was acknowledged.
+
+The probe logs are kept in `.lab/partition-{reader,writer}.log`. Afterwards vol1's target is
+fl-b; `make vol-attach VM=a` moves it back.
+
+## Kubernetes (k3s)
+
+```bash
+make k8s-up                       # server on fl-w, agents on fl-a and fl-b (K3S_VERSION in lab.conf)
+make k8s-status                   # k3s per VM, nodes, pods
+make k8s-smoke                    # cross-node pod traffic, DNS, services, Pod Security, witness taint
+make kubectl ARGS='get nodes -o wide'
+make k8s-down                     # stop k3s and its pods (state kept; k8s-up starts it again)
+CONFIRM=yes make k8s-uninstall    # remove k3s and its state
+```
+
+Requires the overlay (`make mesh-up`). Layout:
+- **Server (control plane) on the witness fl-w.** It is tainted `NoSchedule` and labelled
+  `flaminio.io/witness=true`, so no workload, CSI node plugin included, runs where there is no
+  volume data. It uses k3s's SQLite datastore, which is separate from the metadata etcd.
+- **Agents on fl-a and fl-b**, labelled `flaminio.io/storage=true`.
+- **Addresses:** every node address is its overlay address. The API server listens only on
+  10.77.0.3:6443, and flannel's VXLAN runs over `wg0`, so pod traffic between the servers is
+  encrypted.
+- **Disabled:** Traefik, ServiceLB and local-path storage. Storage will be Flaminio's.
+- **Secrets** are encrypted at rest (`secrets-encryption`). The kubeconfig is readable by root
+  only.
+- **Version:** k3s is pinned (`K3S_VERSION`), installed by that release's own install script,
+  which verifies the binary's checksum.
+
+`make kubectl` runs kubectl on fl-w and needs nothing on the workstation. For a local kubectl:
+
+```bash
+make k8s-tunnel                   # in one terminal: 127.0.0.1:16443 -> fl-w's API server
+export KUBECONFIG=$PWD/.lab/kubeconfig
+kubectl get nodes
+```
+
+### CSI driver
+
+```bash
+make node-up                      # the data plane on fl-a and fl-b (outside Kubernetes, for now)
+make csi-deploy                   # build the image, import it on every VM, apply deploy/csi
+make csi-status                   # pods, StorageClass, PVs, VolumeAttachments
+make csi-test                     # a PVC is written on one node, then verified on the other
+make csi-failover                 # a data VM powered off: the pod comes back on the other node
+make csi-logs
+```
+
+The driver is one binary, `flaminio-csi` ([`control/csi`](../control/csi),
+[`control/failover`](../control/failover)), in three roles:
+- **Controller** (a Deployment on fl-w). It creates, deletes and publishes volumes in the
+  metadata service as the identity `.../admin/csi-controller`. Its key is made on fl-w and
+  kept in a Secret.
+  - Publishing makes the pod's node the volume's target; publishing again to the current
+    target changes nothing.
+  - Unpublishing does nothing: the next attach fences the old target.
+- **Node plugin** (a DaemonSet on fl-a and fl-b). For NodeStage it:
+  1. asks the metadata service for a new epoch for its own node, as the node's agent
+     identity, which may do only that;
+  2. hands the token to `flaminio-io node` through its control socket;
+  3. formats the device with ext4 only if it carries no signature at all;
+  4. mounts it.
+
+  A node serves one volume at a time (`MaxVolumesPerNode: 1`), so `csi-test` first detaches
+  the lab volume vol1.
+- **Failover controller** (a Deployment on fl-w). It sets the standard
+  `node.kubernetes.io/out-of-service` taint on a data node only when both signals agree:
+  - Kubernetes has seen the node not Ready for 40 s;
+  - the node's data plane has stopped heartbeating to the metadata service.
+
+  Kubernetes then deletes the node's pods and detaches their volumes, and they start on the
+  other node. The controller removes its taint once the node is back. Fencing is what makes
+  this safe for the data, whatever the lost node still does (see `make partition-test`).
+
+The StorageClass `flaminio` takes `replicas` (default 2), `minIsr` (1) and `chunkSize`
+(256Mi). Volumes are `ReadWriteOnce` or `ReadWriteOncePod`, as a filesystem or a raw block
+device. The image is built without a container engine (`crane`, on a pinned Ubuntu base) and
+imported into each node's containerd; nothing is pushed to a registry.
+
+## Running the tests yourself
+
+| Command | Where | Duration | What it checks |
+|---|---|---|---|
+| `make test` | workstation | 2 min | Rust and Go unit and integration tests |
+| `make sim` | workstation | 5 min | 20,000 simulated runs of the replication protocol (`SEEDS`), then every injected bug must be caught |
+| `make meta-interop` | workstation | 1 min | the Rust metadata client against the Go service, over mutual TLS |
+| `make check` | workstation | 10 min | all of the above, plus `make lint` |
+| `make vm-test` | fl-a | 5 min | the test suite on Linux, including io_uring and ublk |
+| `make meta-smoke` | lab | 2 min | metadata through etcd member loss; refusal of unauthenticated callers |
+| `make node-fault` | lab | 5–10 min | verified writes through a replica restart; ISR restored; failover |
+| `make partition-test` | lab | 3–5 min | the old target, cut off, serves no stale reads and loses no acknowledged write |
+| `make k8s-smoke` | lab | 1 min | Kubernetes over the overlay |
+| `make csi-test` | lab | 3 min | a PVC provisioned, formatted, written, moved to the other node, verified |
+| `make csi-failover` | lab | 10 min | a data VM powered off: the failover controller marks it, the pod moves with its data; the VM comes back and rejoins |
+| `make lab-test` | lab | about 30 min | every lab test above, in order |
+
+From an empty lab, before the lab tests:
+
+```bash
+make lab-up && make cluster-up             # VMs, overlay, identities, etcd, metadata service
+make deploy && FORMAT=1 make node-up       # nodes on fl-a and fl-b
+make vol-create && make vol-attach VM=a    # the test volume
+make k8s-up && make csi-deploy             # Kubernetes and the CSI driver
+```
+
 ## Long-running jobs
 
 `bench-raw` and `bench-store` run inside the VM as a transient systemd unit. The workstation

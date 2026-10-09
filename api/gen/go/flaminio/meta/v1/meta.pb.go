@@ -803,9 +803,17 @@ func (*DeleteVolumeResponse) Descriptor() ([]byte, []int) {
 }
 
 type AttachRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Volume        string                 `protobuf:"bytes,1,opt,name=volume,proto3" json:"volume,omitempty"`
-	Node          string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Volume string                 `protobuf:"bytes,1,opt,name=volume,proto3" json:"volume,omitempty"`
+	Node   string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	// If the node is already the target, change nothing and issue no token. For the CSI
+	// controller's publish, which Kubernetes may repeat while the node serves the volume.
+	UnlessTarget bool `protobuf:"varint,3,opt,name=unless_target,json=unlessTarget,proto3" json:"unless_target,omitempty"`
+	// Refuse with FAILED_PRECONDITION unless the node is already the target. A node's agent may
+	// make this call for itself, to start its own target again under a new epoch; it cannot take
+	// a volume from another node. A target never restarts under the epoch it had: replicas order
+	// a target's sessions by epoch and session number, and a new process numbers from 1 again.
+	OnlyIfTarget  bool `protobuf:"varint,4,opt,name=only_if_target,json=onlyIfTarget,proto3" json:"only_if_target,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -852,6 +860,20 @@ func (x *AttachRequest) GetNode() string {
 		return x.Node
 	}
 	return ""
+}
+
+func (x *AttachRequest) GetUnlessTarget() bool {
+	if x != nil {
+		return x.UnlessTarget
+	}
+	return false
+}
+
+func (x *AttachRequest) GetOnlyIfTarget() bool {
+	if x != nil {
+		return x.OnlyIfTarget
+	}
+	return false
 }
 
 type AttachResponse struct {
@@ -1146,10 +1168,12 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\x06volume\x18\x01 \x01(\v2\x18.flaminio.meta.v1.VolumeR\x06volume\"%\n" +
 	"\x13DeleteVolumeRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"\x16\n" +
-	"\x14DeleteVolumeResponse\";\n" +
+	"\x14DeleteVolumeResponse\"\x86\x01\n" +
 	"\rAttachRequest\x12\x16\n" +
 	"\x06volume\x18\x01 \x01(\tR\x06volume\x12\x12\n" +
-	"\x04node\x18\x02 \x01(\tR\x04node\"X\n" +
+	"\x04node\x18\x02 \x01(\tR\x04node\x12#\n" +
+	"\runless_target\x18\x03 \x01(\bR\funlessTarget\x12$\n" +
+	"\x0eonly_if_target\x18\x04 \x01(\bR\fonlyIfTarget\"X\n" +
 	"\x0eAttachResponse\x120\n" +
 	"\x06volume\x18\x01 \x01(\v2\x18.flaminio.meta.v1.VolumeR\x06volume\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\fR\x05token\"]\n" +

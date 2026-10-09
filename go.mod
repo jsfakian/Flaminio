@@ -3,6 +3,7 @@ module github.com/flaminio/flaminio
 go 1.26
 
 require (
+	github.com/container-storage-interface/spec v1.13.0
 	go.etcd.io/etcd/client/v3 v3.7.2
 	go.etcd.io/etcd/server/v3 v3.7.2
 	go.uber.org/zap v1.27.1

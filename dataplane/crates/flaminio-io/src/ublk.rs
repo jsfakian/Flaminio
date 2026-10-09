@@ -510,6 +510,8 @@ struct EngineCtx {
     waiters: RefCell<HashMap<u64, Waiter>>,
     next_op: Cell<u64>,
     volume: String,
+    /// The ublk device's id: a deposed target stops its device.
+    dev_id: i32,
 }
 
 impl EngineCtx {
@@ -545,6 +547,18 @@ impl EngineCtx {
                     if let Some(tx) = self.waiters.borrow().get(&op) {
                         let _ = tx.try_send(Event::Piece { at, data });
                     }
+                }
+                Output::Deposed { ref volume } if *volume == self.volume => {
+                    log_output(&o);
+                    // Every I/O would fail from now on. Stopping the device frees the node
+                    // for its next attach; the queue thread cannot wait for its own end, so
+                    // another thread asks.
+                    let id = self.dev_id;
+                    thread::spawn(move || {
+                        if let Err(e) = UblkCtrl::new_simple(id).and_then(|c| c.kill_dev()) {
+                            eprintln!("flaminio-io: stop ublk device {id} after deposition: {e}");
+                        }
+                    });
                 }
                 other => log_output(&other),
             }
@@ -648,6 +662,8 @@ pub fn serve_node(
                 if let Err(e) =
                     attach_and_serve(c, &slot, &attached, volume, token, efd.clone(), &reply)
                 {
+                    // The caller may have given up waiting: the log keeps the reason.
+                    eprintln!("flaminio-io: {e}");
                     let _ = reply.send(format!("error: {e}"));
                 }
             }
@@ -794,6 +810,7 @@ fn serve_engine_queue(
         waiters: RefCell::new(HashMap::new()),
         next_op: Cell::new(1),
         volume,
+        dev_id: dev.dev_info.dev_id as i32,
     };
     let result = serve_with(qid, dev, &ctx, efd);
     // Hand the engine back, whatever happened to the device.

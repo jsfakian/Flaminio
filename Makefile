@@ -202,6 +202,10 @@ vol-delete: ## Delete the test volume from the metadata service
 node-fault: ## Verified writes while fl-b's node restarts; ISR restored; failover to fl-b verified
 	$(LAB) node-fault
 
+.PHONY: partition-test
+partition-test: ## fl-a (the target) cut off the overlay, fl-b takes over: no stale reads, no lost writes (HOLD=30 s)
+	HOLD=$(or $(HOLD),30) $(LAB) partition
+
 .PHONY: pki-issue mesh-up mesh-down mesh-check etcd-up etcd-down etcd-status meta-up meta-down meta-status meta-smoke cluster-up
 cluster-up: ## fl-w, overlay, identities, etcd and the metadata service on a, b and w
 	$(LAB) create w
@@ -244,6 +248,65 @@ meta-status: ## Metadata service state
 
 meta-smoke: ## End-to-end metadata check, including the loss of one and two etcd members
 	$(LAB) meta-smoke
+
+##@ Lab: Kubernetes (k3s server on fl-w, agents on fl-a and fl-b, over the overlay)
+
+.PHONY: k8s-up k8s-down k8s-status k8s-smoke k8s-uninstall kubeconfig k8s-tunnel kubectl
+k8s-up: ## Install and start k3s (K3S_VERSION in lab.conf); writes .lab/kubeconfig
+	$(LAB) k8s up
+
+k8s-down: ## Stop k3s and its pods on every VM (keeps its state)
+	$(LAB) k8s down
+
+k8s-status: ## k3s on each VM, nodes and pods
+	$(LAB) k8s status
+
+k8s-smoke: ## Pods on fl-a and fl-b through a service over the overlay; Pod Security enforced; the witness takes no pods
+	$(LAB) k8s smoke
+
+k8s-uninstall: ## Remove k3s and its state from every VM (CONFIRM=yes)
+	CONFIRM=$(CONFIRM) $(LAB) k8s uninstall
+
+kubeconfig: ## (Re)write .lab/kubeconfig for kubectl on this workstation, through k8s-tunnel
+	$(LAB) k8s kubeconfig
+
+k8s-tunnel: ## Forward 127.0.0.1:16443 to the API server (foreground; KUBECONFIG=.lab/kubeconfig)
+	$(LAB) k8s tunnel
+
+kubectl: ## kubectl on fl-w, no tunnel needed: make kubectl ARGS='get pods -A'
+	$(LAB) kubectl $(ARGS)
+
+.PHONY: csi-deploy csi-status csi-logs csi-test csi-failover csi-undeploy
+csi-deploy: ## Build the CSI driver's image, import it on fl-a and fl-b, apply deploy/csi (needs node-up)
+	$(LAB) csi deploy
+
+csi-status: ## CSI pods, StorageClass, PVs, VolumeAttachments, the test pod
+	$(LAB) csi status
+
+csi-logs: ## Recent logs of the CSI controller and node plugins
+	$(LAB) csi logs
+
+csi-test: ## A pod writes to a Flaminio PVC, moves to the other node, verifies its data (KEEP=1 keeps it)
+	KEEP=$(KEEP) $(LAB) csi test
+
+csi-failover: ## Power off the test pod's data VM: the pod must come back on the other one with its data; the VM rejoins
+	$(LAB) csi failover
+
+csi-undeploy: ## Remove the CSI driver (and the test namespace)
+	$(LAB) csi undeploy
+
+##@ Test suites
+
+.PHONY: check lab-test
+check: lint test sim meta-interop ## Everything that runs on this workstation: lint, tests, simulation, Rust/Go interop
+
+lab-test: ## Every lab test, in order: overlay, metadata, node fault, partition, Kubernetes, CSI (about 30 min)
+	$(LAB) mesh check
+	$(LAB) meta-smoke
+	$(LAB) node-fault
+	HOLD=$(or $(HOLD),30) $(LAB) partition
+	$(LAB) k8s smoke
+	$(LAB) csi test
 
 ##@ Lab: build, test, benchmark
 

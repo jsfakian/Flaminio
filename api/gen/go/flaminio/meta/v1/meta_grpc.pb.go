@@ -59,7 +59,8 @@ type MetadataServiceClient interface {
 	// administrator.
 	DeleteVolume(ctx context.Context, in *DeleteVolumeRequest, opts ...grpc.CallOption) (*DeleteVolumeResponse, error)
 	// Makes a node the volume's target under a new epoch, and issues its capability token.
-	// Caller: an administrator (the CSI controller, the failover controller).
+	// Caller: an administrator (the CSI controller, the failover controller); or, with
+	// only_if_target, the node's agent for itself.
 	Attach(ctx context.Context, in *AttachRequest, opts ...grpc.CallOption) (*AttachResponse, error)
 	// Changes ISRs atomically, only under the current epoch and the expected ISR versions.
 	// Caller: the data plane of the volume's current target node.
@@ -175,7 +176,8 @@ type MetadataServiceServer interface {
 	// administrator.
 	DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error)
 	// Makes a node the volume's target under a new epoch, and issues its capability token.
-	// Caller: an administrator (the CSI controller, the failover controller).
+	// Caller: an administrator (the CSI controller, the failover controller); or, with
+	// only_if_target, the node's agent for itself.
 	Attach(context.Context, *AttachRequest) (*AttachResponse, error)
 	// Changes ISRs atomically, only under the current epoch and the expected ISR versions.
 	// Caller: the data plane of the volume's current target node.

@@ -23,8 +23,14 @@ fn config(endpoints: Vec<String>) -> Config {
 #[ignore = "needs a metadata service: make meta-interop"]
 fn interop_with_the_go_service() {
     let addr = std::env::var("FLAMINIO_META_INTEROP").expect("set by make meta-interop");
-    // A dead endpoint first: the client moves on to the live one.
-    let cfg = config(vec!["127.0.0.1:1".into(), addr]);
+    // Two dead endpoints first, the client moves on to the live one: one that never answers
+    // (a partition: the connection is accepted by the kernel, then nothing) and one that refuses.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let cfg = config(vec![
+        silent.local_addr().unwrap().to_string(),
+        "127.0.0.1:1".into(),
+        addr,
+    ]);
 
     let Answer::GetVolume(r) = call_blocking(
         &cfg,

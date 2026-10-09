@@ -61,6 +61,8 @@ var (
 	ErrExists   = errors.New("already exists")
 	// ErrPlacement means there are not enough live nodes for the requested replicas.
 	ErrPlacement = errors.New("not enough nodes for placement")
+	// ErrNotTarget: a call that requires the node to be the volume's target.
+	ErrNotTarget = errors.New("not the volume's target")
 )
 
 var idPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)

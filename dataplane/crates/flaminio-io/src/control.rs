@@ -4,6 +4,7 @@
 //! ```text
 //! attach VOLUME TOKEN-BASE64   ->  ok /dev/ublkbN      (or: error ...)
 //! detach VOLUME                ->  ok
+//! status                       ->  ok VOLUME /dev/ublkbN | ok none
 //! ```
 //!
 //! The socket is root-only (mode 0600): an attach hands out the volume. This is what the CSI
@@ -71,12 +72,23 @@ fn serve(
     }
     let words: Vec<&str> = line.split_whitespace().collect();
     let answer = match words.as_slice() {
-        ["attach", volume, token] => match base64_decode(token) {
-            Some(token) => attach(ctl, wake, volume, token),
-            None => "error: the token is not base64".into(),
-        },
+        ["attach", volume, token] => {
+            // Not in the match below: a guard there would be held through the attach, and the
+            // device's ready callback takes this lock.
+            let current = attached.lock().expect("attached").clone();
+            match (base64_decode(token), current) {
+                // The main thread takes commands only while no volume is attached.
+                (_, Some((v, _))) => format!("error: {v} is attached here; one volume at a time"),
+                (Some(token), None) => attach(ctl, wake, volume, token),
+                (None, None) => "error: the token is not base64".into(),
+            }
+        }
         ["detach", volume] => detach(engine, wake, attached, volume),
-        _ => "error: usage: attach VOLUME TOKEN-BASE64 | detach VOLUME".into(),
+        ["status"] => match attached.lock().expect("attached").clone() {
+            Some((v, id)) => format!("ok {v} /dev/ublkb{id}"),
+            None => "ok none".into(),
+        },
+        _ => "error: usage: attach VOLUME TOKEN-BASE64 | detach VOLUME | status".into(),
     };
     let mut conn = conn;
     let _ = writeln!(conn, "{answer}");

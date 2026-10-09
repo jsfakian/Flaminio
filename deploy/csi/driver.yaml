@@ -1,0 +1,230 @@
+# Flaminio CSI driver: the CSIDriver object, the controller and the node plugin. A template:
+# {{CSI_IMAGE}} and {{META_ENDPOINTS}} are filled in by `make csi-deploy` (scripts/lab.sh).
+#
+# The data plane (flaminio-io node) runs on each data node outside Kubernetes for now, as the
+# systemd unit flaminio-node; the node plugin drives it through its control socket.
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: csi.flaminio.io
+spec:
+  # ControllerPublishVolume moves the volume's target to the pod's node.
+  attachRequired: true
+  podInfoOnMount: false
+  fsGroupPolicy: File
+  volumeLifecycleModes: [Persistent]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flaminio-csi-controller
+  namespace: flaminio-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: flaminio-csi-controller}
+  template:
+    metadata:
+      labels: {app: flaminio-csi-controller}
+    spec:
+      serviceAccountName: flaminio-csi-controller
+      # On the witness: a lost data node does not take the controller with it.
+      nodeSelector: {flaminio.io/witness: "true"}
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+      priorityClassName: system-cluster-critical
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        # The TLS secret's files are readable by this group only.
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: flaminio-csi
+          image: {{CSI_IMAGE}}
+          imagePullPolicy: Never
+          command: [/usr/local/bin/flaminio-csi, controller]
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --meta={{META_ENDPOINTS}}
+            - --cert=/etc/flaminio/tls/tls.crt
+            - --key=/etc/flaminio/tls/tls.key
+            - --ca=/etc/flaminio/tls/ca.crt
+          livenessProbe:
+            httpGet: {path: /healthz, port: 9808}
+            periodSeconds: 20
+          securityContext: &restricted
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: socket-dir, mountPath: /csi}
+            - {name: tls, mountPath: /etc/flaminio/tls, readOnly: true}
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.2.1
+          args: [--csi-address=/csi/csi.sock, --leader-election, --leader-election-namespace=flaminio-system, --timeout=60s]
+          securityContext: *restricted
+          volumeMounts: [{name: socket-dir, mountPath: /csi}]
+        - name: csi-attacher
+          # An attach moves the target, which may wait for the old target's lease: allow time.
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.12.0
+          args: [--csi-address=/csi/csi.sock, --leader-election, --leader-election-namespace=flaminio-system, --timeout=60s]
+          securityContext: *restricted
+          volumeMounts: [{name: socket-dir, mountPath: /csi}]
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.19.0
+          args: [--csi-address=/csi/csi.sock]
+          securityContext: *restricted
+          volumeMounts: [{name: socket-dir, mountPath: /csi}]
+      volumes:
+        - {name: socket-dir, emptyDir: {}}
+        - name: tls
+          secret: {secretName: flaminio-csi-controller-tls, defaultMode: 0440}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: flaminio-csi-node
+  namespace: flaminio-system
+spec:
+  selector:
+    matchLabels: {app: flaminio-csi-node}
+  template:
+    metadata:
+      labels: {app: flaminio-csi-node}
+    spec:
+      serviceAccountName: flaminio-csi-node
+      nodeSelector: {flaminio.io/storage: "true"}
+      priorityClassName: system-node-critical
+      # The metadata service is on the overlay addresses of the nodes.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: flaminio-csi
+          image: {{CSI_IMAGE}}
+          imagePullPolicy: Never
+          command: [/usr/local/bin/flaminio-csi, node]
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --node-id=$(NODE_NAME)
+            - --meta={{META_ENDPOINTS}}
+            - --cert=/etc/flaminio/pki/agent.crt
+            - --key=/etc/flaminio/pki/agent.key
+            - --ca=/etc/flaminio/pki/ca.crt
+            - --control-socket=/run/flaminio/node.sock
+          livenessProbe:
+            httpGet: {path: /healthz, port: 9809}
+            periodSeconds: 20
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          securityContext:
+            # Mounts and device nodes on the host.
+            privileged: true
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - {name: plugin-dir, mountPath: /csi}
+            - {name: kubelet-dir, mountPath: /var/lib/kubelet, mountPropagation: Bidirectional}
+            - {name: dev, mountPath: /dev}
+            - {name: dataplane, mountPath: /run/flaminio}
+            # Only the node's agent identity, not the rest of /etc/flaminio/pki.
+            - {name: agent-crt, mountPath: /etc/flaminio/pki/agent.crt, readOnly: true}
+            - {name: agent-key, mountPath: /etc/flaminio/pki/agent.key, readOnly: true}
+            - {name: ca-crt, mountPath: /etc/flaminio/pki/ca.crt, readOnly: true}
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.17.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.flaminio.io/csi.sock
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: plugin-dir, mountPath: /csi}
+            - {name: registration-dir, mountPath: /registration}
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.19.0
+          args: [--csi-address=/csi/csi.sock, --health-port=9809]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: plugin-dir, mountPath: /csi}]
+      volumes:
+        - name: plugin-dir
+          hostPath: {path: /var/lib/kubelet/plugins/csi.flaminio.io, type: DirectoryOrCreate}
+        - name: registration-dir
+          hostPath: {path: /var/lib/kubelet/plugins_registry, type: Directory}
+        - name: kubelet-dir
+          hostPath: {path: /var/lib/kubelet, type: Directory}
+        - name: dev
+          hostPath: {path: /dev, type: Directory}
+        - name: dataplane
+          hostPath: {path: /run/flaminio, type: DirectoryOrCreate}
+        - name: agent-crt
+          hostPath: {path: /etc/flaminio/pki/agent.crt, type: File}
+        - name: agent-key
+          hostPath: {path: /etc/flaminio/pki/agent.key, type: File}
+        - name: ca-crt
+          hostPath: {path: /etc/flaminio/pki/ca.crt, type: File}
+---
+# The failover controller (control/failover): marks a lost data node out of service, so that
+# its pods and volumes move. On the witness, which survives the loss of either data node.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flaminio-failover
+  namespace: flaminio-system
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: flaminio-failover}
+  template:
+    metadata:
+      labels: {app: flaminio-failover}
+    spec:
+      serviceAccountName: flaminio-failover
+      nodeSelector: {flaminio.io/witness: "true"}
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+      priorityClassName: system-cluster-critical
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: failover
+          image: {{CSI_IMAGE}}
+          imagePullPolicy: Never
+          command: [/usr/local/bin/flaminio-csi, failover]
+          args:
+            - --meta={{META_ENDPOINTS}}
+            - --cert=/etc/flaminio/tls/tls.crt
+            - --key=/etc/flaminio/tls/tls.key
+            - --ca=/etc/flaminio/tls/ca.crt
+            - --grace=40s
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tls, mountPath: /etc/flaminio/tls, readOnly: true}
+      volumes:
+        - name: tls
+          secret: {secretName: flaminio-csi-controller-tls, defaultMode: 0440}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: flaminio
+provisioner: csi.flaminio.io
+parameters:
+  replicas: "2"
+  minIsr: "1"
+  chunkSize: 256Mi
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false

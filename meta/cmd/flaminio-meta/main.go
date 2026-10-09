@@ -6,7 +6,7 @@
 //	flaminio-meta [--server host:7400] heartbeat <node>
 //	flaminio-meta [--server host:7400] create <volume> <size> [replicas] [min-isr] [chunk]
 //	flaminio-meta [--server host:7400] get <volume>
-//	flaminio-meta [--server host:7400] attach <volume> <node>
+//	flaminio-meta [--server host:7400] attach <volume> <node> [unless-target|only-if-target]
 //	flaminio-meta [--server host:7400] delete <volume>
 //
 // Sizes take K, M, G and T suffixes (powers of 1024).
@@ -85,7 +85,11 @@ func serve(args []string) error {
 	etcdCfg := clientv3.Config{
 		Endpoints:   strings.Split(*endpoints, ","),
 		DialTimeout: 5 * time.Second,
-		Logger:      zap.NewNop(),
+		// A member cut off by a partition leaves an open-looking connection; keepalives notice
+		// it (10 s is gRPC's minimum), and the KV retries requests elsewhere meanwhile.
+		DialKeepAliveTime:    10 * time.Second,
+		DialKeepAliveTimeout: 3 * time.Second,
+		Logger:               zap.NewNop(),
 	}
 	if !*insecureMode {
 		if *trustDomain == "" || *tokenKey == "" {
@@ -267,7 +271,15 @@ func client(args []string) error {
 		}
 	case "attach":
 		if err = need(2); err == nil {
-			out, err = c.Attach(ctx, &metav1.AttachRequest{Volume: args[1], Node: args[2]})
+			mode := argOr(args, 3, "")
+			if mode != "" && mode != "unless-target" && mode != "only-if-target" {
+				err = fmt.Errorf("attach mode %q: use unless-target or only-if-target", mode)
+				break
+			}
+			out, err = c.Attach(ctx, &metav1.AttachRequest{
+				Volume: args[1], Node: args[2],
+				UnlessTarget: mode == "unless-target", OnlyIfTarget: mode == "only-if-target",
+			})
 		}
 	case "delete":
 		if err = need(1); err == nil {

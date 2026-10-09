@@ -28,9 +28,9 @@ machine into real I/O.
 | 2 ✅ | **Metadata service** (Go, `meta/`): the domain service over a dedicated etcd. It handles nodes, disks, volumes, placement, epoch issuance, conditional ISR transitions and node liveness, over gRPC. Its ISR and epoch rules are checked against the same transition table as step 1 | Any machine, then a 3-member etcd in the lab | Unit tests against embedded etcd; lab etcd on fl-a, fl-b and a small third VM (fl-w, a witness) |
 | 3 ✅ | **Identity and mTLS for the control plane**: a development CA; mTLS on etcd and the metadata service, with per-method authorization; capability tokens signed by the metadata service. Replication TLS and token checks in the replica move to step 4, which replaces the MVP's replication transport | Lab | Unauthenticated and unauthorized callers are refused; tokens verify |
 | 4 | **Data plane on the protocol core**:<br>• `flaminio-io` hosts many volumes and chunk replicas;<br>• the target uses placement and ISR from the metadata service, and the step-1 state machine;<br>• one heartbeat per node pair;<br>• replication over mutual TLS (step-3 identities), with the replica checking capability tokens | Lab | • The MVP's fault test passes, with ISR shrink and expand going through the metadata service.<br>• The replica refuses unauthenticated peers and stale tokens.<br>• Read results unchanged (reads stay local) |
-| 5 | **Failover in the lab**: attach on the other VM with an epoch bump, fencing and reconciliation; partition tests (the old target must neither write nor read stale data) | Lab | Scripted failover and partition tests pass, and the data is verified |
+| 5 ✅ | **Failover in the lab**: attach on the other VM with an epoch bump, fencing and reconciliation; partition tests (the old target must neither write nor read stale data) | Lab | Scripted failover and partition tests pass, and the data is verified |
 | 6 | **Node agent**: device discovery, the claim policy (never claim a device with a signature), format, drain by moving chunk replicas | Lab | Adding and draining a disk while fio runs, with the data verified |
-| 7 | **Kubernetes**: k3s on the lab VMs, the CSI driver (provision, attach, stage, publish; block and filesystem), placement controller, failover controller | Lab | A pod with a PVC runs fio. Killing its node moves it to the other node with its data intact |
+| 7 (mostly ✅) | **Kubernetes**: k3s on the lab VMs, the CSI driver (provision, attach, stage, publish; block and filesystem), placement controller, failover controller | Lab | A pod with a PVC runs fio. Killing its node moves it to the other node with its data intact |
 | 8 | **Phase-1 benchmark and chaos run** | Lab | Read results for a pod against the raw disk; failover time measured; chaos run passes |
 
 ## Step 4 breakdown
@@ -82,6 +82,91 @@ simulator checked. It comes in five parts, each committed on its own:
   4. The target gets a "placed" reply and checks the lease before completing.
 
   Ticks run on the 10 ms timer only, not on every I/O event.
+
+## Step 7 result so far (lab, 2026-10-09)
+
+**Done:**
+- k3s on the lab VMs;
+- the CSI driver: provision, attach, stage and publish, block and filesystem;
+- the failover controller.
+
+Placement stays in the metadata service's `CreateVolume`; a separate placement controller
+comes with failure domains ([follow-ups](followups.md) item 4).
+
+**Left for step 8:** the pod running fio. The tests below write and verify 256 MiB with
+checksums instead.
+
+**Kubernetes (`make k8s-up`, `make k8s-smoke`):** k3s v1.36.5. The server is on the witness
+fl-w (tainted, so no workloads run there) and agents are on fl-a and fl-b. Every node address
+is an overlay address, and flannel's VXLAN runs over WireGuard. Ready in about a minute.
+
+**CSI driver** (`control/csi`, one binary `flaminio-csi` in three roles):
+- **Controller** (on fl-w): volumes are created, deleted and published in the metadata
+  service. Publishing makes the node the target, and is a no-op if it already is.
+- **Node plugin** (on fl-a and fl-b): it takes a new epoch for its own node, hands the token
+  to the data plane through its control socket, formats ext4 only a device without any
+  signature, and mounts.
+- **Failover controller** (`control/failover`, on fl-w): it taints a node
+  `node.kubernetes.io/out-of-service` when Kubernetes has seen it not Ready for 40 s and its
+  data plane has stopped heartbeating to the metadata service.
+
+| Test | Result |
+|---|---|
+| `make csi-test`: a PVC provisioned, formatted, written (256 MiB, checksum) | pod Ready in 8 s |
+| …the pod moved to the other node (cordon, delete), data verified | Ready again in 8 s |
+| `make csi-failover`: the pod's VM powered off without warning (`virsh destroy`) | NotReady at 46 s; tainted at 86 s; **pod Ready on the other node, data verified, at 126 s** |
+| …the VM started again | taint removed within 5 s of its data plane starting; its replicas back in every ISR 44 s later |
+
+Of the 126 s, Kubernetes' own detection takes 46 s and the failover controller's grace period
+40 s. Both are settings.
+
+## Step 5 result (lab, 2026-10-09)
+
+`make partition-test` passes: a target cut off by a partition stops reading when its lease
+runs out, never acknowledges a write after the cut, and the new target has every write the old
+one acknowledged.
+
+**Setup.**
+- `vol1` (16 GiB, RF 2) has its target on fl-a and full ISRs.
+- On fl-a's `/dev/ublkb1`, two probes do one O_DIRECT 4 KiB operation every 50 ms, each
+  logged with its start and end time:
+  - a reader at 1 GiB, which holds `gen-1`;
+  - a writer of `writer-1`, `writer-2`, … at 2 GiB.
+- Then fl-a is cut off the overlay in both directions (iptables on `wg0`). It keeps its local
+  etcd member and metadata service, which have no quorum alone.
+- From fl-w, `vol1` is attached to fl-b. After 30 s, the overlay heals.
+
+| Check | Result |
+|---|---|
+| Reads on fl-a started after the cut, within the lease (5 s) | 97 served |
+| Reads on fl-a started after the lease | **0 served**; 79 failed |
+| Writes on fl-a acknowledged after the cut | **0** |
+| Last write fl-a acknowledged, and what fl-b reads at 2 GiB | `writer-98` and `writer-98` |
+| fl-b's first read, after the cut | 12.8 s, including the 2 s before the attach and the 5.5 s takeover wait L(1+ρ) |
+| fl-a told it was deposed, after the heal | at once |
+| fl-a back in every ISR as a replica | 151 s (a whole-chunk resync; [follow-ups](followups.md) item 3) |
+
+Each check compares times from one VM's clock only.
+
+**What the test found on the way:**
+1. **The data plane's metadata client did not fail over on timeouts.** tonic reports its own
+   timeouts as `Cancelled`, which the client did not treat as "try the next instance". A node
+   whose first listed instance was cut off could not attach.
+2. **One unanswering instance could stall every metadata call.** An instance that accepts
+   connections and never answers the TLS handshake held a call forever: the channel's
+   timeouts do not cover the handshake. Every call on every instance now has a deadline, and
+   the interop test puts a silent instance and a refusing one before the live one.
+3. **The metadata service waited on a cut-off etcd member.** A partition drops packets, so the
+   connection to that member still looks open, and requests sent on it waited for the caller's
+   deadline. Each etcd request now has 3 s per attempt, tried again (on another member) while
+   the caller's deadline lasts; client keepalives take the dead connection out of rotation.
+4. **A deposed target kept its device.** I/O failed, but the node stayed busy until a detach.
+   A deposed target now stops its device, and an attach while another volume is attached is
+   refused at once instead of waiting.
+5. **Same-epoch restarts are unsafe** (found while designing the CSI node plugin, from the
+   protocol rather than the lab). A restarted target numbers its sessions from 1 again. So
+   every target start now takes a new epoch, and a node's agent may ask for one for a volume
+   it already holds (`Attach` with `only_if_target`; [protocol](replication-protocol.md) §3).
 
 ## Step 4e results (lab, 2026-10-09)
 

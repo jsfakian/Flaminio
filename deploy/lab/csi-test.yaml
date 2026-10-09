@@ -1,0 +1,73 @@
+# CSI test workload (make csi-test, make csi-failover): one pod with a Flaminio volume. On
+# its first start it writes 256 MiB of random data and its checksum; on every later start,
+# wherever it runs, it verifies them. Its log says which happened, and on which node.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flaminio-test
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: data
+  namespace: flaminio-test
+spec:
+  serviceName: data
+  replicas: 1
+  selector:
+    matchLabels: {app: data}
+  template:
+    metadata:
+      labels: {app: data}
+    spec:
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: data
+          image: busybox:1.37
+          env:
+            - name: NODE
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cd /data
+              if [ -f blob.sha256 ]; then
+                if sha256sum -c blob.sha256 >/dev/null; then echo "verified on $NODE"; else echo "CORRUPT on $NODE"; exit 1; fi
+              else
+                head -c 268435456 /dev/urandom > blob
+                sha256sum blob > blob.sha256
+                sync
+                echo "created on $NODE"
+              fi
+              touch /tmp/ready
+              exec sleep 2147483647
+          readinessProbe:
+            exec: {command: [test, -f, /tmp/ready]}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOncePod]
+        storageClassName: flaminio
+        resources:
+          requests: {storage: 4Gi}

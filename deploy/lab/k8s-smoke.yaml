@@ -1,0 +1,70 @@
+# Kubernetes smoke test for the lab (make k8s-smoke): a server pod on fl-a, a client pod on
+# fl-b reaching it through a Service by DNS name. That exercises pod networking across the two
+# servers (flannel VXLAN over the WireGuard overlay), CoreDNS and service routing. Both pods
+# run under the "restricted" Pod Security Standard.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flaminio-smoke
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: server
+  namespace: flaminio-smoke
+  labels: {app: smoke-server}
+spec:
+  nodeName: fl-a
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: httpd
+      image: busybox:1.37
+      command: [sh, -c, 'mkdir -p /tmp/www && echo "hello from $NODE" > /tmp/www/index.html && exec httpd -f -p 8080 -h /tmp/www']
+      env:
+        - name: NODE
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+      ports: [{containerPort: 8080}]
+      readinessProbe:
+        tcpSocket: {port: 8080}
+        periodSeconds: 2
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}
+      volumeMounts: [{name: tmp, mountPath: /tmp}]
+  volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server
+  namespace: flaminio-smoke
+spec:
+  selector: {app: smoke-server}
+  ports: [{port: 80, targetPort: 8080}]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client
+  namespace: flaminio-smoke
+spec:
+  nodeName: fl-b
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: wget
+      image: busybox:1.37
+      command: [sh, -c, 'for i in $(seq 1 60); do wget -qO- -T 3 http://server.flaminio-smoke.svc.cluster.local && exit 0; sleep 2; done; exit 1']
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: [ALL]}

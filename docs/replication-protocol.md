@@ -55,6 +55,14 @@ A target talks to each replica node over a **session**: one ordered connection, 
   So a message delayed on an old connection can never act after a new session has started.
 - **On timeout**, the target treats a request as failed, closes that session, and opens a new
   one with a new number later. Replies on a closed session are ignored.
+- **One target per epoch, for its whole life.** Session numbers are the target's own
+  (volatile) counter, so a target that restarts, even on the same node, must not reuse its
+  epoch. A new process would number its sessions from 1 again: a replica would drop them as
+  older than the last one seen, and if numbers collided, it could take messages of the dead
+  process's sessions as the new one's. Every target start therefore comes with a new epoch
+  from the metadata service. When the node is already the target, its agent may ask for one
+  itself (`Attach` with `only_if_target`); otherwise the CSI controller or the failover
+  controller attaches it.
 
 ## 4. Writes
 
