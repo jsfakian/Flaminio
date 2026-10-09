@@ -3,15 +3,17 @@
 //! - [`replica::ReplicaService`] serves replication sessions from volume targets: the replica
 //!   rules of `flaminio_repl` (fencing, sessions, uncertain sets, resync filters) in front of
 //!   the replica store.
-//! - [`server`] puts it on the network: a network thread for TLS sessions, and an engine loop.
+//! - [`net`] is the network thread: replication sessions in both directions, over TLS.
 //!
-//! Volume targets come next (phase 1 step 4d).
+//! - [`engine`] is the thread that owns both: the replica service and the volume targets,
+//!   which run the verified state machine of `flaminio_repl::target`.
 //!
 //! The engine is single-threaded by design, like the core it runs: one thread owns the store
 //! and every protocol state machine, and network threads hand it decoded frames.
 
+pub mod engine;
+pub mod net;
 pub mod replica;
-pub mod server;
 
 use flaminio_format::Uuid;
 

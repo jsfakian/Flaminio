@@ -106,3 +106,12 @@ pub struct ChangeIsrResponse {
     #[prost(message, repeated, tag = "3")]
     pub chunks: Vec<ChunkMeta>,
 }
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ListNodesRequest {}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ListNodesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub nodes: Vec<Node>,
+}

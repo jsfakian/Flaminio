@@ -1,0 +1,1037 @@
+//! The engine: one thread that owns the replica service and the volume targets.
+//!
+//! **Inputs** ([`Input`]):
+//! - network events (sessions from other nodes' targets, replies to ours);
+//! - metadata answers;
+//! - attach requests;
+//! - client I/O.
+//!
+//! **Outputs** ([`Output`]): I/O completions and target state changes.
+//!
+//! Each turn the engine also ticks its targets, and sends the requests that queued for the
+//! local replica as **one batch**, so concurrent writes share a group commit.
+//!
+//! **Targets** run the verified state machine (`flaminio_repl::target`), and the engine only
+//! routes their messages:
+//! - to the local replica service, in process;
+//! - to other nodes over the network thread, one TLS connection per session;
+//! - to the metadata service.
+//!
+//! **Untrusted data is checked before it reaches a target.** A data reply must be exactly the
+//! length the engine asked for. Otherwise it is dropped, and the target's timeout treats the
+//! replica as failed.
+
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use flaminio_metaclient::{Answer, Call, MetaClient, pb};
+use flaminio_net::BLOCK;
+use flaminio_net::frame::Frame;
+use flaminio_net::session::Accepted;
+use flaminio_net::token::Claims;
+use flaminio_repl::extent::Extent;
+use flaminio_repl::meta::{ChunkMeta, MetaReply, MetaRequest, VolumeMeta};
+use flaminio_repl::msg::{FromReplica, Request, Response, ToReplica};
+use flaminio_repl::target::{Op, OpResult, Output as TOut, Target};
+use flaminio_repl::types::{Block, NodeId, Timing};
+use flaminio_store::BlockDevice;
+use smol::channel;
+
+use crate::net::{ConnId, Key, Net, NetCommand, NetEvent};
+use crate::replica::{ReplicaService, Reply, SessionRef};
+
+/// Data in flight: a shared, immutable buffer.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Payload(pub Arc<Vec<u8>>);
+
+impl std::fmt::Debug for Payload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+/// Where metadata calls go. The engine's answers come back as [`Input::Meta`].
+pub trait MetaPort: Send {
+    fn call(&self, id: u64, call: Call);
+}
+
+impl MetaPort for MetaClient {
+    fn call(&self, id: u64, call: Call) {
+        MetaClient::call(self, id, call);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    /// This node's name.
+    pub node: String,
+    /// This node's replication address (`ip:port`), registered with the metadata service.
+    pub address: String,
+    pub timing: Timing,
+    /// Largest repair or resync copy, in blocks.
+    pub max_io: Block,
+    /// Interval of node-liveness heartbeats; None: none.
+    pub heartbeat: Option<Duration>,
+}
+
+/// Client I/O on a volume. Offsets and lengths are 4 KiB-aligned.
+#[derive(Debug, Clone)]
+pub enum Io {
+    Read { offset: u64, len: u64 },
+    Write { offset: u64, data: Vec<u8> },
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum IoError {
+    #[error("the volume is not attached here")]
+    NotAttached,
+    #[error("misaligned or out of range")]
+    Invalid,
+    #[error("the target was deposed: the volume moved to another node")]
+    Deposed,
+}
+
+pub enum Input {
+    Net(NetEvent),
+    Meta {
+        id: u64,
+        answer: Answer,
+    },
+    /// Become the target of `volume`, with the capability token from its attach.
+    Attach {
+        volume: String,
+        token: Vec<u8>,
+    },
+    Io {
+        volume: String,
+        op: u64,
+        io: Io,
+    },
+    /// Test and diagnosis: read the local replica's copy of a range, around the target.
+    InspectLocal {
+        volume: String,
+        offset: u64,
+        len: u64,
+        reply: mpsc::Sender<Option<Vec<u8>>>,
+    },
+    /// Test only: drop every request from other nodes' targets until this instant.
+    #[doc(hidden)]
+    Deafen {
+        until: Instant,
+    },
+    Stop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Output {
+    Done {
+        op: u64,
+        result: Result<Option<Vec<u8>>, IoError>,
+    },
+    Attached {
+        volume: String,
+        epoch: u64,
+    },
+    AttachFailed {
+        volume: String,
+        why: String,
+    },
+    /// A newer target took the volume over. Its pending I/O failed.
+    Deposed {
+        volume: String,
+    },
+}
+
+/// A client operation, split into one target operation per chunk it touches.
+struct ClientOp {
+    pending: usize,
+    failed: Option<IoError>,
+    read: Option<Vec<u8>>,
+}
+
+enum Sess {
+    Local {
+        session: u64,
+        sref: Option<SessionRef>,
+    },
+    Remote {
+        session: u64,
+        key: Key,
+    },
+}
+
+struct TargetRt {
+    sm: Target<Payload>,
+    view: VolumeMeta,
+    token: Vec<u8>,
+    size: u64,
+    chunk_size: u64,
+    /// NodeId → node name, and address.
+    nodes: Vec<String>,
+    addrs: Vec<Option<SocketAddr>>,
+    local: NodeId,
+    sessions: BTreeMap<NodeId, Sess>,
+    ops: BTreeMap<u64, ClientOp>,
+    /// Target operation → (client operation, byte offset in it, length).
+    subs: BTreeMap<u64, (u64, usize, usize)>,
+    /// Outstanding read requests to replicas: (node, req) → expected bytes.
+    reads: BTreeMap<(NodeId, u64), usize>,
+    deposed_reported: bool,
+}
+
+struct Attaching {
+    token: Vec<u8>,
+    volume: Option<pb::Volume>,
+    nodes: Option<Vec<pb::Node>>,
+}
+
+enum MetaWait {
+    Attach {
+        volume: String,
+        part: u8,
+    },
+    Isr {
+        volume: String,
+        sm_req: u64,
+        chunks: Vec<u32>,
+    },
+    Background,
+}
+
+/// Where a reply from the local replica goes.
+enum LocalFrom {
+    Target { volume: String, session: u64 },
+    Conn(ConnId),
+}
+
+pub struct Engine<D: BlockDevice> {
+    cfg: EngineConfig,
+    service: ReplicaService<D>,
+    net: Net,
+    meta: Box<dyn MetaPort>,
+    start: Instant,
+    conns: BTreeMap<ConnId, (SessionRef, channel::Sender<Reply>)>,
+    targets: BTreeMap<String, TargetRt>,
+    attaching: BTreeMap<String, Attaching>,
+    keys: BTreeMap<Key, (String, NodeId, u64)>,
+    next_key: Key,
+    next_meta: u64,
+    meta_waits: BTreeMap<u64, MetaWait>,
+    next_sub: u64,
+    local: Vec<(LocalFrom, SessionRef, Frame)>,
+    out: Vec<Output>,
+    next_heartbeat: Instant,
+    deaf_until: Option<Instant>,
+}
+
+impl<D: BlockDevice> Engine<D> {
+    pub fn new(
+        cfg: EngineConfig,
+        service: ReplicaService<D>,
+        net: Net,
+        meta: Box<dyn MetaPort>,
+    ) -> Self {
+        let now = Instant::now();
+        let mut e = Self {
+            cfg,
+            service,
+            net,
+            meta,
+            start: now,
+            conns: BTreeMap::new(),
+            targets: BTreeMap::new(),
+            attaching: BTreeMap::new(),
+            keys: BTreeMap::new(),
+            next_key: 1,
+            next_meta: 1,
+            meta_waits: BTreeMap::new(),
+            next_sub: 1,
+            local: Vec::new(),
+            out: Vec::new(),
+            next_heartbeat: now,
+            deaf_until: None,
+        };
+        let reg = pb::RegisterNodeRequest {
+            node: Some(pb::Node {
+                id: e.cfg.node.clone(),
+                address: e.cfg.address.clone(),
+                ..Default::default()
+            }),
+        };
+        e.meta_call(Call::RegisterNode(reg), MetaWait::Background);
+        e
+    }
+
+    pub fn service(&self) -> &ReplicaService<D> {
+        &self.service
+    }
+
+    pub fn into_service(self) -> ReplicaService<D> {
+        self.service
+    }
+
+    fn us(&self, now: Instant) -> u64 {
+        now.duration_since(self.start).as_micros() as u64
+    }
+
+    fn meta_call(&mut self, call: Call, wait: MetaWait) {
+        let id = self.next_meta;
+        self.next_meta += 1;
+        self.meta_waits.insert(id, wait);
+        self.meta.call(id, call);
+    }
+
+    /// Takes the outputs produced so far.
+    pub fn take_output(&mut self) -> Vec<Output> {
+        std::mem::take(&mut self.out)
+    }
+
+    /// The next time [`Engine::turn`] has work, if no input arrives before.
+    pub fn next_wakeup(&self) -> Instant {
+        let mut t = self.next_heartbeat;
+        for rt in self.targets.values() {
+            let now_us = self.us(Instant::now());
+            if let Some(w) = rt.sm.next_wakeup(now_us) {
+                t = t.min(self.start + Duration::from_micros(w));
+            }
+        }
+        t
+    }
+
+    /// Handles one input. Returns false on [`Input::Stop`].
+    pub fn handle(&mut self, now: Instant, input: Input) -> bool {
+        match input {
+            Input::Net(e) => self.on_net(now, e),
+            Input::Meta { id, answer } => self.on_meta(now, id, answer),
+            Input::Attach { volume, token } => {
+                if self.targets.contains_key(&volume) {
+                    self.out.push(Output::AttachFailed {
+                        volume,
+                        why: "already attached".into(),
+                    });
+                    return true;
+                }
+                self.attaching.insert(
+                    volume.clone(),
+                    Attaching {
+                        token,
+                        volume: None,
+                        nodes: None,
+                    },
+                );
+                self.meta_call(
+                    Call::GetVolume(pb::GetVolumeRequest { id: volume.clone() }),
+                    MetaWait::Attach {
+                        volume: volume.clone(),
+                        part: 0,
+                    },
+                );
+                self.meta_call(
+                    Call::ListNodes(pb::ListNodesRequest {}),
+                    MetaWait::Attach { volume, part: 1 },
+                );
+            }
+            Input::Io { volume, op, io } => self.submit(now, &volume, op, io),
+            Input::InspectLocal {
+                volume,
+                offset,
+                len,
+                reply,
+            } => {
+                self.flush_local(now);
+                let _ = reply.send(self.inspect(&volume, offset, len));
+            }
+            Input::Deafen { until } => self.deaf_until = Some(until),
+            Input::Stop => return false,
+        }
+        true
+    }
+
+    /// Ticks targets and heartbeats, and sends what queued for the local replica.
+    pub fn turn(&mut self, now: Instant) {
+        if let Some(every) = self.cfg.heartbeat
+            && now >= self.next_heartbeat
+        {
+            self.next_heartbeat = now + every;
+            let hb = pb::NodeHeartbeatRequest {
+                node: self.cfg.node.clone(),
+            };
+            self.meta_call(Call::NodeHeartbeat(hb), MetaWait::Background);
+        } else if self.cfg.heartbeat.is_none() {
+            self.next_heartbeat = now + Duration::from_secs(3600);
+        }
+        let us = self.us(now);
+        let vols: Vec<String> = self.targets.keys().cloned().collect();
+        for v in vols {
+            if let Some(rt) = self.targets.get_mut(&v) {
+                rt.sm.tick(us);
+            }
+            self.drain(now, &v);
+        }
+        self.flush_local(now);
+    }
+
+    /// Runs the engine on this thread until [`Input::Stop`] or until every sender is gone.
+    pub fn run(mut self, inputs: mpsc::Receiver<Input>, mut outputs: impl FnMut(Output)) -> Self {
+        loop {
+            let now = Instant::now();
+            self.turn(now);
+            for o in self.take_output() {
+                outputs(o);
+            }
+            let wait = self.next_wakeup().saturating_duration_since(Instant::now());
+            let first = match inputs.recv_timeout(wait.max(Duration::from_micros(100))) {
+                Ok(i) => i,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return self,
+            };
+            let now = Instant::now();
+            if !self.handle(now, first) {
+                return self;
+            }
+            // Everything that has arrived is one batch.
+            for _ in 0..1024 {
+                match inputs.try_recv() {
+                    Ok(i) => {
+                        if !self.handle(now, i) {
+                            return self;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+
+    // --- Replica side: sessions from other nodes' targets ---------------------------------
+
+    fn on_net(&mut self, now: Instant, e: NetEvent) {
+        let deaf = self.deaf_until.is_some_and(|t| now < t);
+        match e {
+            NetEvent::Opened {
+                conn,
+                accepted,
+                replies,
+            } => {
+                if deaf {
+                    return;
+                }
+                self.flush_local(now);
+                match self.service.hello(&accepted) {
+                    Ok((s, reply)) => {
+                        let _ = replies.try_send(Reply::Send(reply));
+                        self.conns.insert(conn, (s, replies));
+                    }
+                    Err(why) => {
+                        let _ = replies.try_send(Reply::Close(why));
+                    }
+                }
+            }
+            NetEvent::Request { conn, frame } => {
+                if deaf {
+                    return;
+                }
+                if let Some((s, _)) = self.conns.get(&conn) {
+                    self.local.push((LocalFrom::Conn(conn), *s, frame));
+                }
+            }
+            NetEvent::Closed { conn } => {
+                self.flush_local(now);
+                self.conns.remove(&conn);
+            }
+            NetEvent::Reply { key, frame } => {
+                let Some((vol, node, session)) = self.keys.get(&key).cloned() else {
+                    return;
+                };
+                self.reply_to_target(now, &vol, node, session, frame);
+                self.drain(now, &vol);
+            }
+            NetEvent::Lost { key, why } => {
+                if let Some((vol, node, _)) = self.keys.remove(&key) {
+                    eprintln!(
+                        "flaminio-node: {vol}: session to {} lost: {why}",
+                        self.node_name(&vol, node)
+                    );
+                }
+            }
+        }
+    }
+
+    fn node_name(&self, vol: &str, n: NodeId) -> String {
+        self.targets
+            .get(vol)
+            .and_then(|rt| rt.nodes.get(n as usize).cloned())
+            .unwrap_or_else(|| format!("node {n}"))
+    }
+
+    /// Sends the requests queued for the local replica, as one batch, until none are left.
+    fn flush_local(&mut self, now: Instant) {
+        for _ in 0..16 {
+            if self.local.is_empty() {
+                return;
+            }
+            let batch = std::mem::take(&mut self.local);
+            let items: Vec<(SessionRef, Frame)> =
+                batch.iter().map(|(_, s, f)| (*s, f.clone())).collect();
+            let replies = self.service.handle(&items);
+            let mut touched = Vec::new();
+            for ((from, _, _), reply) in batch.into_iter().zip(replies) {
+                match from {
+                    LocalFrom::Conn(c) => {
+                        if let Some((_, tx)) = self.conns.get(&c) {
+                            let _ = tx.try_send(reply);
+                        }
+                    }
+                    LocalFrom::Target { volume, session } => {
+                        if let Reply::Send(frame) = reply {
+                            let local = self.targets.get(&volume).map(|rt| rt.local);
+                            if let Some(local) = local {
+                                self.reply_to_target(now, &volume, local, session, frame);
+                                touched.push(volume);
+                            }
+                        }
+                        // Nothing or Close: the target's timeout handles it.
+                    }
+                }
+            }
+            touched.dedup();
+            for v in touched {
+                self.drain(now, &v);
+            }
+        }
+    }
+
+    fn inspect(&mut self, volume: &str, offset: u64, len: u64) -> Option<Vec<u8>> {
+        let rt = self.targets.get(volume);
+        let (chunk_size, sref) = match rt {
+            Some(rt) => match rt.sessions.get(&rt.local) {
+                Some(Sess::Local { sref: Some(s), .. }) => (rt.chunk_size, *s),
+                _ => return None,
+            },
+            None => {
+                // Not a target here: find a replica session of the volume.
+                let (s, _) = self.conns.values().next()?;
+                (self.service.chunk_size_of(s.vol)?, *s)
+            }
+        };
+        let mut out = Vec::with_capacity(len as usize);
+        let mut off = offset;
+        while off < offset + len {
+            let chunk = (off / chunk_size) as u32;
+            let within = off % chunk_size;
+            let n = (chunk_size - within).min(offset + len - off);
+            let f = Frame::Read {
+                req: 0,
+                chunk,
+                ext: Extent::new((within / BLOCK as u64) as u32, (n / BLOCK as u64) as u32),
+            };
+            match self.service.handle(&[(sref, f)]).pop()? {
+                Reply::Send(Frame::Data { data, .. }) => out.extend_from_slice(&data),
+                _ => return None,
+            }
+            off += n;
+        }
+        Some(out)
+    }
+
+    // --- Targets -----------------------------------------------------------------------------
+
+    fn on_meta(&mut self, now: Instant, id: u64, answer: Answer) {
+        let Some(wait) = self.meta_waits.remove(&id) else {
+            return;
+        };
+        match wait {
+            MetaWait::Background => {
+                if let Answer::Failed { code, message } = answer {
+                    eprintln!("flaminio-node: metadata call failed: {code:?}: {message}");
+                }
+            }
+            MetaWait::Attach { volume, part } => {
+                let Some(a) = self.attaching.get_mut(&volume) else {
+                    return;
+                };
+                match (part, answer) {
+                    (0, Answer::GetVolume(r)) => a.volume = r.volume,
+                    (1, Answer::ListNodes(r)) => a.nodes = Some(r.nodes),
+                    (_, Answer::Failed { message, .. }) => {
+                        self.attaching.remove(&volume);
+                        self.out.push(Output::AttachFailed {
+                            volume,
+                            why: message,
+                        });
+                        return;
+                    }
+                    _ => return,
+                }
+                if a.volume.is_some() && a.nodes.is_some() {
+                    let a = self.attaching.remove(&volume).expect("attaching");
+                    match self.start_target(now, &volume, a) {
+                        Ok(epoch) => self.out.push(Output::Attached {
+                            volume: volume.clone(),
+                            epoch,
+                        }),
+                        Err(why) => self.out.push(Output::AttachFailed {
+                            volume: volume.clone(),
+                            why,
+                        }),
+                    }
+                    self.drain(now, &volume);
+                }
+            }
+            MetaWait::Isr {
+                volume,
+                sm_req,
+                chunks,
+            } => {
+                let us = self.us(now);
+                let Some(rt) = self.targets.get_mut(&volume) else {
+                    return;
+                };
+                let Answer::ChangeIsr(r) = answer else { return };
+                rt.view.epoch = r.epoch;
+                for (c, m) in chunks.iter().zip(&r.chunks) {
+                    if let Some(cm) = rt.view.chunks.get_mut(*c as usize) {
+                        cm.isr = m
+                            .isr
+                            .iter()
+                            .filter_map(|n| rt.nodes.iter().position(|x| x == n))
+                            .map(|i| i as NodeId)
+                            .collect();
+                        cm.isr_ver = m.isr_ver;
+                    }
+                }
+                let view = rt.view.clone();
+                let reply = if r.applied {
+                    MetaReply::Applied { vol: 0, view }
+                } else {
+                    MetaReply::Rejected { vol: 0, view }
+                };
+                rt.sm.on_meta(us, sm_req, &reply);
+                self.drain(now, &volume);
+            }
+        }
+    }
+
+    fn start_target(&mut self, now: Instant, volume: &str, a: Attaching) -> Result<u64, String> {
+        let v = a.volume.ok_or("no such volume")?;
+        if v.target != self.cfg.node {
+            return Err(format!(
+                "the volume's target is {:?}, not this node",
+                v.target
+            ));
+        }
+        if v.chunk_bytes == 0
+            || !v.chunk_bytes.is_multiple_of(BLOCK as u64)
+            || v.size_bytes % v.chunk_bytes != 0
+        {
+            return Err("unusable volume geometry".into());
+        }
+        let mut nodes: Vec<String> = Vec::new();
+        let id = |name: &str, nodes: &mut Vec<String>| -> NodeId {
+            match nodes.iter().position(|n| n == name) {
+                Some(i) => i as NodeId,
+                None => {
+                    nodes.push(name.to_string());
+                    (nodes.len() - 1) as NodeId
+                }
+            }
+        };
+        let local = id(&self.cfg.node, &mut nodes);
+        let chunks: Vec<ChunkMeta> = v
+            .chunks
+            .iter()
+            .map(|c| ChunkMeta {
+                replicas: c.replicas.iter().map(|r| id(r, &mut nodes)).collect(),
+                isr: c.isr.iter().map(|r| id(r, &mut nodes)).collect(),
+                isr_ver: c.isr_ver,
+            })
+            .collect();
+        let all = a.nodes.unwrap_or_default();
+        let addrs = nodes
+            .iter()
+            .map(|n| {
+                all.iter()
+                    .find(|x| &x.id == n)
+                    .and_then(|x| x.address.parse().ok())
+            })
+            .collect();
+        let view = VolumeMeta {
+            epoch: v.epoch,
+            target: Some(local),
+            min_isr: v.min_isr as usize,
+            blocks_per_chunk: (v.chunk_bytes / BLOCK as u64) as Block,
+            chunks,
+        };
+        let us = self.us(now);
+        let sm = Target::new(local, 0, &view, self.cfg.timing, self.cfg.max_io, us);
+        self.targets.insert(
+            volume.to_string(),
+            TargetRt {
+                sm,
+                view,
+                token: a.token,
+                size: v.size_bytes,
+                chunk_size: v.chunk_bytes,
+                nodes,
+                addrs,
+                local,
+                sessions: BTreeMap::new(),
+                ops: BTreeMap::new(),
+                subs: BTreeMap::new(),
+                reads: BTreeMap::new(),
+                deposed_reported: false,
+            },
+        );
+        Ok(v.epoch)
+    }
+
+    fn submit(&mut self, now: Instant, volume: &str, op: u64, io: Io) {
+        let us = self.us(now);
+        let Some(rt) = self.targets.get_mut(volume) else {
+            self.out.push(Output::Done {
+                op,
+                result: Err(IoError::NotAttached),
+            });
+            return;
+        };
+        let (offset, len) = match &io {
+            Io::Read { offset, len } => (*offset, *len),
+            Io::Write { offset, data } => (*offset, data.len() as u64),
+        };
+        let b = BLOCK as u64;
+        if len == 0
+            || !offset.is_multiple_of(b)
+            || !len.is_multiple_of(b)
+            || offset.checked_add(len).is_none_or(|e| e > rt.size)
+        {
+            self.out.push(Output::Done {
+                op,
+                result: Err(IoError::Invalid),
+            });
+            return;
+        }
+        let mut pieces = Vec::new();
+        let mut off = offset;
+        while off < offset + len {
+            let chunk = (off / rt.chunk_size) as u32;
+            let within = off % rt.chunk_size;
+            let n = (rt.chunk_size - within).min(offset + len - off);
+            pieces.push((
+                chunk,
+                Extent::new((within / b) as u32, (n / b) as u32),
+                (off - offset) as usize,
+                n as usize,
+            ));
+            off += n;
+        }
+        rt.ops.insert(
+            op,
+            ClientOp {
+                pending: pieces.len(),
+                failed: None,
+                read: matches!(io, Io::Read { .. }).then(|| vec![0u8; len as usize]),
+            },
+        );
+        for (chunk, ext, at, n) in pieces {
+            let sub = self.next_sub;
+            self.next_sub += 1;
+            rt.subs.insert(sub, (op, at, n));
+            let kind = match &io {
+                Io::Read { .. } => Op::Read { chunk, ext },
+                Io::Write { data, .. } => Op::Write {
+                    chunk,
+                    ext,
+                    data: Payload(Arc::new(data[at..at + n].to_vec())),
+                },
+            };
+            rt.sm.submit(us, sub, kind);
+        }
+        self.drain(now, volume);
+    }
+
+    /// Routes a target's outputs.
+    fn drain(&mut self, now: Instant, volume: &str) {
+        let Some(rt) = self.targets.get_mut(volume) else {
+            return;
+        };
+        let outs = rt.sm.take_output();
+        for o in outs {
+            match o {
+                TOut::Send { to, msg } => self.send_from_target(now, volume, to, msg),
+                TOut::Meta { req, body } => {
+                    let MetaRequest::ChangeIsr { epoch, changes, .. } = body else {
+                        continue;
+                    };
+                    let rt = self.targets.get(volume).expect("target");
+                    let names = |s: &std::collections::BTreeSet<NodeId>| -> Vec<String> {
+                        s.iter().map(|n| rt.nodes[*n as usize].clone()).collect()
+                    };
+                    let chunks: Vec<u32> = changes.iter().map(|c| c.chunk).collect();
+                    let call = pb::ChangeIsrRequest {
+                        volume: volume.to_string(),
+                        epoch,
+                        changes: changes
+                            .iter()
+                            .map(|c| pb::IsrChange {
+                                chunk: c.chunk,
+                                expected_ver: c.expected_ver,
+                                new_isr: names(&c.new_isr),
+                            })
+                            .collect(),
+                    };
+                    self.meta_call(
+                        Call::ChangeIsr(call),
+                        MetaWait::Isr {
+                            volume: volume.to_string(),
+                            sm_req: req,
+                            chunks,
+                        },
+                    );
+                }
+                TOut::Done { op: sub, result } => self.sub_done(volume, sub, result),
+            }
+        }
+        let rt = self.targets.get_mut(volume).expect("target");
+        if rt.sm.is_deposed() && !rt.deposed_reported {
+            rt.deposed_reported = true;
+            for key in rt.sessions.values().filter_map(|s| match s {
+                Sess::Remote { key, .. } => Some(*key),
+                _ => None,
+            }) {
+                self.net.send(NetCommand::Close { key });
+            }
+            self.out.push(Output::Deposed {
+                volume: volume.to_string(),
+            });
+            self.targets.remove(volume);
+        }
+    }
+
+    fn sub_done(&mut self, volume: &str, sub: u64, result: OpResult<Payload>) {
+        let Some(rt) = self.targets.get_mut(volume) else {
+            return;
+        };
+        let Some((op, at, n)) = rt.subs.remove(&sub) else {
+            return;
+        };
+        let Some(c) = rt.ops.get_mut(&op) else { return };
+        match result {
+            OpResult::Written => {}
+            OpResult::Read(p) => match c.read.as_mut() {
+                Some(buf) if p.0.len() == n => buf[at..at + n].copy_from_slice(&p.0),
+                _ => c.failed = Some(IoError::Invalid),
+            },
+            OpResult::Failed => c.failed = Some(IoError::Deposed),
+        }
+        c.pending -= 1;
+        if c.pending == 0 {
+            let c = rt.ops.remove(&op).expect("op");
+            let result = match c.failed {
+                Some(e) => Err(e),
+                None => Ok(c.read),
+            };
+            self.out.push(Output::Done { op, result });
+        }
+    }
+
+    fn send_from_target(
+        &mut self,
+        now: Instant,
+        volume: &str,
+        to: NodeId,
+        msg: ToReplica<Payload>,
+    ) {
+        let rt = self.targets.get_mut(volume).expect("target");
+        if let Request::Read { ext, .. } = &msg.body {
+            rt.reads.insert((to, msg.req), ext.len as usize * BLOCK);
+        }
+        if let Request::Hello = msg.body {
+            let chunks: Vec<u32> = rt
+                .view
+                .chunks
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.replicas.contains(&to))
+                .map(|(i, _)| i as u32)
+                .collect();
+            if to == rt.local {
+                let a = Accepted {
+                    peer_node: self.cfg.node.clone(),
+                    req: msg.req,
+                    epoch: msg.epoch,
+                    session: msg.session,
+                    claims: Claims {
+                        volume: volume.to_string(),
+                        epoch: msg.epoch,
+                        node: self.cfg.node.clone(),
+                        issued_at: 0,
+                    },
+                    size: rt.size,
+                    chunk_size: rt.chunk_size,
+                    chunks,
+                };
+                self.flush_local(now);
+                let rt = self.targets.get_mut(volume).expect("target");
+                match self.service.hello(&a) {
+                    Ok((sref, frame)) => {
+                        rt.sessions.insert(
+                            rt.local,
+                            Sess::Local {
+                                session: msg.session,
+                                sref: Some(sref),
+                            },
+                        );
+                        let local = rt.local;
+                        self.reply_to_target(now, volume, local, msg.session, frame);
+                    }
+                    Err(why) => {
+                        eprintln!(
+                            "flaminio-node: {volume}: local replica refused the session: {why}"
+                        );
+                        rt.sessions.insert(
+                            rt.local,
+                            Sess::Local {
+                                session: msg.session,
+                                sref: None,
+                            },
+                        );
+                    }
+                }
+                return;
+            }
+            let Some(addr) = rt.addrs.get(to as usize).copied().flatten() else {
+                return; // no address: the request times out
+            };
+            let key = self.next_key;
+            self.next_key += 1;
+            if let Some(Sess::Remote { key: old, .. }) = rt.sessions.insert(
+                to,
+                Sess::Remote {
+                    session: msg.session,
+                    key,
+                },
+            ) {
+                self.keys.remove(&old);
+                self.net.send(NetCommand::Close { key: old });
+            }
+            self.keys.insert(key, (volume.to_string(), to, msg.session));
+            let hello = Frame::Hello {
+                req: msg.req,
+                epoch: msg.epoch,
+                session: msg.session,
+                volume: volume.to_string(),
+                token: rt.token.clone(),
+                size: rt.size,
+                chunk_size: rt.chunk_size,
+                chunks,
+            };
+            self.net.send(NetCommand::Connect {
+                key,
+                addr,
+                node: rt.nodes[to as usize].clone(),
+                hello: Box::new(hello),
+            });
+            return;
+        }
+        let frame = to_frame(&msg);
+        match rt.sessions.get(&to) {
+            Some(Sess::Local {
+                session,
+                sref: Some(sref),
+            }) if *session == msg.session => {
+                let sref = *sref;
+                self.local.push((
+                    LocalFrom::Target {
+                        volume: volume.to_string(),
+                        session: msg.session,
+                    },
+                    sref,
+                    frame,
+                ));
+            }
+            Some(Sess::Remote { session, key }) if *session == msg.session => {
+                self.net.send(NetCommand::Send { key: *key, frame });
+            }
+            _ => {} // no such session any more: the request times out
+        }
+    }
+
+    fn reply_to_target(
+        &mut self,
+        now: Instant,
+        volume: &str,
+        from: NodeId,
+        session: u64,
+        frame: Frame,
+    ) {
+        let us = self.us(now);
+        let Some(rt) = self.targets.get_mut(volume) else {
+            return;
+        };
+        let Some((req, body)) = from_frame(frame) else {
+            return;
+        };
+        if let Response::Data(p) = &body {
+            // Exactly the length asked for, or the reply is dropped.
+            match rt.reads.remove(&(from, req)) {
+                Some(n) if n == p.0.len() => {}
+                _ => return,
+            }
+        }
+        let m = FromReplica {
+            vol: 0,
+            epoch: rt.sm.epoch(),
+            session,
+            req,
+            body,
+        };
+        rt.sm.on_reply(us, from, &m);
+    }
+}
+
+fn to_frame(m: &ToReplica<Payload>) -> Frame {
+    let req = m.req;
+    match &m.body {
+        Request::Hello => unreachable!("Hello frames carry the session's token"),
+        Request::Heartbeat => Frame::Heartbeat { req },
+        Request::Write {
+            chunk,
+            ext,
+            data,
+            version,
+            prune,
+        } => Frame::Write {
+            req,
+            chunk: *chunk,
+            ext: *ext,
+            version: *version,
+            prune: *prune,
+            data: data.0.to_vec(),
+        },
+        Request::Read { chunk, ext } => Frame::Read {
+            req,
+            chunk: *chunk,
+            ext: *ext,
+        },
+        Request::BeginResync { chunk } => Frame::BeginResync { req, chunk: *chunk },
+        Request::Copy { chunk, ext, data } => Frame::Copy {
+            req,
+            chunk: *chunk,
+            ext: *ext,
+            data: data.0.to_vec(),
+        },
+    }
+}
+
+fn from_frame(f: Frame) -> Option<(u64, Response<Payload>)> {
+    Some(match f {
+        Frame::Fenced { req, uncertain } => (req, Response::Fenced { uncertain }),
+        Frame::Ok { req } => (req, Response::Ok),
+        Frame::Data { req, data } => (req, Response::Data(Payload(Arc::new(data)))),
+        Frame::Stale { req, fenced } => (req, Response::Stale { fenced }),
+        _ => return None,
+    })
+}

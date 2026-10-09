@@ -46,6 +46,30 @@ simulator checked. It comes in five parts, each committed on its own:
 | 4d | **Target runtime.** `flaminio-io serve` attaches with a token, drives the core from ublk, sends to local and remote replicas, and makes ISR changes through the metadata service (gRPC client on its own thread) | The local end-to-end test passes |
 | 4e | **Lab.** An RF=2 volume across fl-a and fl-b, placed by the metadata service | The MVP's fault test passes, with the ISR shrink and expand visible in the metadata service; reads still at the MVP's level |
 
+## Step 4d progress
+
+- **(i) Metadata client** (`flaminio-metaclient`): gRPC over mutual TLS, authenticated as the
+  node's data plane, on its own thread. `make meta-interop` checks it against the Go service.
+- **(ii) Engine** (`flaminio-node::engine`): one thread owns the replica service and the
+  volume targets.
+  - **Targets** run the verified state machine. The engine routes their messages: to the
+    local replica in process, to other nodes over the network thread, to the metadata service.
+  - **Client I/O** is split at chunk boundaries.
+  - **Local requests** of one turn share a group commit.
+  - **A data reply** of the wrong length is dropped before it reaches a target, so a faulty
+    replica can only cause a timeout.
+
+  **The two-node test:** each node a full engine with a TLS network thread, and a model of
+  the metadata service.
+  - Writes across a chunk boundary read back from the target and from the other node's
+    replica.
+  - With the replica deaf, a write completes after 0.5 s: one request timeout, then the ISR
+    shrinks.
+  - After the replica recovers, it is resynced and rejoins within 3.6 s, holding the write it
+    missed.
+- **(iii) Next:** the ublk frontend on the engine, with local reads kept on the MVP's
+  asynchronous, zero-copy path; then the lab (4e).
+
 ## Step 4c result
 
 The crate `flaminio-node` holds two parts:

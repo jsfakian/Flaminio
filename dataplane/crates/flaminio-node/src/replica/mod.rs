@@ -313,6 +313,14 @@ impl<D: BlockDevice> ReplicaService<D> {
         pending.clear();
     }
 
+    /// The chunk size of a volume known here.
+    pub fn chunk_size_of(&self, id: VolumeId) -> Option<u64> {
+        self.vols
+            .values()
+            .find(|v| v.id == id)
+            .map(|v| v.chunk_size)
+    }
+
     fn uuid_of(&self, id: VolumeId) -> Option<Uuid> {
         self.vols.iter().find(|(_, v)| v.id == id).map(|(&u, _)| u)
     }

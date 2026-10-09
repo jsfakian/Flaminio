@@ -35,6 +35,7 @@ pub enum Call {
     ChangeIsr(pb::ChangeIsrRequest),
     RegisterNode(pb::RegisterNodeRequest),
     NodeHeartbeat(pb::NodeHeartbeatRequest),
+    ListNodes(pb::ListNodesRequest),
 }
 
 /// The answer to a call.
@@ -44,6 +45,7 @@ pub enum Answer {
     ChangeIsr(pb::ChangeIsrResponse),
     RegisterNode(pb::RegisterNodeResponse),
     NodeHeartbeat(pb::NodeHeartbeatResponse),
+    ListNodes(pb::ListNodesResponse),
     /// The service refused the call, or no endpoint answered.
     Failed {
         code: tonic::Code,
@@ -171,6 +173,7 @@ async fn call_one(ch: Channel, call: Call) -> Answer {
         Call::NodeHeartbeat(r) => unary(ch, "NodeHeartbeat", r)
             .await
             .map(Answer::NodeHeartbeat),
+        Call::ListNodes(r) => unary(ch, "ListNodes", r).await.map(Answer::ListNodes),
     };
     r.unwrap_or_else(|s| Answer::Failed {
         code: s.code(),

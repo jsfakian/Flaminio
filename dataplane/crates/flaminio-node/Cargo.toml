@@ -12,6 +12,8 @@ flaminio-format.workspace = true
 flaminio-store.workspace = true
 flaminio-repl = { path = "../flaminio-repl" }
 flaminio-net = { path = "../flaminio-net" }
+flaminio-metaclient = { path = "../flaminio-metaclient" }
+thiserror.workspace = true
 ring = "0.17.14"
 smol.workspace = true
 futures-lite = "2"

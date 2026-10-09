@@ -557,6 +557,7 @@ name = "flaminio-node"
 version = "0.1.0"
 dependencies = [
  "flaminio-format",
+ "flaminio-metaclient",
  "flaminio-net",
  "flaminio-repl",
  "flaminio-store",
@@ -565,6 +566,7 @@ dependencies = [
  "rcgen",
  "ring",
  "smol",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

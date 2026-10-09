@@ -85,5 +85,19 @@ fn interop_with_the_go_service() {
             ..
         }
     ));
-    eprintln!("interop: GetVolume, ChangeIsr (applied, then refused), heartbeats: ok");
+    let Answer::ListNodes(l) =
+        call_blocking(&cfg, Call::ListNodes(pb::ListNodesRequest {})).unwrap()
+    else {
+        panic!("ListNodes failed");
+    };
+    let mut nodes: Vec<(String, String)> = l.nodes.into_iter().map(|n| (n.id, n.address)).collect();
+    nodes.sort();
+    assert_eq!(
+        nodes,
+        vec![
+            ("fl-a".into(), "fl-a:7410".into()),
+            ("fl-b".into(), "fl-b:7410".into())
+        ]
+    );
+    eprintln!("interop: GetVolume, ChangeIsr (applied, then refused), heartbeats, ListNodes: ok");
 }
