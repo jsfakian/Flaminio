@@ -17,6 +17,10 @@ journal() {
 }
 
 down() {
+    # The kernel does not delete a block device that is mounted: deleting it would wait forever.
+    local mounts
+    mounts=$(findmnt -rn -S "$dev" -o TARGET 2>/dev/null || true)
+    [[ -z $mounts ]] || die "$dev is mounted (${mounts//$'\n'/, }): unmount it first, or delete the pod that uses it (make csi-undeploy)"
     if [[ -e /dev/ublkc$id ]]; then
         sudo "$bin" del --id "$id" >/dev/null 2>&1 || true
     fi

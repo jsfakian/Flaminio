@@ -716,6 +716,10 @@ vol_degraded() {
 # rejoin every ISR, and a failover to fl-b must read back everything (from fl-b's replica).
 cmd_node_fault() {
     local load_pid rc=0 start
+    ensure_nodes
+    cmd_vol attach a
+    log "waiting for full ISRs before the load"
+    wait_isr_full
     log "write load with verification on $VM_A; $VM_B's node stops after 10 s, restarts 20 s later"
     ENV_VARS="DEV=/dev/ublkb1" run_detached "$VM_A" "$SCRIPTS/guest/write-load.sh" &
     load_pid=$!
@@ -1105,6 +1109,10 @@ csi_failover() {
     done
     log "$(since "$start"): $lost's replicas of $vol are back in every ISR"
     log "OK: $lost lost without warning; the pod came back on $other with its data; $lost rejoined"
+    [[ ${KEEP:-0} == 1 ]] || {
+        kubectl_w delete namespace flaminio-test --wait=true >/dev/null
+        log "test namespace and volume deleted"
+    }
 }
 
 usage() {
