@@ -3,6 +3,9 @@
 // The metadata service is the system of record for nodes, volumes, chunk placement, ISRs and
 // epochs. It is consulted on attach, failover and ISR changes, never on normal reads and
 // writes.
+//
+// Callers authenticate with mutual TLS. Their identity is the SPIFFE URI in their certificate
+// (pkg/pki), and each method states who may call it.
 syntax = "proto3";
 
 package flaminio.meta.v1;
@@ -10,22 +13,29 @@ package flaminio.meta.v1;
 option go_package = "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1;metav1";
 
 service MetadataService {
-  // Registers a node, or updates its address and failure domain.
+  // Registers a node, or updates its address and failure domain. Caller: that node, or an
+  // administrator.
   rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
   // Renews a node's liveness record. Liveness only decides when to fail over; it never grants
-  // permission to serve I/O (ARCHITECTURE §8.5).
+  // permission to serve I/O (ARCHITECTURE §8.5). Caller: that node, or an administrator.
   rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse);
+  // Caller: any authenticated identity.
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
 
-  // Creates a volume and places its chunks. Every replica starts in the ISR.
+  // Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
+  // administrator.
   rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+  // Caller: any authenticated identity.
   rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
-  // Deletes a volume that is not attached.
+  // Deletes a volume. The caller makes sure that no target serves it any more. Caller: an
+  // administrator.
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
 
-  // Makes a node the volume's target under a new epoch.
+  // Makes a node the volume's target under a new epoch, and issues its capability token.
+  // Caller: an administrator (the CSI controller, the failover controller).
   rpc Attach(AttachRequest) returns (AttachResponse);
   // Changes ISRs atomically, only under the current epoch and the expected ISR versions.
+  // Caller: the data plane of the volume's current target node.
   rpc ChangeIsr(ChangeIsrRequest) returns (ChangeIsrResponse);
 }
 
@@ -114,6 +124,9 @@ message AttachRequest {
 
 message AttachResponse {
   Volume volume = 1;
+  // Capability token for the new target: volume, epoch and node, signed by the metadata
+  // service. Replicas accept the target's I/O only with it (ARCHITECTURE §8.4, §15.2).
+  bytes token = 2;
 }
 
 message IsrChange {

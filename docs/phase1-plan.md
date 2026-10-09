@@ -26,8 +26,8 @@ machine into real I/O.
 |---|---|---|---|
 | 1 ✅ | **Replication protocol core + deterministic simulator**: crate `flaminio-repl`. Target, replica and metadata state machines without I/O, covering: per-chunk ISR; epochs and fencing; replica-confirmed leases; shrinking the ISR before acknowledging; resync and rejoin; reconciling in-flight writes after failover. A seeded simulator injects crashes, partitions, delays, lost metadata and clock drift, and a linearizability checker judges every run. Protocol spec: [replication-protocol.md](replication-protocol.md) | Any machine | Thousands of seeds pass; each safety rule, deliberately broken, is caught by the simulator |
 | 2 ✅ | **Metadata service** (Go, `meta/`): the domain service over a dedicated etcd. It handles nodes, disks, volumes, placement, epoch issuance, conditional ISR transitions and node liveness, over gRPC. Its ISR and epoch rules are checked against the same transition table as step 1 | Any machine, then a 3-member etcd in the lab | Unit tests against embedded etcd; lab etcd on fl-a, fl-b and a small third VM (fl-w, a witness) |
-| 3 | **Identity and mTLS**: a development CA; mTLS on replication and on control gRPC; capability tokens signed by the metadata service and checked by replicas | Lab | The replica refuses unauthenticated peers and stale tokens. Read results unchanged (reads stay local) |
-| 4 | **Data plane on the protocol core**: `flaminio-io` hosts many volumes and chunk replicas; the target uses placement and ISR from the metadata service and the step-1 state machine; one heartbeat per node pair | Lab | The MVP's fault test passes with the ISR shrink and expand going through the metadata service |
+| 3 ✅ | **Identity and mTLS for the control plane**: a development CA; mTLS on etcd and the metadata service, with per-method authorization; capability tokens signed by the metadata service. Replication TLS and token checks in the replica move to step 4, which replaces the MVP's replication transport | Lab | Unauthenticated and unauthorized callers are refused; tokens verify |
+| 4 | **Data plane on the protocol core**:<br>• `flaminio-io` hosts many volumes and chunk replicas;<br>• the target uses placement and ISR from the metadata service, and the step-1 state machine;<br>• one heartbeat per node pair;<br>• replication over mutual TLS (step-3 identities), with the replica checking capability tokens | Lab | • The MVP's fault test passes, with ISR shrink and expand going through the metadata service.<br>• The replica refuses unauthenticated peers and stale tokens.<br>• Read results unchanged (reads stay local) |
 | 5 | **Failover in the lab**: attach on the other VM with an epoch bump, fencing and reconciliation; partition tests (the old target must neither write nor read stale data) | Lab | Scripted failover and partition tests pass, and the data is verified |
 | 6 | **Node agent**: device discovery, the claim policy (never claim a device with a signature), format, drain by moving chunk replicas | Lab | Adding and draining a disk while fio runs, with the data verified |
 | 7 | **Kubernetes**: k3s on the lab VMs, the CSI driver (provision, attach, stage, publish; block and filesystem), placement controller, failover controller | Lab | A pod with a PVC runs fio. Killing its node moves it to the other node with its data intact |
@@ -71,6 +71,26 @@ The checks:
 
 Not yet: TLS and authentication (step 3), and a watch API for targets (not needed while each
 target is the only writer of its volume's ISRs).
+
+## Step 3 result
+
+- **`pkg/pki`:** SPIFFE-style workload identities, a CA that signs certificate requests (keys
+  never travel), and TLS 1.3 configurations that require client certificates.
+- **`pkg/captoken`:** Ed25519 capability tokens `{volume, epoch, node}`, with vectors in
+  `pkg/captoken/testdata` for the Rust verifier.
+- **`control/cmd/flaminio-ca`:** the lab's CA tool.
+- **Metadata service:**
+  - mutual TLS, with authorization per method:
+    - administrators create, delete and attach;
+    - a node registers and heartbeats only itself;
+    - only the current target's data plane changes its volume's ISR;
+  - tokens issued on attach.
+- **Checks:**
+  - an authorization test over real mTLS covers every rule, plus missing certificates and
+    certificates from another CA;
+  - a token test refuses every single-bit change and every truncation;
+  - `make meta-smoke` in the lab, with etcd also on TLS 1.3 with client certificates, from a
+    separate CA.
 
 ## Lab changes this phase needs
 

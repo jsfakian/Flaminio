@@ -455,13 +455,13 @@ PersistentKeepalive = 25
 
 etcd_cluster() {
     local vm parts=()
-    for vm in $(vms_of cluster); do parts+=("$vm=http://$(vmvar "$vm" WG):2380"); done
+    for vm in $(vms_of cluster); do parts+=("$vm=https://$(vmvar "$vm" WG):2380"); done
     (IFS=,; echo "${parts[*]}")
 }
 
 etcd_endpoints() {
     local vm parts=()
-    for vm in $(vms_of cluster); do parts+=("http://$(vmvar "$vm" WG):2379"); done
+    for vm in $(vms_of cluster); do parts+=("https://$(vmvar "$vm" WG):2379"); done
     (IFS=,; echo "${parts[*]}")
 }
 
@@ -499,7 +499,8 @@ cmd_meta() {
         case "$action" in
             up)
                 vssh "$vm" "cat > ~/flaminio-meta" <"$bin"
-                ENV_VARS="LISTEN=$(vmvar "$vm" WG):$META_PORT ETCD=$(etcd_endpoints)" run_on_vm "$vm" "$SCRIPTS/guest/meta.sh" up
+                ENV_VARS="LISTEN=$(vmvar "$vm" WG):$META_PORT ETCD=$(etcd_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN" \
+                    run_on_vm "$vm" "$SCRIPTS/guest/meta.sh" up
                 ;;
             down | status) run_on_vm "$vm" "$SCRIPTS/guest/meta.sh" "$action" ;;
             *) die "usage: meta up|down|status [VM]" ;;
@@ -507,11 +508,71 @@ cmd_meta() {
     done
 }
 
-# Runs flaminio-meta's client in VM $1 against the metadata service on VM $2.
+# Runs flaminio-meta's client in VM $1 against the metadata service on VM $2, as the identity
+# AS (default: the lab administrator, whose key is on fl-a).
 metactl() {
-    local vm=$1 server=$2
+    local vm=$1 server=$2 as=${AS:-admin}
     shift 2
-    vssh "$vm" "/usr/local/bin/flaminio-meta --server $(vmvar "$server" WG):$META_PORT $(printf '%q ' "$@")"
+    local p=/etc/flaminio/pki
+    vssh "$vm" "sudo /usr/local/bin/flaminio-meta --server $(vmvar "$server" WG):$META_PORT \
+        --cert $p/$as.crt --key $p/$as.key --ca $p/ca.crt $(printf '%q ' "$@")"
+}
+
+ca_tool() {
+    local bin="$LOCAL_STATE_DIR/bin/flaminio-ca"
+    if [[ ! -x $bin || -n $(find "$REPO_ROOT/control/cmd/flaminio-ca" "$REPO_ROOT/pkg/pki" -newer "$bin" -name '*.go' 2>/dev/null) ]]; then
+        (cd "$REPO_ROOT" && go build -o "$bin" ./control/cmd/flaminio-ca)
+    fi
+    "$bin" "$@"
+}
+
+# Issues identity NAME on VM: the VM makes the key and a CSR, CA_DIR signs it.
+#   issue VM NAME CA_DIR SPIFFE_ID FLAGS...   (FLAGS: --server, --client, --ip ...)
+issue() {
+    local vm=$1 name=$2 ca=$3 id=$4 csr cert
+    shift 4
+    csr=$(run_on_vm "$vm" "$SCRIPTS/guest/pki.sh" csr "$name")
+    cert=$(ca_tool sign "$ca" --id "$id" --days "$CERT_DAYS" "$@" <<<"$csr")
+    ENV_VARS="CERT=$(base64 <<<"$cert" | tr -d '\n')" run_on_vm "$vm" "$SCRIPTS/guest/pki.sh" install "$name"
+    log "$vm: $name.crt for $id"
+}
+
+put_file() {
+    local vm=$1 name=$2 file=$3 mode=${4:-644}
+    ENV_VARS="MODE=$mode DATA=$(base64 <"$file" | tr -d '\n')" run_on_vm "$vm" "$SCRIPTS/guest/pki.sh" file "$name"
+}
+
+# pki init|issue: the lab's two CAs and token key (on this workstation), and every identity of
+# every VM. The workload CA signs identities (meta, io, admin); the etcd CA signs only etcd
+# members and the metadata service's etcd clients.
+cmd_pki() {
+    local dir="$LOCAL_STATE_DIR/pki" vm ip
+    case "${1:-}" in
+        init)
+            [[ -f $dir/flaminio/ca.crt ]] || ca_tool init "$dir/flaminio" "Flaminio lab workload CA"
+            [[ -f $dir/etcd/ca.crt ]] || ca_tool init "$dir/etcd" "Flaminio lab etcd CA"
+            [[ -f $dir/token.key ]] || ca_tool token-key "$dir/token.key"
+            log "CAs and token key in $dir"
+            ;;
+        issue)
+            [[ -f $dir/flaminio/ca.crt ]] || cmd_pki init
+            for vm in $(vms_of "${2:-cluster}"); do
+                ip=$(vmvar "$vm" WG)
+                put_file "$vm" ca.crt "$dir/flaminio/ca.crt"
+                put_file "$vm" etcd-ca.crt "$dir/etcd/ca.crt"
+                put_file "$vm" token.key "$dir/token.key" 600
+                put_file "$vm" token.pub "$dir/token.key.pub"
+                issue "$vm" etcd "$dir/etcd" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/etcd" --server --client --ip "$ip"
+                issue "$vm" meta-etcd "$dir/etcd" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/meta" --client
+                issue "$vm" meta "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/meta" --server --ip "$ip"
+                issue "$vm" io "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/io" --server --client --ip "$ip"
+            done
+            if [[ " $(vms_of "${2:-cluster}") " == *" $VM_A "* ]]; then
+                issue "$VM_A" admin "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/admin/lab" --client
+            fi
+            ;;
+        *) die "usage: pki init|issue [VM]" ;;
+    esac
 }
 
 # End-to-end check of the metadata service: nodes, a volume, attach and ISR, then the loss of
@@ -531,7 +592,7 @@ cmd_meta_smoke() {
     if jq -e --arg w "$VM_W" '[.volume.chunks[].replicas[]] | index($w)' <<<"$out" >/dev/null; then
         die "a replica was placed on the witness $VM_W"
     fi
-    out=$(metactl "$VM_B" "$VM_B" attach "$vol" "$VM_B")
+    out=$(metactl "$VM_A" "$VM_B" attach "$vol" "$VM_B")
     log "attached through $VM_B's service: epoch $(jq -r .volume.epoch <<<"$out"), target $(jq -r .volume.target <<<"$out")"
 
     log "stopping etcd on $VM_W: 2 of 3 members left, quorum holds"
@@ -555,6 +616,25 @@ cmd_meta_smoke() {
     [[ $(jq -r .volume.epoch <<<"$out") == 2 ]] || die "unexpected state after recovery: $out"
     metactl "$VM_A" "$VM_A" delete "$vol" >/dev/null
     log "OK: metadata survived the loss of one member, refused without quorum, recovered (epoch 2)"
+
+    log "refusals:"
+    if vssh "$VM_A" "/usr/local/bin/flaminio-meta --server $VM_A_WG:$META_PORT nodes" >/dev/null 2>&1; then
+        die "a plain-text client was served"
+    fi
+    log "  plain-text client: refused"
+    if AS=io metactl "$VM_A" "$VM_A" create "$vol-x" 1G 2 1 >/dev/null 2>&1; then
+        die "a node identity created a volume"
+    fi
+    log "  node identity creating a volume: refused"
+    if vssh "$VM_A" "sudo curl -sf --cacert /etc/flaminio/pki/etcd-ca.crt https://$VM_B_WG:2379/health" >/dev/null 2>&1; then
+        die "etcd answered a client without a certificate"
+    fi
+    log "  etcd without a client certificate: refused"
+    if vssh "$VM_A" "sudo curl -sf --cacert /etc/flaminio/pki/etcd-ca.crt --cert /etc/flaminio/pki/io.crt \
+            --key /etc/flaminio/pki/io.key https://$VM_B_WG:2379/health" >/dev/null 2>&1; then
+        die "etcd answered a node's workload certificate"
+    fi
+    log "  etcd with a node's workload certificate: refused"
 }
 
 usage() {
@@ -588,7 +668,8 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   mesh ACTION  WireGuard overlay between a, b and w: up | down | status | check
   etcd ACTION [VM]  metadata etcd (default: all three): up | down | status | wipe (CONFIRM=yes)
   meta ACTION [VM]  metadata service (default: all three): up | down | status
-  meta-smoke   end-to-end metadata check, including the loss of etcd members
+  meta-smoke   end-to-end metadata check: etcd member loss, and refusal of unauthenticated callers
+  pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)
   ssh|console  interactive shell or serial console (default: a)
   exec VM CMD  run a command in a VM
 USAGE
@@ -626,6 +707,7 @@ case "$cmd" in
     etcd) cmd_etcd "$@" ;;
     meta) cmd_meta "$@" ;;
     meta-smoke) cmd_meta_smoke ;;
+    pki) cmd_pki "$@" ;;
     ssh) cmd_ssh "$@" ;;
     console) cmd_console "$@" ;;
     exec) cmd_exec "$@" ;;

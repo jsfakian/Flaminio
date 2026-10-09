@@ -28,6 +28,7 @@ import (
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/domain"
 	"github.com/flaminio/flaminio/meta/kv"
+	"github.com/flaminio/flaminio/pkg/captoken"
 )
 
 const (
@@ -59,13 +60,16 @@ func aliveKey(id string) string           { return prefix + "alive/" + id }
 // Service is the metadata service.
 type Service struct {
 	metav1.UnimplementedMetadataServiceServer
-	kv  kv.KV
-	ttl time.Duration
+	kv   kv.KV
+	opts Options
 }
 
-// New returns a service on store. Nodes are considered alive for ttl after a heartbeat.
-func New(store kv.KV, ttl time.Duration) *Service {
-	return &Service{kv: store, ttl: ttl}
+// New returns a service on store.
+func New(store kv.KV, opts Options) *Service {
+	if opts.TTL == 0 {
+		opts.TTL = 10 * time.Second
+	}
+	return &Service{kv: store, opts: opts}
 }
 
 func errStatus(err error) error {
@@ -111,10 +115,10 @@ func (s *Service) NodeHeartbeat(ctx context.Context, r *metav1.NodeHeartbeatRequ
 		}
 		return nil, errStatus(err)
 	}
-	if err := s.kv.PutTTL(ctx, aliveKey(r.GetNode()), []byte("1"), s.ttl); err != nil {
+	if err := s.kv.PutTTL(ctx, aliveKey(r.GetNode()), []byte("1"), s.opts.TTL); err != nil {
 		return nil, errStatus(err)
 	}
-	return &metav1.NodeHeartbeatResponse{TtlSeconds: uint32(s.ttl / time.Second)}, nil
+	return &metav1.NodeHeartbeatResponse{TtlSeconds: uint32(s.opts.TTL / time.Second)}, nil
 }
 
 func (s *Service) ListNodes(ctx context.Context, _ *metav1.ListNodesRequest) (*metav1.ListNodesResponse, error) {
@@ -374,7 +378,16 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 			return nil, errStatus(err)
 		}
 		v.Header = h
-		return &metav1.AttachResponse{Volume: volumePB(v)}, nil
+		out := &metav1.AttachResponse{Volume: volumePB(v)}
+		if s.opts.TokenKey != nil {
+			out.Token, err = captoken.Sign(s.opts.TokenKey, captoken.Claims{
+				Volume: h.ID, Epoch: h.Epoch, Node: h.Target, IssuedAt: time.Now().Unix(),
+			})
+			if err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
+		}
+		return out, nil
 	}
 	return nil, status.Error(codes.Aborted, "too much contention")
 }
@@ -421,6 +434,12 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 				out.Chunks = append(out.Chunks, chunkPB(c))
 			}
 			return out
+		}
+		// Only the current target may change ISRs. Another caller gets the current state,
+		// which tells a deposed target that it has been deposed.
+		caller, authenticated := callerOf(ctx)
+		if authenticated && caller.Node != h.Target {
+			return reply(false), nil
 		}
 		if !domain.CheckIsrChange(&h, named, r.GetEpoch(), changes) {
 			return reply(false), nil

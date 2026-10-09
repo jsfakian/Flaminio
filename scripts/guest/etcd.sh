@@ -3,11 +3,14 @@
 # Usage: etcd.sh install | up | down | status | wipe
 #   install  ETCD_VERSION: official release, checked against its published SHA-256 sums
 #   up       NAME, IP (overlay address), CLUSTER (name=http://ip:2380,...): start the member
-# Not yet: TLS between members and clients (phase 1 step 3). The overlay is encrypted, and the
-# ports listen on the overlay address only.
+# TLS 1.3 everywhere, with client certificates required from peers and clients alike. The
+# certificates come from the lab's etcd CA (lab.sh pki issue), which signs only etcd members
+# and metadata-service instances: nothing else can talk to etcd.
 
 unit=/etc/systemd/system/flaminio-etcd.service
 data=/var/lib/flaminio-etcd
+pki=/etc/flaminio/pki
+tls=(--cacert "$pki/etcd-ca.crt" --cert "$pki/etcd.crt" --key "$pki/etcd.key")
 
 case "${1:-status}" in
     install)
@@ -40,9 +43,12 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/etcd --name $NAME --data-dir $data \\
-  --listen-peer-urls http://$IP:2380 --initial-advertise-peer-urls http://$IP:2380 \\
-  --listen-client-urls http://$IP:2379,http://127.0.0.1:2379 --advertise-client-urls http://$IP:2379 \\
+  --listen-peer-urls https://$IP:2380 --initial-advertise-peer-urls https://$IP:2380 \\
+  --listen-client-urls https://$IP:2379 --advertise-client-urls https://$IP:2379 \\
   --initial-cluster $CLUSTER --initial-cluster-state new --initial-cluster-token flaminio-lab \\
+  --cert-file $pki/etcd.crt --key-file $pki/etcd.key --trusted-ca-file $pki/etcd-ca.crt --client-cert-auth \\
+  --peer-cert-file $pki/etcd.crt --peer-key-file $pki/etcd.key --peer-trusted-ca-file $pki/etcd-ca.crt \\
+  --peer-client-cert-auth --tls-min-version TLS1.3 \\
   --log-level warn
 Restart=on-failure
 RestartSec=2
@@ -61,7 +67,8 @@ UNIT
         ;;
     status)
         if systemctl is-active --quiet flaminio-etcd; then
-            ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 --command-timeout=3s endpoint status -w table 2>&1 | sed 's/^/  /' || true
+            ip=$(ip -4 -o addr show wg0 | awk '{print $4}' | cut -d/ -f1)
+            sudo etcdctl "${tls[@]}" --endpoints="https://$ip:2379" --command-timeout=3s endpoint status -w table 2>&1 | sed 's/^/  /' || true
         else
             echo "  flaminio-etcd: $(systemctl is-active flaminio-etcd 2>/dev/null)"
         fi

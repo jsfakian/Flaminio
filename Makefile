@@ -55,14 +55,14 @@ sim: ## Replication-protocol simulation: SEEDS random runs, then every injected 
 lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 	$(GO) vet ./...
-	@test -z "$$(gofmt -l api meta)" || { echo "gofmt needed:"; gofmt -l api meta; exit 1; }
+	@test -z "$$(gofmt -l api meta pkg control)" || { echo "gofmt needed:"; gofmt -l api meta pkg control; exit 1; }
 	$(BUF) lint
 	@if command -v shellcheck >/dev/null; then shellcheck -x scripts/*.sh scripts/host/*.sh scripts/guest/*.sh && echo "shellcheck: ok"; \
 	 else echo "shellcheck not installed (brew install shellcheck); skipped"; fi
 
 fmt: ## Format Rust and Go code
 	cd $(DATAPLANE) && $(CARGO) fmt
-	gofmt -w meta
+	gofmt -w meta pkg control
 
 proto: ## Regenerate Go code from api/proto (buf and plugins run at pinned versions)
 	$(BUF) lint
@@ -174,14 +174,18 @@ net-check: ## End-to-end check: fl-a -> rhythm-backup -> fl-b
 
 ##@ Lab: metadata (phase 1; VM=w is the witness, VM=cluster all three)
 
-.PHONY: mesh-up mesh-down mesh-check etcd-up etcd-down etcd-status meta-up meta-down meta-status meta-smoke cluster-up
-cluster-up: ## fl-w, overlay, etcd and the metadata service on a, b and w
+.PHONY: pki-issue mesh-up mesh-down mesh-check etcd-up etcd-down etcd-status meta-up meta-down meta-status meta-smoke cluster-up
+cluster-up: ## fl-w, overlay, identities, etcd and the metadata service on a, b and w
 	$(LAB) create w
 	$(LAB) provision w
 	$(LAB) net-setup
 	$(LAB) mesh up
+	$(LAB) pki issue
 	$(LAB) etcd up
 	$(LAB) meta up
+
+pki-issue: ## (Re)issue every VM's certificates; keys are made in the VMs (CAs in .lab/pki)
+	$(LAB) pki issue $(if $(filter-out all,$(VM)),$(VM),cluster)
 
 mesh-up: ## WireGuard overlay between fl-a, fl-b and fl-w (10.77.0.0/24)
 	$(LAB) mesh up

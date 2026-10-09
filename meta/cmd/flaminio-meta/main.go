@@ -9,13 +9,20 @@
 //	flaminio-meta [--server host:7400] attach <volume> <node>
 //	flaminio-meta [--server host:7400] delete <volume>
 //
-// Sizes take K, M, G and T suffixes (powers of 1024). Not yet: TLS and authentication
-// (phase 1 step 3); run it only on a trusted network.
+// Sizes take K, M, G and T suffixes (powers of 1024).
+//
+// The server requires mutual TLS: --tls-cert/--tls-key are its certificate, --tls-ca verifies
+// callers, whose SPIFFE IDs must be in --trust-domain. --token-key signs capability tokens.
+// --etcd-cert/--etcd-key/--etcd-ca authenticate it to etcd. --insecure turns all of that off,
+// for development only. The client takes --cert, --key and --ca.
 package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -30,6 +37,7 @@ import (
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -37,6 +45,7 @@ import (
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/service"
+	"github.com/flaminio/flaminio/pkg/pki"
 )
 
 func main() {
@@ -56,15 +65,46 @@ func main() {
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	listen := fs.String("listen", ":7400", "gRPC listen address")
-	endpoints := fs.String("etcd", "http://127.0.0.1:2379", "comma-separated etcd endpoints")
+	endpoints := fs.String("etcd", "https://127.0.0.1:2379", "comma-separated etcd endpoints")
 	ttl := fs.Duration("liveness-ttl", 10*time.Second, "how long a node stays alive after a heartbeat")
+	var tlsFiles, etcdFiles pki.Files
+	fs.StringVar(&tlsFiles.Cert, "tls-cert", "", "server certificate")
+	fs.StringVar(&tlsFiles.Key, "tls-key", "", "server key")
+	fs.StringVar(&tlsFiles.CA, "tls-ca", "", "CA bundle for client certificates")
+	trustDomain := fs.String("trust-domain", "", "trust domain of callers' SPIFFE IDs")
+	tokenKey := fs.String("token-key", "", "Ed25519 key (PKCS #8 PEM) that signs capability tokens")
+	fs.StringVar(&etcdFiles.Cert, "etcd-cert", "", "client certificate for etcd")
+	fs.StringVar(&etcdFiles.Key, "etcd-key", "", "client key for etcd")
+	fs.StringVar(&etcdFiles.CA, "etcd-ca", "", "CA bundle for etcd's certificates")
+	insecureMode := fs.Bool("insecure", false, "no TLS, no authentication, no tokens: development only")
 	_ = fs.Parse(args)
 
-	c, err := clientv3.New(clientv3.Config{
+	opts := service.Options{TTL: *ttl}
+	var serverOpts []grpc.ServerOption
+	etcdCfg := clientv3.Config{
 		Endpoints:   strings.Split(*endpoints, ","),
 		DialTimeout: 5 * time.Second,
 		Logger:      zap.NewNop(),
-	})
+	}
+	if !*insecureMode {
+		if *trustDomain == "" || *tokenKey == "" {
+			return fmt.Errorf("--trust-domain and --token-key are required (or --insecure)")
+		}
+		scfg, err := tlsFiles.ServerConfig()
+		if err != nil {
+			return fmt.Errorf("server TLS: %w", err)
+		}
+		if etcdCfg.TLS, err = etcdFiles.ClientConfig(); err != nil {
+			return fmt.Errorf("etcd TLS: %w", err)
+		}
+		if opts.TokenKey, err = loadEd25519(*tokenKey); err != nil {
+			return fmt.Errorf("token key: %w", err)
+		}
+		opts.TrustDomain = *trustDomain
+		serverOpts = append(serverOpts, grpc.Creds(credentials.NewTLS(scfg)))
+	}
+
+	c, err := clientv3.New(etcdCfg)
 	if err != nil {
 		return err
 	}
@@ -75,16 +115,38 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	srv := grpc.NewServer()
-	metav1.RegisterMetadataServiceServer(srv, service.New(store, *ttl))
+	svc := service.New(store, opts)
+	srv := grpc.NewServer(append(serverOpts, grpc.UnaryInterceptor(svc.Authorize))...)
+	metav1.RegisterMetadataServiceServer(srv, svc)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
 		srv.GracefulStop()
 	}()
-	slog.Info("flaminio-meta serving", "listen", lis.Addr().String(), "etcd", *endpoints)
+	slog.Info("flaminio-meta serving", "listen", lis.Addr().String(), "etcd", *endpoints,
+		"tls", !*insecureMode, "trust_domain", *trustDomain)
 	return srv.Serve(lis)
+}
+
+func loadEd25519(path string) (ed25519.PrivateKey, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, fmt.Errorf("%s: no PEM block", path)
+	}
+	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	key, ok := k.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("%s: not an Ed25519 key", path)
+	}
+	return key, nil
 }
 
 func parseSize(s string) (uint64, error) {
@@ -118,12 +180,24 @@ func argOr(args []string, i int, def string) string {
 func client(args []string) error {
 	fs := flag.NewFlagSet("flaminio-meta", flag.ExitOnError)
 	server := fs.String("server", "127.0.0.1:7400", "metadata service address")
+	var files pki.Files
+	fs.StringVar(&files.Cert, "cert", "", "client certificate (none: plain-text connection)")
+	fs.StringVar(&files.Key, "key", "", "client key")
+	fs.StringVar(&files.CA, "ca", "", "CA bundle for the server's certificate")
 	_ = fs.Parse(args)
 	args = fs.Args()
 	if len(args) == 0 {
 		return fmt.Errorf("usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete ...")
 	}
-	conn, err := grpc.NewClient(*server, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := insecure.NewCredentials()
+	if files.Cert != "" {
+		cfg, err := files.ClientConfig()
+		if err != nil {
+			return err
+		}
+		creds = credentials.NewTLS(cfg)
+	}
+	conn, err := grpc.NewClient(*server, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return err
 	}

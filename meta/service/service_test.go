@@ -24,11 +24,11 @@ const mib = 1 << 20
 
 // stores runs a test against the in-memory store and against a real etcd.
 func stores(t *testing.T, f func(t *testing.T, s *Service)) {
-	t.Run("mem", func(t *testing.T) { f(t, New(kv.NewMem(nil), 10*time.Second)) })
+	t.Run("mem", func(t *testing.T) { f(t, New(kv.NewMem(nil), Options{})) })
 	t.Run("etcd", func(t *testing.T) {
 		e := kvtest.Etcd(t)
 		defer e.Close()
-		f(t, New(e, 10*time.Second))
+		f(t, New(e, Options{}))
 	})
 }
 
@@ -145,7 +145,7 @@ func TestVolumeLifecycle(t *testing.T) {
 
 func TestLiveness(t *testing.T) {
 	now := time.Unix(1000, 0)
-	s := New(kv.NewMem(func() time.Time { return now }), 10*time.Second)
+	s := New(kv.NewMem(func() time.Time { return now }), Options{TTL: 10 * time.Second})
 	addNodes(t, s, "a", "b")
 	ctx := context.Background()
 	now = now.Add(6 * time.Second)
@@ -164,7 +164,7 @@ func TestLiveness(t *testing.T) {
 }
 
 func TestWitnessHoldsNoData(t *testing.T) {
-	s := New(kv.NewMem(nil), 10*time.Second)
+	s := New(kv.NewMem(nil), Options{})
 	ctx := context.Background()
 	addNodes(t, s, "a", "b")
 	w := &metav1.Node{Id: "w", Address: "w:7410", Labels: map[string]string{WitnessLabel: ""}}
@@ -277,7 +277,7 @@ func TestConcurrentTargets(t *testing.T) {
 func TestGRPC(t *testing.T) {
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	metav1.RegisterMetadataServiceServer(srv, New(kv.NewMem(nil), 10*time.Second))
+	metav1.RegisterMetadataServiceServer(srv, New(kv.NewMem(nil), Options{}))
 	go func() { _ = srv.Serve(lis) }()
 	defer srv.Stop()
 	conn, err := grpc.NewClient("passthrough:///bufnet",

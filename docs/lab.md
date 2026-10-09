@@ -59,6 +59,7 @@ All of it is idempotent, and everything Flaminio-specific is named or tagged `fl
 | `vm-create` | Volumes `fl-*-root.qcow2`, `fl-*-data.img`, `fl-*-seed.iso` and the cached `flaminio-resolute-base.qcow2` in the `default` pool. A DHCP reservation in the `default` network. The domain itself. `~/flaminio-lab/` | `make vm-destroy CONFIRM=yes` (keeps the base image) |
 | `net-setup` | `nat PREROUTING` DNAT rules with matching `FORWARD` accept rules, each restricted to the other server's address:<br>• rhythm-backup: TCP 7410 to fl-b (replication) and UDP 51822 to fl-b's WireGuard port<br>• rhythm: UDP 51821 and 51823 to fl-a and fl-w | `make net-teardown` |
 | `mesh-up` | In the VMs: `wireguard-tools`, `/etc/wireguard/wg0.{key,conf}`, `wg-quick@wg0` enabled | `make mesh-down` |
+| `pki-issue` | In the VMs: keys and certificates in `/etc/flaminio/pki` (root only). On the workstation: the two lab CAs and the token key in `.lab/pki` | Delete the directories |
 | `etcd-up` | In the VMs: etcd in `/usr/local/bin`, `flaminio-etcd.service`, data in `/var/lib/flaminio-etcd` | `make etcd-down`; `lab.sh etcd wipe cluster` with `CONFIRM=yes` deletes the data |
 | `meta-up` | In the VMs: `/usr/local/bin/flaminio-meta`, `flaminio-meta.service` | `make meta-down` |
 
@@ -88,15 +89,28 @@ rule, then adds them again. The rules are **not persistent**: after a server reb
     encrypted.
 
   Each private key is generated in its VM and never leaves it.
+- **Identities** (`make pki-issue`). Two lab CAs live on the workstation in `.lab/pki`:
+  - a **workload CA** for the metadata service, the data planes and the administrator;
+  - an **etcd CA** that signs only etcd members and the metadata service's etcd clients. A
+    node's workload certificate can therefore never talk to etcd.
+
+  Each VM makes its own keys (ECDSA P-256) and sends only certificate requests. Identities are
+  SPIFFE IDs in the trust domain `flaminio-lab` (for example
+  `spiffe://flaminio-lab/flaminio/node/fl-b/io`). Certificates last 30 days (`CERT_DAYS`); in a
+  cluster the operator will issue 24-hour certificates and rotate them. The lab administrator's
+  key is on fl-a. `.lab/pki` also holds the Ed25519 key that signs capability tokens.
 - **etcd** 3.7.2: the official release, checked against its published SHA-256 sums. It runs as
-  one member per VM, listening on the overlay address only. Not yet TLS between members or
-  clients: that is phase 1 step 3. The overlay already encrypts the traffic.
-- **flaminio-meta** runs on every VM against all three etcd members. It is a sandboxed systemd
-  service with a dynamic, unprivileged user. It is built on the workstation
-  (`GOOS=linux`) and copied in by `make meta-up`.
+  one member per VM, on the overlay address only, with TLS 1.3 and client certificates
+  required from peers and clients.
+- **flaminio-meta** runs on every VM against all three etcd members:
+  - it requires mutual TLS and checks each method's caller rule (`meta.proto`);
+  - `Attach` issues signed capability tokens;
+  - it is a sandboxed systemd service with a dynamic, unprivileged user, and gets its keys as
+    systemd credentials;
+  - it is built on the workstation (`GOOS=linux`) and copied in by `make meta-up`.
 
 ```bash
-make cluster-up      # fl-w, port forwards, overlay, etcd and flaminio-meta on all three
+make cluster-up      # fl-w, port forwards, overlay, identities, etcd and flaminio-meta
 make mesh-check      # ping every VM pair over the overlay
 make etcd-status     # one line per member: leader, raft term and index
 make meta-smoke      # register nodes, create and attach a volume, lose one then two etcd members
@@ -109,6 +123,11 @@ make meta-smoke      # register nodes, create and attach a volume, lose one then
 4. Stops etcd on fl-w and attaches again: it works (epoch 2).
 5. Stops etcd on fl-b as well: the service refuses, without quorum.
 6. Restarts both members: the state is intact (epoch 2).
+7. Checks refusals:
+   - a plain-text client;
+   - a node identity creating a volume;
+   - etcd without a client certificate;
+   - etcd with a node's workload certificate.
 
 ## Long-running jobs
 
@@ -159,8 +178,9 @@ corrupt without a kernel bug.
 - VMs accept SSH key logins only (no passwords). The `ubuntu` user has passwordless sudo inside
   the VM.
 - The VMs sit on each host's NAT network, so nothing else on the campus network can reach them.
-- Overlay traffic between the VMs (etcd, the metadata service) is encrypted by WireGuard. The
-  forwarded UDP ports accept only the other server's address.
+- Overlay traffic between the VMs is encrypted by WireGuard, and etcd and the metadata
+  service add mutual TLS on top. The forwarded UDP ports accept only the other server's
+  address.
 - Replication traffic in the MVP is **not yet encrypted**. mTLS comes with the replication
   protocol (ARCHITECTURE §15.2). Until then, don't put real data in the lab.
 
