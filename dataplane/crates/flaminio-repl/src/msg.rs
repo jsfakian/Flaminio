@@ -38,6 +38,10 @@ pub enum Request<P> {
     /// Starts a resync filter for the chunk: from now on, remember which blocks got live
     /// writes, and skip copies for them.
     BeginResync { chunk: ChunkIdx },
+    /// Every uncertain-set entry of the chunk older than `below` is settled, and so is any
+    /// uncertainty left from a restart: the ISR agrees on those blocks (sent once the chunk is
+    /// reconciled, and to a replica that joins the ISR). Reply: [`Response::Ok`].
+    Settle { chunk: ChunkIdx, below: Version },
     /// A resync copy. Applied to the blocks that got no live write since `BeginResync`.
     Copy {
         chunk: ChunkIdx,

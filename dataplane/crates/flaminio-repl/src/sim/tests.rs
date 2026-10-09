@@ -223,6 +223,12 @@ mutation!(
     target(|b| b.prune_reconcile = true),
     60_000
 );
+// Rare like pruning: a target must die after settling and before its repairs reach a replica.
+mutation!(
+    catches_early_settle,
+    target(|b| b.early_settle = true),
+    60_000
+);
 mutation!(
     catches_dirty_set_missing_inflight,
     target(|b| b.no_dirty_inflight = true)

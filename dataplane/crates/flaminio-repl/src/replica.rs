@@ -195,6 +195,14 @@ impl ReplicaCore {
                     data: data.clone(),
                 }
             }
+            Request::Settle { chunk, below } if v.chunks.contains_key(chunk) => {
+                let c = v.chunks.get_mut(chunk).expect("chunk");
+                c.uncertain.retain(|(_, w)| w >= below);
+                if c.restarted_at.is_some_and(|e| e < below.epoch) {
+                    c.restarted_at = None;
+                }
+                Action::Reply(Response::Ok)
+            }
             Request::BeginResync { chunk } if v.chunks.contains_key(chunk) => {
                 v.filters.insert(*chunk, ExtentSet::new());
                 Action::Reply(Response::Ok)

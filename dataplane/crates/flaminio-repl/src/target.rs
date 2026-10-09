@@ -72,6 +72,22 @@ pub struct Bugs {
     pub prune_reconcile: bool,
     /// The dirty set of a removed member omits the writes in flight at its removal.
     pub no_dirty_inflight: bool,
+    /// Settle uncertain sets as soon as reconciliation starts, not once it is done.
+    pub early_settle: bool,
+}
+
+/// Something worth logging that the target did on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// A session failed, and why.
+    SessionFailed { node: NodeId, reason: &'static str },
+}
+
+/// How much of the target's state an event may have changed.
+enum Scope {
+    All,
+    Chunk(usize),
+    Queue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,6 +206,7 @@ enum ReqKind {
         chunk: ChunkIdx,
         round: u64,
     },
+    Settle,
     Copy {
         chunk: ChunkIdx,
         round: u64,
@@ -242,6 +259,7 @@ pub struct Target<P> {
     next_heartbeat: Time,
     deposed: bool,
     out: Vec<Output<P>>,
+    events: Vec<Event>,
     #[cfg(test)]
     pub bugs: Bugs,
 }
@@ -306,6 +324,7 @@ impl<P: Clone + Debug> Target<P> {
             next_heartbeat: now,
             deposed: false,
             out: Vec::new(),
+            events: Vec::new(),
             #[cfg(test)]
             bugs: Bugs::default(),
         };
@@ -405,6 +424,11 @@ impl<P: Clone + Debug> Target<P> {
         )
     }
 
+    /// Takes the events recorded so far, for logging.
+    pub fn take_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.events)
+    }
+
     /// Takes the outputs produced so far.
     pub fn take_output(&mut self) -> Vec<Output<P>> {
         std::mem::take(&mut self.out)
@@ -420,7 +444,8 @@ impl<P: Clone + Debug> Target<P> {
             return;
         }
         self.queue.push_back(Work::Client { op, kind });
-        self.progress(now);
+        // A new operation changes no chunk's state: only queued work can start.
+        self.pump(now);
     }
 
     /// The earliest local time after `now` at which [`Target::tick`] has something to do.
@@ -469,6 +494,10 @@ impl<P: Clone + Debug> Target<P> {
             .map(|(&n, _)| n)
             .collect();
         for n in expired {
+            self.events.push(Event::SessionFailed {
+                node: n,
+                reason: "a request timed out",
+            });
             self.fail_peer(now, n);
         }
         let reconnect: Vec<NodeId> = self
@@ -523,12 +552,15 @@ impl<P: Clone + Debug> Target<P> {
             session.open = true;
         }
         peer.confirmed_until = peer.confirmed_until.max(sent_at + self.timing.lease);
+        // How much to advance afterwards: the hot replies (reads, writes) touch at most one
+        // chunk's state; everything else gets a full pass.
+        let mut scope = Scope::All;
         match (kind, &m.body) {
             (ReqKind::Hello, Response::Fenced { uncertain }) => {
                 self.on_fenced(now, from, uncertain);
                 self.retransmit(now, from);
             }
-            (ReqKind::Heartbeat, Response::Ok) => {}
+            (ReqKind::Heartbeat | ReqKind::Settle, Response::Ok) => {}
             (ReqKind::Write { seq, chunk }, Response::Ok) => {
                 if let Some(r) = self.chunks[chunk as usize]
                     .resync
@@ -541,10 +573,13 @@ impl<P: Clone + Debug> Target<P> {
                     w.acked.insert(from);
                     self.check_write(seq);
                 }
+                // A completed write may finish the chunk's reconciliation or unblock a join.
+                scope = Scope::Chunk(chunk as usize);
             }
             (ReqKind::Read { id }, Response::Data(data)) => {
                 let data = data.clone();
-                self.on_read(now, id, data)
+                self.on_read(now, id, data);
+                scope = Scope::Queue;
             }
             (ReqKind::BeginResync { chunk, round }, Response::Ok) => {
                 let max_io = self.max_io;
@@ -564,10 +599,24 @@ impl<P: Clone + Debug> Target<P> {
             }
             _ => {
                 // A reply that does not answer its request: treat the session as broken.
+                self.events.push(Event::SessionFailed {
+                    node: from,
+                    reason: "a reply did not answer its request",
+                });
                 self.fail_peer(now, from);
             }
         }
-        self.progress(now);
+        match scope {
+            Scope::All => self.progress(now),
+            Scope::Chunk(i) => {
+                if !self.deposed {
+                    self.advance_chunk(now, i);
+                    self.send_meta(now);
+                    self.pump(now);
+                }
+            }
+            Scope::Queue => self.pump(now),
+        }
     }
 
     /// Handles the reply to metadata request `req`.
@@ -583,7 +632,7 @@ impl<P: Clone + Debug> Target<P> {
                     return;
                 }
                 if view.epoch == self.epoch {
-                    self.apply_view(view);
+                    self.apply_view(now, view);
                 }
             }
             MetaReply::NotFound { .. } => {
@@ -1097,10 +1146,24 @@ impl<P: Clone + Debug> Target<P> {
         if self.deposed {
             return;
         }
-        let wait = self.timing.takeover_wait();
         for i in 0..self.chunks.len() {
+            self.advance_chunk(now, i);
+        }
+        self.send_meta(now);
+        self.pump(now);
+    }
+
+    /// Advances one chunk: failed members, fencing, reconciliation, resync.
+    fn advance_chunk(&mut self, now: Time, i: usize) {
+        let wait = self.timing.takeover_wait();
+        {
             // ISR members without a session have failed.
-            if self.chunks[i].phase != Phase::Fencing {
+            if self.chunks[i].phase != Phase::Fencing
+                && self.chunks[i]
+                    .isr
+                    .iter()
+                    .any(|&n| self.session_of(n).is_none())
+            {
                 let lost: Vec<NodeId> = self.chunks[i]
                     .isr
                     .iter()
@@ -1131,6 +1194,10 @@ impl<P: Clone + Debug> Target<P> {
                             });
                         }
                         c.phase = Phase::Reconciling { pending };
+                        #[cfg(test)]
+                        if self.bugs.early_settle {
+                            self.settle(now, i);
+                        }
                     } else if let Some(t) = c.first_fence {
                         #[cfg(test)]
                         let t = if self.bugs.no_takeover_wait { 0 } else { t };
@@ -1147,13 +1214,20 @@ impl<P: Clone + Debug> Target<P> {
             let c = &mut self.chunks[i];
             if matches!(&c.phase, Phase::Reconciling { pending } if pending.is_empty()) {
                 c.phase = Phase::Ready;
+                // The ISR agrees on everything older than this epoch now.
+                #[cfg(test)]
+                let settle = !self.bugs.early_settle;
+                #[cfg(not(test))]
+                let settle = true;
+                if settle {
+                    self.settle(now, i);
+                }
             }
+            let c = &self.chunks[i];
             if c.phase == Phase::Ready {
                 self.drive_resync(now, i);
             }
         }
-        self.send_meta(now);
-        self.pump(now);
     }
 
     /// Starts a resync of an out-of-ISR replica, or proposes the expansion once it is done.
@@ -1214,7 +1288,12 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Proposes the pending ISR changes, one request at a time.
     fn send_meta(&mut self, now: Time) {
-        if self.meta_inflight.is_some() {
+        if self.meta_inflight.is_some()
+            || !self
+                .chunks
+                .iter()
+                .any(|c| !c.removing.is_empty() || c.joining.is_some())
+        {
             return;
         }
         let changes: Vec<IsrChange> = self
@@ -1250,7 +1329,38 @@ impl<P: Clone + Debug> Target<P> {
     }
 
     /// Adopts the metadata service's view of our own epoch: our changes that were applied.
-    fn apply_view(&mut self, view: &VolumeMeta) {
+    /// The oldest write still in flight on chunk `i`: everything below it has completed.
+    fn settled_below(&self, i: usize) -> Version {
+        let seq = self
+            .writes
+            .iter()
+            .find(|(_, w)| w.chunk as usize == i)
+            .map_or(self.next_seq, |(&s, _)| s);
+        Version {
+            epoch: self.epoch,
+            seq,
+        }
+    }
+
+    /// Tells the chunk's ISR members that the entries below its oldest write in flight are
+    /// settled.
+    fn settle(&mut self, now: Time, i: usize) {
+        let below = self.settled_below(i);
+        let members: Vec<NodeId> = self.chunks[i].isr.iter().copied().collect();
+        for n in members {
+            self.send(
+                now,
+                n,
+                Request::Settle {
+                    chunk: i as ChunkIdx,
+                    below,
+                },
+                ReqKind::Settle,
+            );
+        }
+    }
+
+    fn apply_view(&mut self, now: Time, view: &VolumeMeta) {
         for (i, m) in view.chunks.iter().enumerate() {
             let c = &self.chunks[i];
             if m.isr_ver <= c.isr_ver {
@@ -1276,16 +1386,31 @@ impl<P: Clone + Debug> Target<P> {
                 }
             }
             let c = &mut self.chunks[i];
+            let mut joined = None;
             if let Some(j) = c.joining
                 && m.isr.contains(&j)
             {
                 c.joining = None;
                 c.dirty.remove(&j);
+                joined = Some(j);
             }
             c.isr = m.isr.clone();
             c.isr_ver = m.isr_ver;
             let isr = c.isr.clone();
             c.removing.retain(|n| isr.contains(n));
+            if let Some(j) = joined {
+                // The joiner holds what the ISR holds: its older entries are settled too.
+                let below = self.settled_below(i);
+                self.send(
+                    now,
+                    j,
+                    Request::Settle {
+                        chunk: i as ChunkIdx,
+                        below,
+                    },
+                    ReqKind::Settle,
+                );
+            }
         }
         let seqs: Vec<u64> = self.writes.keys().copied().collect();
         for seq in seqs {

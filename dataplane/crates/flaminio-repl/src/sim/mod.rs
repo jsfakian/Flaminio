@@ -614,7 +614,7 @@ impl Sim {
                         R::Write { chunk, ext, .. }
                         | R::Copy { chunk, ext, .. }
                         | R::Read { chunk, ext } => chunk == tc && ext.contains(tb),
-                        R::BeginResync { chunk } => chunk == tc,
+                        R::BeginResync { chunk } | R::Settle { chunk, .. } => chunk == tc,
                         R::Hello => true,
                         R::Heartbeat => false,
                     };

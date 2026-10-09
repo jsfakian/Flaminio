@@ -8,6 +8,8 @@
 //!   (`--attach`), on the replication core and the metadata service.
 
 mod cli;
+#[cfg(target_os = "linux")]
+mod control;
 mod node;
 mod proto;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

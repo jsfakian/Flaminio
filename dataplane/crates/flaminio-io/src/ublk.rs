@@ -477,7 +477,9 @@ async fn drive(
 
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Instant;
 
 use flaminio_node::engine::{Input, Io, IoError, LocalRead, Output};
@@ -570,35 +572,146 @@ impl EngineCtx {
     }
 }
 
-/// Attaches `volume` through the engine, then serves it as a ublk device whose queue thread
-/// runs the engine.
-pub fn serve_volume(
+/// The engine's slot: whoever drives the engine holds it, the main thread while no volume is
+/// attached and the device's queue thread while one is.
+pub type Slot = Arc<Mutex<Option<Parts<UringDevice>>>>;
+
+/// The attached volume and its ublk device id, if any.
+pub type Attached = Arc<Mutex<Option<(String, i32)>>>;
+
+/// A command from the control socket to the main thread.
+pub enum Control {
+    Attach {
+        volume: String,
+        token: Vec<u8>,
+        reply: mpsc::Sender<String>,
+    },
+}
+
+/// Runs a node: the main thread drives the engine (replicas only) until an attach command
+/// arrives, then serves that volume as a ublk device until it is detached, and so on. The
+/// engine and its state survive attaches and detaches; one volume at a time.
+pub fn serve_node(
     c: &NodeConfig,
-    mut parts: Parts<UringDevice>,
-    volume: String,
+    parts: Parts<UringDevice>,
     efd: Arc<EventFd>,
 ) -> Result<(), String> {
-    let token = read_token(c.token.as_ref().expect("checked with --attach"))?;
-    parts.engine.handle(
-        Instant::now(),
-        Input::Attach {
-            volume: volume.clone(),
-            token,
-        },
+    let engine_tx = parts.sender.clone();
+    let slot: Slot = Arc::new(Mutex::new(Some(parts)));
+    let attached: Attached = Arc::new(Mutex::new(None));
+    let (ctl_tx, ctl_rx) = mpsc::channel::<Control>();
+    let wake: Arc<dyn Fn() + Send + Sync> = {
+        let (efd, tx) = (efd.clone(), Mutex::new(engine_tx.clone()));
+        Arc::new(move || {
+            let _ = tx.lock().expect("sender").send(Input::Nop);
+            efd.signal();
+        })
+    };
+    crate::control::spawn(
+        &c.control,
+        ctl_tx.clone(),
+        engine_tx,
+        wake,
+        attached.clone(),
+    )?;
+    if let (Some(volume), Some(path)) = (c.attach.clone(), c.token.as_ref()) {
+        let (reply, answer) = mpsc::channel();
+        ctl_tx
+            .send(Control::Attach {
+                volume,
+                token: read_token(path)?,
+                reply,
+            })
+            .expect("own channel");
+        thread::spawn(move || {
+            if let Ok(a) = answer.recv() {
+                eprintln!("flaminio-io: attach at startup: {a}");
+            }
+        });
+    }
+    eprintln!(
+        "flaminio-io: serving replicas; control socket {}",
+        c.control.display()
     );
-    let attached = drive_until(&mut parts, Duration::from_secs(60), |o| {
-        matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
-    });
-    let size = match attached {
-        Some(Output::Attached { size, .. }) => size,
-        Some(Output::AttachFailed { why, .. }) => return Err(format!("attach {volume}: {why}")),
-        _ => {
-            return Err(format!(
-                "attach {volume}: no answer from the metadata service"
-            ));
+    loop {
+        {
+            let mut guard = slot.lock().expect("slot");
+            let parts = guard.as_mut().expect("the main thread holds the engine");
+            drive_until(parts, Duration::from_millis(50), |_| false);
+        }
+        match ctl_rx.try_recv() {
+            Ok(Control::Attach {
+                volume,
+                token,
+                reply,
+            }) => {
+                if let Err(e) =
+                    attach_and_serve(c, &slot, &attached, volume, token, efd.clone(), &reply)
+                {
+                    let _ = reply.send(format!("error: {e}"));
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+/// Attaches `volume`, then serves it as a ublk device until the device stops (on detach).
+/// Replies "ok /dev/ublkbN" once the device is up.
+fn attach_and_serve(
+    c: &NodeConfig,
+    slot: &Slot,
+    attached: &Attached,
+    volume: String,
+    token: Vec<u8>,
+    efd: Arc<EventFd>,
+    reply: &mpsc::Sender<String>,
+) -> Result<(), String> {
+    let size = {
+        let mut guard = slot.lock().expect("slot");
+        let parts = guard.as_mut().expect("the main thread holds the engine");
+        parts.engine.handle(
+            Instant::now(),
+            Input::Attach {
+                volume: volume.clone(),
+                token,
+            },
+        );
+        match drive_until(parts, Duration::from_secs(60), |o| {
+            matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
+        }) {
+            Some(Output::Attached { size, .. }) => size,
+            Some(Output::AttachFailed { why, .. }) => {
+                return Err(format!("attach {volume}: {why}"));
+            }
+            _ => {
+                return Err(format!(
+                    "attach {volume}: no answer from the metadata service"
+                ));
+            }
         }
     };
+    let result = run_device(c, slot, attached, &volume, size, efd, reply);
+    *attached.lock().expect("attached") = None;
+    // Whatever stopped the device, the target ends with it.
+    if let Some(parts) = slot.lock().expect("slot").as_mut() {
+        parts
+            .engine
+            .handle(Instant::now(), Input::Detach { volume });
+    }
+    result
+}
 
+fn run_device(
+    c: &NodeConfig,
+    slot: &Slot,
+    attached: &Attached,
+    volume: &str,
+    size: u64,
+    efd: Arc<EventFd>,
+    reply: &mpsc::Sender<String>,
+) -> Result<(), String> {
     let ctrl = UblkCtrlBuilder::default()
         .name("flaminio")
         .id(c.id)
@@ -628,40 +741,50 @@ pub fn serve_volume(
         };
         Ok(())
     };
-    let parts = Arc::new(Mutex::new(Some(parts)));
+    let (qslot, qvol) = (slot.clone(), volume.to_string());
     let queue = move |qid: u16, dev: &UblkDev| {
-        let Some(parts) = parts.lock().expect("parts").take() else {
-            eprintln!("flaminio-io: only one queue is supported");
-            return;
-        };
-        if let Err(e) = serve_engine_queue(qid, dev, parts, volume.clone(), efd.clone()) {
+        if let Err(e) = serve_engine_queue(qid, dev, &qslot, qvol.clone(), efd.clone()) {
             eprintln!("flaminio-io: queue {qid} stopped: {e}");
         }
     };
+    let (ready_reply, ready_attached, ready_vol) = (
+        Mutex::new(reply.clone()),
+        attached.clone(),
+        volume.to_string(),
+    );
     let ready = move |ctrl: &UblkCtrl| {
+        let path = ctrl.get_bdev_path();
+        let id = ctrl.dev_info().dev_id as i32;
         println!(
-            "flaminio-io: serving {} MiB at {} (ublk id {})",
-            size >> 20,
-            ctrl.get_bdev_path(),
-            ctrl.dev_info().dev_id
+            "flaminio-io: serving {} MiB at {path} (ublk id {id})",
+            size >> 20
         );
+        *ready_attached.lock().expect("attached") = Some((ready_vol.clone(), id));
+        let _ = ready_reply
+            .lock()
+            .expect("reply")
+            .send(format!("ok {path}"));
     };
     ctrl.run_target(tgt_init, queue, ready)
         .map_err(|e| format!("ublk: {e}"))?;
+    eprintln!("flaminio-io: {volume} detached; serving replicas");
     Ok(())
 }
 
 fn serve_engine_queue(
     qid: u16,
     dev: &UblkDev,
-    parts: Parts<UringDevice>,
+    slot: &Slot,
     volume: String,
     efd: Arc<EventFd>,
 ) -> Result<(), String> {
+    let Some(parts) = slot.lock().expect("slot").take() else {
+        return Err("only one queue is supported".into());
+    };
     let Parts {
         engine,
         inputs,
-        sender: _keep_open,
+        sender,
     } = parts;
     let fd = engine.device().as_raw_fd();
     let ctx = EngineCtx {
@@ -672,7 +795,17 @@ fn serve_engine_queue(
         next_op: Cell::new(1),
         volume,
     };
-    let ctx = &ctx;
+    let result = serve_with(qid, dev, &ctx, efd);
+    // Hand the engine back, whatever happened to the device.
+    *slot.lock().expect("slot") = Some(Parts {
+        engine: ctx.engine.into_inner(),
+        inputs: ctx.inputs,
+        sender,
+    });
+    result
+}
+
+fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, efd: Arc<EventFd>) -> Result<(), String> {
     let q = Rc::new(UblkQueue::new(qid, dev).map_err(|e| format!("ublk queue: {e}"))?);
     let depth = dev.dev_info.queue_depth;
     let buf_bytes = dev.dev_info.max_io_buf_bytes as usize;

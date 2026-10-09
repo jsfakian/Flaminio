@@ -145,8 +145,13 @@ A node is `flaminio-io node` as the systemd unit `flaminio-node`:
   `/etc/flaminio/pki`;
 - a volume target serves ublk id 1 (`/dev/ublkb1`), so it never collides with the MVP
   commands, which use id 0;
-- `vol attach` asks the metadata service (as the lab administrator) for the attach, and
-  passes the capability token to the node in `/run/flaminio/<volume>.token`.
+- `vol attach` works in three steps:
+  1. It detaches the volume from the other data VMs.
+  2. It asks the metadata service, as the lab administrator, for the attach.
+  3. It hands the capability token to the running node through its control socket,
+     `/run/flaminio/node.sock`, with the line `attach VOLUME TOKEN-BASE64`.
+
+  Nothing restarts, so the replicas keep their state.
 
 ## Long-running jobs
 

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # A phase-1 node in a lab VM: flaminio-io node as the systemd service "flaminio-node".
-# Usage: node.sh up | down | status
-#   up   NODE, LISTEN, META, TRUST_DOMAIN; FORMAT=1 reformats the data disk. With ATTACH=VOLUME
-#        and TOKEN (base64 capability token), the node is also VOLUME's target, at /dev/ublkb1.
+# Usage: node.sh up | down | status | attach | detach
+#   up      NODE, LISTEN, META, TRUST_DOMAIN; FORMAT=1 reformats the data disk
+#   attach  VOLUME, TOKEN (base64 capability token): the running node becomes VOLUME's target,
+#           at /dev/ublkb1, through its control socket (no restart)
+#   detach  VOLUME
 bin="$HOME/flaminio/dataplane/target/release/flaminio-io"
 id=1
 dev=/dev/ublkb$id
@@ -51,6 +53,32 @@ up() {
     log "$(journal | grep -E 'store ready|target of|serving' | tail -3 | tr '\n' ' ')"
 }
 
+# Sends one command to the node's control socket and prints the answer.
+control() {
+    sudo python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(180)
+s.connect("/run/flaminio/node.sock")
+s.sendall((sys.argv[1] + "\n").encode())
+print(s.makefile().readline().strip())' "$1"
+}
+
+attach() {
+    : "${VOLUME:?}" "${TOKEN:?}"
+    systemctl is-active --quiet "$unit" || die "flaminio-node is not running"
+    local answer
+    answer=$(control "attach $VOLUME $TOKEN")
+    [[ $answer == ok* ]] || die "attach $VOLUME: $answer"
+    log "attached $VOLUME: ${answer#ok }"
+}
+
+detach() {
+    : "${VOLUME:?}"
+    local answer
+    answer=$(control "detach $VOLUME")
+    [[ $answer == ok* || $answer == *"not attached"* ]] || die "detach $VOLUME: $answer"
+}
+
 status() {
     echo "  flaminio-node: $(systemctl is-active "$unit" 2>/dev/null)"
     [[ -b $dev ]] && echo "  $dev: $(lsblk -dn -o SIZE "$dev")"
@@ -61,5 +89,7 @@ case "${1:-status}" in
     up) up ;;
     down) down ;;
     status) status ;;
-    *) die "usage: node.sh up|down|status" ;;
+    attach) attach ;;
+    detach) detach ;;
+    *) die "usage: node.sh up|down|status|attach|detach" ;;
 esac

@@ -54,6 +54,11 @@ pub enum Frame {
         req: u64,
         chunk: u32,
     },
+    Settle {
+        req: u64,
+        chunk: u32,
+        below: Version,
+    },
     Copy {
         req: u64,
         chunk: u32,
@@ -101,6 +106,7 @@ mod tag {
     pub const READ: u8 = 4;
     pub const BEGIN_RESYNC: u8 = 5;
     pub const COPY: u8 = 6;
+    pub const SETTLE: u8 = 7;
     pub const FENCED: u8 = 64;
     pub const OK: u8 = 65;
     pub const DATA: u8 = 66;
@@ -205,6 +211,12 @@ impl Frame {
                 w.u8(tag::BEGIN_RESYNC);
                 w.u64(*req);
                 w.u32(*chunk);
+            }
+            Frame::Settle { req, chunk, below } => {
+                w.u8(tag::SETTLE);
+                w.u64(*req);
+                w.u32(*chunk);
+                w.version(below);
             }
             Frame::Copy {
                 req,
@@ -335,6 +347,11 @@ impl Frame {
             tag::BEGIN_RESYNC => Frame::BeginResync {
                 req: r.u64()?,
                 chunk: r.u32()?,
+            },
+            tag::SETTLE => Frame::Settle {
+                req: r.u64()?,
+                chunk: r.u32()?,
+                below: r.version()?,
             },
             tag::COPY => {
                 let req = r.u64()?;
@@ -506,6 +523,11 @@ mod tests {
                 ext,
             },
             Frame::BeginResync { req: 6, chunk: 4 },
+            Frame::Settle {
+                req: 12,
+                chunk: 4,
+                below: Version { epoch: 7, seq: 90 },
+            },
             Frame::Copy {
                 req: 7,
                 chunk: 4,

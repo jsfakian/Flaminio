@@ -125,8 +125,24 @@ are served synchronously, one batch at a time, on the engine's thread.
 | 1M sequential, depth 8 | 3 030 MiB/s | ~61% | 62% |
 
 Depth 1 and the sequential job are at the MVP's level; the sequential job is limited by the
-single queue thread, as it was then. Depth 32 still trails, and the engine's per-I/O CPU on
-that thread is next.
+single queue thread, as it was then. Depth 32 still trailed.
+
+**After profiling** (`perf` on fl-b): the queue thread was CPU-bound, and the target's
+`progress` was the largest cost. It walked all 64 chunks on every I/O event. Client events now
+advance only what they can change: a submission or a read reply starts queued work; a write
+acknowledgement advances its own chunk. 20 000 seeds pass, and every mutation is still
+caught.
+
+Three runs each, against the raw disk measured the same day:
+
+| Job | Result | Raw | Share |
+|---|---:|---:|---:|
+| 4K random, depth 1 | 12 740 IOPS, p50 75 µs | 15 136, p50 62 µs | 84% |
+| 4K random, depth 32 | 184 000 IOPS | 254 508 | 72% |
+| 1M sequential, depth 8 | 3 130 MiB/s | 5 662 | 55% |
+
+The sequential job, and much of depth 32, are limited by the single queue thread: copying,
+checksums, and the engine. Multiple queues and zero-copy are the next performance steps.
 
 **Found while measuring: reconciling after a replica restart is expensive.**
 - A replica that restarts reports whole chunks as uncertain. The next new target then
@@ -136,10 +152,19 @@ that thread is next.
 - The lab made it worse: `vol attach` restarts the node, because `--attach` exists only at
   startup.
 
-Two follow-ups:
-1. **Attach without restarting the node.** A local control socket, which the CSI node plugin
-   needs anyway. Then a failover finds surviving replicas with exact, small uncertain sets.
-2. **Reconcile by comparing digests first.** The store keeps a CRC-32C per 4 KiB block in its
+Both are now done:
+1. **Attach and detach while the node runs**, through the control socket
+   `/run/flaminio/node.sock`, which the CSI node plugin will use.
+   - The engine moves to the device's queue thread on attach, and back on detach, with its
+     state intact.
+   - One volume per node at a time in this phase.
+2. **`Settle` after reconciliation** (replication-protocol.md §6). Reconciliation also left its
+   repairs as uncertain entries, so every failover reconciled the whole volume again.
+
+Moving `vol1` between the running nodes now serves the first read in 15–17 ms, both ways,
+where it waited 152–260 s. Only a restart of the replicas themselves still costs a whole
+reconciliation, about 160 s for 16 GiB over 1 GbE. The remaining follow-up:
+3. **Reconcile by comparing digests first** (for restarts and power loss). The store keeps a CRC-32C per 4 KiB block in its
    metadata, so replicas can compare their blocks without reading data, and repair only what
    differs. That keeps genuine whole-volume cases, such as a power loss, cheap.
 

@@ -129,13 +129,20 @@ reconciled. An older target can then neither read nor write:
   `prune = (e, a)` removes entries older than `(e, a)`.
 - **Reconciliation writes** carry no `prune`, so a target that dies mid-reconciliation leaves
   the old entries for the next one.
+- **Settling.** Once a chunk is reconciled, the target sends every ISR member
+  `Settle{below}`, with `below` the version of the chunk's oldest write in flight (nothing is in
+  flight at that moment, so `below` is the next version). The replicas drop the entries below
+  it. A replica joining the ISR gets the same.
+  - The repairs themselves are entries too.
+  - Without settling, the next target would reconcile everything again, until client writes
+    happened to prune it.
 - **The set is volatile.** After a restart, a replica fenced at epoch `f` reports **every block
   of its chunks** as uncertain:
   - it cannot tell which of its recent writes completed;
   - every write it applied had an epoch of at most `f`.
 
-  That lasts until a write prunes with an epoch above `f`. Such a target has reconciled the
-  chunk, so everything older is settled. The cost: a failover soon after a replica restart
+  That lasts until a write prunes, or a `Settle` arrives, with an epoch above `f`. Such a target
+  has reconciled the chunk, so everything older is settled. The cost: a failover soon after a replica restart
   reconciles whole chunks. The data plane makes that cheaper by comparing digests first.
 
 ## 7. Resync and rejoin
@@ -239,7 +246,8 @@ the simulator then fails:
 | Acknowledge once a removal is proposed, not committed (§4) | seed 27 |
 | Accept requests from an old session (§3) | seed 0 |
 | No reconciliation after failover (§6) | seed 1 |
-| Reconciliation writes prune uncertain sets (§6) | seed 12 049 |
+| Reconciliation writes prune uncertain sets (§6) | seed 778 |
+| Settling before the repairs are done (§6) | seed 71 |
 | No lease check on reads (§5) | seed 216, split-brain scenario |
 | No takeover wait (§6) | seed 81, split-brain scenario |
 | Reads from a member being removed (§5) | removal-in-flight scenario |
@@ -288,6 +296,13 @@ a scenario for it:
    - The simulator's links have no bandwidth, so it could not see this.
    - Fix: repairs and copies in flight are bounded (§7). The simulator now runs with bounds
      of 1–4, which also made the reconciliation-pruning mutation easier to catch.
+6. **Reconciling again and again** (found in the lab, step 4d). After a replica restart, every
+   later failover reconciled the whole volume (16 GiB, 150–260 s before the first read).
+   - The restart marker, and the repairs' own entries, cleared only through client writes.
+   - The simulator's chunks are a few blocks, so a needless reconciliation costs it nothing:
+     a performance bug cannot show there.
+   - Fix: `Settle` (§6). A move between running nodes now serves its first read in 15 ms.
+     Its mutation (settling before the repairs are done) is caught.
 
 **Results:** 320 000 random seeds pass (on average 4 failovers, 2.5 crashes and 7 partitions per
 run), all scenarios pass, and every mutation above is caught.

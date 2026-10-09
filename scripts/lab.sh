@@ -675,10 +675,20 @@ cmd_vol() {
             ;;
         attach)
             vm=$(vms_of "${2:-a}")
+            # The volume moves: the other nodes let go of it first (best effort: a node that
+            # is down lets go anyway, and a newer epoch deposes it).
+            local other
+            for other in $(vms_of all); do
+                [[ $other == "$vm" ]] && continue
+                ENV_VARS="VOLUME=$VOL" run_on_vm "$other" "$SCRIPTS/guest/node.sh" detach 2>/dev/null || true
+            done
             out=$(metactl "$VM_A" "$VM_A" attach "$VOL" "$vm")
             tok=$(jq -r .token <<<"$out")
             log "attached $VOL to $vm at epoch $(jq -r .volume.epoch <<<"$out")"
-            ENV_VARS="$(node_env "$vm") ATTACH=$VOL TOKEN=$tok" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" up
+            ENV_VARS="VOLUME=$VOL TOKEN=$tok" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" attach
+            ;;
+        detach)
+            ENV_VARS="VOLUME=$VOL" run_on_vm "$(vms_of "${2:-a}")" "$SCRIPTS/guest/node.sh" detach
             ;;
         delete)
             metactl "$VM_A" "$VM_A" delete "$VOL" >/dev/null
@@ -688,7 +698,7 @@ cmd_vol() {
             metactl "$VM_A" "$VM_A" get "$VOL" | jq -r '"epoch \(.volume.epoch), target \(.volume.target)",
                 ([.volume.chunks[] | (.isr | join("+"))] | group_by(.) | map("  ISR \(.[0]): \(length) chunks") | .[])'
             ;;
-        *) die "usage: vol create|attach VM|show|delete" ;;
+        *) die "usage: vol create|attach VM|detach VM|show|delete" ;;
     esac
 }
 

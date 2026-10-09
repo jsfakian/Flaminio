@@ -414,6 +414,7 @@ fn req_of(f: &Frame) -> u64 {
         | Frame::Write { req, .. }
         | Frame::Read { req, .. }
         | Frame::BeginResync { req, .. }
+        | Frame::Settle { req, .. }
         | Frame::Copy { req, .. }
         | Frame::Fenced { req, .. }
         | Frame::Ok { req }
@@ -446,6 +447,7 @@ fn to_request(f: &Frame) -> Option<(u64, Request<()>)> {
         ),
         Frame::Read { req, chunk, ext } => (req, Request::Read { chunk, ext }),
         Frame::BeginResync { req, chunk } => (req, Request::BeginResync { chunk }),
+        Frame::Settle { req, chunk, below } => (req, Request::Settle { chunk, below }),
         Frame::Copy {
             req, chunk, ext, ..
         } => (

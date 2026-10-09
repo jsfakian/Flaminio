@@ -172,6 +172,13 @@ pub enum Input {
     Deafen {
         until: Instant,
     },
+    /// Stop being the target of `volume`, as if the target had crashed: its pending I/O
+    /// fails, and the next target reconciles what was in flight.
+    Detach {
+        volume: String,
+    },
+    /// Nothing: wakes the engine's driver.
+    Nop,
     Stop,
 }
 
@@ -192,6 +199,10 @@ pub enum Output {
     },
     /// A newer target took the volume over. Its pending I/O failed.
     Deposed {
+        volume: String,
+    },
+    /// The volume was detached. Its pending I/O failed.
+    Detached {
         volume: String,
     },
     /// A piece of a direct read to read from the local store (see [`LocalRead`]).
@@ -424,6 +435,8 @@ impl<D: BlockDevice> Engine<D> {
                 let _ = reply.send(self.inspect(&volume, offset, len));
             }
             Input::Deafen { until } => self.deaf_until = Some(until),
+            Input::Detach { volume } => self.detach(&volume),
+            Input::Nop => {}
             Input::Stop => return false,
         }
         true
@@ -862,6 +875,11 @@ impl<D: BlockDevice> Engine<D> {
         let Some(rt) = self.targets.get_mut(volume) else {
             return;
         };
+        for e in rt.sm.take_events() {
+            let flaminio_repl::target::Event::SessionFailed { node, reason } = e;
+            let name = rt.nodes.get(node as usize).map_or("?", String::as_str);
+            eprintln!("flaminio-node: {volume}: session to {name} failed: {reason}");
+        }
         let outs = rt.sm.take_output();
         for o in outs {
             match o {
@@ -875,6 +893,16 @@ impl<D: BlockDevice> Engine<D> {
                         s.iter().map(|n| rt.nodes[*n as usize].clone()).collect()
                     };
                     let chunks: Vec<u32> = changes.iter().map(|c| c.chunk).collect();
+                    let mut summary: BTreeMap<Vec<String>, usize> = BTreeMap::new();
+                    for c in &changes {
+                        *summary.entry(names(&c.new_isr)).or_default() += 1;
+                    }
+                    for (isr, n) in summary {
+                        eprintln!(
+                            "flaminio-node: {volume}: proposing ISR {} for {n} chunks",
+                            isr.join("+")
+                        );
+                    }
                     let call = pb::ChangeIsrRequest {
                         volume: volume.to_string(),
                         epoch,
@@ -913,6 +941,28 @@ impl<D: BlockDevice> Engine<D> {
             });
             self.targets.remove(volume);
         }
+    }
+
+    fn detach(&mut self, volume: &str) {
+        let Some(rt) = self.targets.remove(volume) else {
+            return;
+        };
+        for s in rt.sessions.values() {
+            if let Sess::Remote { key, .. } = s {
+                self.net.send(NetCommand::Close { key: *key });
+            }
+        }
+        for op in rt.ops.keys() {
+            self.out.push(Output::Done {
+                op: *op,
+                result: Err(IoError::NotAttached),
+            });
+        }
+        self.keys.retain(|_, (v, _, _)| v != volume);
+        self.local_reads.retain(|_, p| p.volume != volume);
+        self.out.push(Output::Detached {
+            volume: volume.to_string(),
+        });
     }
 
     fn sub_done(&mut self, volume: &str, sub: u64, result: OpResult<Payload>) {
@@ -1244,6 +1294,11 @@ fn to_frame(m: &ToReplica<Payload>) -> Frame {
             ext: *ext,
         },
         Request::BeginResync { chunk } => Frame::BeginResync { req, chunk: *chunk },
+        Request::Settle { chunk, below } => Frame::Settle {
+            req,
+            chunk: *chunk,
+            below: *below,
+        },
         Request::Copy { chunk, ext, data } => Frame::Copy {
             req,
             chunk: *chunk,

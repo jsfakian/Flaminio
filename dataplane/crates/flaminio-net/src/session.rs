@@ -169,6 +169,7 @@ pub fn check_request(f: &Frame) -> Result<(), &'static str> {
         | Frame::Write { .. }
         | Frame::Read { .. }
         | Frame::BeginResync { .. }
+        | Frame::Settle { .. }
         | Frame::Copy { .. } => Ok(()),
         Frame::Hello { .. } => Err("one session per connection"),
         _ => Err("not a request"),

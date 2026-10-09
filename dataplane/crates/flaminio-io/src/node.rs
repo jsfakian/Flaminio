@@ -44,6 +44,7 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --depth N            ublk queue depth (default 128)
       --io-buf SIZE        largest single I/O, at most 1M (default 512K)
       --id N               ublk device id (default: first free)
+      --control PATH       control socket for attach and detach (default /run/flaminio/node.sock)
 
 PKI directory: io.crt and io.key (this node's data-plane identity), ca.crt (the CA bundle) and
 token.pub (the metadata service's token key). Runs in the foreground.";
@@ -65,6 +66,7 @@ pub(crate) struct NodeConfig {
     pub depth: u16,
     pub io_buf: u32,
     pub id: i32,
+    pub control: PathBuf,
 }
 
 fn parse(args: &[String]) -> Result<NodeConfig, String> {
@@ -84,6 +86,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         depth: 128,
         io_buf: 512 << 10,
         id: -1,
+        control: PathBuf::from("/run/flaminio/node.sock"),
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -112,6 +115,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
                     u32::try_from(parse_size(&value()?)?).map_err(|_| "--io-buf too large")?
             }
             "--id" => c.id = value()?.parse().map_err(|_| "invalid --id")?,
+            "--control" => c.control = value()?.into(),
             _ => return Err(format!("unknown argument {flag}\n\n{USAGE}")),
         }
     }
@@ -279,6 +283,7 @@ pub(crate) fn log_output(o: &Output) {
         Output::Deposed { volume } => {
             eprintln!("flaminio-io: deposed as the target of {volume}: it moved to another node")
         }
+        Output::Detached { volume } => eprintln!("flaminio-io: detached {volume}"),
         Output::Done { .. } | Output::LocalRead(_) | Output::Piece { .. } => {}
     }
 }
@@ -295,10 +300,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
             Arc::new(move || efd.signal())
         };
         let parts = build(&c, dev, wake)?;
-        match c.attach.clone() {
-            None => serve_replicas(parts),
-            Some(volume) => crate::ublk::serve_volume(&c, parts, volume, efd),
-        }
+        crate::ublk::serve_node(&c, parts, efd)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -312,6 +314,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
 }
 
 /// A node without a volume target: the engine serves replicas until the process ends.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn serve_replicas<D: BlockDevice>(p: Parts<D>) -> Result<(), String> {
     eprintln!("flaminio-io: serving replicas");
     let Parts {
@@ -328,4 +331,52 @@ fn serve_replicas<D: BlockDevice>(p: Parts<D>) -> Result<(), String> {
 /// The token file: the raw token bytes.
 pub(crate) fn read_token(path: &PathBuf) -> Result<Vec<u8>, String> {
     std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+/// Decodes standard base64 (with or without padding), as the metadata service's JSON
+/// carries tokens. None if it is not valid base64.
+pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    }
+    let s = s.trim_end_matches('=').as_bytes();
+    if s.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    for group in s.chunks(4) {
+        let mut n = 0u32;
+        for (i, &c) in group.iter().enumerate() {
+            n |= val(c)? << (18 - 6 * i);
+        }
+        let bytes = n.to_be_bytes();
+        out.extend_from_slice(&bytes[1..group.len()]);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::base64_decode;
+
+    #[test]
+    fn base64() {
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert_eq!(base64_decode("Zg==").unwrap(), b"f");
+        assert_eq!(base64_decode("Zm8=").unwrap(), b"fo");
+        assert_eq!(base64_decode("Zm9v").unwrap(), b"foo");
+        assert_eq!(base64_decode("Zm9vYmFy").unwrap(), b"foobar");
+        assert_eq!(base64_decode("Zm9vYg").unwrap(), b"foob");
+        assert_eq!(base64_decode("/+8=").unwrap(), [0xff, 0xef]);
+        assert!(base64_decode("Zm9v!").is_none());
+        assert!(base64_decode("Z").is_none());
+    }
 }
