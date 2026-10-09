@@ -11,7 +11,14 @@ use libfuzzer_sys::fuzz_target;
 const NONCE: u64 = 1;
 
 fuzz_target!(|data: &[u8]| {
-    let layout = Layout::compute(GIB, LayoutParams { journal_size: Some(4 * MIB), ..Default::default() }).unwrap();
+    let layout = Layout::compute(
+        GIB,
+        LayoutParams {
+            journal_size: Some(4 * MIB),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let mut dev = vec![0u8; (layout.journal_offset + layout.journal_size) as usize];
     let j = layout.journal_offset as usize;
     let n = data.len().min(layout.journal_size as usize);

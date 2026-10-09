@@ -8,6 +8,7 @@ members = [
     "crates/flaminio-io",
     "crates/flaminio-disktool",
     "crates/flaminio-repl",
+    "crates/flaminio-net",
 ]
 exclude = ["fuzz"]
 

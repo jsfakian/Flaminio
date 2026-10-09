@@ -41,10 +41,38 @@ simulator checked. It comes in five parts, each committed on its own:
 | Part | What | Done when |
 |---|---|---|
 | 4a ✅ | **Ranges and payloads in the core.** Operations, locks, uncertain sets, dirty sets and resync copies work on extents (runs of blocks) instead of single blocks. Data is an opaque payload type: per-block values in the simulator, buffer handles in the data plane. A replica's uncertain set becomes volatile: after a restart it reports the whole chunk | The simulator passes and every mutation is still caught, with multi-block operations |
-| 4b | **Transport.** Framed messages over TLS 1.3 with the step-3 identities. The capability token is presented in `Hello`, and the replica checks it against the peer certificate | Loopback tests: wrong CA, wrong node, stale epoch and bad token are all refused |
+| 4b ✅ | **Transport.** Framed messages over TLS 1.3 with the step-3 identities. The capability token is presented in `Hello`, and the replica checks it against the peer certificate | Loopback tests: wrong CA, wrong node, stale epoch and bad token are all refused |
 | 4c | **Replica service on the real store.** The core's replica rules (fencing, sessions, uncertain sets, resync filters) in front of `flaminio-store`, with group commit per session | Loopback tests against a file-backed store |
 | 4d | **Target runtime.** `flaminio-io serve` attaches with a token, drives the core from ublk, sends to local and remote replicas, and makes ISR changes through the metadata service (gRPC client on its own thread) | The local end-to-end test passes |
 | 4e | **Lab.** An RF=2 volume across fl-a and fl-b, placed by the metadata service | The MVP's fault test passes, with the ISR shrink and expand visible in the metadata service; reads still at the MVP's level |
+
+## Step 4b result
+
+The crate `flaminio-net` holds:
+- the wire format, in which every decoder treats its input as untrusted;
+- TLS 1.3 configurations (rustls with ring) that require client certificates both ways;
+- SPIFFE identities read from certificates;
+- capability-token verification, which agrees with the Go vectors.
+
+**One connection is one session.** The replica side refuses a session unless:
+- the peer is a node's data plane;
+- its first frame is a `Hello` whose token verifies;
+- the token names this volume, this epoch and the peer's own node.
+
+The target side checks that it reached the node it meant to reach.
+
+**Checks:**
+- **Loopback tests** over real TLS cover a valid session, and refusals for:
+  - a foreign CA;
+  - the wrong component;
+  - a token for another node, volume or epoch;
+  - a forged token;
+  - the wrong server;
+  - a second `Hello`.
+- **Frame tests** refuse every truncation and a catalogue of malformed frames; one of them
+  found an empty data frame accepted, now fixed.
+- **Fuzz targets:** `repl_frame` and `capability_token` (they need a nightly toolchain to
+  run).
 
 ## Step 4a result
 

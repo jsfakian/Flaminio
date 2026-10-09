@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.10"
 flaminio-format = { path = "../crates/flaminio-format" }
+flaminio-net = { path = "../crates/flaminio-net" }
 
 # Not part of the main workspace: build with `cargo +nightly fuzz run <target>`.
 [workspace]
@@ -32,6 +33,20 @@ bench = false
 [[bin]]
 name = "journal"
 path = "fuzz_targets/journal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "repl_frame"
+path = "fuzz_targets/repl_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "capability_token"
+path = "fuzz_targets/capability_token.rs"
 test = false
 doc = false
 bench = false

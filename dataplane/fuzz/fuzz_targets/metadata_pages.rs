@@ -3,14 +3,18 @@
 
 use flaminio_format::consts::GIB;
 use flaminio_format::layout::{Layout, LayoutParams};
-use flaminio_format::meta::{BitmapKind, BitmapPage, CheckpointHeader, ChunkHeader, MapPage, PageTable};
+use flaminio_format::meta::{
+    BitmapKind, BitmapPage, CheckpointHeader, ChunkHeader, MapPage, PageTable,
+};
 use flaminio_format::page::{PAGE_PAYLOAD_LEN, PageType, new_page, payload_mut, seal};
 use libfuzzer_sys::fuzz_target;
 
 const NONCE: u64 = 1;
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&selector, rest)) = data.split_first() else { return };
+    let Some((&selector, rest)) = data.split_first() else {
+        return;
+    };
     let layout = Layout::compute(4 * GIB, LayoutParams::default()).unwrap();
     let offset = layout.pool_pair_offset(0);
     let mut page = new_page();
