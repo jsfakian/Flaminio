@@ -6,7 +6,7 @@ belongs to.
 
 | # | Item | Why it matters | Order |
 |---|---|---|---|
-| 1 | Read performance: multiple queues, less work per I/O, zero-copy | Reads are judged first; we are at 72–84% of raw for 4K and 55% for 1M | Now, alongside Kubernetes |
+| 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads at 67–69% of raw at QD32 and 51–61% for 1M; writes never measured from a controlled state | Next |
 | 2 | Reconciliation after a replica restart | 160 s before the first read for 16 GiB after both replicas restarted | Before the chaos run (step 8) |
 | 3 | Copying unwritten ranges | Resync and repair turn thin volumes thick (16 GiB used for 4 GiB written) and waste the network | With item 2: same tools |
 | 4 | Failure domains in placement | Today placement only spreads chunks over nodes | Before the edge profile; tested now with node labels |
@@ -19,6 +19,9 @@ belongs to.
 | 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator |
 
 ## 1. Read performance
+
+Superseded by the [performance plan](performance-plan.md), which adds a profile, measurement
+rules and a plan for writes. Kept below for history.
 
 **Where the time goes.** The ublk queue thread is CPU-bound (`perf`, 2026-10-09). Per I/O it
 pays for:
