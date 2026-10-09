@@ -1,0 +1,11 @@
+[package]
+name = "flaminio-repl"
+version = "0.1.0"
+description = "Flaminio replication protocol core: target, replica and metadata state machines without I/O, and a deterministic simulator"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

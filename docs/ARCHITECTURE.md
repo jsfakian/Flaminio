@@ -480,9 +480,14 @@ metadata service stays off the I/O path.
 - **Why it is safe.** A fenced replica refuses to confirm an older epoch. A new target must fence
   at least one ISR member of every chunk anyway, because it needs an up-to-date source. From that
   moment the old target cannot renew, because it needs *all* ISR members, and its lease expires
-  within `L`. The new target serves reads at once from replicas it has fenced. It waits
-  `L × (1 + ρ)` after fencing before it removes unreachable replicas from the ISR and starts
-  writing.
+  within `L`.
+- **When the new target may serve.** It serves a chunk once every ISR member is fenced and the
+  in-flight writes are reconciled. If some ISR members cannot be reached, it first waits
+  `L × (1 + ρ)` after fencing the first one, then removes the unreachable ones from the ISR.
+  Serving earlier would let the old target, reading an unfenced member, and the new target
+  disagree about an unfinished write. An old target never reads from a member whose ISR
+  removal is in flight. The exact rules, checked by simulation, are in
+  [replication-protocol.md](replication-protocol.md).
 - **Timing assumption:** only a bounded clock *rate* drift ρ. Both sides measure durations on
   their own monotonic clocks, so no clock synchronization is required.
 - The same rule protects writes (all ISR members must ack) and leases (all ISR members must

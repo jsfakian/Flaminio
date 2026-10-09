@@ -14,6 +14,11 @@ and you restore from an encrypted, immutable backup.
 > plane yet (no Kubernetes integration, metadata service or TLS), so nothing here is ready for
 > real data. See the [MVP plan](docs/mvp-plan.md), [lab](docs/lab.md) and
 > [benchmarks](docs/benchmarks/).
+>
+> **Phase 1 under way** ([plan](docs/phase1-plan.md)). The failover and consistency rules
+> (in-sync replica sets, epoch fencing, replica-confirmed leases, reconciliation after
+> failover) are implemented as a pure state machine and checked by a deterministic simulator
+> ([protocol](docs/replication-protocol.md)).
 
 ---
 

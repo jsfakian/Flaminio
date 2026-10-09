@@ -13,6 +13,7 @@ DATAPLANE := dataplane
 LAB       := scripts/lab.sh
 VM        ?= all
 CASES     ?= 50000
+SEEDS     ?= 20000
 RUNTIME   ?= 30
 # Benchmarks measure reads by default: SSD/NVMe write results are not stable enough to rely on.
 # JOBS=. runs everything, writes included.
@@ -30,7 +31,7 @@ help: ## Show this help
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test lint fmt disk-demo clean
+.PHONY: build release test crash-test sim lint fmt disk-demo clean
 build: ## Build the data plane (debug)
 	cd $(DATAPLANE) && $(CARGO) build
 
@@ -42,6 +43,10 @@ test: ## Run all tests
 
 crash-test: ## Long crash-consistency campaign (CASES=50000)
 	cd $(DATAPLANE) && PROPTEST_CASES=$(CASES) $(CARGO) test --release -p flaminio-store --test crash_consistency
+
+sim: ## Replication-protocol simulation: SEEDS random runs, then every injected bug must be caught
+	cd $(DATAPLANE) && $(CARGO) run --release -q -p flaminio-repl --example sim -- 0 $(SEEDS)
+	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
 
 lint: ## clippy (warnings are errors), rustfmt check, shellcheck
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
