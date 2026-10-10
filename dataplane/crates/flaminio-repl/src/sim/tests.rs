@@ -65,6 +65,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         detect: (0, 0),
         read_pct: 0,
         move_pct: 0,
+        fast_reads: false,
     }
 }
 
@@ -134,6 +135,18 @@ fn scenario_split_brain() {
 #[test]
 fn scenario_removal_in_flight() {
     removal_in_flight().run().unwrap();
+}
+
+/// The split brain again, with the old target's client reads on the fast path.
+#[test]
+fn scenario_split_brain_fast_reads() {
+    let mut sim = split_brain();
+    sim.cfg_mut().fast_reads = true;
+    sim.run().unwrap();
+    let mut sim = split_brain().with_bugs(target(|b| b.fast_read_no_lease = true));
+    sim.cfg_mut().fast_reads = true;
+    let err = sim.run().expect_err("bug not caught");
+    assert!(err.contains("not linearizable"), "{err}");
 }
 
 #[test]
@@ -250,4 +263,17 @@ mutation!(
 mutation!(
     catches_drop_before_join,
     target(|b| b.drop_before_join = true)
+);
+mutation!(
+    catches_fast_reads_without_lease,
+    target(|b| b.fast_read_no_lease = true)
+);
+mutation!(
+    catches_fast_reads_from_a_replaced_replica,
+    target(|b| b.fast_read_ignores_membership = true)
+);
+mutation!(
+    catches_fast_reads_across_a_fence,
+    target(|b| b.fast_read_no_fence_check = true),
+    300_000
 );

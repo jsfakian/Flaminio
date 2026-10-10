@@ -475,8 +475,8 @@ async fn drive(
 
 // --- Phase 1: a volume served by the node engine (flaminio-io node --attach) ---------------
 
-use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -501,28 +501,50 @@ enum Event {
 
 type Waiter = smol::channel::Sender<Event>;
 
-/// What the queue thread's tasks share: the engine and the completions they wait for.
-struct EngineCtx {
-    engine: RefCell<flaminio_node::engine::Engine<UringDevice>>,
+/// What every queue thread of a device shares: the engine, and the completions its tag tasks
+/// wait for. Locks are held only between awaits: admission, planning, completion.
+struct Shared {
+    engine: Mutex<flaminio_node::engine::Engine<UringDevice>>,
+    inputs: Mutex<mpsc::Receiver<Input>>,
+    sender: mpsc::Sender<Input>,
     /// The store's device, for the local reads the tag tasks perform.
     fd: RawFd,
-    inputs: std::sync::mpsc::Receiver<Input>,
-    waiters: RefCell<HashMap<u64, Waiter>>,
-    next_op: Cell<u64>,
+    /// Op id → the waiting tag task's queue and channel.
+    waiters: Mutex<HashMap<u64, (u16, Waiter)>>,
+    next_op: AtomicU64,
     volume: String,
     /// The ublk device's id: a deposed target stops its device.
     dev_id: i32,
+    /// Local reads are checked against their checksums (off only for experiments).
+    verify: bool,
+    /// How long a queue thread checks its ring without sleeping after a completion.
+    poll: Duration,
+    /// Per queue: what wakes its thread when another thread completes one of its operations.
+    /// Queue 0's is the node's eventfd, which the network and metadata threads signal too.
+    wakes: Vec<Arc<EventFd>>,
+}
+
+/// A queue thread's handle on the shared engine.
+struct EngineCtx {
+    shared: Arc<Shared>,
+    qid: u16,
 }
 
 impl EngineCtx {
+    fn engine(&self) -> std::sync::MutexGuard<'_, flaminio_node::engine::Engine<UringDevice>> {
+        self.shared.engine.lock().expect("engine")
+    }
+
     /// Feeds the engine what other threads sent, flushes it (a full turn with ticks when
-    /// `tick`), and delivers completions.
+    /// `tick`), and delivers completions, waking the queue threads they belong to.
     fn pump_with(&self, tick: bool) {
         let now = Instant::now();
         let outputs = {
-            let mut e = self.engine.borrow_mut();
-            while let Ok(i) = self.inputs.try_recv() {
-                e.handle(now, i);
+            let mut e = self.engine();
+            if let Ok(inputs) = self.shared.inputs.try_lock() {
+                while let Ok(i) = inputs.try_recv() {
+                    e.handle(now, i);
+                }
             }
             if tick {
                 e.turn(now);
@@ -531,29 +553,30 @@ impl EngineCtx {
             }
             e.take_output()
         };
+        let mut wake = vec![false; self.shared.wakes.len()];
         for o in outputs {
+            let mut waiters = self.shared.waiters.lock().expect("waiters");
+            let mut deliver = |op: u64, ev: Event, last: bool| {
+                let w = if last {
+                    waiters.remove(&op)
+                } else {
+                    waiters.get(&op).cloned()
+                };
+                if let Some((q, tx)) = w {
+                    let _ = tx.try_send(ev);
+                    wake[q as usize] |= q != self.qid;
+                }
+            };
             match o {
-                Output::Done { op, result } => {
-                    if let Some(tx) = self.waiters.borrow_mut().remove(&op) {
-                        let _ = tx.try_send(Event::Done(result));
-                    }
-                }
-                Output::LocalRead(lr) => {
-                    if let Some(tx) = self.waiters.borrow().get(&lr.op) {
-                        let _ = tx.try_send(Event::Local(lr));
-                    }
-                }
-                Output::Piece { op, at, data } => {
-                    if let Some(tx) = self.waiters.borrow().get(&op) {
-                        let _ = tx.try_send(Event::Piece { at, data });
-                    }
-                }
-                Output::Deposed { ref volume } if *volume == self.volume => {
+                Output::Done { op, result } => deliver(op, Event::Done(result), true),
+                Output::LocalRead(lr) => deliver(lr.op, Event::Local(lr), false),
+                Output::Piece { op, at, data } => deliver(op, Event::Piece { at, data }, false),
+                Output::Deposed { ref volume } if *volume == self.shared.volume => {
                     log_output(&o);
                     // Every I/O would fail from now on. Stopping the device frees the node
-                    // for its next attach; the queue thread cannot wait for its own end, so
+                    // for its next attach; a queue thread cannot wait for its own end, so
                     // another thread asks.
-                    let id = self.dev_id;
+                    let id = self.shared.dev_id;
                     thread::spawn(move || {
                         if let Err(e) = UblkCtrl::new_simple(id).and_then(|c| c.kill_dev()) {
                             eprintln!("flaminio-io: stop ublk device {id} after deposition: {e}");
@@ -561,6 +584,11 @@ impl EngineCtx {
                     });
                 }
                 other => log_output(&other),
+            }
+        }
+        for (q, w) in wake.into_iter().enumerate() {
+            if w {
+                self.shared.wakes[q].signal();
             }
         }
     }
@@ -571,13 +599,16 @@ impl EngineCtx {
     }
 
     fn submit(&self, io: Io, waiter: Waiter) {
-        let op = self.next_op.get();
-        self.next_op.set(op + 1);
-        self.waiters.borrow_mut().insert(op, waiter);
-        self.engine.borrow_mut().handle(
+        let op = self.shared.next_op.fetch_add(1, Ordering::Relaxed);
+        self.shared
+            .waiters
+            .lock()
+            .expect("waiters")
+            .insert(op, (self.qid, waiter));
+        self.engine().handle(
             Instant::now(),
             Input::Io {
-                volume: self.volume.clone(),
+                volume: self.shared.volume.clone(),
                 op,
                 io,
             },
@@ -736,7 +767,7 @@ fn add_device(c: &NodeConfig) -> Result<UblkCtrl, String> {
             .name("flaminio")
             .id(c.id)
             .depth(c.depth)
-            .nr_queues(1)
+            .nr_queues(c.queues)
             .io_buf_bytes(c.io_buf)
             .ctrl_flags(ctrl_flags)
             .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
@@ -786,9 +817,46 @@ fn run_device(
         };
         Ok(())
     };
-    let (qslot, qvol, zero_copy) = (slot.clone(), volume.to_string(), c.zero_copy);
+    // The queue threads share the engine while the device runs; the main thread gets it back
+    // after.
+    let Some(Parts {
+        engine,
+        inputs,
+        sender,
+    }) = slot.lock().expect("slot").take()
+    else {
+        return Err("the engine is not with the main thread".into());
+    };
+    let mut wakes = vec![efd];
+    for _ in 1..c.queues {
+        wakes.push(Arc::new(
+            EventFd::new().map_err(|e| format!("eventfd: {e}"))?,
+        ));
+    }
+    let verify = !c.no_verify;
+    if !verify {
+        eprintln!("flaminio-io: EXPERIMENT: local reads are not checked against their checksums");
+    }
+    let shared = Arc::new(Shared {
+        fd: engine.device().as_raw_fd(),
+        engine: Mutex::new(engine),
+        inputs: Mutex::new(inputs),
+        sender,
+        waiters: Mutex::new(HashMap::new()),
+        next_op: AtomicU64::new(1),
+        volume: volume.to_string(),
+        dev_id: ctrl.dev_info().dev_id as i32,
+        verify,
+        poll: Duration::from_micros(c.poll_us),
+        wakes,
+    });
+    let (qshared, zero_copy) = (shared.clone(), c.zero_copy);
     let queue = move |qid: u16, dev: &UblkDev| {
-        if let Err(e) = serve_engine_queue(qid, dev, &qslot, qvol.clone(), efd.clone(), zero_copy) {
+        let ctx = EngineCtx {
+            shared: qshared.clone(),
+            qid,
+        };
+        if let Err(e) = serve_with(qid, dev, &ctx, zero_copy) {
             eprintln!("flaminio-io: queue {qid} stopped: {e}");
         }
     };
@@ -810,55 +878,26 @@ fn run_device(
             .expect("reply")
             .send(format!("ok {path}"));
     };
-    ctrl.run_target(tgt_init, queue, ready)
-        .map_err(|e| format!("ublk: {e}"))?;
+    let result = ctrl
+        .run_target(tgt_init, queue, ready)
+        .map_err(|e| format!("ublk: {e}"));
+    // Every queue thread has ended: hand the engine back, whatever happened to the device.
+    let Ok(shared) = Arc::try_unwrap(shared) else {
+        return Err("a queue thread still holds the engine".into());
+    };
+    *slot.lock().expect("slot") = Some(Parts {
+        engine: shared.engine.into_inner().expect("engine"),
+        inputs: shared.inputs.into_inner().expect("inputs"),
+        sender: shared.sender,
+    });
+    result?;
     eprintln!("flaminio-io: {volume} detached; serving replicas");
     Ok(())
 }
 
-fn serve_engine_queue(
-    qid: u16,
-    dev: &UblkDev,
-    slot: &Slot,
-    volume: String,
-    efd: Arc<EventFd>,
-    zero_copy: bool,
-) -> Result<(), String> {
-    let Some(parts) = slot.lock().expect("slot").take() else {
-        return Err("only one queue is supported".into());
-    };
-    let Parts {
-        engine,
-        inputs,
-        sender,
-    } = parts;
-    let fd = engine.device().as_raw_fd();
-    let ctx = EngineCtx {
-        engine: RefCell::new(engine),
-        fd,
-        inputs,
-        waiters: RefCell::new(HashMap::new()),
-        next_op: Cell::new(1),
-        volume,
-        dev_id: dev.dev_info.dev_id as i32,
-    };
-    let result = serve_with(qid, dev, &ctx, efd, zero_copy);
-    // Hand the engine back, whatever happened to the device.
-    *slot.lock().expect("slot") = Some(Parts {
-        engine: ctx.engine.into_inner(),
-        inputs: ctx.inputs,
-        sender,
-    });
-    result
-}
-
-fn serve_with(
-    qid: u16,
-    dev: &UblkDev,
-    ctx: &EngineCtx,
-    efd: Arc<EventFd>,
-    zero_copy: bool,
-) -> Result<(), String> {
+/// Serves one ublk queue on this thread: its tag tasks, its wake-ups, and on queue 0 the
+/// engine's ticks.
+fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Result<(), String> {
     let q = Rc::new(UblkQueue::new(qid, dev).map_err(|e| format!("ublk queue: {e}"))?);
     let depth = dev.dev_info.queue_depth;
     let buf_bytes = dev.dev_info.max_io_buf_bytes as usize;
@@ -895,7 +934,9 @@ fn serve_with(
             }));
         }
     }
-    // Other threads' inputs: wait for the eventfd to become readable on this ring.
+    // Other threads' inputs, and completions of this queue's operations that another thread
+    // delivered: wait for the queue's eventfd to become readable on this ring.
+    let efd = ctx.shared.wakes[qid as usize].clone();
     let _waker = {
         let q = q.clone();
         let fd = efd.as_raw_fd();
@@ -908,8 +949,8 @@ fn serve_with(
             }
         })
     };
-    // Timeouts, heartbeats and leases: a turn every 10 ms.
-    let _ticker = {
+    // Timeouts, heartbeats and leases: a turn every 10 ms, on queue 0.
+    let _ticker = (qid == 0).then(|| {
         let q = q.clone();
         exe.spawn(async move {
             let ts = types::Timespec::new().nsec(10_000_000);
@@ -918,12 +959,12 @@ fn serve_with(
                 ctx.pump_with(true);
             }
         })
-    };
+    });
     let runner = exe.clone();
     let result = smol::block_on(exe.run(async move {
         let run_ops = || while runner.try_tick() {};
         let is_done = || tasks.iter().all(|t| t.is_finished());
-        libublk::wait_and_handle_io_events(&q, Some(20), run_ops, is_done).await
+        event_loop(&q, ctx.shared.poll, run_ops, is_done).await
     }));
     result.map_err(|e| format!("event loop: {e}"))
 }
@@ -956,6 +997,12 @@ async fn engine_io_task(
         let res = match op {
             // Reads land in the tag's buffer directly: pieces from the local replica are read
             // here, on this ring, as the engine admits them; other pieces are copied.
+            sys::UBLK_IO_OP_READ
+                if n <= bufs[tag as usize].borrow().len()
+                    && fast_read_copy(q, &bufs[tag as usize], ctx, offset, len).await =>
+            {
+                len as i32
+            }
             sys::UBLK_IO_OP_READ if n <= bufs[tag as usize].borrow().len() => {
                 ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
                 loop {
@@ -1014,7 +1061,7 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
     for attempt in 0..2 {
         let plan = {
             let mut b = buf.borrow_mut();
-            match ctx.engine.borrow().plan_local_read(&lr, &mut b[at..at + n]) {
+            match ctx.engine().plan_local_read(&lr, &mut b[at..at + n]) {
                 Ok(p) => p,
                 Err(_) => break,
             }
@@ -1025,7 +1072,7 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
         let mut pending = Vec::new();
         for r in plan.reads() {
             let sqe = opcode::Read::new(
-                types::Fd(ctx.fd),
+                types::Fd(ctx.shared.fd),
                 base.wrapping_add(r.buf_offset),
                 r.len as u32,
             )
@@ -1037,18 +1084,17 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
         for (completion, expected) in pending {
             io_ok &= completion.await == expected;
         }
-        let verified = io_ok && plan.verify(&buf.borrow()[at..at + n]).is_ok();
+        let verified =
+            io_ok && (!ctx.shared.verify || plan.verify(&buf.borrow()[at..at + n]).is_ok());
         if verified || !io_ok || attempt == 1 {
-            ctx.engine
-                .borrow_mut()
+            ctx.engine()
                 .local_read_done(Instant::now(), &lr, Some(plan), verified);
             ctx.pump();
             return;
         }
-        ctx.engine.borrow().finish_plan(plan);
+        ctx.engine().finish_plan(plan);
     }
-    ctx.engine
-        .borrow_mut()
+    ctx.engine()
         .local_read_done(Instant::now(), &lr, None, false);
     ctx.pump();
 }
@@ -1099,6 +1145,11 @@ async fn engine_io_task_zc(
             -libc::EIO
         } else {
             match op {
+                sys::UBLK_IO_OP_READ
+                    if n <= st.slot_len() && fast_read_zc(q, tag, st, ctx, offset, len).await =>
+                {
+                    len as i32
+                }
                 sys::UBLK_IO_OP_READ if n <= st.slot_len() => {
                     ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
                     let mut failed = false;
@@ -1156,15 +1207,31 @@ async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCt
     let (at, n) = (lr.at, lr.len);
     // The plan zero-fills the never-written ranges of the slot; they are copied in below.
     let plan = st.with_slot(tag as usize, |b| {
-        ctx.engine.borrow().plan_local_read(&lr, &mut b[at..at + n])
+        ctx.engine().plan_local_read(&lr, &mut b[at..at + n])
     });
     let Ok(plan) = plan else {
-        ctx.engine
-            .borrow_mut()
+        ctx.engine()
             .local_read_done(Instant::now(), &lr, None, false);
         ctx.pump();
         return;
     };
+    let ok = zc_read_plan(q, tag, st, ctx, &plan, at, n).await;
+    ctx.engine()
+        .local_read_done(Instant::now(), &lr, Some(plan), ok);
+    ctx.pump();
+}
+
+/// Carries out a planned read with zero copy: the device reads land in the request's pages at
+/// `at`, and the plan's zero-filled ranges are copied in from the tag's staging slot.
+async fn zc_read_plan(
+    q: &UblkQueue<'_>,
+    tag: u16,
+    st: &Staging,
+    ctx: &EngineCtx,
+    plan: &flaminio_store::ReadPlan,
+    at: usize,
+    n: usize,
+) -> bool {
     let mut pending = Vec::new();
     let mut zeros = Vec::new();
     let mut pos = 0;
@@ -1173,7 +1240,7 @@ async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCt
             zeros.push((pos, r.buf_offset - pos));
         }
         let sqe = opcode::ReadFixed::new(
-            types::Fd(ctx.fd),
+            types::Fd(ctx.shared.fd),
             (at + r.buf_offset) as *mut u8,
             r.len as u32,
             tag,
@@ -1193,8 +1260,155 @@ async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCt
     for (completion, expected) in pending {
         ok &= completion.await == expected;
     }
-    ctx.engine
-        .borrow_mut()
-        .local_read_done(Instant::now(), &lr, Some(plan), ok);
+    ok
+}
+
+/// The fast path, with zero copy. True if the read was served; false to take the slow path.
+async fn fast_read_zc(
+    q: &UblkQueue<'_>,
+    tag: u16,
+    st: &Staging,
+    ctx: &EngineCtx,
+    offset: u64,
+    len: u64,
+) -> bool {
+    let Some(fast) = ctx
+        .engine()
+        .try_fast_read(Instant::now(), &ctx.shared.volume, offset, len)
+    else {
+        return false;
+    };
+    let mut ok = true;
+    let pieces: Vec<(usize, usize)> = fast.pieces().collect();
+    for (i, (at, n)) in pieces.into_iter().enumerate() {
+        let plan = st.with_slot(tag as usize, |b| {
+            ctx.engine().plan_fast_read(&fast, i, &mut b[at..at + n])
+        });
+        let Ok(plan) = plan else {
+            ok = false;
+            break;
+        };
+        ok &= zc_read_plan(q, tag, st, ctx, &plan, at, n).await;
+        ctx.engine().finish_plan(plan);
+        if !ok {
+            break;
+        }
+    }
+    let served = ctx
+        .engine()
+        .finish_fast_read(Instant::now(), &ctx.shared.volume, fast, ok);
     ctx.pump();
+    served
+}
+
+/// The fast path, into the tag's buffer: the pieces are planned, read and verified here,
+/// without the engine's queue. True if the read was served; false to take the slow path.
+async fn fast_read_copy(
+    q: &UblkQueue<'_>,
+    buf: &RefCell<IoBuf<u8>>,
+    ctx: &EngineCtx,
+    offset: u64,
+    len: u64,
+) -> bool {
+    let Some(fast) = ctx
+        .engine()
+        .try_fast_read(Instant::now(), &ctx.shared.volume, offset, len)
+    else {
+        return false;
+    };
+    let mut ok = true;
+    let mut plans = Vec::new();
+    for (i, (at, n)) in fast.pieces().enumerate() {
+        let plan = {
+            let mut b = buf.borrow_mut();
+            ctx.engine().plan_fast_read(&fast, i, &mut b[at..at + n])
+        };
+        match plan {
+            Ok(p) => plans.push((p, at, n)),
+            Err(_) => {
+                ok = false;
+                break;
+            }
+        }
+    }
+    // The kernel gave us this tag's buffer; nothing else touches it until the request is
+    // committed, and every read queued here is awaited before it is used.
+    let base = buf.borrow_mut().as_mut_ptr();
+    let mut pending = Vec::new();
+    if ok {
+        for (plan, at, _) in &plans {
+            for r in plan.reads() {
+                let sqe = opcode::Read::new(
+                    types::Fd(ctx.shared.fd),
+                    base.wrapping_add(at + r.buf_offset),
+                    r.len as u32,
+                )
+                .offset(r.device_offset)
+                .build();
+                pending.push((q.ublk_submit_sqe(sqe), r.len as i32));
+            }
+        }
+    }
+    for (completion, expected) in pending {
+        ok &= completion.await == expected;
+    }
+    if ok && ctx.shared.verify {
+        let b = buf.borrow();
+        ok = plans
+            .iter()
+            .all(|(plan, at, n)| plan.verify(&b[*at..*at + *n]).is_ok());
+    }
+    for (plan, _, _) in plans {
+        ctx.engine().finish_plan(plan);
+    }
+    let served = ctx
+        .engine()
+        .finish_fast_read(Instant::now(), &ctx.shared.volume, fast, ok);
+    ctx.pump();
+    served
+}
+
+/// libublk's event loop, with polling: for `poll` after the last completion, the ring is
+/// checked without sleeping, so that the next request or device completion costs no wake-up of
+/// the thread (in a VM, a halted vCPU's wake-up costs microseconds). Then it blocks, as
+/// libublk's own loop always does (`poll` zero).
+async fn event_loop(
+    q: &UblkQueue<'_>,
+    poll: Duration,
+    run_ops: impl Fn(),
+    is_done: impl Fn() -> bool,
+) -> Result<(), UblkError> {
+    use libublk::uring_async::{
+        ublk_reap_io_events_with_update_queue, ublk_wake_task, uring_poll_io_fn,
+    };
+    run_ops();
+    let mut last = Instant::now();
+    loop {
+        let spinning = !poll.is_zero() && last.elapsed() < poll;
+        // Submit what the tasks queued; wait for a completion only when not spinning.
+        let polled = if spinning {
+            uring_poll_io_fn::<io_uring::squeue::Entry>(q, None, 0)
+        } else {
+            uring_poll_io_fn::<io_uring::squeue::Entry>(q, Some(types::Timespec::new().sec(20)), 1)
+        };
+        let (poll_timeout, failed) = match polled {
+            Ok(t) => (t, false),
+            Err(_) => (false, true),
+        };
+        let mut reaped = 0usize;
+        let aborted = ublk_reap_io_events_with_update_queue(q, poll_timeout, None, |cqe| {
+            reaped += 1;
+            ublk_wake_task(cqe.user_data(), cqe)
+        })?;
+        run_ops();
+        if reaped > 0 {
+            last = Instant::now();
+        } else if spinning {
+            std::hint::spin_loop();
+        }
+        if (aborted || failed) && is_done() {
+            break;
+        }
+    }
+    Ok(())
 }

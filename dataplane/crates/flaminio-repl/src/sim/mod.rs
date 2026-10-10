@@ -112,6 +112,8 @@ pub struct Config {
     pub read_pct: u64,
     /// Percent chance that a controller round requests a replica move.
     pub move_pct: u64,
+    /// Client reads take the fast path when the target admits them (spec §5, fast reads).
+    pub fast_reads: bool,
 }
 
 impl Config {
@@ -149,6 +151,7 @@ impl Config {
             detect: r.pick(&[(100 * MS, 2 * SEC), (SEC, 10 * SEC)]),
             read_pct: r.pick(&[50, 80, 95]),
             move_pct: r.pick(&[0, 10, 30]),
+            fast_reads: r.pct(50),
         }
     }
 }
@@ -215,17 +218,51 @@ type Conn = Option<(Epoch, u64)>;
 #[derive(Debug, Clone)]
 enum Ev {
     Deliver(Packet),
-    Wake { node: NodeId },
-    ClientStep { node: NodeId, inc: u64 },
+    Wake {
+        node: NodeId,
+    },
+    ClientStep {
+        node: NodeId,
+        inc: u64,
+    },
     Fault,
-    Restart { node: NodeId },
-    Heal { a: NodeId, b: NodeId },
-    Unslow { a: NodeId, b: NodeId },
-    Failover { epoch: Epoch },
+    Restart {
+        node: NodeId,
+    },
+    Heal {
+        a: NodeId,
+        b: NodeId,
+    },
+    Unslow {
+        a: NodeId,
+        b: NodeId,
+    },
+    Failover {
+        epoch: Epoch,
+    },
     MetaUp,
     Controller,
     EndChaos,
     Script(Action),
+    /// A fast read's device read on the local replica, then its completion.
+    FastDevice {
+        node: NodeId,
+        inc: u64,
+        op: u64,
+    },
+    FastDone {
+        node: NodeId,
+        inc: u64,
+        op: u64,
+    },
+}
+
+/// A fast read in flight on a node: the admission, the target's epoch, and the data once read.
+#[derive(Debug)]
+struct Fast {
+    fr: crate::target::FastRead,
+    epoch: Epoch,
+    data: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -255,6 +292,8 @@ struct Node {
     target: Option<Target<Data>>,
     /// Client operations in flight: op id → extent.
     client: BTreeMap<u64, (ChunkIdx, Extent)>,
+    /// Fast reads in flight: op id → read.
+    fast: BTreeMap<u64, Fast>,
     wake_at: Option<u64>,
 }
 
@@ -345,6 +384,7 @@ impl Sim {
                     replica,
                     target: None,
                     client: BTreeMap::new(),
+                    fast: BTreeMap::new(),
                     wake_at: None,
                 }
             })
@@ -374,6 +414,11 @@ impl Sim {
             #[cfg(test)]
             bugs: Bugs::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn cfg_mut(&mut self) -> &mut Config {
+        &mut self.cfg
     }
 
     #[cfg(test)]
@@ -526,6 +571,8 @@ impl Sim {
             Ev::Failover { epoch } => self.failover(epoch),
             Ev::MetaUp => self.meta_up = true,
             Ev::Controller => self.controller(),
+            Ev::FastDevice { node, inc, op } => self.fast_device(node, inc, op),
+            Ev::FastDone { node, inc, op } => self.fast_done(node, inc, op),
             Ev::EndChaos => self.end_chaos(),
             Ev::Script(a) => self.script_step(a),
         }
@@ -707,6 +754,7 @@ impl Sim {
         }
         // The previous target on this node goes away: its operations stay unanswered.
         n.client.clear();
+        n.fast.clear();
         let local = n.clock.local(self.now);
         #[allow(unused_mut)]
         let mut t = Target::new(node, VOL, &view, timing, self.cfg.max_io, local);
@@ -800,6 +848,11 @@ impl Sim {
         });
         n.client.insert(op, (chunk, ext));
         let local = n.clock.local(self.now);
+        if write.is_none() && self.cfg.fast_reads && self.fast_read(node, op, chunk, ext) {
+            return op;
+        }
+        let n = &mut self.nodes[node as usize];
+        let t = n.target.as_mut().expect("target");
         let kind = match write {
             Some(value) => Op::Write {
                 chunk,
@@ -811,6 +864,102 @@ impl Sim {
         t.submit(local, op, kind);
         self.after(node);
         op
+    }
+
+    /// Starts a fast read if the target admits it: the local replica's rules (fencing, the
+    /// session) apply now, its device read happens later, and the target completes it after
+    /// that, as in the data plane. Returns false if it must go through the queue.
+    fn fast_read(&mut self, node: NodeId, op: u64, chunk: ChunkIdx, ext: Extent) -> bool {
+        let n = &mut self.nodes[node as usize];
+        let local = n.clock.local(self.now);
+        let t = n.target.as_mut().expect("target");
+        let Some(fr) = t.try_fast_read(local, chunk, ext) else {
+            return false;
+        };
+        let epoch = t.epoch();
+        let msg = ToReplica {
+            vol: VOL,
+            epoch,
+            session: fr.session,
+            req: u64::MAX,
+            body: crate::msg::Request::<Data>::Read { chunk, ext },
+        };
+        let admitted = matches!(
+            n.replica.core.handle(&msg),
+            crate::replica::Action::Read { .. }
+        );
+        if !admitted {
+            // Refused by the replica (fenced at a newer epoch, or another session): back to
+            // the queue, where its reply deposes the target or times out.
+            let ok = t.finish_fast_read(local, fr, false);
+            debug_assert!(!ok);
+            self.after(node);
+            return false;
+        }
+        n.fast.insert(
+            op,
+            Fast {
+                fr,
+                epoch,
+                data: None,
+            },
+        );
+        // A device read: usually quick, sometimes slow enough to outlast a lease.
+        let delay = if self.rng.pct(95) {
+            self.rng.range(10, 3 * MS)
+        } else {
+            self.rng.range(MS, 2 * self.cfg.timing.lease)
+        };
+        let inc = n.inc;
+        self.at(self.now + delay, Ev::FastDevice { node, inc, op });
+        true
+    }
+
+    fn fast_device(&mut self, node: NodeId, inc: u64, op: u64) {
+        let n = &mut self.nodes[node as usize];
+        if n.inc != inc {
+            return;
+        }
+        let Some(f) = n.fast.get_mut(&op) else {
+            return;
+        };
+        let (chunk, ext) = (f.fr.chunk, f.fr.ext);
+        // The replica may have lost the chunk since (a move dropped it): the read fails.
+        f.data = ext
+            .blocks()
+            .map(|b| n.replica.block(VOL, chunk, b))
+            .collect::<Option<Vec<Value>>>();
+        let delay = self.rng.range(1, 300);
+        self.at(self.now + delay, Ev::FastDone { node, inc, op });
+    }
+
+    fn fast_done(&mut self, node: NodeId, inc: u64, op: u64) {
+        let n = &mut self.nodes[node as usize];
+        if n.inc != inc {
+            return;
+        }
+        let Some(f) = n.fast.remove(&op) else {
+            return;
+        };
+        let local = n.clock.local(self.now);
+        // The local replica still fenced at the read's epoch: no newer target can have written
+        // to it while the device read was under way (spec §5, fast reads).
+        let fenced = n.replica.core.fenced(VOL) == f.epoch;
+        #[cfg(test)]
+        let fenced = fenced || self.bugs.target.fast_read_no_fence_check;
+        let Some(t) = n.target.as_mut().filter(|t| t.epoch() == f.epoch) else {
+            return;
+        };
+        let (chunk, ext) = (f.fr.chunk, f.fr.ext);
+        if t.finish_fast_read(local, f.fr, f.data.is_some() && fenced)
+            && let Some(data) = f.data
+        {
+            n.client.remove(&op);
+            self.history[op as usize].result = Some((self.now, OpResult::Read(data)));
+        } else {
+            t.submit(local, op, Op::Read { chunk, ext });
+        }
+        self.after(node);
     }
 
     fn client_step(&mut self, node: NodeId, inc: u64) {
@@ -893,6 +1042,7 @@ impl Sim {
         n.inc += 1;
         n.target = None;
         n.client.clear();
+        n.fast.clear();
         n.wake_at = None;
         n.replica.restart();
         self.report.crashes += 1;

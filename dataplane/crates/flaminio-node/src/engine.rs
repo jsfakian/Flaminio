@@ -35,7 +35,7 @@ use flaminio_net::token::Claims;
 use flaminio_repl::extent::Extent;
 use flaminio_repl::meta::{ChunkMeta, MetaReply, MetaRequest, VolumeMeta};
 use flaminio_repl::msg::{FromReplica, Request, Response, ToReplica};
-use flaminio_repl::target::{Op, OpResult, Output as TOut, Target};
+use flaminio_repl::target::{FastRead, Op, OpResult, Output as TOut, Target};
 use flaminio_repl::types::{Block, NodeId, Timing};
 use flaminio_store::BlockDevice;
 use smol::channel;
@@ -120,6 +120,33 @@ pub enum Io {
         offset: u64,
         data: Vec<u8>,
     },
+}
+
+/// A client read admitted on the fast path ([`Engine::try_fast_read`]): every piece is on the
+/// local replica, and the frontend reads them from the store itself.
+#[derive(Debug)]
+pub struct FastLocal {
+    pieces: Vec<FastPiece>,
+}
+
+#[derive(Debug)]
+struct FastPiece {
+    fr: FastRead,
+    /// The local replica's session it was admitted on.
+    sref: SessionRef,
+    /// Byte offset and length of the piece within the client's read.
+    at: usize,
+    len: usize,
+    key: flaminio_store::ChunkKey,
+    offset: u64,
+    epoch: u64,
+}
+
+impl FastLocal {
+    /// The pieces, as (byte offset in the client's read, length).
+    pub fn pieces(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.pieces.iter().map(|p| (p.at, p.len))
+    }
 }
 
 /// A piece of a direct read to serve from the local replica: plan it with
@@ -219,6 +246,8 @@ pub enum Output {
 /// An admitted local read, waiting for the frontend.
 struct PendingLocal {
     volume: String,
+    /// The local replica's session the read was admitted on.
+    sref: SessionRef,
     session: u64,
     req: u64,
     key: flaminio_store::ChunkKey,
@@ -1239,6 +1268,7 @@ impl<D: BlockDevice> Engine<D> {
                         token,
                         PendingLocal {
                             volume: volume.to_string(),
+                            sref,
                             session: msg.session,
                             req: msg.req,
                             key,
@@ -1318,6 +1348,132 @@ impl<D: BlockDevice> Engine<D> {
 }
 
 impl<D: BlockDevice> Engine<D> {
+    /// The fast path for a client read (spec §5, fast reads): if the volume's target admits
+    /// every piece at once, by the same rules as its queue, and the local replica admits each
+    /// on the target's session, the frontend reads the pieces from the store itself
+    /// ([`Self::plan_fast_read`]) and ends with [`Self::finish_fast_read`]. `None`: use
+    /// [`Input::Io`], which applies the same rules through the queue.
+    pub fn try_fast_read(
+        &mut self,
+        now: Instant,
+        volume: &str,
+        offset: u64,
+        len: u64,
+    ) -> Option<FastLocal> {
+        let us = self.us(now);
+        let rt = self.targets.get_mut(volume)?;
+        let b = BLOCK as u64;
+        if len == 0
+            || !offset.is_multiple_of(b)
+            || !len.is_multiple_of(b)
+            || offset.checked_add(len).is_none_or(|e| e > rt.size)
+        {
+            return None;
+        }
+        let Some(Sess::Local {
+            session,
+            sref: Some(sref),
+        }) = rt.sessions.get(&rt.local)
+        else {
+            return None;
+        };
+        let (session, sref) = (*session, *sref);
+        let mut pieces = Vec::with_capacity(1);
+        let mut off = offset;
+        let mut refused = false;
+        while off < offset + len {
+            let chunk = (off / rt.chunk_size) as u32;
+            let within = off % rt.chunk_size;
+            let n = (rt.chunk_size - within).min(offset + len - off);
+            let ext = Extent::new((within / b) as u32, (n / b) as u32);
+            let Some(fr) = rt.sm.try_fast_read(us, chunk, ext) else {
+                refused = true;
+                break;
+            };
+            // The local replica's rules on the target's session: fencing above all.
+            let admitted = fr.session == session
+                && match self.service.admit_read(sref, 0, chunk, ext) {
+                    crate::replica::Admit::Read {
+                        key,
+                        offset: in_chunk,
+                        epoch,
+                        ..
+                    } => {
+                        pieces.push(FastPiece {
+                            fr,
+                            sref,
+                            at: (off - offset) as usize,
+                            len: n as usize,
+                            key,
+                            offset: in_chunk,
+                            epoch,
+                        });
+                        true
+                    }
+                    crate::replica::Admit::Reply(_) => false,
+                };
+            if !admitted {
+                rt.sm.finish_fast_read(us, fr, false);
+                refused = true;
+                break;
+            }
+            off += n;
+        }
+        if refused {
+            for p in pieces {
+                rt.sm.finish_fast_read(us, p.fr, false);
+            }
+            self.drain(now, volume);
+            return None;
+        }
+        Some(FastLocal { pieces })
+    }
+
+    /// Plans piece `i` of a fast read into `buf` (exactly its length): the device reads to
+    /// perform. Never-written ranges are zero-filled now.
+    pub fn plan_fast_read(
+        &self,
+        fast: &FastLocal,
+        i: usize,
+        buf: &mut [u8],
+    ) -> Result<flaminio_store::ReadPlan, IoError> {
+        let p = fast.pieces.get(i).ok_or(IoError::Invalid)?;
+        if buf.len() != p.len {
+            return Err(IoError::Invalid);
+        }
+        self.service
+            .plan_read(p.key, p.offset, buf, p.epoch)
+            .map_err(|_| IoError::Invalid)
+    }
+
+    /// Ends a fast read: `ok` if every piece was read (and verified). True if its data
+    /// counts; otherwise the frontend submits the read again through [`Input::Io`]. The data
+    /// counts only if no newer target fenced the local replica while the reads were under way:
+    /// a newer target writes only to replicas it has fenced (spec §5, fast reads).
+    pub fn finish_fast_read(
+        &mut self,
+        now: Instant,
+        volume: &str,
+        fast: FastLocal,
+        ok: bool,
+    ) -> bool {
+        let us = self.us(now);
+        let ok = ok
+            && fast
+                .pieces
+                .iter()
+                .all(|p| self.service.still_fenced_at(p.sref));
+        let Some(rt) = self.targets.get_mut(volume) else {
+            return false;
+        };
+        let mut all = ok;
+        for p in fast.pieces {
+            all &= rt.sm.finish_fast_read(us, p.fr, ok);
+        }
+        self.drain(now, volume);
+        all
+    }
+
     /// Plans a local read into `buf` (exactly `lr.len` bytes): the device reads for the
     /// frontend to perform. Unmapped ranges are zero-filled now.
     pub fn plan_local_read(
@@ -1362,12 +1518,21 @@ impl<D: BlockDevice> Engine<D> {
             Some(n) if n == lr.len => {}
             _ => return,
         }
+        // The read was admitted before the device read: if a newer target fenced the replica
+        // meanwhile, it may have written to it, and the answer is what the replica would have
+        // given at the time of the read (spec §5, fast reads).
+        let fenced = self.service.fenced_epoch(p.sref);
+        let body = if fenced == p.sref.epoch {
+            Response::Data(Payload::Placed(lr.len))
+        } else {
+            Response::Stale { fenced }
+        };
         let m = FromReplica {
             vol: 0,
             epoch: rt.sm.epoch(),
             session: p.session,
             req: p.req,
-            body: Response::Data(Payload::Placed(lr.len)),
+            body,
         };
         rt.sm.on_reply(us, local, &m);
         self.drain(now, &p.volume);

@@ -8,20 +8,28 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## Status (2026-10-09)
+## Status (2026-10-10)
 
-R0 is done (`make bench-reads`), and zero copy is measured
-([results](benchmarks/2026-10-09-zero-copy-reads.md)): all three jobs on fl-b at 4 vCPUs, raw
-measured on the same 16 GiB span size, caches dropped before every job, medians of 3 runs.
+R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)). Measured on fl-b at 4 vCPUs,
+against raw on 16 GiB spans of the same disk, caches dropped before every job, medians of 3
+runs. Every run passed fio's end-to-end check of the whole volume, and every verify-mode run
+logged 0 checksum failures.
 
-| Read job | Verify (baseline) | Zero copy | Raw |
-|---|---:|---:|---:|
-| 4K random, QD1 | 82% | 83% | 15.4k IOPS |
-| 4K random, QD32 | 74% | **88%** | 240k IOPS |
-| 1M sequential, QD8 | 51% | **≈ 100%** | 6.3–6.7 GB/s (depends on the region of the disk) |
+| Read job | Verify, start | Zero copy, start | **Zero copy now** | With 100 µs polling | Verify now |
+|---|---:|---:|---:|---:|---:|
+| 4K random, QD1 | 82% | 83% | 84% | **88%** | 82% |
+| 4K random, QD32 | 74% | 88% | **95%** | 96% | 87% |
+| 1M sequential, QD8 | 51% | ≈ 100% | **≈ 100%** | 102% | 58% |
 
-Integrity runs on both paths: fio verified 16 GiB with 0 errors, and Flaminio logged 0
-checksum failures. Next: R2 for QD1 and QD32, then the write harness (W1–W2).
+**Two fio jobs, 2 queues (R4):** 94% at QD32, against 90% with 1 queue.
+
+**Goal:** QD32 and 1M meet it (≥ 90%). QD1 does not: 84% by default, 88% with polling. The
+rest is the ublk round trip, a larger change; next steps in the results document.
+
+**Decided:** zero copy for performance, the verify path for integrity runs. Polling
+(`--poll-us`) and several queues (`--queues`) are per-node settings, off by default.
+
+Next: the write harness (W1–W2).
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 

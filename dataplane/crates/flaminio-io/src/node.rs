@@ -43,6 +43,14 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --token FILE         the capability token from VOLUME's attach (raw bytes)
       --depth N            ublk queue depth (default 128)
       --io-buf SIZE        largest single I/O, at most 1M (default 512K)
+      --poll-us N          after any completion, a queue thread checks its ring without sleeping
+                           for N microseconds before it blocks (default 0: never). Spends CPU
+                           under load to save the wake-ups of low queue depths
+      --queues N           ublk queues, each served by a thread of its own (default 1). The
+                           kernel maps each submitting CPU to one queue: more queues serve more
+                           submitting threads at once
+      --no-verify          EXPERIMENT ONLY: skip the checksum check of local reads (to measure
+                           what verification costs)
       --zero-copy          local reads go straight from the disk into the request's pages
                            (ublk auto buffer registration): no copy, and so no checksum
                            verification of those reads. For measuring; see docs/performance-plan.md
@@ -71,6 +79,9 @@ pub(crate) struct NodeConfig {
     pub id: i32,
     pub control: PathBuf,
     pub zero_copy: bool,
+    pub no_verify: bool,
+    pub queues: u16,
+    pub poll_us: u64,
 }
 
 fn parse(args: &[String]) -> Result<NodeConfig, String> {
@@ -92,6 +103,9 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         id: -1,
         control: PathBuf::from("/run/flaminio/node.sock"),
         zero_copy: false,
+        no_verify: false,
+        queues: 1,
+        poll_us: 0,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -122,6 +136,14 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
             "--id" => c.id = value()?.parse().map_err(|_| "invalid --id")?,
             "--control" => c.control = value()?.into(),
             "--zero-copy" => c.zero_copy = true,
+            "--no-verify" => c.no_verify = true,
+            "--poll-us" => c.poll_us = value()?.parse().map_err(|_| "invalid --poll-us")?,
+            "--queues" => {
+                c.queues = value()?.parse().map_err(|_| "invalid --queues")?;
+                if c.queues == 0 || c.queues > 64 {
+                    return Err("--queues must be 1 to 64".into());
+                }
+            }
             _ => return Err(format!("unknown argument {flag}\n\n{USAGE}")),
         }
     }

@@ -2,9 +2,12 @@
 
 use crate::consts::BLOCK_SIZE;
 
-/// CRC-32C of `data`. Hardware accelerated where the CPU supports it.
+/// CRC-32C of `data`. Carry-less multiplication folding, with the widest vectors the CPU has
+/// (chosen at run time: AVX-512 or AVX2 `vpclmulqdq`, `pclmulqdq`, or ARM `pmull`). It is
+/// 4–9 times faster per 4 KiB block than the `crc32` instruction alone
+/// (`examples/crc_bench.rs`), and verifying reads is where it counts.
 pub fn crc32c(data: &[u8]) -> u32 {
-    crc32c::crc32c(data)
+    crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, data) as u32
 }
 
 /// One CRC-32C per 4 KiB block of `data`, as stored in map entries and write records.
@@ -23,6 +26,21 @@ pub fn block_checksums(data: &[u8]) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Same values as the reference implementation, for every length and alignment that
+    /// matters to the folding code's edges.
+    #[test]
+    fn matches_the_reference() {
+        let data: Vec<u8> = (0..70_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 11) as u8)
+            .collect();
+        for start in [0, 1, 7, 15, 64] {
+            for len in (0..300).chain([1023, 1024, 4095, 4096, 4097, 65_536]) {
+                let d = &data[start..start + len];
+                assert_eq!(crc32c(d), crc32c::crc32c(d), "start {start} len {len}");
+            }
+        }
+    }
 
     #[test]
     fn known_vector() {

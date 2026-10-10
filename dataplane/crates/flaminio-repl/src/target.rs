@@ -79,6 +79,25 @@ pub struct Bugs {
     /// Drop a move's source once the destination is a replica, not once it is in the ISR
     /// (counting the destination in the ISR).
     pub drop_before_join: bool,
+    /// Admit and complete fast reads without checking the lease.
+    pub fast_read_no_lease: bool,
+    /// Complete fast reads without checking that the local replica stayed in the ISR.
+    pub fast_read_ignores_membership: bool,
+    /// (Checked by the caller, which owns the replica.) Complete fast reads without checking
+    /// that the local replica is still fenced at the read's epoch.
+    pub fast_read_no_fence_check: bool,
+}
+
+/// A read admitted by [`Target::try_fast_read`]: carried out by the caller on the local
+/// replica, then handed back to [`Target::finish_fast_read`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FastRead {
+    pub chunk: ChunkIdx,
+    pub ext: Extent,
+    /// The local replica's session: the read goes to the replica's rules on it (fencing).
+    pub session: u64,
+    /// The chunk's local-membership generation at admission (see `Chunk::local_gen`).
+    member_gen: u64,
 }
 
 /// Something worth logging that the target did on its own.
@@ -149,6 +168,10 @@ struct Chunk {
     /// The move's next step, to be proposed: add the destination, or drop the source.
     add_replica: Option<NodeId>,
     drop_replica: Option<NodeId>,
+    /// Counts the local node's departures from the ISR. A fast read counts only if the local
+    /// replica stayed in the ISR throughout: a replica dropped and added again in between holds
+    /// different data (possibly a chunk recreated empty), though the lease may hold.
+    local_gen: u64,
 }
 
 impl Chunk {
@@ -318,6 +341,7 @@ impl<P: Clone + Debug> Target<P> {
                 moving: m.moving,
                 add_replica: None,
                 drop_replica: None,
+                local_gen: 0,
             })
             .collect();
         let peers = chunks
@@ -460,6 +484,74 @@ impl<P: Clone + Debug> Target<P> {
     /// Takes the outputs produced so far.
     pub fn take_output(&mut self) -> Vec<Output<P>> {
         std::mem::take(&mut self.out)
+    }
+
+    /// Admits a client read to be served by the local replica without going through the queue
+    /// (spec §5, fast reads). It is admitted only when the queue would start it at once, by the
+    /// same rules: the chunk is serving, the local replica is a usable ISR member (not being
+    /// removed, its session open), the lease holds, no operation in flight holds an
+    /// overlapping lock, and no client operation waits on an overlapping extent ahead of it.
+    /// The read takes its blocks' lock until [`Target::finish_fast_read`].
+    pub fn try_fast_read(&mut self, now: Time, chunk: ChunkIdx, ext: Extent) -> Option<FastRead> {
+        let i = chunk as usize;
+        let c = self.chunks.get(i)?;
+        if self.deposed
+            || ext.len == 0
+            || ext.end() > self.blocks_per_chunk
+            || c.phase != Phase::Ready
+            || c.locks.overlaps(&ext)
+            || self.source(i, None) != Some(self.node)
+        {
+            return None;
+        }
+        #[cfg(test)]
+        let lease = self.bugs.fast_read_no_lease || self.lease_ok(i, now);
+        #[cfg(not(test))]
+        let lease = self.lease_ok(i, now);
+        if !lease
+            || self.queue.iter().any(|w| match w {
+                Work::Client { kind, .. } => {
+                    let (qc, qx) = kind.key();
+                    qc == chunk && qx.overlaps(&ext)
+                }
+                _ => false,
+            })
+        {
+            return None;
+        }
+        let session = self.session_of(self.node)?;
+        let c = &mut self.chunks[i];
+        c.locks.insert(ext);
+        Some(FastRead {
+            chunk,
+            ext,
+            session,
+            member_gen: c.local_gen,
+        })
+    }
+
+    /// Ends a fast read. Its data counts only if the local replica served it (`ok`), the lease
+    /// still holds now, after the read, and the local replica stayed a usable ISR member on the
+    /// same session throughout: then the read is linearized while all of that held. Otherwise
+    /// the caller submits the read again, through the queue.
+    pub fn finish_fast_read(&mut self, now: Time, fr: FastRead, ok: bool) -> bool {
+        if self.deposed {
+            return false;
+        }
+        let i = fr.chunk as usize;
+        self.chunks[i].locks.remove(&fr.ext);
+        #[cfg(test)]
+        let lease = self.bugs.fast_read_no_lease || self.lease_ok(i, now);
+        #[cfg(not(test))]
+        let lease = self.lease_ok(i, now);
+        let member = self.chunks[i].local_gen == fr.member_gen
+            && self.source(i, None) == Some(self.node)
+            && self.session_of(self.node) == Some(fr.session);
+        #[cfg(test)]
+        let member = member || self.bugs.fast_read_ignores_membership;
+        // The lock's release may let queued work start.
+        self.pump(now);
+        ok && lease && member
     }
 
     /// Submits a client operation. Its result comes as an [`Output::Done`].
@@ -1537,6 +1629,9 @@ impl<P: Clone + Debug> Target<P> {
                 c.joining = None;
                 c.dirty.remove(&j);
                 joined = Some(j);
+            }
+            if c.isr.contains(&self.node) && !m.isr.contains(&self.node) {
+                c.local_gen += 1;
             }
             c.isr = m.isr.clone();
             c.isr_ver = m.isr_ver;

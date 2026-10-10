@@ -566,5 +566,64 @@ fn direct_reads_from_the_local_replica() {
         "data placed, not returned"
     );
     assert!(buf == pattern(9, 2 * MIB), "both pieces read into place");
+
+    // The fast path: the same read, admitted at once and served without the queue.
+    let fast_read = |engine: &mut Engine<MemDevice>, buf: &mut Vec<u8>| -> Option<bool> {
+        let fast = engine.try_fast_read(Instant::now(), "v", off, 2 * MIB)?;
+        let pieces: Vec<(usize, usize)> = fast.pieces().collect();
+        assert_eq!(pieces.len(), 2, "one piece per chunk");
+        let mut ok = true;
+        for (i, (at, n)) in pieces.into_iter().enumerate() {
+            let piece = &mut buf[at..at + n];
+            let plan = engine.plan_fast_read(&fast, i, piece).unwrap();
+            let mut reads: Vec<(u64, &mut [u8])> = Vec::new();
+            let mut rest: &mut [u8] = piece;
+            let mut base = 0;
+            for r in plan.reads() {
+                let (_, tail) = rest.split_at_mut(r.buf_offset - base);
+                let (this, tail) = tail.split_at_mut(r.len);
+                reads.push((r.device_offset, this));
+                rest = tail;
+                base = r.buf_offset + r.len;
+            }
+            engine.device().read_many(&mut reads).unwrap();
+            ok &= plan.verify(&buf[at..at + n]).is_ok();
+            engine.finish_plan(plan);
+        }
+        Some(engine.finish_fast_read(Instant::now(), "v", fast, ok))
+    };
+    let mut fast_buf = vec![0u8; 2 * MIB as usize];
+    assert_eq!(fast_read(&mut engine, &mut fast_buf), Some(true));
+    assert!(
+        fast_buf == pattern(9, 2 * MIB),
+        "the fast path reads the same data"
+    );
+
+    // A write in flight holds its blocks: an overlapping fast read is refused, and admitted
+    // again once the write is done.
+    engine.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op: 3,
+            io: Io::Write {
+                offset: off,
+                data: pattern(10, 2 * MIB),
+            },
+        },
+    );
+    assert_eq!(
+        fast_read(&mut engine, &mut fast_buf),
+        None,
+        "refused under a write"
+    );
+    run(&mut engine, &mut buf, &|o| {
+        matches!(o, Output::Done { op: 3, .. })
+    });
+    assert_eq!(fast_read(&mut engine, &mut fast_buf), Some(true));
+    assert!(
+        fast_buf == pattern(10, 2 * MIB),
+        "the write's data, after it completed"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

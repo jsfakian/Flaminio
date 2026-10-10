@@ -344,6 +344,7 @@ driver.
 | `make node-fault` | lab | 5–10 min | verified writes through a replica restart; ISR restored; failover |
 | `make partition-test` | lab | 3–5 min | the old target, cut off, serves no stale reads and loses no acknowledged write |
 | `make bench-pod` | lab | 10 min | reads from a pod with a Flaminio volume against the raw disk |
+| `make bench-reads` | lab | 15 min per run | vol1 against raw by the [performance plan](performance-plan.md)'s rules; ends with fio's check of every block. `MODE=zero-copy\|verify`, `QUEUES`, `POLL_US`, `NUMJOBS` |
 | `make chaos` | lab | 20–30 min | random faults under a verified write load; each round ends with a crashed target and a verified failover |
 | `make drain-test` | lab | 15–25 min | a node drained under a verified write load; the destination then serves every byte alone (needs `make data-node-up`) |
 | `make k8s-smoke` | lab | 1 min | Kubernetes over the overlay |

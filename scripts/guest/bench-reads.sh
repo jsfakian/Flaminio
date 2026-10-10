@@ -4,7 +4,7 @@
 #   bench-reads.sh fill DEV SPAN         write all of SPAN once, with fio's checksum in every
 #                                        1 MiB block (so `verify` can check it later)
 #   bench-reads.sh warm DEV SPAN         read all of SPAN once, unmeasured
-#   bench-reads.sh job DEV OFFSET SPAN NAME RW BS QD RUNTIME OUT
+#   bench-reads.sh job DEV OFFSET SPAN NAME RW BS QD RUNTIME OUT [JOBS]
 #                                        one measured job; prints a TSV row: name, IOPS, MiB/s,
 #                                        p50 and p99 (us), fio's CPU and the ublk queue thread's
 #                                        CPU (%, sampled mid-run; - for the raw disk)
@@ -29,10 +29,10 @@ case "${1:-}" in
             "${fio_common[@]}" --output=/tmp/bench-warm.json >/dev/null
         ;;
     job)
-        dev=$2 off=$3 span=$4 name=$5 rw=$6 bs=$7 qd=$8 runtime=$9 out=${10}
+        dev=$2 off=$3 span=$4 name=$5 rw=$6 bs=$7 qd=$8 runtime=$9 out=${10} jobs=${11:-1}
         drop_caches
         sudo fio --name="$name" --filename="$dev" --offset="$off" --size="$span" --rw="$rw" --bs="$bs" \
-            --iodepth="$qd" --numjobs=1 --time_based --runtime="$runtime" --ramp_time=3 \
+            --iodepth="$qd" --numjobs="$jobs" --time_based --runtime="$runtime" --ramp_time=3 \
             "${fio_common[@]}" --output="$out" >/dev/null &
         fio_pid=$!
         qcpu=-

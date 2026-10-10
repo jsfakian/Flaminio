@@ -1,0 +1,5 @@
+job                 Flaminio  spread        raw  spread   share  p99 (us) queue thread CPU %
+randread-4k-qd1        13053    2.9%      15607    0.9%     84%        85  9.6 10.7 11.0
+randread-4k-qd32      229041    0.2%     240531    2.6%     95%       203  68.7 69.8 68.4
+read-1m-qd8             6626    0.1%       6506    2.2%    102%      1548  13.3 13.7 13.3 MiB/s
+  verified 16 GiB, errors 0

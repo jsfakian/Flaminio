@@ -412,6 +412,18 @@ impl<D: BlockDevice> ReplicaService<D> {
         self.store.finish_read(plan);
     }
 
+    /// True if the volume of session `s` is still fenced at the session's epoch. A read
+    /// admitted on `s` and performed later counts only if this holds after it: a newer target
+    /// writes only to replicas it has fenced (spec §5, fast reads).
+    pub fn still_fenced_at(&self, s: SessionRef) -> bool {
+        self.fenced_epoch(s) == s.epoch
+    }
+
+    /// The epoch the volume of session `s` is fenced at now.
+    pub fn fenced_epoch(&self, s: SessionRef) -> u64 {
+        self.core.fenced(s.vol)
+    }
+
     /// The chunk size of a volume known here.
     pub fn chunk_size_of(&self, id: VolumeId) -> Option<u64> {
         self.vols

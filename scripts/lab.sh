@@ -653,7 +653,7 @@ meta_endpoints() {
 
 node_env() {
     local vm=$1
-    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0}"
+    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0}"
 }
 
 # node up|down|status [VM selector, default all]: the data VMs' nodes, replicas only.
@@ -1388,21 +1388,32 @@ drive_temp() {
 
 # MODE=zero-copy|verify, NODE (fl-b), REPS (3), RUNTIME (30): the volume vol1 (16 GiB) on NODE
 # against 16 GiB spans of NODE's raw data disk, at offsets 0, 32 and 64 GiB in turn. FILL=1
-# writes the volume again first.
+# writes the volume again first. The node runs with QUEUES ublk queues (1) and POLL_US of
+# polling (0); fio runs NUMJOBS jobs (1) on both sides.
 cmd_bench_reads() {
     local node mode=${MODE:-zero-copy} reps=${REPS:-3} runtime=${RUNTIME:-30} span=16G
     local dir raw zc=0 r spec name rw bs qd side dev off row t0 t1 since
     node=$(vms_of "${NODE:-b}")
-    [[ $mode == zero-copy || $mode == verify ]] || die "MODE is zero-copy or verify"
-    [[ $mode == zero-copy ]] && zc=1
-    dir="$LOCAL_STATE_DIR/bench/reads-$mode-$(date +%Y%m%dT%H%M%S)"
+    local nv=0 flags want queues=${QUEUES:-1} poll=${POLL_US:-0} jobs=${NUMJOBS:-1}
+    case $mode in
+        zero-copy) zc=1 ;;
+        verify) ;;
+        no-verify) nv=1 ;; # an experiment: the copy path without checksum checks (R1)
+        *) die "MODE is zero-copy, verify or no-verify" ;;
+    esac
+    want=""
+    ((zc)) && want+="--zero-copy "
+    ((nv)) && want+="--no-verify "
+    ((queues != 1)) && want+="--queues $queues "
+    ((poll != 0)) && want+="--poll-us $poll "
+    dir="$LOCAL_STATE_DIR/bench/reads-$mode-q$queues-poll$poll-jobs$jobs-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "$dir"
     release_lab_volume
     # The node runs in the mode asked for: restart it if not.
-    if [[ $(vssh "$node" "systemctl show -p ExecStart --value flaminio-node | grep -c -- --zero-copy" || true) != "$zc" ]] ||
-        ! vssh "$node" "systemctl is-active --quiet flaminio-node"; then
+    flags=$(vssh "$node" "systemctl show -p ExecStart --value flaminio-node | grep -o -- '--zero-copy\|--no-verify\|--queues [0-9]*\|--poll-us [0-9]*' | tr '\n' ' '" || true)
+    if [[ $flags != "$want" ]] || ! vssh "$node" "systemctl is-active --quiet flaminio-node"; then
         log "$node: node in $mode mode"
-        ZERO_COPY=$zc cmd_node up "$(vms_of "$node")" >/dev/null
+        ZERO_COPY=$zc NO_VERIFY=$nv QUEUES=$queues POLL_US=$poll cmd_node up "$(vms_of "$node")" >/dev/null
     fi
     ensure_nodes
     cmd_vol attach "${node#fl-}" >/dev/null
@@ -1416,7 +1427,7 @@ cmd_bench_reads() {
     log "warm-up read of $VOL (waits for reconciliation after a restart)"
     run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" warm /dev/ublkb1 "$span"
 
-    log "$node, $mode, $(vssh "$node" nproc) vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
+    log "$node, $mode, $queues queue(s), ${poll} us polling, $jobs fio job(s), $(vssh "$node" nproc) vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
     printf 'rep\tside\tjob\tIOPS\tMiB/s\tp50\tp99\tfio_cpu\tqueue_cpu\ttemp\n' >"$dir/runs.tsv"
     for r in $(seq 1 "$reps"); do
         for spec in "randread-4k-qd1 randread 4k 1" "randread-4k-qd32 randread 4k 32" "read-1m-qd8 read 1m 8"; do
@@ -1433,7 +1444,7 @@ cmd_bench_reads() {
                 host_drop_caches "$node"
                 t0=$(drive_temp "$node")
                 row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" job "$dev" "$off" "$span" "$name" "$rw" "$bs" "$qd" \
-                    "$runtime" "/tmp/bench-$side-$name-$r.json")
+                    "$runtime" "/tmp/bench-$side-$name-$r.json" "$jobs")
                 t1=$(drive_temp "$node")
                 vssh "$node" "cat /tmp/bench-$side-$name-$r.json" >"$dir/$side-$name-$r.json"
                 printf '%s\t%s\t%s\t%s\n' "$r" "$side" "$row" "$t0/$t1" >>"$dir/runs.tsv"

@@ -217,8 +217,9 @@ chaos: ## ROUNDS (4) of random faults under a verified write load; each round en
 	ROUNDS=$(or $(ROUNDS),4) $(LAB) chaos
 
 .PHONY: bench-reads
-bench-reads: ## vol1 against the same 16 GiB of the raw disk, by the rules of docs/performance-plan.md (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30)
-	MODE=$(or $(MODE),zero-copy) NODE=$(or $(NODE),b) REPS=$(or $(REPS),3) RUNTIME=$(RUNTIME) FILL=$(FILL) $(LAB) bench-reads
+bench-reads: ## vol1 against the same 16 GiB of the raw disk, by the plan's rules (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30, QUEUES=1, POLL_US=0, NUMJOBS=1)
+	MODE=$(or $(MODE),zero-copy) NODE=$(or $(NODE),b) REPS=$(or $(REPS),3) RUNTIME=$(RUNTIME) FILL=$(FILL) \
+	    QUEUES=$(or $(QUEUES),1) POLL_US=$(or $(POLL_US),0) NUMJOBS=$(or $(NUMJOBS),1) $(LAB) bench-reads
 
 .PHONY: bench-pod
 bench-pod: ## Reads from a pod with a 16 GiB Flaminio volume (NODE=fl-b, RUNTIME=30), against the node's raw disk

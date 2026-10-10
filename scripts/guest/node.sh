@@ -45,6 +45,9 @@ up() {
     [[ ${FORMAT:-0} == 1 ]] && args+=(--format --force)
     # Zero copy: local reads unverified, for measuring (docs/performance-plan.md).
     [[ ${ZERO_COPY:-0} == 1 ]] && args+=(--zero-copy)
+    [[ ${NO_VERIFY:-0} == 1 ]] && args+=(--no-verify)
+    [[ ${QUEUES:-1} != 1 ]] && args+=(--queues "$QUEUES")
+    [[ ${POLL_US:-0} != 0 ]] && args+=(--poll-us "$POLL_US")
     if [[ -n ${ATTACH:-} ]]; then
         sudo install -d -m 700 /run/flaminio
         echo "${TOKEN:?}" | base64 -d | sudo tee "/run/flaminio/$ATTACH.token" >/dev/null

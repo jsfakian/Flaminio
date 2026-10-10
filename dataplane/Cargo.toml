@@ -29,6 +29,7 @@ libc = "0.2.175"
 libublk = "0.4.8"
 smol = "2.0.2"
 crc32c = "0.6.8"
+crc-fast = { version = "1.10.0", default-features = false, features = ["std"] }
 thiserror = "2.0.12"
 proptest = "1.6.0"
 

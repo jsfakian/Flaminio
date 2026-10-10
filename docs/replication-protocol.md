@@ -101,6 +101,45 @@ being removed may already be out of the metadata service's ISR, so a new target 
 it (§6). Under this rule, an old target only ever reads from members of the metadata service's
 current ISR.
 
+### Fast reads
+
+Most reads are served by the target's own node from its local replica. The fast path admits
+such a read at once, instead of putting it through the target's queue. The data plane then
+reads the store itself, with no message to the local replica. The read is linearized while the
+three conditions below all held.
+
+1. **Admission** (`Target::try_fast_read`). The same rules as the queue, checked at once:
+   - the chunk is serving;
+   - the local replica is a usable ISR member: in the ISR, not being removed, its session open;
+   - the lease holds;
+   - no operation in flight holds an overlapping lock, and no client operation waits on an
+     overlapping extent ahead of it.
+
+   The read takes its blocks' lock. Then the local replica's own rules admit it on the target's
+   session: fencing above all.
+2. **The device read**, some time later.
+3. **Completion** (`Target::finish_fast_read`). The data counts only if all of these hold:
+   - the lease still holds;
+   - the local replica stayed a usable ISR member on the same session throughout: a counter of
+     the local node's departures from the ISR must be unchanged;
+   - **the local replica is still fenced at the read's epoch.**
+
+   Otherwise the read goes through the queue.
+
+Why the last two conditions (both found by the simulator, finding 9):
+- **Membership.** A move can drop the local replica and add it back during a slow device read.
+  The chunk is then recreated empty and refilled by a resync. The lease, which covers the
+  current ISR, still holds, but the replica's data is not the ISR's.
+- **Fencing.** A newer target that fences *every* ISR member needs no takeover wait (§6). It can
+  write to the local replica while an old target's read, admitted before the fence, is still
+  under way. The old target's lease, from earlier confirmations, still holds. A newer target
+  writes only to replicas it has fenced, so "still fenced at our epoch after the read" rules
+  this out.
+
+  The slow path is safe here because the replica checks fencing at the moment it reads. The
+  data plane's earlier direct local reads admitted first and read later, and so shared this
+  flaw. They now answer `Stale` if the replica was fenced meanwhile.
+
 ## 6. Failover: fencing and reconciliation
 
 A new target starts from `Attach`, which bumps the epoch. For each chunk:
@@ -296,6 +335,9 @@ the simulator then fails:
 | No resync filter on the replica (§7) | seed 7 |
 | A move's destination joins the ISR without a resync (§7, moves) | seed 1 |
 | A move drops its source before the destination is in the ISR (§7, moves) | seed 1; in 400 seeds, 49 runs show lost or stale data, 60 a stall |
+| Fast reads without the lease check (§5, fast reads) | seed 967; split-brain scenario |
+| Fast reads without the membership check (§5, fast reads) | seed 3206 |
+| Fast reads without the fencing check at completion (§5, fast reads) | seed 70955: a slow device read must straddle a complete takeover |
 
 The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
 and 60 000 for reconciliation pruning. That bug is rare by nature: the target must die between
@@ -356,7 +398,16 @@ a scenario for it:
 8. **The volume poll delayed ISR changes** (found by the removal-in-flight scenario). The
    target's poll first shared the single slot of its ISR changes, so a poll on a slow
    metadata link held back an urgent removal. The poll now has its own slot.
+9. **Fast reads** (§5, phase 1 performance work). With fast reads in the simulator:
+   - 9 of the first 20 000 seeds returned zeros: a slow read of a replica that a move had
+     dropped and re-added in between. The fix is the membership check.
+   - 2 of the next 200 000 returned a value that a newer target had written but never
+     completed: a slow read across a complete takeover. The fix is the fencing check. The data
+     plane's earlier direct local reads had the same gap, because the simulator modelled
+     replica reads as instantaneous. It now models a fast read as its admission, a device read
+     at a random later time (sometimes longer than a lease), and its completion.
 
 **Results:** 320 000 random seeds passed before moves (on average 4 failovers, 2.5 crashes and
-7 partitions per run). With moves, 220 000 seeds pass (seeds 0–219 999, 2026-10-09), all
-scenarios pass, and every mutation above is caught.
+7 partitions per run). With moves, 220 000 seeds passed (2026-10-09). With moves and fast
+reads, 320 000 seeds pass (seeds 0–319 999, 2026-10-10), all scenarios pass, and every
+mutation above is caught.
