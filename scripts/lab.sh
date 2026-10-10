@@ -1496,6 +1496,150 @@ bench_summary() {
         }' "$1"
 }
 
+# --- Writes, by the rules of docs/performance-plan.md (W1–W3) ---
+
+# W1: the empty state, before every write run. The data disk is discarded in the guest (QEMU
+# punches holes in the image), the host trims its filesystem and preallocates the image again,
+# then everything rests for IDLE seconds and the caches are dropped. For Flaminio, the store is
+# then formatted and a fresh 16 GiB volume created (RF replicas, one on NODE) and attached.
+write_reset() {
+    local node=$1 side=$2 rf=$3 host
+    host=$(vmvar "$node" HOST)
+    ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
+    metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
+    cmd_node down "$(vms_of "$node")" >/dev/null
+    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" discard 2>/dev/null
+    ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$host" "$SCRIPTS/host/reset-disk.sh" reset
+    sleep "${IDLE:-300}"
+    host_drop_caches "$node"
+    if [[ $side == flaminio ]]; then
+        FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
+        metactl "$VM_A" "$VM_A" create wbench 16G "$rf" 1 256M "$node" >/dev/null
+        local out tok
+        out=$(metactl "$VM_A" "$VM_A" attach wbench "$node")
+        tok=$(jq -r .token <<<"$out")
+        ENV_VARS="VOLUME=wbench TOKEN=$tok" run_on_vm "$node" "$SCRIPTS/guest/node.sh" attach >/dev/null
+    fi
+}
+
+# A write job's measure, from its TSV row: MiB/s for large writes, otherwise IOPS (reads
+# included, for the mixed job).
+write_metric() {
+    if [[ $1 == 1m ]]; then cut -f3 <<<"$2"; else awk -F'\t' '{print $2 + $6}' <<<"$2"; fi
+}
+
+# Steady state (SNIA PTS-style): the last 5 rounds within ±10% of their mean, and the best-fit
+# line's change across them within 10% of the mean. Prints the mean if steady, nothing if not.
+steady_mean() {
+    tail -5 | awk '{v[NR] = $1; s += $1} END {
+        if (NR < 5) exit
+        m = s / NR; lo = hi = v[1]
+        for (i = 1; i <= NR; i++) { if (v[i] < lo) lo = v[i]; if (v[i] > hi) hi = v[i]; sx += i; sxx += i * i; sxy += i * v[i] }
+        slope = (NR * sxy - sx * s) / (NR * sxx - sx * sx)
+        if (hi - m <= 0.1 * m && m - lo <= 0.1 * m && (slope * (NR - 1) < 0 ? -slope * (NR - 1) : slope * (NR - 1)) <= 0.1 * m) printf "%d", m
+    }'
+}
+
+# W2–W3: NODE (fl-b), RF (1: the volume on NODE's own disk, against raw O_DSYNC; 2: a second
+# replica elsewhere), REPS (3), IDLE (300 s), ROUND (60 s), MAX_ROUNDS (12), JOBS (a regex over
+# the job names). NODE's replicas of other volumes move away first and come back after.
+cmd_bench_writes() {
+    local node rf=${RF:-1} reps=${REPS:-3} round=${ROUND:-60} max=${MAX_ROUNDS:-12} filter=${JOBS:-.}
+    local dir raw spec name rw bs qd mix r side dev k row mean fresh w0 w1 c0 c1 bytes
+    node=$(vms_of "${NODE:-b}")
+    dir="$LOCAL_STATE_DIR/bench/writes-rf$rf-$(date +%Y%m%dT%H%M%S)"
+    mkdir -p "$dir"
+    raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)
+    if [[ $(chunks_on "$node") != 0 ]]; then
+        log "moving $VOL's replicas off $node first: its disk is about to be reset"
+        metactl "$VM_A" "$VM_A" drain "$node" >/dev/null
+    fi
+    metactl "$VM_A" "$VM_A" undrain "$node" >/dev/null
+    log "$node, RF $rf, $reps repetitions, $round s rounds (steady: 5 within ±10%, at most $max), idle ${IDLE:-300} s after each reset"
+    printf 'rep\tside\tjob\tphase\tround\tIOPS\tMiB/s\tp50\tp99\tread_IOPS\n' >"$dir/rounds.tsv"
+    printf 'rep\tside\tjob\tfresh\tsteady\trounds\tclient_bytes\tdisk_bytes\tdrive_bytes\ttemp\n' >"$dir/runs.tsv"
+    for spec in "randwrite-4k-qd1 randwrite 4k 1 -" "randwrite-4k-qd32 randwrite 4k 32 -" \
+        "write-1m-qd8 write 1m 8 -" "randrw-70-30-4k-qd32 randrw 4k 32 70"; do
+        read -r name rw bs qd mix <<<"$spec"
+        [[ $name =~ $filter ]] || continue
+        [[ $mix == - ]] && mix=""
+        for r in $(seq 1 "$reps"); do
+            for side in raw flaminio; do
+                write_reset "$node" "$side" "$rf"
+                if [[ $side == raw ]]; then dev=$raw; else dev=/dev/ublkb1; fi
+                row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix")
+                fresh=$(write_metric "$bs" "$row")
+                printf '%s\t%s\t%s\tfresh\t0\t%s\n' "$r" "$side" "$name" "$row" | cut -f1-4,5,7- >>"$dir/rounds.tsv"
+                run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" precondition "$dev" 16G
+                read -r c0 _ <<<"$(ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$(vmvar "$node" HOST)" "$SCRIPTS/host/reset-disk.sh" counters)"
+                : >"$dir/.window"
+                bytes=0 mean=""
+                for k in $(seq 1 "$max"); do
+                    w0=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" written)
+                    row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix")
+                    w1=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" written)
+                    write_metric "$bs" "$row" >>"$dir/.window"
+                    bytes=$((bytes + $(vssh "$node" "jq '.jobs[0].write.io_bytes' /tmp/bench-w.json")))
+                    echo "$(((w1 - w0) * 512))" >>"$dir/.disk"
+                    printf '%s\t%s\t%s\tround\t%s\t%s\n' "$r" "$side" "$name" "$k" "$row" | cut -f1-5,7- >>"$dir/rounds.tsv"
+                    mean=$(steady_mean <"$dir/.window")
+                    [[ -n $mean ]] && break
+                done
+                local temp disk
+                read -r c1 temp <<<"$(ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$(vmvar "$node" HOST)" "$SCRIPTS/host/reset-disk.sh" counters)"
+                disk=$(awk '{s += $1} END {print s + 0}' "$dir/.disk")
+                rm -f "$dir/.disk"
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$r" "$side" "$name" "$fresh" "${mean:-unsteady}" "$k" \
+                    "$bytes" "$disk" "$(((c1 - c0) * 512000))" "$temp" >>"$dir/runs.tsv"
+                log "  $name rep $r $side: fresh $fresh, steady ${mean:-not reached} after $k rounds (${temp} °C)"
+            done
+        done
+    done
+    write_summary "$dir/runs.tsv" | tee "$dir/summary.txt"
+    if [[ ${RESTORE:-1} == 0 ]]; then
+        log "results in $dir ($node left as it is: RESTORE=0)"
+        return
+    fi
+
+    log "restoring $node: a clean store, and $VOL's replicas moved back"
+    metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
+    cmd_node down "$(vms_of "$node")" >/dev/null
+    FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
+    local other
+    for other in $(vms_of all) "$VM_C"; do
+        [[ $other == "$node" || $(chunks_on "$other") == 0 ]] && continue
+        [[ $other == "$VM_A" ]] && continue # the target's node keeps its replicas
+        metactl "$VM_A" "$VM_A" drain "$other" >/dev/null && metactl "$VM_A" "$VM_A" undrain "$other" >/dev/null
+    done
+    log "results in $dir"
+}
+
+# Per job: medians over the repetitions of the fresh and steady values, Flaminio's share of raw
+# at steady state, and write amplification (bytes the guest wrote to the disk, and bytes the
+# drive was given by its host, per byte the client wrote; the drive's count includes the host).
+write_summary() {
+    awk -F'\t' 'NR > 1 {
+            k = $3 "\t" $2; n[k]++; f[k, n[k]] = $4; st[k, n[k]] = ($5 == "unsteady") ? -1 : $5
+            cb[k] += $7; db[k] += $8; vb[k] += $9; jobs[$3] = 1
+        }
+        function med(a, k, c,   i, j, t, x) {
+            for (i = 1; i <= c; i++) x[i] = a[k, i]
+            for (i = 1; i <= c; i++) for (j = i + 1; j <= c; j++) if (x[j] < x[i]) { t = x[i]; x[i] = x[j]; x[j] = t }
+            return (c % 2) ? x[(c + 1) / 2] : (x[c / 2] + x[c / 2 + 1]) / 2
+        }
+        END {
+            printf "%-21s %-9s %10s %10s %7s %9s %9s\n", "job", "side", "fresh", "steady", "share", "disk WA", "drive WA"
+            for (j in jobs) for (s = 0; s < 2; s++) {
+                side = s ? "flaminio" : "raw"; k = j "\t" side
+                if (!n[k]) continue
+                sm = med(st, k, n[k]); rm = med(st, j "\traw", n[j "\traw"])
+                share = (side == "flaminio" && rm > 0 && sm > 0) ? sprintf("%d%%", 100 * sm / rm) : "-"
+                printf "%-21s %-9s %10d %10s %7s %9.2f %9.2f\n", j, side, med(f, k, n[k]), (sm < 0 ? "unsteady" : sm), share,
+                    cb[k] ? db[k] / cb[k] : 0, db[k] ? vb[k] / db[k] : 0
+            }
+        }' "$1"
+}
+
 usage() {
     cat <<USAGE
 usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; cluster: a, b, w)
@@ -1538,6 +1682,7 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   data-node-up fl-c, a third data node: VM, overlay, identities, build, disk claimed by the agent, node
   drain-test   verified writes while $VM_B is drained into $VM_C; $VM_C alone then serves every byte
   chaos        ROUNDS (4) of random faults under a verified write load, each ending with a crashed target
+  bench-writes writes against raw O_DSYNC from an empty state each run: NODE, RF, REPS, IDLE, ROUND, JOBS
   bench-reads  vol1 against the same span of the raw disk: MODE=zero-copy|verify, NODE, REPS, RUNTIME
   bench-pod    reads from a pod with a Flaminio volume (NODE=fl-b, RUNTIME=30), against the raw disk
   partition    $VM_A (the target) cut off the overlay; $VM_B takes over; no stale reads, no lost writes
@@ -1586,6 +1731,7 @@ case "$cmd" in
     partition) cmd_partition ;;
     bench-pod) cmd_bench_pod ;;
     bench-reads) cmd_bench_reads ;;
+    bench-writes) cmd_bench_writes ;;
     chaos) cmd_chaos ;;
     agent) cmd_agent "$@" ;;
     data-node-up) cmd_data_node_up ;;

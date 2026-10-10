@@ -10,7 +10,7 @@
 //!   takes all of them as one batch: one group commit. Writes are acknowledged only once
 //!   durable, so the device advertises no volatile write cache and flushes are no-ops.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::os::fd::{AsRawFd, RawFd};
 use std::rc::Rc;
 
@@ -528,6 +528,10 @@ struct Shared {
 struct EngineCtx {
     shared: Arc<Shared>,
     qid: u16,
+    /// Requests were submitted since the last pump. The event loop pumps once per round, after
+    /// running the tag tasks, so that the writes of a round reach the store together and share
+    /// one group commit.
+    due: Cell<bool>,
 }
 
 impl EngineCtx {
@@ -595,7 +599,17 @@ impl EngineCtx {
 
     /// After an I/O event: no tick.
     fn pump(&self) {
+        self.due.set(false);
         self.pump_with(false);
+    }
+
+    /// Pumps if requests were submitted since the last pump. Returns whether it did.
+    fn pump_if_due(&self) -> bool {
+        let due = self.due.get();
+        if due {
+            self.pump();
+        }
+        due
     }
 
     fn submit(&self, io: Io, waiter: Waiter) {
@@ -613,7 +627,8 @@ impl EngineCtx {
                 io,
             },
         );
-        self.pump();
+        // Pumped at the end of the event loop's round: see `due`.
+        self.due.set(true);
     }
 }
 
@@ -855,6 +870,7 @@ fn run_device(
         let ctx = EngineCtx {
             shared: qshared.clone(),
             qid,
+            due: Cell::new(false),
         };
         if let Err(e) = serve_with(qid, dev, &ctx, zero_copy) {
             eprintln!("flaminio-io: queue {qid} stopped: {e}");
@@ -962,7 +978,13 @@ fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Resu
     });
     let runner = exe.clone();
     let result = smol::block_on(exe.run(async move {
-        let run_ops = || while runner.try_tick() {};
+        // Run the tasks until they wait, then pump what they submitted, which can wake them.
+        let run_ops = || loop {
+            while runner.try_tick() {}
+            if !ctx.pump_if_due() {
+                break;
+            }
+        };
         let is_done = || tasks.iter().all(|t| t.is_finished());
         event_loop(&q, ctx.shared.poll, run_ops, is_done).await
     }));
