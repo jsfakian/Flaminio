@@ -190,10 +190,19 @@ The same procedure runs before every write job, for Flaminio and for the raw dis
   - **Fresh** (right after W1). It shows the SLC cache and the best case. It is not a
     sustained number.
   - **Steady state** (SNIA PTS-style).
-    1. Precondition the test span: sequential 128 KiB writes, twice over.
-    2. Run the workload in 1-minute rounds until 5 rounds in a row stay within ±10% of their
+    1. Write the whole disk once, sequentially (then, for Flaminio, format the store and
+       create the volume again).
+       - Added on 2026-10-11: with option 3, the host's first write to each block after the
+         reset costs 3–4× more, as its filesystem converts the preallocated, unwritten extents
+         (145 against 460 MB/s for 1M writes at QD1; 2 891 against 10 830 IOPS at 4K QD32).
+       - The raw side rewrites one span, but the store allocates data clusters over the whole
+         disk with a rotating cursor, so without this step its steady state kept paying for
+         first writes (1M writes at 7% of raw).
+       - It also matches SNIA's whole-device preconditioning, and both sides do it.
+    2. Precondition the test span: sequential 128 KiB writes, twice over.
+    3. Run the workload in 1-minute rounds until 5 rounds in a row stay within ±10% of their
        mean, with no trend.
-    3. Report the steady-state window.
+    4. Report the steady-state window.
 
   Results are judged on steady state.
 - **Same span, same free space:** 16 GiB on both sides, on a freshly discarded 100 GiB disk.

@@ -1512,14 +1512,56 @@ write_reset() {
     ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$host" "$SCRIPTS/host/reset-disk.sh" reset
     sleep "${IDLE:-300}"
     host_drop_caches "$node"
+    [[ $side == flaminio ]] && write_volume "$node" "$rf"
+    return 0
+}
+
+# A freshly formatted store on NODE, and a new 16 GiB volume wbench (RF replicas, one on NODE)
+# attached there.
+write_volume() {
+    local node=$1 rf=$2 out tok
+    FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
+    metactl "$VM_A" "$VM_A" create wbench 16G "$rf" 1 256M "$node" >/dev/null
+    out=$(metactl "$VM_A" "$VM_A" attach wbench "$node")
+    tok=$(jq -r .token <<<"$out")
+    ENV_VARS="VOLUME=wbench TOKEN=$tok" run_on_vm "$node" "$SCRIPTS/guest/node.sh" attach >/dev/null
+}
+
+# After the fresh round, on both sides: the whole disk written once, then (Flaminio) a store
+# formatted again on it. The lab's disks are files: after the reset, the host's first write to
+# each block costs 3-4x more (its filesystem converts unwritten extents; measured 145 against
+# 460 MB/s for 1M writes at QD1). The raw side rewrites one span, while the store allocates
+# over the whole disk, so without this its steady state would keep paying for first writes.
+write_whole() {
+    local node=$1 side=$2 rf=$3
     if [[ $side == flaminio ]]; then
-        FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
-        metactl "$VM_A" "$VM_A" create wbench 16G "$rf" 1 256M "$node" >/dev/null
-        local out tok
-        out=$(metactl "$VM_A" "$VM_A" attach wbench "$node")
-        tok=$(jq -r .token <<<"$out")
-        ENV_VARS="VOLUME=wbench TOKEN=$tok" run_on_vm "$node" "$SCRIPTS/guest/node.sh" attach >/dev/null
+        ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
+        metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
+        cmd_node down "$(vms_of "$node")" >/dev/null
     fi
+    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" whole
+    [[ $side == flaminio ]] && write_volume "$node" "$rf"
+    return 0
+}
+
+# W3 B: the network between NODE and the other data nodes, measured in the same campaign, at
+# its start and end: TCP throughput both ways (iperf3, 10 s each) and the round-trip time, over
+# the overlay the replicas use.
+write_network() {
+    local node=$1 when=$2 peer vm ip up down rtt
+    for peer in $(vms_of all) "$VM_C"; do
+        [[ $peer == "$node" ]] && continue
+        ip=$(vmvar "$peer" WG)
+        for vm in "$node" "$peer"; do
+            vssh "$vm" 'command -v iperf3 >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iperf3 >/dev/null'
+        done
+        vssh "$peer" "iperf3 -s -1 -D -B $ip" && sleep 1
+        up=$(vssh "$node" "iperf3 -c $ip -t 10 -J" | jq '.end.sum_received.bits_per_second / 8e6 | floor')
+        vssh "$peer" "iperf3 -s -1 -D -B $ip" && sleep 1
+        down=$(vssh "$node" "iperf3 -c $ip -t 10 -R -J" | jq '.end.sum_received.bits_per_second / 8e6 | floor')
+        rtt=$(vssh "$node" "LC_ALL=C ping -c 50 -i 0.2 -q $ip" | awk -F/ '/^rtt/ {print $5 " ms avg, " $7 " ms mdev"}')
+        printf '%s %s -> %s: %s MB/s out, %s MB/s in, RTT %s\n' "$when" "$node" "$peer" "$up" "$down" "$rtt"
+    done
 }
 
 # A write job's measure, from its TSV row: MiB/s for large writes, otherwise IOPS (reads
@@ -1556,6 +1598,7 @@ cmd_bench_writes() {
     fi
     metactl "$VM_A" "$VM_A" undrain "$node" >/dev/null
     log "$node, RF $rf, $reps repetitions, $round s rounds (steady: 5 within ±10%, at most $max), idle ${IDLE:-300} s after each reset"
+    ((rf > 1)) && write_network "$node" before | tee "$dir/network.txt"
     printf 'rep\tside\tjob\tphase\tround\tIOPS\tMiB/s\tp50\tp99\tread_IOPS\n' >"$dir/rounds.tsv"
     printf 'rep\tside\tjob\tfresh\tsteady\trounds\tclient_bytes\tdisk_bytes\tdrive_bytes\ttemp\n' >"$dir/runs.tsv"
     for spec in "randwrite-4k-qd1 randwrite 4k 1 -" "randwrite-4k-qd32 randwrite 4k 32 -" \
@@ -1570,6 +1613,7 @@ cmd_bench_writes() {
                 row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix")
                 fresh=$(write_metric "$bs" "$row")
                 printf '%s\t%s\t%s\tfresh\t0\t%s\n' "$r" "$side" "$name" "$row" | cut -f1-4,5,7- >>"$dir/rounds.tsv"
+                write_whole "$node" "$side" "$rf"
                 run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" precondition "$dev" 16G
                 read -r c0 _ <<<"$(ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$(vmvar "$node" HOST)" "$SCRIPTS/host/reset-disk.sh" counters)"
                 : >"$dir/.window"
@@ -1595,6 +1639,7 @@ cmd_bench_writes() {
             done
         done
     done
+    ((rf > 1)) && write_network "$node" after | tee -a "$dir/network.txt"
     write_summary "$dir/runs.tsv" | tee "$dir/summary.txt"
     if [[ ${RESTORE:-1} == 0 ]]; then
         log "results in $dir ($node left as it is: RESTORE=0)"

@@ -2,6 +2,7 @@
 # Write benchmark steps in a lab VM, one per call (docs/performance-plan.md, W1–W2). Usage:
 #   bench-writes.sh discard              discard the whole data disk (nothing may hold it)
 #   bench-writes.sh written              sectors written to the data disk since boot
+#   bench-writes.sh whole                write the whole data disk once (nothing may hold it)
 #   bench-writes.sh precondition DEV SPAN   sequential 128 KiB writes over SPAN, twice
 #   bench-writes.sh job DEV SPAN NAME RW BS QD RUNTIME OUT [MIX]
 #                                        one measured round, writes durable when acknowledged
@@ -23,6 +24,13 @@ case "${1:-}" in
         disk=$(data_disk)
         awk '{print $7}' "/sys/block/$(basename "$disk")/stat"
         ;;
+    whole)
+        disk=$(data_disk)
+        systemctl is-active --quiet flaminio-node && die "flaminio-node holds $disk"
+        sudo fio --name=whole --filename="$disk" --rw=write --bs=1m --iodepth=32 --ioengine=io_uring \
+            --direct=1 --output-format=json --output=/tmp/bench-whole.json >/dev/null
+        jq -r '.jobs[0].write | "  whole disk written: \(.io_bytes/1073741824|floor) GiB at \(.bw_bytes/1048576|floor) MiB/s"' /tmp/bench-whole.json
+        ;;
     precondition)
         drop_caches
         sudo fio --name=precondition --filename="$2" --size="$3" --rw=write --bs=128k --iodepth=32 \
@@ -42,5 +50,5 @@ case "${1:-}" in
              (($w.clat_ns.percentile["50.000000"] // 0)/1000|floor),
              (($w.clat_ns.percentile["99.000000"] // 0)/1000|floor), (.read.iops|floor)] | @tsv' "$out"
         ;;
-    *) die "usage: bench-writes.sh discard|written|precondition|job ..." ;;
+    *) die "usage: bench-writes.sh discard|written|whole|precondition|job ..." ;;
 esac

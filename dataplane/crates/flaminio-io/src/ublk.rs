@@ -532,6 +532,9 @@ struct EngineCtx {
     /// running the tag tasks, so that the writes of a round reach the store together and share
     /// one group commit.
     due: Cell<bool>,
+    /// Writes whose data is still being copied into the staging area (zero copy). The pump
+    /// waits for them, so that they join the same group commit as the writes before them.
+    staging: Cell<u32>,
 }
 
 impl EngineCtx {
@@ -603,9 +606,10 @@ impl EngineCtx {
         self.pump_with(false);
     }
 
-    /// Pumps if requests were submitted since the last pump. Returns whether it did.
+    /// Pumps if requests were submitted since the last pump and no write is still being
+    /// staged. Returns whether it did.
     fn pump_if_due(&self) -> bool {
-        let due = self.due.get();
+        let due = self.due.get() && self.staging.get() == 0;
         if due {
             self.pump();
         }
@@ -871,6 +875,7 @@ fn run_device(
             shared: qshared.clone(),
             qid,
             due: Cell::new(false),
+            staging: Cell::new(0),
         };
         if let Err(e) = serve_with(qid, dev, &ctx, zero_copy) {
             eprintln!("flaminio-io: queue {qid} stopped: {e}");
@@ -1200,7 +1205,10 @@ async fn engine_io_task_zc(
                     )
                     .offset(st.offset(tag as usize, 0))
                     .build();
-                    if q.ublk_submit_sqe(sqe).await != n as i32 {
+                    ctx.staging.set(ctx.staging.get() + 1);
+                    let copied = q.ublk_submit_sqe(sqe).await;
+                    ctx.staging.set(ctx.staging.get() - 1);
+                    if copied != n as i32 {
                         -libc::EIO
                     } else {
                         let data = st.with_slot(tag as usize, |b| b[..n].to_vec());

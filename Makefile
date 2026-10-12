@@ -219,7 +219,7 @@ chaos: ## ROUNDS (4) of random faults under a verified write load; each round en
 .PHONY: bench-writes
 bench-writes: ## Writes against raw O_DSYNC, each run from an empty, reset disk (NODE=b, RF=1, REPS=3, IDLE=300, ROUND=60, JOBS=regex); hours
 	NODE=$(or $(NODE),b) RF=$(or $(RF),1) REPS=$(or $(REPS),3) IDLE=$(or $(IDLE),300) ROUND=$(or $(ROUND),60) \
-	    JOBS='$(or $(JOBS),.)' $(LAB) bench-writes
+	    JOBS='$(if $(filter file,$(origin JOBS)),.,$(JOBS))' $(LAB) bench-writes
 
 .PHONY: bench-reads
 bench-reads: ## vol1 against the same 16 GiB of the raw disk, by the plan's rules (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30, QUEUES=1, POLL_US=0, NUMJOBS=1)
