@@ -1113,6 +1113,13 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
         }
         let verified =
             io_ok && (!ctx.shared.verify || plan.verify(&buf.borrow()[at..at + n]).is_ok());
+        if io_ok && !verified {
+            eprintln!(
+                "flaminio-io: {}: checksum mismatch on a local read (attempt {})",
+                ctx.shared.volume,
+                attempt + 1
+            );
+        }
         if verified || !io_ok || attempt == 1 {
             ctx.engine()
                 .local_read_done(Instant::now(), &lr, Some(plan), verified);
@@ -1387,6 +1394,14 @@ async fn fast_read_copy(
         ok = plans
             .iter()
             .all(|(plan, at, n)| plan.verify(&b[*at..*at + *n]).is_ok());
+        if !ok {
+            // Served again by the slow path, which checks once more; logged even if that
+            // succeeds, as integrity runs count these.
+            eprintln!(
+                "flaminio-io: {}: checksum mismatch on a fast read at {offset}+{len}; retrying",
+                ctx.shared.volume
+            );
+        }
     }
     for (plan, _, _) in plans {
         ctx.engine().finish_plan(plan);

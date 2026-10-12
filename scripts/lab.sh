@@ -1519,12 +1519,36 @@ write_reset() {
 # A freshly formatted store on NODE, and a new 16 GiB volume wbench (RF replicas, one on NODE)
 # attached there.
 write_volume() {
-    local node=$1 rf=$2 out tok
+    local node=$1 rf=$2
     FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
     metactl "$VM_A" "$VM_A" create wbench 16G "$rf" 1 256M "$node" >/dev/null
+    attach_wbench "$node"
+}
+
+attach_wbench() {
+    local node=$1 out tok
     out=$(metactl "$VM_A" "$VM_A" attach wbench "$node")
     tok=$(jq -r .token <<<"$out")
     ENV_VARS="VOLUME=wbench TOKEN=$tok" run_on_vm "$node" "$SCRIPTS/guest/node.sh" attach >/dev/null
+}
+
+# The integrity check after each Flaminio run (the plan's second run, for writes): fio writes
+# the volume with a checksum in every block and reads it back; then the node restarts, which
+# replays the store's journal, on the verify path (no zero copy: every read is checked against
+# the store's checksums too), and fio checks the random writes again. Any error stops the
+# campaign.
+write_integrity() {
+    local node=$1 since bad
+    since=$(vssh "$node" "date '+%Y-%m-%d %H:%M:%S'")
+    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" integrity-write /dev/ublkb1 16G
+    ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
+    cmd_node down "$(vms_of "$node")" >/dev/null
+    ZERO_COPY=0 cmd_node up "$(vms_of "$node")" >/dev/null
+    attach_wbench "$node"
+    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" integrity-read /dev/ublkb1 16G
+    bad=$(vssh "$node" "sudo journalctl -u flaminio-node --since '$since' -o cat | grep -c -i -E 'local read failed|checksum' || true")
+    echo "  Flaminio checksum failures: $bad"
+    [[ $bad == 0 ]] || die "checksum failures on $node: see its journal"
 }
 
 # After the fresh round, on both sides: the whole disk written once, then (Flaminio) a store
@@ -1636,6 +1660,9 @@ cmd_bench_writes() {
                 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$r" "$side" "$name" "$fresh" "${mean:-unsteady}" "$k" \
                     "$bytes" "$disk" "$(((c1 - c0) * 512000))" "$temp" >>"$dir/runs.tsv"
                 log "  $name rep $r $side: fresh $fresh, steady ${mean:-not reached} after $k rounds (${temp} °C)"
+                if [[ $side == flaminio ]]; then
+                    { echo "$name rep $r"; write_integrity "$node"; } | tee -a "$dir/integrity.txt"
+                fi
             done
         done
     done
