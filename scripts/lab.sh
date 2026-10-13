@@ -1594,13 +1594,13 @@ write_network() {
         [[ $peer == "$node" ]] && continue
         ip=$(vmvar "$peer" WG)
         for vm in "$node" "$peer"; do
-            vssh "$vm" 'command -v iperf3 >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iperf3 >/dev/null'
+            vssh "$vm" 'command -v iperf3 >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iperf3 >/dev/null 2>&1'
         done
         vssh "$peer" "iperf3 -s -1 -D -B $ip" && sleep 1
         up=$(vssh "$node" "iperf3 -c $ip -t 10 -J" | jq '.end.sum_received.bits_per_second / 8e6 | floor')
         vssh "$peer" "iperf3 -s -1 -D -B $ip" && sleep 1
         down=$(vssh "$node" "iperf3 -c $ip -t 10 -R -J" | jq '.end.sum_received.bits_per_second / 8e6 | floor')
-        rtt=$(vssh "$node" "LC_ALL=C ping -c 50 -i 0.2 -q $ip" | awk -F/ '/^rtt/ {print $5 " ms avg, " $7 " ms mdev"}')
+        rtt=$(vssh "$node" "LC_ALL=C ping -c 50 -i 0.2 -q $ip" | awk -F/ '/^rtt/ {sub(/ ms$/, "", $7); print $5 " ms avg, " $7 " ms mdev"}')
         printf '%s %s -> %s: %s MB/s out, %s MB/s in, RTT %s\n' "$when" "$node" "$peer" "$up" "$down" "$rtt"
     done
 }
