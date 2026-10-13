@@ -8,7 +8,7 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## Status (2026-10-10)
+## Status (2026-10-14)
 
 R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)). Measured on fl-b at 4 vCPUs,
 against raw on 16 GiB spans of the same disk, caches dropped before every job, medians of 3
@@ -29,7 +29,21 @@ rest is the ublk round trip, a larger change; next steps in the results document
 **Decided:** zero copy for performance, the verify path for integrity runs. Polling
 (`--poll-us`) and several queues (`--queues`) are per-node settings, off by default.
 
-Next: the write harness (W1–W2).
+**Writes (2026-10-14):** W1–W2's harness is done, and comparison A (RF 1 against raw
+O_DSYNC, steady state) is measured ([results](benchmarks/2026-10-14-writes-rf1.md)). 12
+Flaminio runs, each followed by an integrity check: 0 errors, 0 checksum failures.
+
+| Write job, O_DSYNC | Raw | Flaminio, RF 1 | Share |
+|---|---:|---:|---:|
+| 4K random, QD1 | 466 IOPS | 413 IOPS | **88%** |
+| 4K random, QD32 | 8 823 IOPS | 10 245 IOPS | **116%** |
+| 1M sequential, QD8 | 1 746 MiB/s | 591 MiB/s | 33% |
+| 70/30 random, 4K QD32 | 24 255 IOPS | 8 820 IOPS | 36% |
+
+**Not met:** 1M and the mixed job. Both are limited by synchronous commits on the ublk queue
+thread, which block the next group and every read.
+
+Next: W4.1, commits off the queue thread and pipelined; then RF 2 (comparison B).
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
