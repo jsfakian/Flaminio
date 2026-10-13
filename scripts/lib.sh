@@ -23,7 +23,10 @@ die() {
     exit 1
 }
 
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15)
+# Long campaigns run over the internet through a jump host: tolerate short drops (2 minutes
+# without an answer, 3 attempts to connect).
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=3 -o ServerAliveInterval=15
+    -o ServerAliveCountMax=8)
 # Lab VMs get fresh host keys whenever they are recreated, so they use their own known_hosts,
 # from which vm-destroy removes them.
 VM_SSH_OPTS=("${SSH_OPTS[@]}" -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new)

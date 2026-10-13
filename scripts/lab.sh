@@ -1505,6 +1505,8 @@ bench_summary() {
 write_reset() {
     local node=$1 side=$2 rf=$3 host
     host=$(vmvar "$node" HOST)
+    # A connection lost mid-run can leave fio running in the VM.
+    vssh "$node" "sudo pkill -x fio; while pgrep -x fio >/dev/null; do sleep 1; done" || true
     ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
     metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
     cmd_node down "$(vms_of "$node")" >/dev/null
@@ -1549,6 +1551,21 @@ write_integrity() {
     bad=$(vssh "$node" "sudo journalctl -u flaminio-node --since '$since' -o cat | grep -c -i -E 'local read failed|checksum' || true")
     echo "  Flaminio checksum failures: $bad"
     [[ $bad == 0 ]] || die "checksum failures on $node: see its journal"
+}
+
+# bench-writes with RETRIES: a campaign cut off (by a lost connection) is resumed, at most
+# RETRIES times. A failed integrity check is never retried.
+cmd_bench_writes_retrying() {
+    local dir try
+    dir=${RESUME:-$LOCAL_STATE_DIR/bench/writes-rf${RF:-1}-$(date +%Y%m%dT%H%M%S)}
+    for try in $(seq 0 "$RETRIES"); do
+        ((try > 0)) && { warn "campaign cut off; resuming in 2 minutes (retry $try of $RETRIES)"; sleep 120; }
+        if RESUME=$dir RETRIES=0 "$0" bench-writes; then
+            return 0
+        fi
+        [[ -e $dir/INTEGRITY_FAILED ]] && die "integrity check failed: see $dir/integrity.txt"
+    done
+    die "campaign still cut off after $RETRIES retries: resume with RESUME=$dir"
 }
 
 # After the fresh round, on both sides: the whole disk written once, then (Flaminio) a store
@@ -1613,7 +1630,7 @@ cmd_bench_writes() {
     local node rf=${RF:-1} reps=${REPS:-3} round=${ROUND:-60} max=${MAX_ROUNDS:-12} filter=${JOBS:-.}
     local dir raw spec name rw bs qd mix r side dev k row mean fresh w0 w1 c0 c1 bytes
     node=$(vms_of "${NODE:-b}")
-    dir="$LOCAL_STATE_DIR/bench/writes-rf$rf-$(date +%Y%m%dT%H%M%S)"
+    dir=${RESUME:-$LOCAL_STATE_DIR/bench/writes-rf$rf-$(date +%Y%m%dT%H%M%S)}
     mkdir -p "$dir"
     raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)
     if [[ $(chunks_on "$node") != 0 ]]; then
@@ -1622,9 +1639,17 @@ cmd_bench_writes() {
     fi
     metactl "$VM_A" "$VM_A" undrain "$node" >/dev/null
     log "$node, RF $rf, $reps repetitions, $round s rounds (steady: 5 within ±10%, at most $max), idle ${IDLE:-300} s after each reset"
-    ((rf > 1)) && write_network "$node" before | tee "$dir/network.txt"
-    printf 'rep\tside\tjob\tphase\tround\tIOPS\tMiB/s\tp50\tp99\tread_IOPS\n' >"$dir/rounds.tsv"
-    printf 'rep\tside\tjob\tfresh\tsteady\trounds\tclient_bytes\tdisk_bytes\tdrive_bytes\ttemp\n' >"$dir/runs.tsv"
+    ((rf > 1)) && write_network "$node" before | tee -a "$dir/network.txt"
+    [[ -e $dir/INTEGRITY_FAILED ]] && die "$dir: an integrity check failed; not resuming"
+    if [[ -n ${RESUME:-} && -f $dir/runs.tsv ]]; then
+        # Runs already recorded are skipped; the rounds of the run that was cut off are dropped.
+        log "resuming $dir: $(($(wc -l <"$dir/runs.tsv") - 1)) runs done"
+        awk -F'\t' 'NR == FNR { done[$1 FS $2 FS $3] = 1; next } FNR == 1 || done[$1 FS $2 FS $3]' \
+            "$dir/runs.tsv" "$dir/rounds.tsv" >"$dir/.rounds" && mv "$dir/.rounds" "$dir/rounds.tsv"
+    else
+        printf 'rep\tside\tjob\tphase\tround\tIOPS\tMiB/s\tp50\tp99\tread_IOPS\n' >"$dir/rounds.tsv"
+        printf 'rep\tside\tjob\tfresh\tsteady\trounds\tclient_bytes\tdisk_bytes\tdrive_bytes\ttemp\n' >"$dir/runs.tsv"
+    fi
     for spec in "randwrite-4k-qd1 randwrite 4k 1 -" "randwrite-4k-qd32 randwrite 4k 32 -" \
         "write-1m-qd8 write 1m 8 -" "randrw-70-30-4k-qd32 randrw 4k 32 70"; do
         read -r name rw bs qd mix <<<"$spec"
@@ -1632,6 +1657,10 @@ cmd_bench_writes() {
         [[ $mix == - ]] && mix=""
         for r in $(seq 1 "$reps"); do
             for side in raw flaminio; do
+                if awk -F'\t' -v k="$r\t$side\t$name" '$1 FS $2 FS $3 == k { found = 1 } END { exit !found }' "$dir/runs.tsv"; then
+                    continue
+                fi
+                rm -f "$dir/.disk"
                 write_reset "$node" "$side" "$rf"
                 if [[ $side == raw ]]; then dev=$raw; else dev=/dev/ublkb1; fi
                 row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix")
@@ -1639,6 +1668,10 @@ cmd_bench_writes() {
                 printf '%s\t%s\t%s\tfresh\t0\t%s\n' "$r" "$side" "$name" "$row" | cut -f1-4,5,7- >>"$dir/rounds.tsv"
                 write_whole "$node" "$side" "$rf"
                 run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" precondition "$dev" 16G
+                # The drive works off the whole-disk write and the preconditioning in the
+                # background, and does so only when idle: under load, it stays slow for more than
+                # 20 minutes (4K QD1: 275 IOPS against 460), while 5 minutes idle restore it.
+                sleep "${SETTLE:-300}"
                 read -r c0 _ <<<"$(ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$(vmvar "$node" HOST)" "$SCRIPTS/host/reset-disk.sh" counters)"
                 : >"$dir/.window"
                 bytes=0 mean=""
@@ -1657,12 +1690,21 @@ cmd_bench_writes() {
                 read -r c1 temp <<<"$(ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$(vmvar "$node" HOST)" "$SCRIPTS/host/reset-disk.sh" counters)"
                 disk=$(awk '{s += $1} END {print s + 0}' "$dir/.disk")
                 rm -f "$dir/.disk"
-                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$r" "$side" "$name" "$fresh" "${mean:-unsteady}" "$k" \
-                    "$bytes" "$disk" "$(((c1 - c0) * 512000))" "$temp" >>"$dir/runs.tsv"
+                # Recorded after the integrity check: a run cut off before it is run again.
+                local result
+                result=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$r" "$side" "$name" "$fresh" "${mean:-unsteady}" "$k" \
+                    "$bytes" "$disk" "$(((c1 - c0) * 512000))" "$temp")
                 log "  $name rep $r $side: fresh $fresh, steady ${mean:-not reached} after $k rounds (${temp} °C)"
                 if [[ $side == flaminio ]]; then
-                    { echo "$name rep $r"; write_integrity "$node"; } | tee -a "$dir/integrity.txt"
+                    if ! { echo "$name rep $r"; write_integrity "$node"; } | tee -a "$dir/integrity.txt"; then
+                        # Not resumable when fio or the checksums found an error; a lost
+                        # connection is, but cannot be told apart here without the output.
+                        grep -q 'VERIFICATION FAILED\|checksum failures: [1-9]' "$dir/integrity.txt" &&
+                            touch "$dir/INTEGRITY_FAILED"
+                        die "integrity check of $name rep $r did not complete"
+                    fi
                 fi
+                echo "$result" >>"$dir/runs.tsv"
             done
         done
     done
@@ -1803,7 +1845,7 @@ case "$cmd" in
     partition) cmd_partition ;;
     bench-pod) cmd_bench_pod ;;
     bench-reads) cmd_bench_reads ;;
-    bench-writes) cmd_bench_writes ;;
+    bench-writes) if ((${RETRIES:-0} > 0)); then cmd_bench_writes_retrying; else cmd_bench_writes; fi ;;
     chaos) cmd_chaos ;;
     agent) cmd_agent "$@" ;;
     data-node-up) cmd_data_node_up ;;

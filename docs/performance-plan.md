@@ -200,9 +200,17 @@ The same procedure runs before every write job, for Flaminio and for the raw dis
          first writes (1M writes at 7% of raw).
        - It also matches SNIA's whole-device preconditioning, and both sides do it.
     2. Precondition the test span: sequential 128 KiB writes, twice over.
-    3. Run the workload in 1-minute rounds until 5 rounds in a row stay within ±10% of their
+    3. Idle for a fixed time (5 minutes), on both sides. Added on 2026-10-13: the drive works
+       off the whole-disk write and the preconditioning only when idle.
+       - Under load it stays in a slow mode for more than 20 minutes: 4K QD1 with O_DSYNC at
+         about 275 IOPS against 460.
+       - 5 minutes of idle restore it: every 20 s probe over the next 25 minutes gave 431–505
+         IOPS.
+       - Without this wait, runs switched between the two modes mid-run, at random, on both
+         sides.
+    4. Run the workload in 1-minute rounds until 5 rounds in a row stay within ±10% of their
        mean, with no trend.
-    4. Report the steady-state window.
+    5. Report the steady-state window.
 
   Results are judged on steady state.
 - **Same span, same free space:** 16 GiB on both sides, on a freshly discarded 100 GiB disk.
