@@ -1550,18 +1550,32 @@ attach_wbench() {
 # replays the store's journal, on the verify path (no zero copy: every read is checked against
 # the store's checksums too), and fio checks the random writes again. Any error stops the
 # campaign.
+#
+# Returns 0 if the data checked out, 1 if fio or the checksums found an error, and 2 if the check
+# did not complete (a lost connection, a node that did not come back). It runs where `set -e` is
+# ignored (its caller tests it), so every step checks its own status.
 write_integrity() {
-    local node=$1 since bad
-    since=$(vssh "$node" "date '+%Y-%m-%d %H:%M:%S'")
-    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" integrity-write /dev/ublkb1 16G
+    local node=$1 since bad status
+    since=$(vssh "$node" "date '+%Y-%m-%d %H:%M:%S'") || return 2
+    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" integrity-write /dev/ublkb1 16G || {
+        status=$?
+        ((status == 1)) && return 1 # fio's check failed (bench-writes.sh exits 1 only then)
+        return 2
+    }
     ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
-    cmd_node down "$(vms_of "$node")" >/dev/null
-    ZERO_COPY=0 cmd_node up "$(vms_of "$node")" >/dev/null
-    attach_wbench "$node"
-    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" integrity-read /dev/ublkb1 16G
-    bad=$(vssh "$node" "sudo journalctl -u flaminio-node --since '$since' -o cat | grep -c -i -E 'local read failed|checksum' || true")
+    cmd_node down "$(vms_of "$node")" >/dev/null || return 2
+    ZERO_COPY=0 cmd_node up "$(vms_of "$node")" >/dev/null || return 2
+    attach_wbench "$node" || return 2
+    run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" integrity-read /dev/ublkb1 16G || {
+        status=$?
+        ((status == 1)) && return 1
+        return 2
+    }
+    bad=$(vssh "$node" "sudo journalctl -u flaminio-node --since '$since' -o cat | grep -c -i -E 'local read failed|checksum' || true") ||
+        return 2
+    [[ $bad =~ ^[0-9]+$ ]] || return 2
     echo "  Flaminio checksum failures: $bad"
-    [[ $bad == 0 ]] || die "checksum failures on $node: see its journal"
+    ((bad == 0)) || return 1
 }
 
 # bench-writes with RETRIES: a campaign cut off (by a lost connection) is resumed, at most
@@ -1709,13 +1723,13 @@ cmd_bench_writes() {
                     "$bytes" "$disk" "$(((c1 - c0) * 512000))" "$temp")
                 log "  $name rep $r $side: fresh $fresh, steady ${mean:-not reached} after $k rounds (${temp} °C)"
                 if [[ $side == flaminio ]]; then
-                    if ! { echo "$name rep $r"; write_integrity "$node"; } | tee -a "$dir/integrity.txt"; then
-                        # Not resumable when fio or the checksums found an error; a lost
-                        # connection is, but cannot be told apart here without the output.
-                        if grep -q 'VERIFICATION FAILED\|checksum failures: [1-9]' "$dir/integrity.txt"; then
-                            touch "$dir/INTEGRITY_FAILED"
-                            die "integrity check of $name rep $r failed: see $dir/integrity.txt"
-                        fi
+                    local checked=0
+                    { echo "$name rep $r"; write_integrity "$node"; } | tee -a "$dir/integrity.txt" || checked=$?
+                    if ((checked == 1)); then
+                        touch "$dir/INTEGRITY_FAILED"
+                        die "integrity check of $name rep $r failed: see $dir/integrity.txt"
+                    elif ((checked != 0)); then
+                        echo "  (did not complete: run again)" >>"$dir/integrity.txt"
                         warn "integrity check of $name rep $r did not complete"
                         exit 255 # as a lost connection: the run is done again on resume
                     fi
