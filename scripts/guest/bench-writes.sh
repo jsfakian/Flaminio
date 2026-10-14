@@ -15,6 +15,8 @@
 # Both sides use O_DSYNC: Flaminio acknowledges a write once it is durable on every ISR member,
 # and the raw disk's writes are durable only with it (the virtio disk has a write cache).
 drop_caches() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; }
+# fio creates a missing file: a vanished device would silently become a file in /dev.
+block_device() { [[ -b $1 ]] || die "$1 is not a block device"; }
 check=(--verify=crc32c --verify_fatal=1 --ioengine=io_uring --direct=1 --output-format=json)
 random=(--rw=randwrite --bs=4k --iodepth=32 --io_size=2G --randseed=7411)
 # fio_checked NAME OUT FIO_ARGS...: runs a checked fio job, prints what it verified.
@@ -53,22 +55,26 @@ case "${1:-}" in
         jq -r '.jobs[0].write | "  whole disk written: \(.io_bytes/1073741824|floor) GiB at \(.bw_bytes/1048576|floor) MiB/s"' /tmp/bench-whole.json
         ;;
     precondition)
+        block_device "$2"
         drop_caches
         sudo fio --name=precondition --filename="$2" --size="$3" --rw=write --bs=128k --iodepth=32 \
             --loops=2 --ioengine=io_uring --direct=1 --output-format=json --output=/tmp/bench-pre.json >/dev/null
         jq -r '.jobs[0].write | "  preconditioned: \(.io_bytes/1073741824|floor) GiB at \(.bw_bytes/1048576|floor) MiB/s"' /tmp/bench-pre.json
         ;;
     integrity-write)
+        block_device "$2"
         drop_caches
         fio_checked sequential /tmp/bench-int-seq.json --filename="$2" --size="$3" --rw=write --bs=1m --iodepth=32 --do_verify=1
         fio_checked random /tmp/bench-int-rand.json --filename="$2" --size="$3" "${random[@]}" --do_verify=1
         ;;
     integrity-read)
+        block_device "$2"
         drop_caches
         READ_ONLY=1 fio_checked "random, after a restart" /tmp/bench-int-read.json --filename="$2" --size="$3" "${random[@]}" --verify_only
         ;;
     job)
         dev=$2 span=$3 name=$4 rw=$5 bs=$6 qd=$7 runtime=$8 out=$9 mix=${10:-}
+        block_device "$dev"
         drop_caches
         extra=()
         [[ -n $mix ]] && extra=(--rwmixread="$mix")

@@ -14,22 +14,27 @@ fio_common=(--ioengine=io_uring --direct=1 --invalidate=1 --group_reporting --ou
 fill_opts=(--rw=write --bs=1m --iodepth=32 --verify=crc32c --randseed=7411)
 
 drop_caches() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; }
+# fio creates a missing file: a vanished device would silently become a file in /dev.
+block_device() { [[ -b $1 ]] || die "$1 is not a block device"; }
 
 case "${1:-}" in
     disk) data_disk ;;
     fill)
+        block_device "$2"
         drop_caches
         sudo fio --name=fill --filename="$2" --size="$3" "${fill_opts[@]}" --do_verify=0 \
             "${fio_common[@]}" --output=/tmp/bench-fill.json >/dev/null
         jq -r '.jobs[0].write | "  filled \(.io_bytes/1073741824|floor) GiB at \(.bw_bytes/1048576|floor) MiB/s"' /tmp/bench-fill.json
         ;;
     warm)
+        block_device "$2"
         drop_caches
         sudo fio --name=warm --filename="$2" --size="$3" --rw=read --bs=1m --iodepth=8 \
             "${fio_common[@]}" --output=/tmp/bench-warm.json >/dev/null
         ;;
     job)
         dev=$2 off=$3 span=$4 name=$5 rw=$6 bs=$7 qd=$8 runtime=$9 out=${10} jobs=${11:-1}
+        block_device "$dev"
         drop_caches
         sudo fio --name="$name" --filename="$dev" --offset="$off" --size="$span" --rw="$rw" --bs="$bs" \
             --iodepth="$qd" --numjobs="$jobs" --time_based --runtime="$runtime" --ramp_time=3 \
@@ -50,6 +55,7 @@ case "${1:-}" in
              ((.usr_cpu + .sys_cpu)|floor), $q] | @tsv' "$out"
         ;;
     verify)
+        block_device "$2"
         drop_caches
         if sudo fio --name=fill --filename="$2" --size="$3" "${fill_opts[@]}" --verify_only --verify_fatal=1 \
             "${fio_common[@]}" --output=/tmp/bench-verify.json >/dev/null; then

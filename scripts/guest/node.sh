@@ -80,7 +80,16 @@ attach() {
     local answer
     answer=$(control "attach $VOLUME $TOKEN")
     [[ $answer == ok* ]] || die "attach $VOLUME: $answer"
-    log "attached $VOLUME: ${answer#ok }"
+    # udev creates the device node just after: until then, a write to the path would create a
+    # regular file in /dev (in memory) and every later run would use it instead of the volume.
+    local path=${answer#ok } _
+    for _ in $(seq 100); do
+        [[ -b $path ]] && break
+        [[ -e $path ]] && die "$path exists but is not a block device: remove it"
+        sleep 0.1
+    done
+    [[ -b $path ]] || die "$path did not appear within 10 s"
+    log "attached $VOLUME: $path"
 }
 
 detach() {
