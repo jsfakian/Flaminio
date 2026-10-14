@@ -84,11 +84,13 @@ fn serve(
             }
         }
         ["detach", volume] => detach(engine, wake, attached, volume),
+        ["delete", volume] => delete(engine, wake, volume),
         ["status"] => match attached.lock().expect("attached").clone() {
             Some((v, id)) => format!("ok {v} /dev/ublkb{id}"),
             None => "ok none".into(),
         },
-        _ => "error: usage: attach VOLUME TOKEN-BASE64 | detach VOLUME | status".into(),
+        _ => "error: usage: attach VOLUME TOKEN-BASE64 | detach VOLUME | delete VOLUME | status"
+            .into(),
     };
     let mut conn = conn;
     let _ = writeln!(conn, "{answer}");
@@ -110,6 +112,26 @@ fn attach(ctl: &mpsc::Sender<Control>, wake: &Wake, volume: &str, token: Vec<u8>
     answer
         .recv_timeout(Duration::from_secs(120))
         .unwrap_or_else(|_| "error: no answer within 120 s".into())
+}
+
+/// Deletes this node's replicas of a volume deleted from the metadata service.
+fn delete(engine: &mpsc::Sender<Input>, wake: &Wake, volume: &str) -> String {
+    let (reply, answer) = mpsc::channel();
+    if engine
+        .send(Input::DeleteReplicas {
+            volume: volume.to_string(),
+            reply,
+        })
+        .is_err()
+    {
+        return "error: the node is shutting down".into();
+    }
+    wake();
+    match answer.recv_timeout(Duration::from_secs(60)) {
+        Ok(Ok(n)) => format!("ok {n} replicas deleted"),
+        Ok(Err(e)) => format!("error: {e}"),
+        Err(_) => "error: no answer within 60 s".into(),
+    }
 }
 
 fn detach(engine: &mpsc::Sender<Input>, wake: &Wake, attached: &Attached, volume: &str) -> String {

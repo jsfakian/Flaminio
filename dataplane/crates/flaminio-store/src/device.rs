@@ -33,6 +33,26 @@ pub trait BlockDevice {
     fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
         reads.iter_mut().try_for_each(|(o, b)| self.read_at(*o, b))
     }
+
+    /// Starts a commit's I/O: writes `writes` (as [`write_many`](Self::write_many)), then
+    /// flushes, without waiting for either. The device keeps its own copy of the data. Returns
+    /// true if the commit is already complete and durable; otherwise
+    /// [`poll_commit`](Self::poll_commit) reports its outcome. At most one commit is in flight.
+    ///
+    /// The default does it all before returning.
+    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+        self.write_many(writes)?;
+        self.flush()?;
+        Ok(true)
+    }
+
+    /// The outcome of the commit in flight, once its writes and flush are complete (with
+    /// `wait`, waits for them). `None` while it is still in flight. Called only after
+    /// [`start_commit`](Self::start_commit) returned false.
+    fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
+        let _ = wait;
+        Some(Ok(()))
+    }
 }
 
 impl<D: BlockDevice + ?Sized> BlockDevice for &D {
@@ -59,6 +79,14 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &D {
     fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
         (**self).read_many(reads)
     }
+
+    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+        (**self).start_commit(writes)
+    }
+
+    fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
+        (**self).poll_commit(wait)
+    }
 }
 
 impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
@@ -84,6 +112,14 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
 
     fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
         (**self).read_many(reads)
+    }
+
+    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+        (**self).start_commit(writes)
+    }
+
+    fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
+        (**self).poll_commit(wait)
     }
 }
 
@@ -323,6 +359,95 @@ impl SplitMix {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
+    }
+}
+
+/// Writes, with their data.
+type OwnedWrites = Vec<(u64, Vec<u8>)>;
+
+/// A [`MemDevice`] whose commits ([`BlockDevice::start_commit`]) stay in flight until
+/// [`complete`](Self::complete) lands them, or until the store waits for them: for testing
+/// asynchronous commits.
+pub struct DeferredDevice {
+    inner: MemDevice,
+    pending: RefCell<Option<OwnedWrites>>,
+    fail: std::cell::Cell<bool>,
+}
+
+impl DeferredDevice {
+    pub fn new(inner: MemDevice) -> Self {
+        Self {
+            inner,
+            pending: RefCell::new(None),
+            fail: std::cell::Cell::new(false),
+        }
+    }
+
+    /// True while a commit is in flight.
+    pub fn in_flight(&self) -> bool {
+        self.pending.borrow().is_some()
+    }
+
+    /// Lands the commit in flight: its writes, then the flush.
+    pub fn complete(&self) {
+        let writes = self
+            .pending
+            .borrow_mut()
+            .take()
+            .expect("a commit in flight");
+        for (o, d) in writes {
+            self.inner.write_at(o, &d).expect("in memory");
+        }
+        self.inner.flush().expect("in memory");
+    }
+
+    /// Makes the commit in flight fail (its writes are lost).
+    pub fn fail_commit(&self) {
+        self.fail.set(true);
+    }
+
+    /// The device underneath, without what is still in flight: as a crash would leave it.
+    pub fn into_inner(self) -> MemDevice {
+        self.inner
+    }
+}
+
+impl BlockDevice for DeferredDevice {
+    fn size(&self) -> u64 {
+        self.inner.size()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+
+    fn write_at(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+        self.inner.write_at(offset, data)
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.inner.flush()
+    }
+
+    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+        let mut p = self.pending.borrow_mut();
+        assert!(p.is_none(), "one commit in flight at a time");
+        *p = Some(writes.iter().map(|(o, d)| (*o, d.to_vec())).collect());
+        Ok(false)
+    }
+
+    fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
+        if self.fail.replace(false) {
+            self.pending.borrow_mut().take();
+            return Some(Err(io::Error::other("injected commit failure")));
+        }
+        if self.in_flight() {
+            if !wait {
+                return None;
+            }
+            self.complete();
+        }
+        Some(Ok(()))
     }
 }
 

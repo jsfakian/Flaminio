@@ -90,6 +90,16 @@ detach() {
     [[ $answer == ok* || $answer == *"not attached"* ]] || die "detach $VOLUME: $answer"
 }
 
+# Deletes this node's replicas of VOLUME (already deleted from the metadata service).
+delete() {
+    : "${VOLUME:?}"
+    systemctl is-active --quiet "$unit" || return 0
+    local answer
+    answer=$(control "delete $VOLUME")
+    [[ $answer == ok* ]] || die "delete $VOLUME: $answer"
+    log "$VOLUME: ${answer#ok }"
+}
+
 status() {
     echo "  flaminio-node: $(systemctl is-active "$unit" 2>/dev/null)"
     [[ -b $dev ]] && echo "  $dev: $(lsblk -dn -o SIZE "$dev")"
@@ -102,5 +112,6 @@ case "${1:-status}" in
     status) status ;;
     attach) attach ;;
     detach) detach ;;
-    *) die "usage: node.sh up|down|status|attach|detach" ;;
+    delete) delete ;;
+    *) die "usage: node.sh up|down|status|attach|detach|delete" ;;
 esac

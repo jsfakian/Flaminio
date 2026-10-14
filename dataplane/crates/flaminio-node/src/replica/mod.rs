@@ -4,7 +4,9 @@
 //! module carries out its decisions on the store:
 //! - fences are made durable before the `Hello` reply;
 //! - consecutive writes and copies, from all sessions, share one group commit;
-//! - a read first commits the writes before it.
+//! - a read first commits the writes before it;
+//! - with [`ReplicaService::start`], a commit's I/O can stay in flight while the caller does
+//!   other work: the requests after its writes are answered with them, once durable.
 //!
 //! A store failure on a request closes its session: the target then treats this replica as
 //! failed, which the protocol already handles.
@@ -19,7 +21,7 @@ use flaminio_repl::extent::Extent;
 use flaminio_repl::msg::{Request, Response, ToReplica};
 use flaminio_repl::replica::{Action, ReplicaCore};
 use flaminio_repl::types::{Block, VolumeId};
-use flaminio_store::{BlockDevice, ChunkKey, ReadReq, Store, StoreError, WriteReq};
+use flaminio_store::{BlockDevice, ChunkKey, ReadReq, Started, Store, StoreError, WriteReq};
 
 use crate::volume_uuid;
 
@@ -70,6 +72,36 @@ pub struct ReplicaService<D: BlockDevice> {
     core: ReplicaCore,
     vols: BTreeMap<Uuid, Vol>,
     next_id: VolumeId,
+    /// The group commit in flight, if any.
+    flying: Option<Flying>,
+}
+
+/// What [`ReplicaService::start`] did with a batch of requests.
+#[derive(Debug)]
+pub struct Progress {
+    /// Replies to the first `replies.len()` requests.
+    pub replies: Vec<Reply>,
+    /// How many requests were handled. Those after `replies` wait for the commit in flight,
+    /// and [`ReplicaService::poll`] answers them; those after `handled` were not looked at,
+    /// and go to `start` again once it has.
+    pub handled: usize,
+}
+
+impl Progress {
+    /// True if a commit is in flight: some handled requests are not answered yet.
+    pub fn in_flight(&self) -> bool {
+        self.replies.len() < self.handled
+    }
+}
+
+/// A commit in flight, and the requests it holds back.
+struct Flying {
+    /// Replies to the held requests (the first one is the commit's first write), the writes'
+    /// to be filled in.
+    replies: Vec<Option<Reply>>,
+    /// For each store request of the commit: its held request (an index into `replies`), and
+    /// that request's id.
+    writes: Vec<(usize, u64)>,
 }
 
 /// A write to commit: the store request's parts, with the index of the request it answers.
@@ -92,6 +124,7 @@ impl<D: BlockDevice> ReplicaService<D> {
             core: ReplicaCore::default(),
             vols: BTreeMap::new(),
             next_id: 1,
+            flying: None,
         };
         for c in s.store.chunks() {
             let id = s.vol_id(c.key.volume, c.volume_size, c.chunk_size);
@@ -235,9 +268,37 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// Handles requests from any sessions, in order, and returns one reply per request. A
     /// `Hello` here is refused: a connection carries one session, opened by [`Self::hello`].
     pub fn handle(&mut self, items: &[(SessionRef, Frame)]) -> Vec<Reply> {
+        let mut replies = Vec::with_capacity(items.len());
+        while replies.len() < items.len() {
+            let done = replies.len();
+            let p = self.start(&items[done..]);
+            let in_flight = p.in_flight();
+            replies.extend(p.replies);
+            if in_flight {
+                replies.extend(self.poll(true).expect("waited for the commit"));
+            }
+            debug_assert_eq!(replies.len(), done + p.handled);
+        }
+        replies
+    }
+
+    /// [`Self::handle`], without waiting for a commit's I/O when the store's device can do it
+    /// asynchronously: see [`Progress`]. Nothing may start while a commit is in flight.
+    pub fn start(&mut self, items: &[(SessionRef, Frame)]) -> Progress {
+        assert!(
+            self.flying.is_none(),
+            "a commit is in flight: poll it first"
+        );
         let mut replies: Vec<Option<Reply>> = vec![None; items.len()];
         let mut pending: Vec<PendingWrite> = Vec::new();
         for (i, (s, f)) in items.iter().enumerate() {
+            if matches!(f, Frame::Read { .. })
+                && !pending.is_empty()
+                && self.commit(items, &mut pending, &mut replies)
+            {
+                // Reads see every write before them: this one waits for the commit.
+                return self.held(replies, i);
+            }
             let Some((req, body)) = to_request(f) else {
                 replies[i] = Some(Reply::Close("not a request".into()));
                 continue;
@@ -299,8 +360,6 @@ impl<D: BlockDevice> ReplicaService<D> {
                     }
                 }
                 Action::Read { chunk, ext } => {
-                    // Reads see every write before them.
-                    self.commit(items, &mut pending, &mut replies, req_of);
                     let mut buf = vec![0u8; ext.len as usize * BLOCK];
                     let mut r = [ReadReq {
                         key: key(uuid, chunk),
@@ -318,23 +377,78 @@ impl<D: BlockDevice> ReplicaService<D> {
                 }
             }
         }
-        self.commit(items, &mut pending, &mut replies, req_of);
-        replies
-            .into_iter()
-            .map(|r| r.expect("every request answered"))
-            .collect()
+        if self.commit(items, &mut pending, &mut replies) {
+            return self.held(replies, items.len());
+        }
+        Progress {
+            replies: replies
+                .into_iter()
+                .map(|r| r.expect("every request answered"))
+                .collect(),
+            handled: items.len(),
+        }
     }
 
-    /// Commits the pending writes as one group, and fills in their replies.
+    /// The replies to the requests the commit in flight held back, once it is durable (with
+    /// `wait`, waits for it). `None` while it is still in flight.
+    pub fn poll(&mut self, wait: bool) -> Option<Vec<Reply>> {
+        let f = self.flying.as_ref()?;
+        let results = match self.store.poll_write_batch(wait) {
+            Ok(None) => return None,
+            Ok(Some(r)) => r,
+            Err(e) => f.writes.iter().map(|_| Err(clone_err(&e))).collect(),
+        };
+        let Flying {
+            mut replies,
+            writes,
+        } = self.flying.take().expect("in flight");
+        for ((at, req), r) in writes.into_iter().zip(results) {
+            fill(&mut replies[at], req, r);
+        }
+        Some(
+            replies
+                .into_iter()
+                .map(|r| r.expect("every held request answered"))
+                .collect(),
+        )
+    }
+
+    /// True while a commit is in flight.
+    pub fn commit_in_flight(&self) -> bool {
+        self.flying.is_some()
+    }
+
+    /// The progress of `start` when a commit stays in flight: the requests up to its first
+    /// write are answered; those up to `handled` are held for it.
+    fn held(&mut self, replies: Vec<Option<Reply>>, handled: usize) -> Progress {
+        let f = self.flying.as_mut().expect("a commit in flight");
+        let first = f.writes.first().expect("a commit has writes").0;
+        let mut replies = replies;
+        replies.truncate(handled);
+        let held = replies.split_off(first);
+        for w in &mut f.writes {
+            w.0 -= first;
+        }
+        f.replies = held;
+        Progress {
+            replies: replies
+                .into_iter()
+                .map(|r| r.expect("requests before the commit answered"))
+                .collect(),
+            handled,
+        }
+    }
+
+    /// Commits the pending writes as one group. Returns true if its I/O is in flight
+    /// (`self.flying` then holds it); otherwise their replies are filled in.
     fn commit(
         &mut self,
         items: &[(SessionRef, Frame)],
         pending: &mut Vec<PendingWrite>,
         replies: &mut [Option<Reply>],
-        req_of: fn(&Frame) -> u64,
-    ) {
+    ) -> bool {
         if pending.is_empty() {
-            return;
+            return false;
         }
         let reqs: Vec<WriteReq<'_>> = pending
             .iter()
@@ -346,25 +460,26 @@ impl<D: BlockDevice> ReplicaService<D> {
                 epoch: p.epoch,
             })
             .collect();
-        let results: Vec<Result<(), StoreError>> = match self.store.write_batch(&reqs) {
-            Ok(r) => r,
-            Err(e) => pending.iter().map(|_| Err(clone_err(&e))).collect(),
-        };
-        for (p, r) in pending.iter().zip(results) {
-            let reply = &mut replies[p.item];
-            match r {
-                // A copy split in parts answers once, unless a part failed.
-                Ok(()) => {
-                    if reply.is_none() {
-                        *reply = Some(Reply::Send(Frame::Ok {
-                            req: req_of(&items[p.item].1),
-                        }));
-                    }
-                }
-                Err(e) => *reply = Some(Reply::Close(e.to_string())),
+        let started = self.store.start_write_batch(&reqs);
+        let writes: Vec<(usize, u64)> = pending
+            .drain(..)
+            .map(|p| (p.item, req_of(&items[p.item].1)))
+            .collect();
+        let results: Vec<Result<(), StoreError>> = match started {
+            Ok(Started::InFlight) => {
+                self.flying = Some(Flying {
+                    replies: Vec::new(),
+                    writes,
+                });
+                return true;
             }
+            Ok(Started::Done(r)) => r,
+            Err(e) => writes.iter().map(|_| Err(clone_err(&e))).collect(),
+        };
+        for ((item, req), r) in writes.into_iter().zip(results) {
+            fill(&mut replies[item], req, r);
         }
-        pending.clear();
+        false
     }
 
     /// Admits a read through the replica rules without performing it: for a caller that
@@ -419,6 +534,24 @@ impl<D: BlockDevice> ReplicaService<D> {
         self.fenced_epoch(s) == s.epoch
     }
 
+    /// Deletes every chunk replica of the volume named `volume` from the store, and forgets the
+    /// volume: for a volume deleted from the metadata service. Its sessions are not valid any
+    /// more (their requests get "unknown volume"). Returns how many replicas were deleted.
+    pub fn delete_volume(&mut self, volume: &str) -> Result<usize, String> {
+        let uuid = volume_uuid(volume);
+        let Some(v) = self.vols.remove(&uuid) else {
+            return Ok(0);
+        };
+        self.core.remove_volume(v.id);
+        for &c in &v.chunks {
+            // Whatever the chunk's fence: the volume is gone.
+            self.store
+                .delete_chunk(key(uuid, c), u64::MAX)
+                .map_err(|e| format!("delete chunk {c}: {e}"))?;
+        }
+        Ok(v.chunks.len())
+    }
+
     /// The epoch the volume of session `s` is fenced at now.
     pub fn fenced_epoch(&self, s: SessionRef) -> u64 {
         self.core.fenced(s.vol)
@@ -439,6 +572,19 @@ impl<D: BlockDevice> ReplicaService<D> {
 
 fn clone_err(e: &StoreError) -> StoreError {
     StoreError::Invalid(e.to_string())
+}
+
+/// A write's reply from its store result. A copy split in parts answers once, unless a part
+/// failed.
+fn fill(reply: &mut Option<Reply>, req: u64, r: Result<(), StoreError>) {
+    match r {
+        Ok(()) => {
+            if reply.is_none() {
+                *reply = Some(Reply::Send(Frame::Ok { req }));
+            }
+        }
+        Err(e) => *reply = Some(Reply::Close(e.to_string())),
+    }
 }
 
 fn key(volume: Uuid, chunk: u32) -> ChunkKey {

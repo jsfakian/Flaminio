@@ -4,17 +4,20 @@
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use flaminio_store::BlockDevice;
-use io_uring::{IoUring, opcode, types};
+use io_uring::{IoUring, opcode, squeue, types};
 
 use crate::aligned::{AlignedBuf, is_aligned};
 
 /// Submission queue size. Larger batches are submitted in windows of this many operations.
 const QUEUE_DEPTH: u32 = 256;
+
+/// The flush's tag among a commit's operations (the writes are tagged by index).
+const COMMIT_FLUSH: u64 = u64::MAX;
 
 /// A file or block device driven through io_uring.
 ///
@@ -22,11 +25,26 @@ const QUEUE_DEPTH: u32 = 256;
 /// durability is exactly what [`flush`](BlockDevice::flush) (an `fdatasync`) provides.
 /// Unaligned buffers are bounced through [`AlignedBuf`]s; pass aligned buffers to avoid the
 /// copy. The device is single-threaded, like the store that owns it.
+///
+/// Commits ([`BlockDevice::start_commit`]) run on a second ring, so that their writes and
+/// flush stay in flight while the first serves synchronous I/O. Register an eventfd with
+/// [`notify_commits`](Self::notify_commits) to learn when one completes.
 pub struct UringDevice {
     file: File,
     size: u64,
     direct: bool,
     ring: RefCell<IoUring>,
+    commit_ring: RefCell<IoUring>,
+    commit: RefCell<Option<CommitIo>>,
+}
+
+/// A commit's I/O in flight on the commit ring. The buffers are the kernel's to read until
+/// every operation has completed, so they live here until then.
+struct CommitIo {
+    bufs: Vec<AlignedBuf>,
+    /// Operations not yet completed.
+    left: usize,
+    error: Option<io::Error>,
 }
 
 enum Op<'a> {
@@ -54,12 +72,25 @@ impl UringDevice {
         let ring = IoUring::builder()
             .setup_cqsize(2 * QUEUE_DEPTH)
             .build(QUEUE_DEPTH)?;
+        let commit_ring = IoUring::builder()
+            .setup_cqsize(2 * QUEUE_DEPTH)
+            .build(QUEUE_DEPTH)?;
         Ok(Self {
             file,
             size,
             direct,
             ring: RefCell::new(ring),
+            commit_ring: RefCell::new(commit_ring),
+            commit: RefCell::new(None),
         })
+    }
+
+    /// Signals `eventfd` whenever an operation of a commit completes.
+    pub fn notify_commits(&self, eventfd: RawFd) -> io::Result<()> {
+        self.commit_ring
+            .borrow()
+            .submitter()
+            .register_eventfd(eventfd)
     }
 
     /// Whether the device bypasses the page cache.
@@ -187,6 +218,15 @@ impl std::os::fd::AsRawFd for UringDevice {
     }
 }
 
+impl Drop for UringDevice {
+    fn drop(&mut self) {
+        // The kernel may still read a commit's buffers: wait for it before freeing them.
+        if self.commit.get_mut().is_some() {
+            let _ = self.poll_commit(true);
+        }
+    }
+}
+
 impl BlockDevice for UringDevice {
     fn size(&self) -> u64 {
         self.size
@@ -212,6 +252,117 @@ impl BlockDevice for UringDevice {
     fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
         let mut ops: Vec<Op<'_>> = reads.iter_mut().map(|(o, b)| Op::Read(*o, b)).collect();
         self.run(&mut ops)
+    }
+
+    /// The writes, then an `fdatasync` that starts only once they have all completed
+    /// (`IOSQE_IO_DRAIN`), submitted on the commit ring. The data is copied into aligned
+    /// buffers. A commit too large for one submission is done synchronously.
+    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+        if writes.len() >= QUEUE_DEPTH as usize {
+            self.write_many(writes)?;
+            self.flush()?;
+            return Ok(true);
+        }
+        let mut slot = self.commit.borrow_mut();
+        assert!(slot.is_none(), "one commit in flight at a time");
+        let lens = writes
+            .iter()
+            .map(|(_, d)| len32(d.len()))
+            .collect::<io::Result<Vec<u32>>>()?;
+        let bufs: Vec<AlignedBuf> = writes.iter().map(|(_, d)| AlignedBuf::copy_of(d)).collect();
+        let fd = types::Fd(self.file.as_raw_fd());
+        let mut ring = self.commit_ring.borrow_mut();
+        {
+            let mut sq = ring.submission();
+            for (i, ((offset, _), b)) in writes.iter().zip(&bufs).enumerate() {
+                let entry = opcode::Write::new(fd, b.as_ptr(), lens[i])
+                    .offset(*offset)
+                    .build()
+                    .user_data(i as u64);
+                // SAFETY: the buffer moves into `self.commit` below and stays there until this
+                // operation's completion is reaped (`poll_commit`, also on drop). Fewer than
+                // QUEUE_DEPTH entries, on a ring with nothing else in flight: they fit.
+                unsafe { sq.push(&entry).expect("a commit fits the ring") };
+            }
+            let flush = opcode::Fsync::new(fd)
+                .flags(types::FsyncFlags::DATASYNC)
+                .build()
+                .flags(squeue::Flags::IO_DRAIN)
+                .user_data(COMMIT_FLUSH);
+            // SAFETY: references no memory.
+            unsafe { sq.push(&flush).expect("a commit fits the ring") };
+        }
+        *slot = Some(CommitIo {
+            bufs,
+            left: writes.len() + 1,
+            error: None,
+        });
+        loop {
+            match ring.submit() {
+                Ok(_) => return Ok(false),
+                Err(e)
+                    if matches!(
+                        e.raw_os_error(),
+                        Some(libc::EINTR | libc::EAGAIN | libc::EBUSY)
+                    ) => {}
+                // Some entries may be the kernel's already, with our buffers: fail-stop.
+                Err(e) => {
+                    eprintln!("flaminio-uring: io_uring_enter failed for a commit: {e}; aborting");
+                    std::process::abort();
+                }
+            }
+        }
+    }
+
+    fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
+        let mut slot = self.commit.borrow_mut();
+        let Some(io) = slot.as_mut() else {
+            return Some(Ok(()));
+        };
+        let mut ring = self.commit_ring.borrow_mut();
+        loop {
+            for cqe in ring.completion() {
+                io.left -= 1;
+                let tag = cqe.user_data();
+                let expected = if tag == COMMIT_FLUSH {
+                    0
+                } else {
+                    io.bufs[tag as usize].len()
+                };
+                let res = cqe.result();
+                let error = if res < 0 {
+                    Some(io::Error::from_raw_os_error(-res))
+                } else if res as usize != expected {
+                    Some(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("short commit write: {res} of {expected} bytes"),
+                    ))
+                } else {
+                    None
+                };
+                if io.error.is_none() {
+                    io.error = error;
+                }
+            }
+            if io.left == 0 {
+                let done = slot.take().expect("in flight");
+                return Some(done.error.map_or(Ok(()), Err));
+            }
+            if !wait {
+                return None;
+            }
+            if let Err(e) = ring.submit_and_wait(1)
+                && !matches!(
+                    e.raw_os_error(),
+                    Some(libc::EINTR | libc::EAGAIN | libc::EBUSY)
+                )
+            {
+                eprintln!(
+                    "flaminio-uring: io_uring_enter failed waiting for a commit: {e}; aborting"
+                );
+                std::process::abort();
+            }
+        }
     }
 }
 
@@ -259,6 +410,36 @@ mod tests {
             let mut one = vec![0u8; 4096];
             dev.read_at(4096, &mut one).unwrap();
             assert!(one.iter().all(|&x| x == 0xEE));
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn commits_complete_asynchronously_and_are_durable() {
+        for direct in [false, true] {
+            let (dev, path) = temp_device(12 << 20, direct);
+            let efd = crate::EventFd::new().unwrap();
+            dev.notify_commits(efd.as_raw_fd()).unwrap();
+            let data: Vec<Vec<u8>> = (0..40u8).map(|i| vec![i; 8192]).collect();
+            let writes: Vec<(u64, &[u8])> = data
+                .iter()
+                .enumerate()
+                .map(|(i, d)| (i as u64 * 16384, &d[..]))
+                .collect();
+            assert!(!dev.start_commit(&writes).unwrap(), "in flight");
+            drop(data); // the device kept its own copy
+            assert!(dev.poll_commit(true).unwrap().is_ok());
+            assert!(efd.drain(), "the eventfd was signalled");
+            let mut buf = vec![0u8; 8192];
+            for i in 0..40u8 {
+                dev.read_at(u64::from(i) * 16384, &mut buf).unwrap();
+                assert!(buf.iter().all(|&x| x == i), "direct={direct} write {i}");
+            }
+            // An error (an offset no file can have: negative as a file offset) is reported
+            // once everything completed.
+            let b = vec![1u8; 4096];
+            assert!(!dev.start_commit(&[(0, &b), (u64::MAX - 8191, &b)]).unwrap());
+            assert!(dev.poll_commit(true).unwrap().is_err());
             std::fs::remove_file(path).unwrap();
         }
     }

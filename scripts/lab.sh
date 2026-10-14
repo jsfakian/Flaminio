@@ -1508,7 +1508,7 @@ write_reset() {
     # A connection lost mid-run can leave fio running in the VM.
     vssh "$node" "sudo pkill -x fio; while pgrep -x fio >/dev/null; do sleep 1; done" || true
     ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
-    metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
+    delete_wbench
     cmd_node down "$(vms_of "$node")" >/dev/null
     run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" discard 2>/dev/null
     ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$host" "$SCRIPTS/host/reset-disk.sh" reset
@@ -1516,6 +1516,17 @@ write_reset() {
     host_drop_caches "$node"
     [[ $side == flaminio ]] && write_volume "$node" "$rf"
     return 0
+}
+
+# Deletes wbench from the metadata service, then its replicas from every data node: a
+# volume's replicas outlive its metadata, and a new wbench (epoch 1 again) would be deposed by
+# old replicas fenced at a later epoch.
+delete_wbench() {
+    local vm
+    metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
+    for vm in $(vms_of all) "$VM_C"; do
+        ENV_VARS="VOLUME=wbench" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" delete >/dev/null
+    done
 }
 
 # A freshly formatted store on NODE, and a new 16 GiB volume wbench (RF replicas, one on NODE)
@@ -1560,10 +1571,12 @@ cmd_bench_writes_retrying() {
     dir=${RESUME:-$LOCAL_STATE_DIR/bench/writes-rf${RF:-1}-$(date +%Y%m%dT%H%M%S)}
     for try in $(seq 0 "$RETRIES"); do
         ((try > 0)) && { warn "campaign cut off; resuming in 2 minutes (retry $try of $RETRIES)"; sleep 120; }
-        if RESUME=$dir RETRIES=0 "$0" bench-writes; then
-            return 0
-        fi
+        local status=0
+        RESUME=$dir RETRIES=0 "$0" bench-writes || status=$?
+        ((status == 0)) && return 0
         [[ -e $dir/INTEGRITY_FAILED ]] && die "integrity check failed: see $dir/integrity.txt"
+        # 255: ssh lost its connection. Anything else is a real failure.
+        ((status == 255)) || die "campaign failed (exit $status): resume with RESUME=$dir"
     done
     die "campaign still cut off after $RETRIES retries: resume with RESUME=$dir"
 }
@@ -1577,7 +1590,7 @@ write_whole() {
     local node=$1 side=$2 rf=$3
     if [[ $side == flaminio ]]; then
         ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
-        metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
+        delete_wbench
         cmd_node down "$(vms_of "$node")" >/dev/null
     fi
     run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" whole
@@ -1699,9 +1712,12 @@ cmd_bench_writes() {
                     if ! { echo "$name rep $r"; write_integrity "$node"; } | tee -a "$dir/integrity.txt"; then
                         # Not resumable when fio or the checksums found an error; a lost
                         # connection is, but cannot be told apart here without the output.
-                        grep -q 'VERIFICATION FAILED\|checksum failures: [1-9]' "$dir/integrity.txt" &&
+                        if grep -q 'VERIFICATION FAILED\|checksum failures: [1-9]' "$dir/integrity.txt"; then
                             touch "$dir/INTEGRITY_FAILED"
-                        die "integrity check of $name rep $r did not complete"
+                            die "integrity check of $name rep $r failed: see $dir/integrity.txt"
+                        fi
+                        warn "integrity check of $name rep $r did not complete"
+                        exit 255 # as a lost connection: the run is done again on resume
                     fi
                 fi
                 echo "$result" >>"$dir/runs.tsv"
@@ -1716,7 +1732,7 @@ cmd_bench_writes() {
     fi
 
     log "restoring $node: a clean store, and $VOL's replicas moved back"
-    metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
+    delete_wbench
     cmd_node down "$(vms_of "$node")" >/dev/null
     FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
     local other

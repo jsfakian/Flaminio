@@ -174,6 +174,25 @@ pub struct Batch {
 }
 
 impl Batch {
+    /// A batch built by [`BatchBuilder::finish`], taken back from memory: for a writer that
+    /// applies a batch once it is durable, from the same bytes replay would apply.
+    pub fn from_bytes(buf: Vec<u8>, nonce: u64) -> Result<Self, FormatError> {
+        let header = BatchHeader::decode(&buf, nonce)?;
+        if header.total_len as usize != buf.len()
+            || header.payload_len as usize > buf.len() - BATCH_HEADER_LEN
+        {
+            return Err(FormatError::Truncated {
+                need: header.total_len as usize,
+                have: buf.len(),
+            });
+        }
+        let batch = Self { header, buf };
+        if crc32c(batch.payload()) != header.payload_crc {
+            return Err(FormatError::Checksum);
+        }
+        Ok(batch)
+    }
+
     /// The batch header.
     pub fn header(&self) -> &BatchHeader {
         &self.header

@@ -660,6 +660,11 @@ pub fn serve_node(
     parts: Parts<UringDevice>,
     efd: Arc<EventFd>,
 ) -> Result<(), String> {
+    parts
+        .engine
+        .device()
+        .notify_commits(efd.as_raw_fd())
+        .map_err(|e| format!("commit notifications: {e}"))?;
     let engine_tx = parts.sender.clone();
     let slot: Slot = Arc::new(Mutex::new(Some(parts)));
     let attached: Attached = Arc::new(Mutex::new(None));
@@ -839,13 +844,16 @@ fn run_device(
     // The queue threads share the engine while the device runs; the main thread gets it back
     // after.
     let Some(Parts {
-        engine,
+        mut engine,
         inputs,
         sender,
     }) = slot.lock().expect("slot").take()
     else {
         return Err("the engine is not with the main thread".into());
     };
+    // The queue threads pump the engine when the store's device signals a commit done (the
+    // node's eventfd, queue 0's wake-up), so commits need not block them.
+    engine.set_async_commits(Instant::now(), true);
     let mut wakes = vec![efd];
     for _ in 1..c.queues {
         wakes.push(Arc::new(
@@ -906,8 +914,10 @@ fn run_device(
     let Ok(shared) = Arc::try_unwrap(shared) else {
         return Err("a queue thread still holds the engine".into());
     };
+    let mut engine = shared.engine.into_inner().expect("engine");
+    engine.set_async_commits(Instant::now(), false);
     *slot.lock().expect("slot") = Some(Parts {
-        engine: shared.engine.into_inner().expect("engine"),
+        engine,
         inputs: shared.inputs.into_inner().expect("inputs"),
         sender: shared.sender,
     });

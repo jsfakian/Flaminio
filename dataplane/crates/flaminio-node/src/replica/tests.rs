@@ -2,7 +2,7 @@ use flaminio_format::layout::LayoutParams;
 use flaminio_format::mkfs::FormatOptions;
 use flaminio_net::token::Claims;
 use flaminio_repl::types::Version;
-use flaminio_store::{MemDevice, StoreConfig};
+use flaminio_store::{DeferredDevice, MemDevice, StoreConfig};
 
 use super::*;
 
@@ -15,6 +15,16 @@ fn store_on(dev: MemDevice) -> Store<MemDevice> {
 }
 
 fn service() -> ReplicaService<MemDevice> {
+    ReplicaService::new(store_on(formatted()))
+}
+
+/// A service whose commits stay in flight until the test completes them.
+fn deferred_service() -> ReplicaService<DeferredDevice> {
+    let store = Store::open(DeferredDevice::new(formatted()), StoreConfig::default()).unwrap();
+    ReplicaService::new(store)
+}
+
+fn formatted() -> MemDevice {
     let dev = MemDevice::new(256 * MIB);
     let opts = FormatOptions {
         disk_uuid: Uuid([1; 16]),
@@ -28,7 +38,7 @@ fn service() -> ReplicaService<MemDevice> {
         label: String::new(),
     };
     Store::format(&dev, &opts).unwrap();
-    ReplicaService::new(store_on(dev))
+    dev
 }
 
 /// Reopens the service on the same device, as after a crash and restart.
@@ -215,4 +225,95 @@ fn a_hello_inside_a_session_is_refused() {
     let (sess, hello) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let r = s.handle(&[(sess, hello)]);
     assert!(matches!(r[0], Reply::Close(_)), "{r:?}");
+}
+
+#[test]
+fn a_commit_in_flight_holds_the_requests_after_its_writes() {
+    let mut s = deferred_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    let items = [
+        (sess, Frame::Heartbeat { req: 2 }),
+        (sess, write(3, 0, 4, &[7, 8], 0)),
+        (sess, Frame::Heartbeat { req: 4 }),
+        (sess, read(5, 0, 4, 2)),
+    ];
+    let p = s.start(&items);
+    assert!(p.in_flight());
+    assert_eq!(
+        p.replies.len(),
+        1,
+        "the heartbeat before the write is answered at once"
+    );
+    assert_eq!(p.handled, 3, "the read waits for the commit");
+    assert!(s.poll(false).is_none());
+
+    s.store().device().complete();
+    let held = s.poll(false).expect("durable");
+    assert_eq!(held.len(), 2);
+    assert_eq!(held[0], Reply::Send(Frame::Ok { req: 3 }));
+    assert!(!s.commit_in_flight());
+    let p = s.start(&items[3..]);
+    assert!(!p.in_flight());
+    assert_eq!(blocks(&p.replies[0]), vec![7, 8]);
+}
+
+#[test]
+fn a_hello_waits_for_the_commit_in_flight() {
+    let mut s = deferred_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    let p = s.start(&[(sess, write(2, 0, 0, &[5], 0))]);
+    assert!(p.in_flight());
+    // A new target's fence must not be durable before the writes ahead of it.
+    s.hello(&accepted(2, 2, &[0])).unwrap();
+    assert!(!s.store().device().in_flight());
+    assert_eq!(
+        s.poll(false).expect("kept for the caller"),
+        vec![Reply::Send(Frame::Ok { req: 2 })]
+    );
+}
+
+#[test]
+fn handle_waits_for_its_commits() {
+    let mut s = deferred_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    let r = s.handle(&[
+        (sess, write(2, 0, 4, &[1, 2, 3], 0)),
+        (sess, read(3, 0, 3, 5)),
+        (sess, write(4, 0, 0, &[9], 0)),
+    ]);
+    assert_eq!(r.len(), 3);
+    assert_eq!(r[0], Reply::Send(Frame::Ok { req: 2 }));
+    assert_eq!(blocks(&r[1]), vec![0, 1, 2, 3, 0]);
+    assert_eq!(r[2], Reply::Send(Frame::Ok { req: 4 }));
+    assert!(!s.commit_in_flight());
+}
+
+#[test]
+fn a_deleted_volume_can_be_created_again_from_epoch_one() {
+    let mut s = service();
+    let (old, _) = s.hello(&accepted(2, 1, &[0, 1])).unwrap();
+    let r = s.handle(&[(old, write(2, 0, 0, &[3], 1))]);
+    assert_eq!(r, vec![Reply::Send(Frame::Ok { req: 2 })]);
+    assert_eq!(s.delete_volume("pvc-1"), Ok(2));
+    assert!(s.store().chunks().is_empty());
+    assert_eq!(s.delete_volume("pvc-1"), Ok(0), "nothing left");
+
+    // A new volume of the same name, from epoch 1: not refused by the old fence.
+    let (new, reply) = s.hello(&accepted(1, 2, &[0])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    let r = s.handle(&[
+        (new, write(3, 0, 0, &[4], 1)),
+        (new, read(4, 0, 0, 2)),
+        (old, write(5, 0, 0, &[5], 2)),
+    ]);
+    assert_eq!(r[0], Reply::Send(Frame::Ok { req: 3 }));
+    assert_eq!(blocks(&r[1]), vec![4, 0], "the old data is gone");
+    assert!(
+        matches!(&r[2], Reply::Close(why) if why.contains("unknown volume")),
+        "{:?}",
+        r[2]
+    );
+
+    let s = restart(s);
+    assert_eq!(s.store().chunks().len(), 1, "the deletion is durable");
 }

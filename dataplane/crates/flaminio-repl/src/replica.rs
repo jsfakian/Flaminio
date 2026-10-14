@@ -141,6 +141,13 @@ impl ReplicaCore {
         }
     }
 
+    /// Forgets a deleted volume entirely, its fenced epoch included: for a volume that no
+    /// longer exists, so that a new volume of the same name starts afresh. Requests of its
+    /// sessions are not valid after this.
+    pub fn remove_volume(&mut self, vol: VolumeId) {
+        self.vols.remove(&vol);
+    }
+
     pub fn fenced(&self, vol: VolumeId) -> Epoch {
         self.vols.get(&vol).map_or(0, |v| v.fenced)
     }

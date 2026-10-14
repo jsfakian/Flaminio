@@ -15,10 +15,10 @@ mod error;
 mod state;
 mod store;
 
-pub use device::{BlockDevice, FileDevice, MemDevice};
+pub use device::{BlockDevice, DeferredDevice, FileDevice, MemDevice};
 pub use error::StoreError;
 pub use state::ChunkKey;
 pub use store::{
-    Allocation, ChunkInfo, FsckReport, PlannedRead, ReadPlan, ReadReq, Stats, Store, StoreConfig,
-    WriteReq,
+    Allocation, ChunkInfo, FsckReport, PlannedRead, ReadPlan, ReadReq, Started, Stats, Store,
+    StoreConfig, WriteReq,
 };

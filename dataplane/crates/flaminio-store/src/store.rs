@@ -178,6 +178,36 @@ impl<'a> Plan<'a> {
     }
 }
 
+/// A group commit whose I/O is in flight (see [`Store::start_write_batch`]).
+struct InFlight {
+    /// The journal batch, applied once durable, as replay would apply it.
+    batch: Vec<u8>,
+    /// The results of the requests of the call that started it: `None` for the requests in
+    /// the batch, which succeed once it is durable.
+    results: Vec<Option<Result<(), StoreError>>>,
+}
+
+/// What [`Store::start_write_batch`] did.
+#[derive(Debug)]
+#[must_use = "a commit in flight must be polled"]
+pub enum Started {
+    /// Every request is done: durable, or failed on its own. One result per request.
+    Done(Vec<Result<(), StoreError>>),
+    /// The last group's writes and flush are in flight: [`Store::poll_write_batch`] gives the
+    /// results.
+    InFlight,
+}
+
+/// How [`Store::execute_start`] went.
+enum Exec {
+    /// The journal has no room for the batch: nothing was written.
+    NoRoom,
+    /// Durable and applied.
+    Done,
+    /// Written and flushed asynchronously: apply this batch once the device reports it done.
+    InFlight(Vec<u8>),
+}
+
 /// One write of a [`Store::write_batch`].
 #[derive(Debug, Clone, Copy)]
 pub struct WriteReq<'a> {
@@ -263,6 +293,12 @@ pub struct Store<D: BlockDevice> {
     poisoned: bool,
     /// Plans handed out by plan_read and not yet finished.
     reads_in_flight: Cell<u64>,
+    /// The group commit in flight, if any. Only one at a time: recovery relies on every batch
+    /// but the last being durable, data included (format spec §6.2).
+    in_flight: Option<InFlight>,
+    /// The results of a commit that another change waited for (see [`Store::guard`]), until
+    /// [`Store::poll_write_batch`] hands them out.
+    settled: Option<Vec<Result<(), StoreError>>>,
 }
 
 fn read_block<D: BlockDevice + ?Sized>(dev: &D, offset: u64) -> Result<Box<PageBuf>, StoreError> {
@@ -476,6 +512,8 @@ impl<D: BlockDevice> Store<D> {
             config,
             poisoned: false,
             reads_in_flight: Cell::new(0),
+            in_flight: None,
+            settled: None,
         };
         store.checkpoint_inner()?;
         Ok(store)
@@ -496,8 +534,9 @@ impl<D: BlockDevice> Store<D> {
         self.dev
     }
 
-    /// Runs a mutating operation. Device and consistency failures poison the store: in-memory
-    /// state no longer matches the disk, and only a reopen (recovery) can fix that.
+    /// Runs a mutating operation, after the commit in flight completes. Device and consistency
+    /// failures poison the store: in-memory state no longer matches the disk, and only a
+    /// reopen (recovery) can fix that.
     fn guard<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, StoreError>,
@@ -505,10 +544,12 @@ impl<D: BlockDevice> Store<D> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
         }
-        if self.reads_in_flight.get() == 0 {
-            self.state.data.unblock_all();
-        }
-        let result = f(self);
+        let result = self.settle().and_then(|()| {
+            if self.reads_in_flight.get() == 0 {
+                self.state.data.unblock_all();
+            }
+            f(self)
+        });
         if matches!(
             result,
             Err(StoreError::Io(_)
@@ -601,21 +642,47 @@ impl<D: BlockDevice> Store<D> {
     /// of its own. Returns false, after releasing the plan's reservations, if the journal has
     /// no room for the batch.
     fn execute(&mut self, batch: BatchBuilder, plan: Plan<'_>) -> Result<bool, StoreError> {
+        match self.execute_start(batch, plan)? {
+            Exec::NoRoom => Ok(false),
+            Exec::Done => Ok(true),
+            Exec::InFlight(bytes) => {
+                self.dev.poll_commit(true).expect("waited for the commit")?;
+                self.execute_finish(bytes)?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Starts the commit protocol: the data and the batch written, then a flush, without
+    /// waiting if the device can. Nothing is applied until the batch is durable, so reads see
+    /// the state before it meanwhile.
+    fn execute_start(&mut self, batch: BatchBuilder, plan: Plan<'_>) -> Result<Exec, StoreError> {
         let len = batch.total_len();
         let Some(at) = self.journal.place(len) else {
             self.release(&plan.reserved);
-            return Ok(false);
+            return Ok(Exec::NoRoom);
         };
         let bytes = batch.finish(self.sb.format_nonce, self.journal.head.seq, at);
         let mut writes: Vec<(u64, &[u8])> =
             plan.data_writes.iter().map(|(o, d)| (*o, &d[..])).collect();
         writes.push((self.journal.offset + at, &bytes));
-        self.dev.write_many(&writes)?;
-        self.dev.flush()?;
+        let done = self.dev.start_commit(&writes)?;
         self.journal.advance(at, len);
+        if done {
+            self.execute_finish(bytes)?;
+            return Ok(Exec::Done);
+        }
+        Ok(Exec::InFlight(bytes))
+    }
+
+    /// Ends the commit protocol once the batch is durable: applies its records, decoded from
+    /// the batch as replay decodes them, writes deferred writes in place, and checkpoints if
+    /// the journal is full enough.
+    fn execute_finish(&mut self, bytes: Vec<u8>) -> Result<(), StoreError> {
+        let batch = Batch::from_bytes(bytes, self.sb.format_nonce)?;
         let mut in_place = Vec::new();
-        for r in &plan.records {
-            in_place.extend(self.state.apply(r)?);
+        for r in batch.records() {
+            in_place.extend(self.state.apply(&r?)?);
         }
         if !in_place.is_empty() {
             self.dev.write_many(&in_place)?;
@@ -625,7 +692,25 @@ impl<D: BlockDevice> Store<D> {
         {
             self.checkpoint_inner()?;
         }
-        Ok(true)
+        Ok(())
+    }
+
+    /// Waits for the commit in flight and applies it, keeping its results for
+    /// [`Self::poll_write_batch`]. Every other change waits for it this way (from
+    /// [`Self::guard`]), so batches stay durable in order.
+    fn settle(&mut self) -> Result<(), StoreError> {
+        let Some(f) = self.in_flight.take() else {
+            return Ok(());
+        };
+        self.dev.poll_commit(true).expect("waited for the commit")?;
+        let results = self.finish_in_flight(f)?;
+        self.settled = Some(results);
+        Ok(())
+    }
+
+    fn finish_in_flight(&mut self, f: InFlight) -> Result<Vec<Result<(), StoreError>>, StoreError> {
+        self.execute_finish(f.batch)?;
+        Ok(f.results.into_iter().map(|r| r.unwrap_or(Ok(()))).collect())
     }
 
     // ---------------------------------------------------------------------------------------
@@ -780,8 +865,25 @@ impl<D: BlockDevice> Store<D> {
         &mut self,
         reqs: &[WriteReq<'_>],
     ) -> Result<Vec<Result<(), StoreError>>, StoreError> {
+        match self.start_write_batch(reqs)? {
+            Started::Done(results) => Ok(results),
+            Started::InFlight => Ok(self.poll_write_batch(true)?.expect("waited for the commit")),
+        }
+    }
+
+    /// [`Self::write_batch`], without waiting for the last group's I/O when the device can do
+    /// it asynchronously ([`BlockDevice::start_commit`]). The data is copied: `reqs` may go as
+    /// soon as this returns. Until [`Self::poll_write_batch`] has returned the results, reads
+    /// see the state before the batch, and no other write batch may start; any other change
+    /// waits for the commit first.
+    pub fn start_write_batch(&mut self, reqs: &[WriteReq<'_>]) -> Result<Started, StoreError> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
+        }
+        if self.commit_in_flight() {
+            return Err(StoreError::invalid(
+                "a write batch is in flight: poll it before starting another",
+            ));
         }
         let mut results: Vec<Option<Result<(), StoreError>>> = reqs.iter().map(|_| None).collect();
         let mut pending = Vec::with_capacity(reqs.len());
@@ -794,7 +896,8 @@ impl<D: BlockDevice> Store<D> {
         let mut next = 0;
         let mut retries = 0;
         while next < pending.len() {
-            let (consumed, failed) = self.guard(|s| s.commit_group(reqs, &pending[next..]))?;
+            let (consumed, failed, flying) =
+                self.guard(|s| s.commit_group(reqs, &pending[next..]))?;
             if consumed == 0 {
                 // No journal room: commit_group checkpointed. Try once more.
                 retries += 1;
@@ -809,26 +912,76 @@ impl<D: BlockDevice> Store<D> {
             for (i, e) in failed {
                 results[i] = Some(Err(e));
             }
-            for &(i, _) in &pending[next..next + consumed] {
+            let group = next..next + consumed;
+            next += consumed;
+            if let Some(bytes) = flying {
+                if next == pending.len() {
+                    self.in_flight = Some(InFlight {
+                        batch: bytes,
+                        results,
+                    });
+                    return Ok(Started::InFlight);
+                }
+                // Groups commit one after the other: only the last stays in flight.
+                self.guard(|s| {
+                    s.dev.poll_commit(true).expect("waited for the commit")?;
+                    s.execute_finish(bytes)
+                })?;
+            }
+            for &(i, _) in &pending[group] {
                 results[i].get_or_insert(Ok(()));
             }
-            next += consumed;
         }
-        Ok(results
-            .into_iter()
-            .map(|r| r.expect("every request has a result"))
-            .collect())
+        Ok(Started::Done(
+            results
+                .into_iter()
+                .map(|r| r.expect("every request has a result"))
+                .collect(),
+        ))
+    }
+
+    /// The results of the write batch in flight, once durable (with `wait`, waits for it):
+    /// one per request of [`Self::start_write_batch`]. `None` while still in flight.
+    pub fn poll_write_batch(
+        &mut self,
+        wait: bool,
+    ) -> Result<Option<Vec<Result<(), StoreError>>>, StoreError> {
+        if let Some(results) = self.settled.take() {
+            return Ok(Some(results));
+        }
+        if self.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        if self.in_flight.is_none() {
+            return Err(StoreError::invalid("no write batch in flight"));
+        }
+        let Some(outcome) = self.dev.poll_commit(wait) else {
+            return Ok(None);
+        };
+        let f = self.in_flight.take().expect("in flight");
+        self.guard(|s| {
+            outcome?;
+            s.finish_in_flight(f)
+        })
+        .map(Some)
+    }
+
+    /// True from [`Self::start_write_batch`] returning [`Started::InFlight`] until
+    /// [`Self::poll_write_batch`] returns its results.
+    pub fn commit_in_flight(&self) -> bool {
+        self.in_flight.is_some() || self.settled.is_some()
     }
 
     /// Plans and commits the longest prefix of `pending` that forms a valid group. Returns how
-    /// many requests it consumed (committed or failed individually) and the individual
-    /// failures. Consumes nothing, after checkpointing, if the journal had no room.
+    /// many requests it consumed (committed or failed individually), the individual failures,
+    /// and the group's batch if its I/O is still in flight. Consumes nothing, after
+    /// checkpointing, if the journal had no room.
     #[allow(clippy::type_complexity)]
     fn commit_group(
         &mut self,
         reqs: &[WriteReq<'_>],
         pending: &[(usize, u32)],
-    ) -> Result<(usize, Vec<(usize, StoreError)>), StoreError> {
+    ) -> Result<(usize, Vec<(usize, StoreError)>, Option<Vec<u8>>), StoreError> {
         let cs = self.state.cluster_size();
         let mut batch = BatchBuilder::new(self.config.max_batch_bytes);
         let mut group = Plan {
@@ -895,13 +1048,16 @@ impl<D: BlockDevice> Store<D> {
             consumed += 1;
         }
         if group.records.is_empty() {
-            return Ok((consumed, failed));
+            return Ok((consumed, failed, None));
         }
-        if !self.execute(batch, group)? {
-            self.checkpoint_inner()?;
-            return Ok((0, Vec::new()));
+        match self.execute_start(batch, group)? {
+            Exec::NoRoom => {
+                self.checkpoint_inner()?;
+                Ok((0, Vec::new(), None))
+            }
+            Exec::Done => Ok((consumed, failed, None)),
+            Exec::InFlight(bytes) => Ok((consumed, failed, Some(bytes))),
         }
-        Ok((consumed, failed))
     }
 
     fn fill_write_plan<'a>(

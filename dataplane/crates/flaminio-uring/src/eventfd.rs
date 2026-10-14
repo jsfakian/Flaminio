@@ -27,10 +27,10 @@ impl EventFd {
         let _ = (&self.0).write(&1u64.to_ne_bytes());
     }
 
-    /// Clears pending signals without blocking.
-    pub fn drain(&self) {
+    /// Clears pending signals without blocking. Returns whether there were any.
+    pub fn drain(&self) -> bool {
         let mut b = [0u8; 8];
-        let _ = (&self.0).read(&mut b);
+        (&self.0).read(&mut b).is_ok()
     }
 }
 

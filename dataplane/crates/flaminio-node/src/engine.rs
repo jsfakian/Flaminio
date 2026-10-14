@@ -204,6 +204,12 @@ pub enum Input {
     Detach {
         volume: String,
     },
+    /// Delete the local replicas of a volume deleted from the metadata service (see
+    /// `ReplicaService::delete_volume`). Refused while this node is its target.
+    DeleteReplicas {
+        volume: String,
+        reply: mpsc::Sender<Result<usize, String>>,
+    },
     /// Nothing: wakes the engine's driver.
     Nop,
     Stop,
@@ -374,6 +380,11 @@ pub struct Engine<D: BlockDevice> {
     meta_waits: BTreeMap<u64, MetaWait>,
     next_sub: u64,
     local: Vec<(LocalFrom, SessionRef, Frame)>,
+    /// Who sent the requests the local replica's commit in flight holds back, in order.
+    committing: Option<Vec<LocalFrom>>,
+    /// Whether the local replica's commits may stay in flight between turns. Off, each commit is
+    /// waited for: for a thread that cannot learn when one completes.
+    async_commits: bool,
     out: Vec<Output>,
     local_reads: BTreeMap<u64, PendingLocal>,
     next_token: u64,
@@ -406,6 +417,8 @@ impl<D: BlockDevice> Engine<D> {
             meta_waits: BTreeMap::new(),
             next_sub: 1,
             local: Vec::new(),
+            committing: None,
+            async_commits: false,
             out: Vec::new(),
             local_reads: BTreeMap::new(),
             next_token: 1,
@@ -501,11 +514,21 @@ impl<D: BlockDevice> Engine<D> {
                 len,
                 reply,
             } => {
-                self.flush_local(now);
+                self.settle_local(now);
                 let _ = reply.send(self.inspect(&volume, offset, len));
             }
             Input::Deafen { until } => self.deaf_until = Some(until),
             Input::Detach { volume } => self.detach(&volume),
+            Input::DeleteReplicas { volume, reply } => {
+                let r =
+                    if self.targets.contains_key(&volume) || self.attaching.contains_key(&volume) {
+                        Err(format!("{volume} is attached here"))
+                    } else {
+                        self.settle_local(now);
+                        self.service.delete_volume(&volume)
+                    };
+                let _ = reply.send(r);
+            }
             Input::Nop => {}
             Input::Stop => return false,
         }
@@ -608,7 +631,7 @@ impl<D: BlockDevice> Engine<D> {
                 }
             }
             NetEvent::Closed { conn } => {
-                self.flush_local(now);
+                self.settle_local(now);
                 self.conns.remove(&conn);
             }
             NetEvent::Reply { key, frame } => {
@@ -636,40 +659,99 @@ impl<D: BlockDevice> Engine<D> {
             .unwrap_or_else(|| format!("node {n}"))
     }
 
-    /// Sends the requests queued for the local replica, as one batch, until none are left.
+    /// Lets the local replica's commits stay in flight between turns (`on`), for a thread that
+    /// pumps the engine when the store's device signals a commit done. Turning it off waits for
+    /// the commit in flight.
+    pub fn set_async_commits(&mut self, now: Instant, on: bool) {
+        self.async_commits = on;
+        if !on {
+            self.finish_commit(now, true);
+        }
+    }
+
+    /// Sends the requests queued for the local replica, a batch at a time, until none are left
+    /// or a commit stays in flight.
     fn flush_local(&mut self, now: Instant) {
         for _ in 0..16 {
-            if self.local.is_empty() {
+            if !self.finish_commit(now, !self.async_commits) || self.local.is_empty() {
                 return;
             }
             let batch = std::mem::take(&mut self.local);
-            let items: Vec<(SessionRef, Frame)> =
-                batch.iter().map(|(_, s, f)| (*s, f.clone())).collect();
-            let replies = self.service.handle(&items);
-            let mut touched = Vec::new();
-            for ((from, _, _), reply) in batch.into_iter().zip(replies) {
-                match from {
-                    LocalFrom::Conn(c) => {
-                        if let Some((_, tx)) = self.conns.get(&c) {
-                            let _ = tx.try_send(reply);
-                        }
-                    }
-                    LocalFrom::Target { volume, session } => {
-                        if let Reply::Send(frame) = reply {
-                            let local = self.targets.get(&volume).map(|rt| rt.local);
-                            if let Some(local) = local {
-                                self.reply_to_target(now, &volume, local, session, frame);
-                                touched.push(volume);
-                            }
-                        }
-                        // Nothing or Close: the target's timeout handles it.
+            let mut from = Vec::with_capacity(batch.len());
+            let mut items = Vec::with_capacity(batch.len());
+            for (f, s, frame) in batch {
+                from.push(f);
+                items.push((s, frame));
+            }
+            let p = self.service.start(&items);
+            // Requests not handled yet wait for the commit, ahead of anything queued since.
+            let rest: Vec<_> = from
+                .drain(p.handled..)
+                .zip(items.drain(p.handled..))
+                .map(|(f, (s, frame))| (f, s, frame))
+                .collect();
+            if !rest.is_empty() {
+                let newer = std::mem::replace(&mut self.local, rest);
+                self.local.extend(newer);
+            }
+            let held = from.split_off(p.replies.len());
+            if !held.is_empty() {
+                self.committing = Some(held);
+            }
+            self.deliver_local(now, from, p.replies);
+        }
+        if !self.async_commits {
+            self.finish_commit(now, true);
+        }
+    }
+
+    /// Ends the local replica's commit in flight if it is done (with `wait`, waits for it), and
+    /// delivers the replies it held back. Returns true if no commit is in flight any more.
+    fn finish_commit(&mut self, now: Instant, wait: bool) -> bool {
+        if self.committing.is_none() {
+            return true;
+        }
+        let Some(replies) = self.service.poll(wait) else {
+            return false;
+        };
+        let from = self.committing.take().expect("a commit in flight");
+        self.deliver_local(now, from, replies);
+        true
+    }
+
+    /// Everything queued for the local replica handled and durable: before using the replica
+    /// directly.
+    fn settle_local(&mut self, now: Instant) {
+        while self.committing.is_some() || !self.local.is_empty() {
+            self.finish_commit(now, true);
+            self.flush_local(now);
+        }
+    }
+
+    fn deliver_local(&mut self, now: Instant, from: Vec<LocalFrom>, replies: Vec<Reply>) {
+        let mut touched = Vec::new();
+        for (from, reply) in from.into_iter().zip(replies) {
+            match from {
+                LocalFrom::Conn(c) => {
+                    if let Some((_, tx)) = self.conns.get(&c) {
+                        let _ = tx.try_send(reply);
                     }
                 }
+                LocalFrom::Target { volume, session } => {
+                    if let Reply::Send(frame) = reply {
+                        let local = self.targets.get(&volume).map(|rt| rt.local);
+                        if let Some(local) = local {
+                            self.reply_to_target(now, &volume, local, session, frame);
+                            touched.push(volume);
+                        }
+                    }
+                    // Nothing or Close: the target's timeout handles it.
+                }
             }
-            touched.dedup();
-            for v in touched {
-                self.drain(now, &v);
-            }
+        }
+        touched.dedup();
+        for v in touched {
+            self.drain(now, &v);
         }
     }
 
