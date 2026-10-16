@@ -8,7 +8,7 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## Status (2026-10-14)
+## Status (2026-10-16)
 
 R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)). Measured on fl-b at 4 vCPUs,
 against raw on 16 GiB spans of the same disk, caches dropped before every job, medians of 3
@@ -43,7 +43,12 @@ Flaminio runs, each followed by an integrity check: 0 errors, 0 checksum failure
 **Not met:** 1M and the mixed job. Both are limited by synchronous commits on the ublk queue
 thread, which block the next group and every read.
 
-Next: W4.1, commits off the queue thread and pipelined; then RF 2 (comparison B).
+**Since (2026-10-16):** W4.1 is in, with commits off the queue thread and gathering (see W4).
+- **Short validations:** 1M sequential about 1 000 MiB/s (50% of raw), the 70/30 mix at
+  raw's level, and 4K QD32 as before.
+- **In progress:** the full RF 1 campaign on this build, then RF 2 (comparison B) on the same
+  build.
+- **After that:** W4.2, overlapped commits, for 1M.
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
@@ -263,10 +268,35 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
 1. **Group commit:**
    - tune the batch size and wait;
    - measure the journal's share of device writes (W2's write amplification).
-2. **Zero-copy writes** (performance item 1.3): the data goes from the request to the store
+
+   *Done (2026-10-16):*
+   - **Commits off the queue thread.** A commit's writes and flush stay in flight on a
+     second ring while the queue thread serves reads and gathers the next group.
+   - **Gathering.** After a commit, the next one waits up to 300 µs for the writes it
+     acknowledged to come back.
+   - **Results so far** (short validations): 1M sequential from 591 to about 1 000 MiB/s, and
+     the 70/30 mix at raw's level. 4K QD32 equals blocking commits, with a better p99.
+   - The full campaign is in progress.
+2. **Overlapped commits: the next group's data written during the current flush.** Today one
+   commit is in flight at a time: the next group's writes start only when the current flush
+   has completed, so at 1M each commit pays its 8 MiB of data, then its flush, in turn (about
+   50% of raw).
+   - **What overlaps:** the next group's redirect-on-write data goes to the device while the
+     current flush runs. Its journal batch, and its own flush, still wait for the current
+     flush to complete.
+   - **Why it is safe:**
+     - That data goes to clusters reserved for the group, which no durable batch references.
+       Until the group's batch is durable, they read as free.
+     - The batches stay durable one at a time, in order, so recovery's rule still holds: only
+       the last batch can lack its data.
+     - Small writes into mapped clusters are not written early. They overwrite live data, and
+       go through the journal as today.
+   - **Measure:** 1M sequential, against W4.1's result. Crash tests and the store's crash
+     proptest cover an early data write whose batch never commits.
+3. **Zero-copy writes** (performance item 1.3): the data goes from the request to the store
    and the network without a copy into a `Vec`.
-3. **Several queues for writes** (R4 brings them for reads).
-4. **Write amplification:** journal writes for large sequential writes. Large aligned writes
+4. **Several queues for writes** (R4 brings them for reads).
+5. **Write amplification:** journal writes for large sequential writes. Large aligned writes
    could bypass the journal (written in place, then one metadata update).
 
 ## 5. Order, and what is needed
