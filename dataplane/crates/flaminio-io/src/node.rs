@@ -54,6 +54,11 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --zero-copy          local reads go straight from the disk into the request's pages
                            (ublk auto buffer registration): no copy, and so no checksum
                            verification of those reads. For measuring; see docs/performance-plan.md
+      --gather-us N        after a commit, the next waits up to N microseconds for the writes
+                           just acknowledged to come back, so that they commit together
+                           (default 300; 0: never waits)
+      --sync-commits       commits block the queue thread until durable (as before commits
+                           went asynchronous): for comparing
       --id N               ublk device id (default: first free)
       --control PATH       control socket for attach and detach (default /run/flaminio/node.sock)
 
@@ -82,6 +87,8 @@ pub(crate) struct NodeConfig {
     pub no_verify: bool,
     pub queues: u16,
     pub poll_us: u64,
+    pub gather_us: Option<u64>,
+    pub sync_commits: bool,
 }
 
 fn parse(args: &[String]) -> Result<NodeConfig, String> {
@@ -106,6 +113,8 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         no_verify: false,
         queues: 1,
         poll_us: 0,
+        gather_us: None,
+        sync_commits: false,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -138,6 +147,10 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
             "--zero-copy" => c.zero_copy = true,
             "--no-verify" => c.no_verify = true,
             "--poll-us" => c.poll_us = value()?.parse().map_err(|_| "invalid --poll-us")?,
+            "--gather-us" => {
+                c.gather_us = Some(value()?.parse().map_err(|_| "invalid --gather-us")?)
+            }
+            "--sync-commits" => c.sync_commits = true,
             "--queues" => {
                 c.queues = value()?.parse().map_err(|_| "invalid --queues")?;
                 if c.queues == 0 || c.queues > 64 {

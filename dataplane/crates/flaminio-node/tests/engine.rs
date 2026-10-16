@@ -831,6 +831,103 @@ fn commits_in_flight_hold_writes_but_not_reads() {
             "write {seed} reads back"
         );
     }
+    // Gathering: after a commit of one write, with two queued, the next commit waits for as
+    // many writes as were in flight (here, a third) before it starts.
+    let cluster = 64 * 1024;
+    let at = |i: u64| 2 * MIB + i * cluster;
+    engine.set_commit_gather(Duration::from_secs(10));
+    io(
+        &mut engine,
+        10,
+        Io::Write {
+            offset: at(0),
+            data: pattern(10, cluster),
+        },
+    );
+    run(&mut engine, &mut buf, 5, &done(10));
+    assert_eq!(
+        engine.device().pending_writes(),
+        2,
+        "one write and its batch"
+    );
+    io(
+        &mut engine,
+        11,
+        Io::Write {
+            offset: at(1),
+            data: pattern(11, cluster),
+        },
+    );
+    io(
+        &mut engine,
+        12,
+        Io::Write {
+            offset: at(2),
+            data: pattern(12, cluster),
+        },
+    );
+    run(&mut engine, &mut buf, 5, &done(11));
+    engine.device().complete();
+    assert_eq!(run(&mut engine, &mut buf, until, &done(10)).len(), 1);
+    run(&mut engine, &mut buf, 20, &done(11));
+    assert!(!engine.device().in_flight(), "waiting for a third write");
+    io(
+        &mut engine,
+        13,
+        Io::Write {
+            offset: at(3),
+            data: pattern(13, cluster),
+        },
+    );
+    run(&mut engine, &mut buf, 5, &done(11));
+    assert_eq!(
+        engine.device().pending_writes(),
+        4,
+        "three writes in one group"
+    );
+    // From here, waits end after 5 ms (the wait this completion starts included).
+    engine.set_commit_gather(Duration::from_millis(5));
+    engine.device().complete();
+    // All three are acknowledged together, possibly in one turn.
+    let mut acked = 0;
+    while acked < 3 {
+        acked += run(
+            &mut engine,
+            &mut buf,
+            until,
+            &|o| matches!(o, Output::Done { op, .. } if (11..=13).contains(op)),
+        )
+        .len();
+    }
+    // A wait that cannot be met ends with its window.
+    io(
+        &mut engine,
+        14,
+        Io::Write {
+            offset: at(4),
+            data: pattern(14, cluster),
+        },
+    );
+    run(&mut engine, &mut buf, 30, &done(14));
+    io(
+        &mut engine,
+        15,
+        Io::Write {
+            offset: at(5),
+            data: pattern(15, cluster),
+        },
+    );
+    engine.device().complete();
+    assert_eq!(run(&mut engine, &mut buf, until, &done(14)).len(), 1);
+    run(&mut engine, &mut buf, 30, &done(15));
+    assert_eq!(
+        engine.device().pending_writes(),
+        2,
+        "started alone after 5 ms"
+    );
+    engine.device().complete();
+    assert_eq!(run(&mut engine, &mut buf, until, &done(15)).len(), 1);
+
     engine.set_async_commits(Instant::now(), false);
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -48,6 +48,8 @@ up() {
     [[ ${NO_VERIFY:-0} == 1 ]] && args+=(--no-verify)
     [[ ${QUEUES:-1} != 1 ]] && args+=(--queues "$QUEUES")
     [[ ${POLL_US:-0} != 0 ]] && args+=(--poll-us "$POLL_US")
+    [[ -n ${GATHER_US:-} ]] && args+=(--gather-us "$GATHER_US")
+    [[ ${SYNC_COMMITS:-0} == 1 ]] && args+=(--sync-commits)
     if [[ -n ${ATTACH:-} ]]; then
         sudo install -d -m 700 /run/flaminio
         echo "${TOKEN:?}" | base64 -d | sudo tee "/run/flaminio/$ATTACH.token" >/dev/null

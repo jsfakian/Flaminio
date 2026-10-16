@@ -89,6 +89,13 @@ impl MetaPort for MetaClient {
     }
 }
 
+/// How long, by default, a commit may wait for writes to gather (see `Engine::set_commit_gather`):
+/// longer than a client takes to send a write again after its acknowledgement, short against a
+/// commit (a flush takes milliseconds). Measured in the lab's VMs at 4K QD32: 100 µs ran out
+/// for 80% of the commits (16 writes each), 300 µs gathered 23.5, like commits that block the
+/// queue thread, and longer windows gained nothing.
+pub const DEFAULT_GATHER: Duration = Duration::from_micros(300);
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// This node's name.
@@ -380,8 +387,19 @@ pub struct Engine<D: BlockDevice> {
     meta_waits: BTreeMap<u64, MetaWait>,
     next_sub: u64,
     local: Vec<(LocalFrom, SessionRef, Frame)>,
-    /// Who sent the requests the local replica's commit in flight holds back, in order.
-    committing: Option<Vec<LocalFrom>>,
+    /// Who sent the requests the local replica's commit in flight holds back, in order, and
+    /// how many of them are writes.
+    committing: Option<(Vec<LocalFrom>, usize)>,
+    /// After a commit completes, the next waits until this many writes are queued, or until the
+    /// instant (see `finish_commit`).
+    gather: Option<(usize, Instant)>,
+    /// How long the next commit may wait for writes to gather.
+    gather_window: Duration,
+    /// A wait for writes to gather began: the driver arms a timer for it.
+    gather_timer: Option<Duration>,
+    /// Local commits since the last report: how many, their writes, and how many started when
+    /// their wait for writes to gather ran out.
+    commit_stats: (u64, u64, u64),
     /// Whether the local replica's commits may stay in flight between turns. Off, each commit is
     /// waited for: for a thread that cannot learn when one completes.
     async_commits: bool,
@@ -418,6 +436,10 @@ impl<D: BlockDevice> Engine<D> {
             next_sub: 1,
             local: Vec::new(),
             committing: None,
+            gather: None,
+            gather_window: DEFAULT_GATHER,
+            gather_timer: None,
+            commit_stats: (0, 0, 0),
             async_commits: false,
             out: Vec::new(),
             local_reads: BTreeMap::new(),
@@ -666,7 +688,31 @@ impl<D: BlockDevice> Engine<D> {
         self.async_commits = on;
         if !on {
             self.finish_commit(now, true);
+            self.gather = None;
+            let (commits, writes, expired) = std::mem::take(&mut self.commit_stats);
+            if commits > 0 {
+                eprintln!(
+                    "flaminio-node: {commits} local commits, {:.1} writes each; {expired} started when their wait for writes ran out",
+                    writes as f64 / commits as f64
+                );
+            }
         }
+    }
+
+    /// How long a commit may wait for writes to gather (see `finish_commit`); zero: never.
+    pub fn set_commit_gather(&mut self, window: Duration) {
+        self.gather_window = window;
+    }
+
+    /// The timer to arm, once, when the next commit starts waiting for writes to gather: the
+    /// driver pumps the engine when it fires.
+    pub fn take_gather_timer(&mut self) -> Option<Duration> {
+        self.gather_timer.take()
+    }
+
+    /// Writes (and copies) queued for the local replica.
+    fn queued_writes(&self) -> usize {
+        self.local.iter().filter(|(_, _, f)| is_write(f)).count()
     }
 
     /// Sends the requests queued for the local replica, a batch at a time, until none are left
@@ -675,6 +721,15 @@ impl<D: BlockDevice> Engine<D> {
         for _ in 0..16 {
             if !self.finish_commit(now, !self.async_commits) || self.local.is_empty() {
                 return;
+            }
+            if let Some((target, until)) = self.gather {
+                if self.queued_writes() < target {
+                    if now < until {
+                        return;
+                    }
+                    self.commit_stats.2 += 1;
+                }
+                self.gather = None;
             }
             let batch = std::mem::take(&mut self.local);
             let mut from = Vec::with_capacity(batch.len());
@@ -696,7 +751,13 @@ impl<D: BlockDevice> Engine<D> {
             }
             let held = from.split_off(p.replies.len());
             if !held.is_empty() {
-                self.committing = Some(held);
+                let writes = items[p.replies.len()..]
+                    .iter()
+                    .filter(|(_, f)| is_write(f))
+                    .count();
+                self.commit_stats.0 += 1;
+                self.commit_stats.1 += writes as u64;
+                self.committing = Some((held, writes));
             }
             self.deliver_local(now, from, p.replies);
         }
@@ -707,6 +768,13 @@ impl<D: BlockDevice> Engine<D> {
 
     /// Ends the local replica's commit in flight if it is done (with `wait`, waits for it), and
     /// delivers the replies it held back. Returns true if no commit is in flight any more.
+    ///
+    /// With commits in flight, the next commit then waits, briefly, for writes to gather: the
+    /// writes queued meanwhile, plus as many as this commit acknowledged, which a client keeping
+    /// its queue full sends again at once. Starting at once would split the client's writes into
+    /// two halves that commit in turn, each commit carrying half (4K QD32: 13 writes per commit
+    /// against 23). A client with one write in flight waits for nothing: its next write is the
+    /// target.
     fn finish_commit(&mut self, now: Instant, wait: bool) -> bool {
         if self.committing.is_none() {
             return true;
@@ -714,8 +782,12 @@ impl<D: BlockDevice> Engine<D> {
         let Some(replies) = self.service.poll(wait) else {
             return false;
         };
-        let from = self.committing.take().expect("a commit in flight");
+        let (from, writes) = self.committing.take().expect("a commit in flight");
         self.deliver_local(now, from, replies);
+        if self.async_commits && !self.gather_window.is_zero() {
+            self.gather = Some((writes + self.queued_writes(), now + self.gather_window));
+            self.gather_timer = Some(self.gather_window);
+        }
         true
     }
 
@@ -1629,6 +1701,11 @@ impl<D: BlockDevice> Engine<D> {
     pub fn device(&self) -> &D {
         self.service.store().device()
     }
+}
+
+/// Whether a frame for the local replica writes to its store.
+fn is_write(f: &Frame) -> bool {
+    matches!(f, Frame::Write { .. } | Frame::Copy { .. })
 }
 
 fn to_frame(m: &ToReplica<Payload>) -> Frame {

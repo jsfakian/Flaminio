@@ -653,7 +653,7 @@ meta_endpoints() {
 
 node_env() {
     local vm=$1
-    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0}"
+    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0} GATHER_US=${GATHER_US:-} SYNC_COMMITS=${SYNC_COMMITS:-0}"
 }
 
 # node up|down|status [VM selector, default all]: the data VMs' nodes, replicas only.

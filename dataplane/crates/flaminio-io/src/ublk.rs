@@ -535,6 +535,8 @@ struct EngineCtx {
     /// Writes whose data is still being copied into the staging area (zero copy). The pump
     /// waits for them, so that they join the same group commit as the writes before them.
     staging: Cell<u32>,
+    /// Arms this queue's timer for a commit waiting for writes to gather.
+    gather: std::cell::OnceCell<smol::channel::Sender<Duration>>,
 }
 
 impl EngineCtx {
@@ -557,6 +559,9 @@ impl EngineCtx {
                 e.turn(now);
             } else {
                 e.flush(now);
+            }
+            if let (Some(d), Some(tx)) = (e.take_gather_timer(), self.gather.get()) {
+                let _ = tx.try_send(d);
             }
             e.take_output()
         };
@@ -853,7 +858,10 @@ fn run_device(
     };
     // The queue threads pump the engine when the store's device signals a commit done (the
     // node's eventfd, queue 0's wake-up), so commits need not block them.
-    engine.set_async_commits(Instant::now(), true);
+    engine.set_async_commits(Instant::now(), !c.sync_commits);
+    if let Some(us) = c.gather_us {
+        engine.set_commit_gather(Duration::from_micros(us));
+    }
     let mut wakes = vec![efd];
     for _ in 1..c.queues {
         wakes.push(Arc::new(
@@ -884,6 +892,7 @@ fn run_device(
             qid,
             due: Cell::new(false),
             staging: Cell::new(0),
+            gather: std::cell::OnceCell::new(),
         };
         if let Err(e) = serve_with(qid, dev, &ctx, zero_copy) {
             eprintln!("flaminio-io: queue {qid} stopped: {e}");
@@ -976,6 +985,19 @@ fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Resu
                 let sqe = opcode::PollAdd::new(types::Fd(fd), libc::POLLIN as u32).build();
                 let _ = q.ublk_submit_sqe(sqe).await;
                 efd.drain();
+                ctx.pump();
+            }
+        })
+    };
+    // A commit waiting for writes to gather: pump when its wait ends.
+    let (gather_tx, gather_rx) = smol::channel::unbounded::<Duration>();
+    let _ = ctx.gather.set(gather_tx);
+    let _gather = {
+        let q = q.clone();
+        exe.spawn(async move {
+            while let Ok(d) = gather_rx.recv().await {
+                let ts = types::Timespec::new().nsec(d.as_nanos() as u32);
+                let _ = q.ublk_submit_sqe(opcode::Timeout::new(&ts).build()).await;
                 ctx.pump();
             }
         })

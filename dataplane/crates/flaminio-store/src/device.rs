@@ -388,6 +388,11 @@ impl DeferredDevice {
         self.pending.borrow().is_some()
     }
 
+    /// The writes of the commit in flight (its data writes and its journal batch).
+    pub fn pending_writes(&self) -> usize {
+        self.pending.borrow().as_ref().map_or(0, Vec::len)
+    }
+
     /// Lands the commit in flight: its writes, then the flush.
     pub fn complete(&self) {
         let writes = self
