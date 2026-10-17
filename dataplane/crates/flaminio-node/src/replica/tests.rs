@@ -317,3 +317,32 @@ fn a_deleted_volume_can_be_created_again_from_epoch_one() {
     let s = restart(s);
     assert_eq!(s.store().chunks().len(), 1, "the deletion is durable");
 }
+
+#[test]
+fn staged_writes_are_answered_after_their_own_commit() {
+    let mut s = deferred_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    let p = s.start(&[(sess, write(2, 0, 0, &[1], 1))]);
+    assert!(p.in_flight());
+    // Behind it: a write elsewhere is staged; one into its cluster is not, nor what follows.
+    let rest = [
+        (sess, write(3, 0, 64, &[2], 2)),
+        (sess, write(4, 0, 1, &[3], 3)),
+        (sess, read(5, 0, 64, 1)),
+    ];
+    assert_eq!(s.stage(&rest), 1);
+    assert!(s.poll(false).is_none());
+    s.store().device().complete();
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 2 })]));
+    assert!(
+        s.commit_in_flight(),
+        "the staged write's commit is in flight"
+    );
+    assert!(s.poll(false).is_none());
+    s.store().device().complete();
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 3 })]));
+    assert!(!s.commit_in_flight());
+    let r = s.handle(&rest[1..]);
+    assert_eq!(r[0], Reply::Send(Frame::Ok { req: 4 }));
+    assert_eq!(blocks(&r[1]), vec![2], "the staged write reads back");
+}

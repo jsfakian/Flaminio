@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use flaminio_format::FormatError;
 use flaminio_format::checksum::{block_checksums, crc32c};
@@ -185,6 +185,22 @@ struct InFlight {
     /// The results of the requests of the call that started it: `None` for the requests in
     /// the batch, which succeed once it is durable.
     results: Vec<Option<Result<(), StoreError>>>,
+    /// The clusters its requests write, as (slot, chunk-relative cluster): a staged request
+    /// may not touch them, as its plan would not see this batch's changes.
+    touched: HashSet<(u32, u64)>,
+    /// Metadata pages its records may take from the pool when applied.
+    pool_budget: u64,
+}
+
+/// The next group, staged while a commit is in flight ([`Store::stage_writes`]): its records
+/// gather in a journal batch, written once the batch in flight is durable; its
+/// redirect-on-write data is written already.
+struct Staged {
+    batch: BatchBuilder,
+    touched: HashSet<(u32, u64)>,
+    pool_budget: u64,
+    /// One per staged request: `None` for those in the batch, which succeed once it is durable.
+    results: Vec<Option<Result<(), StoreError>>>,
 }
 
 /// What [`Store::start_write_batch`] did.
@@ -196,6 +212,13 @@ pub enum Started {
     /// The last group's writes and flush are in flight: [`Store::poll_write_batch`] gives the
     /// results.
     InFlight,
+}
+
+/// A group whose batch is in flight, from [`Store::commit_group`].
+struct Flying {
+    bytes: Vec<u8>,
+    touched: HashSet<(u32, u64)>,
+    pool_budget: u64,
 }
 
 /// How [`Store::execute_start`] went.
@@ -296,9 +319,11 @@ pub struct Store<D: BlockDevice> {
     /// The group commit in flight, if any. Only one at a time: recovery relies on every batch
     /// but the last being durable, data included (format spec §6.2).
     in_flight: Option<InFlight>,
-    /// The results of a commit that another change waited for (see [`Store::guard`]), until
-    /// [`Store::poll_write_batch`] hands them out.
-    settled: Option<Vec<Result<(), StoreError>>>,
+    /// The next group, staged behind the commit in flight.
+    staged: Option<Staged>,
+    /// The results of commits that another change waited for (see [`Store::guard`]), in order,
+    /// until [`Store::poll_write_batch`] hands them out.
+    settled: VecDeque<Vec<Result<(), StoreError>>>,
 }
 
 fn read_block<D: BlockDevice + ?Sized>(dev: &D, offset: u64) -> Result<Box<PageBuf>, StoreError> {
@@ -513,7 +538,8 @@ impl<D: BlockDevice> Store<D> {
             poisoned: false,
             reads_in_flight: Cell::new(0),
             in_flight: None,
-            settled: None,
+            staged: None,
+            settled: VecDeque::new(),
         };
         store.checkpoint_inner()?;
         Ok(store)
@@ -550,6 +576,22 @@ impl<D: BlockDevice> Store<D> {
             }
             f(self)
         });
+        self.poison_on(result)
+    }
+
+    /// Runs a step of the commit in flight: like [`Self::guard`], without waiting for it.
+    fn poisoning<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        if self.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        let result = f(self);
+        self.poison_on(result)
+    }
+
+    fn poison_on<T>(&mut self, result: Result<T, StoreError>) -> Result<T, StoreError> {
         if matches!(
             result,
             Err(StoreError::Io(_)
@@ -687,30 +729,216 @@ impl<D: BlockDevice> Store<D> {
         if !in_place.is_empty() {
             self.dev.write_many(&in_place)?;
         }
-        if self.journal.live_bytes() as f64
-            > self.journal.size as f64 * self.config.checkpoint_threshold
+        // Not while a group is staged: its reserved clusters would reach the bitmaps on disk
+        // before its batch does, and leak in a crash. The next commit checkpoints instead (and
+        // staging stops when the journal runs out of room).
+        if self.staged.is_none()
+            && self.journal.live_bytes() as f64
+                > self.journal.size as f64 * self.config.checkpoint_threshold
         {
             self.checkpoint_inner()?;
         }
         Ok(())
     }
 
-    /// Waits for the commit in flight and applies it, keeping its results for
-    /// [`Self::poll_write_batch`]. Every other change waits for it this way (from
-    /// [`Self::guard`]), so batches stay durable in order.
+    /// Waits for the commit in flight, and the staged one after it, and applies them, keeping
+    /// their results for [`Self::poll_write_batch`]. Every other change waits for them this way
+    /// (from [`Self::guard`]), so batches stay durable in order.
     fn settle(&mut self) -> Result<(), StoreError> {
-        let Some(f) = self.in_flight.take() else {
-            return Ok(());
-        };
-        self.dev.poll_commit(true).expect("waited for the commit")?;
-        let results = self.finish_in_flight(f)?;
-        self.settled = Some(results);
-        Ok(())
+        loop {
+            if let Some(f) = self.in_flight.take() {
+                self.dev.poll_commit(true).expect("waited for the commit")?;
+                let results = self.finish_in_flight(f)?;
+                self.settled.push_back(results);
+            }
+            if self.staged.is_none() {
+                return Ok(());
+            }
+            self.promote_staged()?;
+        }
     }
 
     fn finish_in_flight(&mut self, f: InFlight) -> Result<Vec<Result<(), StoreError>>, StoreError> {
         self.execute_finish(f.batch)?;
         Ok(f.results.into_iter().map(|r| r.unwrap_or(Ok(()))).collect())
+    }
+
+    /// Starts the staged group's commit, once the batch before it is durable and applied: its
+    /// journal batch, then a flush that also covers its data, written already.
+    fn promote_staged(&mut self) -> Result<(), StoreError> {
+        let Some(st) = self.staged.take() else {
+            return Ok(());
+        };
+        if st.batch.record_count() == 0 {
+            // Every staged request failed on its own.
+            let results = st
+                .results
+                .into_iter()
+                .map(|r| r.unwrap_or(Ok(())))
+                .collect();
+            self.settled.push_back(results);
+            return Ok(());
+        }
+        let len = st.batch.total_len();
+        let at = self
+            .journal
+            .place(len)
+            .ok_or_else(|| StoreError::corrupt("a staged batch lost its room in the journal"))?;
+        let bytes = st
+            .batch
+            .finish(self.sb.format_nonce, self.journal.head.seq, at);
+        let done = self
+            .dev
+            .start_commit(&[(self.journal.offset + at, &bytes[..])])?;
+        self.journal.advance(at, len);
+        let f = InFlight {
+            batch: bytes,
+            results: st.results,
+            touched: st.touched,
+            pool_budget: st.pool_budget,
+        };
+        if done {
+            let results = self.finish_in_flight(f)?;
+            self.settled.push_back(results);
+        } else {
+            self.in_flight = Some(f);
+        }
+        Ok(())
+    }
+
+    /// True if [`Self::stage_writes`] would take this write now: a commit is in flight, the
+    /// write touches none of its clusters nor those of the requests staged already, and the
+    /// metadata pool and the journal have room for it.
+    pub fn can_stage(&self, key: ChunkKey, offset: u64, len: u64) -> bool {
+        self.stage_check(key, offset, len).is_some()
+    }
+
+    /// The write's slot, clusters and metadata pages, if it can be staged.
+    fn stage_check(
+        &self,
+        key: ChunkKey,
+        offset: u64,
+        len: u64,
+    ) -> Option<(u32, std::ops::RangeInclusive<u64>, u64)> {
+        let f = self.in_flight.as_ref()?;
+        if self.poisoned || len == 0 {
+            return None;
+        }
+        let slot = self.state.slot_of(key).ok()?;
+        let cs = self.state.cluster_size();
+        let clusters = offset / cs..=(offset + len - 1) / cs;
+        let staged = self.staged.as_ref();
+        let busy = |x: u64| {
+            f.touched.contains(&(slot, x))
+                || staged.is_some_and(|st| st.touched.contains(&(slot, x)))
+        };
+        if clusters.clone().any(busy) {
+            return None;
+        }
+        let needed = self.state.pool_needed(slot, clusters.clone());
+        let budget = f.pool_budget + staged.map_or(0, |st| st.pool_budget);
+        if self.state.pool.free() < budget + needed {
+            return None;
+        }
+        // Records of a write: at most one per cluster, each with a checksum per block, and the
+        // data itself for a small write. A conservative bound for the journal checks.
+        let bound = (clusters.end() - clusters.start() + 1) as usize * 128
+            + len as usize / 1024
+            + if len < cs { len as usize } else { 0 };
+        let total = staged.map_or_else(
+            || BatchBuilder::new(self.config.max_batch_bytes).total_len_with(bound),
+            |st| st.batch.total_len_with(bound),
+        );
+        if total > self.config.max_batch_bytes as u64 || self.journal.place(total).is_none() {
+            return None;
+        }
+        Some((slot, clusters, needed))
+    }
+
+    /// Stages writes behind the commit in flight: takes the longest prefix of `reqs` that
+    /// [`Self::can_stage`] accepts, starts writing their redirect-on-write data, and adds their
+    /// records to the next journal batch. That batch is written, and flushed, as soon as the
+    /// batch in flight is durable; [`Self::poll_write_batch`] then returns the staged requests'
+    /// results with the next commit's. Returns how many requests were taken.
+    ///
+    /// Recovery is unchanged: batches still become durable one at a time and in order, and the
+    /// data written early goes to clusters no durable batch references until its batch is.
+    pub fn stage_writes(&mut self, reqs: &[WriteReq<'_>]) -> Result<usize, StoreError> {
+        if self.poisoned {
+            return Err(StoreError::Poisoned);
+        }
+        let mut taken = 0;
+        for r in reqs {
+            let Some((slot, clusters, needed)) =
+                self.stage_check(r.key, r.offset, r.data.len() as u64)
+            else {
+                break;
+            };
+            self.staged.get_or_insert_with(|| Staged {
+                batch: BatchBuilder::new(self.config.max_batch_bytes),
+                touched: HashSet::new(),
+                pool_budget: 0,
+                results: Vec::new(),
+            });
+            if let Err(e) = self.check_io(r.key, r.offset, r.data.len() as u64, r.epoch) {
+                self.staged
+                    .as_mut()
+                    .expect("staged")
+                    .results
+                    .push(Some(Err(e)));
+                taken += 1;
+                continue;
+            }
+            let mut plan = Plan {
+                records: Vec::new(),
+                data_writes: Vec::new(),
+                reserved: Vec::new(),
+            };
+            let range = (*clusters.start(), *clusters.end());
+            let planned = self.poisoning(|s| {
+                match s.fill_write_plan(&mut plan, slot, r.offset, r.data, r.write_seq, range) {
+                    Ok(()) => Ok(None),
+                    Err(e @ (StoreError::Io(_) | StoreError::Corrupt(_))) => Err(e),
+                    Err(e) => Ok(Some(e)),
+                }
+            });
+            match planned {
+                Err(e) => {
+                    self.release(&plan.reserved);
+                    return Err(e);
+                }
+                Ok(Some(e)) => {
+                    self.release(&plan.reserved);
+                    self.staged
+                        .as_mut()
+                        .expect("staged")
+                        .results
+                        .push(Some(Err(e)));
+                    taken += 1;
+                    continue;
+                }
+                Ok(None) => {}
+            }
+            let writes: Vec<(u64, &[u8])> =
+                plan.data_writes.iter().map(|(o, d)| (*o, &d[..])).collect();
+            if !writes.is_empty() {
+                let started = self.dev.start_writes(&writes);
+                self.poisoning(|_| started.map_err(StoreError::from))?;
+            }
+            let st = self.staged.as_mut().expect("staged");
+            for rec in &plan.records {
+                if let Err(e) = st.batch.push(rec) {
+                    // can_stage bounded the records' size: this is a bug, not a full batch.
+                    self.poisoned = true;
+                    return Err(StoreError::Format(e));
+                }
+            }
+            st.touched.extend(clusters.map(|x| (slot, x)));
+            st.pool_budget += needed;
+            st.results.push(None);
+            taken += 1;
+        }
+        Ok(taken)
     }
 
     // ---------------------------------------------------------------------------------------
@@ -914,18 +1142,20 @@ impl<D: BlockDevice> Store<D> {
             }
             let group = next..next + consumed;
             next += consumed;
-            if let Some(bytes) = flying {
+            if let Some(f) = flying {
                 if next == pending.len() {
                     self.in_flight = Some(InFlight {
-                        batch: bytes,
+                        batch: f.bytes,
                         results,
+                        touched: f.touched,
+                        pool_budget: f.pool_budget,
                     });
                     return Ok(Started::InFlight);
                 }
                 // Groups commit one after the other: only the last stays in flight.
                 self.guard(|s| {
                     s.dev.poll_commit(true).expect("waited for the commit")?;
-                    s.execute_finish(bytes)
+                    s.execute_finish(f.bytes)
                 })?;
             }
             for &(i, _) in &pending[group] {
@@ -946,7 +1176,7 @@ impl<D: BlockDevice> Store<D> {
         &mut self,
         wait: bool,
     ) -> Result<Option<Vec<Result<(), StoreError>>>, StoreError> {
-        if let Some(results) = self.settled.take() {
+        if let Some(results) = self.settled.pop_front() {
             return Ok(Some(results));
         }
         if self.poisoned {
@@ -959,17 +1189,20 @@ impl<D: BlockDevice> Store<D> {
             return Ok(None);
         };
         let f = self.in_flight.take().expect("in flight");
-        self.guard(|s| {
+        // Not `guard`: it would wait for the staged group too.
+        self.poisoning(|s| {
             outcome?;
-            s.finish_in_flight(f)
+            let results = s.finish_in_flight(f)?;
+            s.promote_staged()?;
+            Ok(results)
         })
         .map(Some)
     }
 
     /// True from [`Self::start_write_batch`] returning [`Started::InFlight`] until
-    /// [`Self::poll_write_batch`] returns its results.
+    /// [`Self::poll_write_batch`] has returned the results of every batch in flight or staged.
     pub fn commit_in_flight(&self) -> bool {
-        self.in_flight.is_some() || self.settled.is_some()
+        self.in_flight.is_some() || self.staged.is_some() || !self.settled.is_empty()
     }
 
     /// Plans and commits the longest prefix of `pending` that forms a valid group. Returns how
@@ -981,7 +1214,7 @@ impl<D: BlockDevice> Store<D> {
         &mut self,
         reqs: &[WriteReq<'_>],
         pending: &[(usize, u32)],
-    ) -> Result<(usize, Vec<(usize, StoreError)>, Option<Vec<u8>>), StoreError> {
+    ) -> Result<(usize, Vec<(usize, StoreError)>, Option<Flying>), StoreError> {
         let cs = self.state.cluster_size();
         let mut batch = BatchBuilder::new(self.config.max_batch_bytes);
         let mut group = Plan {
@@ -1056,7 +1289,15 @@ impl<D: BlockDevice> Store<D> {
                 Ok((0, Vec::new(), None))
             }
             Exec::Done => Ok((consumed, failed, None)),
-            Exec::InFlight(bytes) => Ok((consumed, failed, Some(bytes))),
+            Exec::InFlight(bytes) => Ok((
+                consumed,
+                failed,
+                Some(Flying {
+                    bytes,
+                    touched,
+                    pool_budget,
+                }),
+            )),
         }
     }
 

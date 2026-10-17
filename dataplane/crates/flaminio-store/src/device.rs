@@ -34,9 +34,20 @@ pub trait BlockDevice {
         reads.iter_mut().try_for_each(|(o, b)| self.read_at(*o, b))
     }
 
+    /// Starts writing data that the next commit will make durable (the store's early writes,
+    /// to clusters no durable batch references), without waiting. The device keeps its own copy
+    /// of the data. The next [`start_commit`](Self::start_commit)'s flush covers them, and the
+    /// flush of a commit already in flight need not wait for them.
+    ///
+    /// The default writes them before returning.
+    fn start_writes(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+        self.write_many(writes)
+    }
+
     /// Starts a commit's I/O: writes `writes` (as [`write_many`](Self::write_many)), then
-    /// flushes, without waiting for either. The device keeps its own copy of the data. Returns
-    /// true if the commit is already complete and durable; otherwise
+    /// flushes, without waiting for either. The flush also covers the early writes started
+    /// before ([`start_writes`](Self::start_writes)). The device keeps its own copy of the
+    /// data. Returns true if the commit is already complete and durable; otherwise
     /// [`poll_commit`](Self::poll_commit) reports its outcome. At most one commit is in flight.
     ///
     /// The default does it all before returning.
@@ -80,6 +91,10 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &D {
         (**self).read_many(reads)
     }
 
+    fn start_writes(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+        (**self).start_writes(writes)
+    }
+
     fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
         (**self).start_commit(writes)
     }
@@ -112,6 +127,10 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
 
     fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
         (**self).read_many(reads)
+    }
+
+    fn start_writes(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+        (**self).start_writes(writes)
     }
 
     fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {

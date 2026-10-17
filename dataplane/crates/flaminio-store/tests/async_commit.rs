@@ -163,3 +163,213 @@ fn a_failed_commit_poisons_the_store() {
         Err(StoreError::Poisoned)
     ));
 }
+
+// Staging (W4.2): the next group written behind the commit in flight.
+
+#[test]
+fn staged_writes_commit_right_after_the_batch_in_flight() {
+    let mut s = store();
+    let (a, b, c) = (blocks(1, 0, 16), blocks(2, 256, 16), blocks(3, 0, 16));
+    assert!(matches!(
+        s.start_write_batch(&[req(0, &a, 1)]).unwrap(),
+        Started::InFlight
+    ));
+    // A write elsewhere is staged; one to a cluster of the batch in flight is not.
+    assert_eq!(s.stage_writes(&[req(256 * 4096, &b, 2)]).unwrap(), 1);
+    assert!(!s.can_stage(key(0), 0, 16 * 4096));
+    assert_eq!(s.stage_writes(&[req(0, &c, 3)]).unwrap(), 0);
+    assert!(s.start_write_batch(&[req(0, &c, 3)]).is_err());
+
+    s.device().complete();
+    let first = s.poll_write_batch(false).unwrap().expect("the first batch");
+    assert_eq!(first.len(), 1);
+    assert!(first[0].is_ok());
+    // The staged batch is in flight now: its journal batch only, its data went early.
+    assert!(s.device().in_flight());
+    assert_eq!(s.device().pending_writes(), 1);
+    assert!(s.poll_write_batch(false).unwrap().is_none());
+    assert_eq!(
+        read(&s, 256 * 4096, 16 * 4096),
+        vec![0; 16 * 4096],
+        "not before durable"
+    );
+    s.device().complete();
+    let second = s
+        .poll_write_batch(false)
+        .unwrap()
+        .expect("the staged batch");
+    assert_eq!(second.len(), 1);
+    assert!(second[0].is_ok());
+    assert!(!s.commit_in_flight());
+    assert_eq!(read(&s, 0, 16 * 4096), a);
+    assert_eq!(read(&s, 256 * 4096, 16 * 4096), b);
+    s.fsck(true).unwrap();
+    let s = reopen(s);
+    let mut buf = vec![0u8; 16 * 4096];
+    s.read(key(0), 256 * 4096, &mut buf, 1).unwrap();
+    assert_eq!(buf, b, "after recovery");
+    s.fsck(true).unwrap();
+}
+
+#[test]
+fn a_staged_group_that_never_commits_is_absent_after_recovery() {
+    for promoted in [false, true] {
+        let mut s = store();
+        let (a, b) = (blocks(1, 0, 16), blocks(2, 256, 16));
+        assert!(matches!(
+            s.start_write_batch(&[req(0, &a, 1)]).unwrap(),
+            Started::InFlight
+        ));
+        assert_eq!(s.stage_writes(&[req(256 * 4096, &b, 2)]).unwrap(), 1);
+        if promoted {
+            // The first batch lands; the staged one is in flight, and never lands.
+            s.device().complete();
+            assert!(s.poll_write_batch(false).unwrap().is_some());
+        }
+        let s = reopen(s);
+        let mut buf = vec![0u8; 16 * 4096];
+        s.read(key(0), 0, &mut buf, 1).unwrap();
+        assert_eq!(buf == a, promoted, "promoted={promoted}");
+        s.read(key(0), 256 * 4096, &mut buf, 1).unwrap();
+        assert_eq!(buf, vec![0; 16 * 4096], "promoted={promoted}");
+        // Its data went to clusters nothing references: none leaked.
+        s.fsck(true).unwrap();
+    }
+}
+
+#[test]
+fn a_fence_waits_for_the_staged_group_too() {
+    let mut s = store();
+    let (a, b) = (blocks(1, 0, 16), blocks(2, 256, 16));
+    assert!(matches!(
+        s.start_write_batch(&[req(0, &a, 1)]).unwrap(),
+        Started::InFlight
+    ));
+    assert_eq!(s.stage_writes(&[req(256 * 4096, &b, 2)]).unwrap(), 1);
+    s.fence(key(0).volume, 5).unwrap();
+    assert!(!s.device().in_flight());
+    let first = s.poll_write_batch(false).unwrap().expect("the first batch");
+    let second = s
+        .poll_write_batch(false)
+        .unwrap()
+        .expect("the staged batch");
+    assert!(first.iter().chain(&second).all(Result::is_ok));
+    assert!(!s.commit_in_flight());
+    let s = reopen(s);
+    let mut buf = vec![0u8; 16 * 4096];
+    s.read(key(0), 256 * 4096, &mut buf, 5).unwrap();
+    assert_eq!(buf, b);
+    assert_eq!(s.chunk_info(key(0)).unwrap().fenced_epoch, 5);
+}
+
+#[test]
+fn staging_through_full_journals_keeps_the_data() {
+    // A continuous pipeline, as the engine runs it: a group is staged behind every commit, so
+    // checkpoints keep waiting, the 16 MiB journal fills with journaled small writes (15 blocks
+    // into mapped clusters), and staging stops until a commit can checkpoint.
+    let mut s = store();
+    let fill = blocks(9, 0, 1024);
+    s.write(key(0), 0, &fill, 1, 1).unwrap();
+    let mut expect = fill.clone();
+    let write = |i: u64| (i % 64, blocks(2 + i as u32, (i % 64) * 16, 15));
+    let (x, d) = write(0);
+    assert!(matches!(
+        s.start_write_batch(&[req(x * 16 * 4096, &d, 2)]).unwrap(),
+        Started::InFlight
+    ));
+    expect[(x * 16 * 4096) as usize..][..d.len()].copy_from_slice(&d);
+    let (mut staged, mut refused) = (0, 0);
+    for i in 1..800u64 {
+        let (x, d) = write(i);
+        let took = s.stage_writes(&[req(x * 16 * 4096, &d, 2 + i)]).unwrap();
+        // The commit in flight lands; the staged group, if any, takes its place.
+        s.device().complete();
+        let results = s.poll_write_batch(false).unwrap().expect("landed");
+        assert!(results.iter().all(Result::is_ok));
+        if took == 1 {
+            staged += 1;
+        } else {
+            refused += 1;
+            assert!(!s.commit_in_flight());
+            assert!(matches!(
+                s.start_write_batch(&[req(x * 16 * 4096, &d, 2 + i)])
+                    .unwrap(),
+                Started::InFlight
+            ));
+        }
+        expect[(x * 16 * 4096) as usize..][..d.len()].copy_from_slice(&d);
+    }
+    while s.commit_in_flight() {
+        if s.device().in_flight() {
+            s.device().complete();
+        }
+        s.poll_write_batch(false).unwrap();
+    }
+    assert!(staged > 100, "staged {staged}");
+    assert!(
+        refused > 0,
+        "refused {refused}: the journal never ran short"
+    );
+    assert_eq!(read(&s, 0, 1024 * 4096), expect);
+    s.fsck(true).unwrap();
+    let s = reopen(s);
+    let mut buf = vec![0u8; 1024 * 4096];
+    s.read(key(0), 0, &mut buf, 1).unwrap();
+    assert!(buf == expect, "after recovery");
+    s.fsck(true).unwrap();
+}
+
+#[test]
+fn a_crash_in_the_pipeline_keeps_exactly_the_landed_writes() {
+    // Power cut at various points of a staging pipeline, with every unflushed block (early data
+    // included) independently kept, lost or torn: recovery shows the writes whose commits
+    // landed, and no more.
+    for stop in [3u64, 10, 37, 120] {
+        for seed in 0..8 {
+            let mut s = store();
+            let fill = blocks(9, 0, 1024);
+            s.write(key(0), 0, &fill, 1, 1).unwrap();
+            let mut landed = fill.clone();
+            // Alternate journaled small writes and whole-cluster (redirect-on-write) writes.
+            let write = |i: u64| {
+                let x = i % 64;
+                let n = if i.is_multiple_of(2) { 15 } else { 16 };
+                (x, blocks(2 + i as u32, x * 16, n))
+            };
+            let (x, d) = write(0);
+            assert!(matches!(
+                s.start_write_batch(&[req(x * 16 * 4096, &d, 2)]).unwrap(),
+                Started::InFlight
+            ));
+            let mut flying = vec![(x, d)];
+            for i in 1..stop {
+                let (x, d) = write(i);
+                let took = s.stage_writes(&[req(x * 16 * 4096, &d, 2 + i)]).unwrap();
+                s.device().complete();
+                assert!(s.poll_write_batch(false).unwrap().is_some());
+                for (x, d) in flying.drain(..) {
+                    landed[(x * 16 * 4096) as usize..][..d.len()].copy_from_slice(&d);
+                }
+                if took == 1 {
+                    flying.push((x, d));
+                } else {
+                    assert!(matches!(
+                        s.start_write_batch(&[req(x * 16 * 4096, &d, 2 + i)])
+                            .unwrap(),
+                        Started::InFlight
+                    ));
+                    flying.push((x, d));
+                }
+            }
+            // One more staged behind the commit in flight, then the power goes.
+            let (x, d) = write(stop);
+            s.stage_writes(&[req(x * 16 * 4096, &d, 2 + stop)]).unwrap();
+            let image = s.into_device().into_inner().crash(seed);
+            let s = Store::open(image, StoreConfig::default()).unwrap();
+            let mut buf = vec![0u8; 1024 * 4096];
+            s.read(key(0), 0, &mut buf, 1).unwrap();
+            assert!(buf == landed, "stop {stop} seed {seed}");
+            s.fsck(true).unwrap();
+        }
+    }
+}

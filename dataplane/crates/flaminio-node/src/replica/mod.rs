@@ -74,6 +74,10 @@ pub struct ReplicaService<D: BlockDevice> {
     next_id: VolumeId,
     /// The group commit in flight, if any.
     flying: Option<Flying>,
+    /// The next group, staged behind it (see [`ReplicaService::stage`]).
+    staged: Option<Flying>,
+    /// Replies of staged groups that needed no commit, for the next polls.
+    ready: std::collections::VecDeque<Vec<Reply>>,
 }
 
 /// What [`ReplicaService::start`] did with a batch of requests.
@@ -125,6 +129,8 @@ impl<D: BlockDevice> ReplicaService<D> {
             vols: BTreeMap::new(),
             next_id: 1,
             flying: None,
+            staged: None,
+            ready: std::collections::VecDeque::new(),
         };
         for c in s.store.chunks() {
             let id = s.vol_id(c.key.volume, c.volume_size, c.chunk_size);
@@ -286,7 +292,7 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// asynchronously: see [`Progress`]. Nothing may start while a commit is in flight.
     pub fn start(&mut self, items: &[(SessionRef, Frame)]) -> Progress {
         assert!(
-            self.flying.is_none(),
+            !self.commit_in_flight(),
             "a commit is in flight: poll it first"
         );
         let mut replies: Vec<Option<Reply>> = vec![None; items.len()];
@@ -389,9 +395,101 @@ impl<D: BlockDevice> ReplicaService<D> {
         }
     }
 
+    /// Stages writes behind the commit in flight (the store's [`Store::stage_writes`]): takes
+    /// the longest prefix of `items` made of writes the store can stage now, decides them, and
+    /// holds their replies for their own commit, which starts as soon as the one in flight is
+    /// durable. Returns how many items it took; the rest wait, in order.
+    pub fn stage(&mut self, items: &[(SessionRef, Frame)]) -> usize {
+        if self.flying.is_none() {
+            return 0;
+        }
+        let mut taken = 0;
+        for (s, f) in items {
+            let Frame::Write {
+                req, chunk, ext, ..
+            } = f
+            else {
+                break;
+            };
+            let Some(uuid) = self.uuid_of(s.vol) else {
+                break;
+            };
+            let key = key(uuid, *chunk);
+            let at = offset(*ext);
+            if !self.store.can_stage(key, at, payload(f).len() as u64) {
+                break;
+            }
+            let (req, body) = (*req, to_request(f).expect("a write").1);
+            let msg = ToReplica {
+                vol: s.vol,
+                epoch: s.epoch,
+                session: s.session,
+                req,
+                body,
+            };
+            let st = self.staged.get_or_insert_with(|| Flying {
+                replies: Vec::new(),
+                writes: Vec::new(),
+            });
+            let at_reply = st.replies.len();
+            match self.core.handle(&msg) {
+                Action::Write { .. } => {
+                    let Frame::Write { version, data, .. } = f else {
+                        unreachable!("a write")
+                    };
+                    let w = WriteReq {
+                        key,
+                        offset: at,
+                        data,
+                        write_seq: version.seq,
+                        epoch: s.epoch,
+                    };
+                    let st = self.staged.as_mut().expect("staged");
+                    match self.store.stage_writes(&[w]) {
+                        Ok(1) => {
+                            st.replies.push(None);
+                            st.writes.push((at_reply, req));
+                        }
+                        // can_stage said yes and the store took nothing: it failed.
+                        Ok(_) => st.replies.push(Some(Reply::Close(
+                            "the store refused a staged write".into(),
+                        ))),
+                        Err(e) => st.replies.push(Some(Reply::Close(e.to_string()))),
+                    }
+                }
+                Action::Reply(r) => self
+                    .staged
+                    .as_mut()
+                    .expect("staged")
+                    .replies
+                    .push(Some(Reply::Send(response_frame(req, r)))),
+                Action::Drop => self
+                    .staged
+                    .as_mut()
+                    .expect("staged")
+                    .replies
+                    .push(Some(Reply::Nothing)),
+                other => self
+                    .staged
+                    .as_mut()
+                    .expect("staged")
+                    .replies
+                    .push(Some(Reply::Close(format!(
+                        "unexpected action for a staged write: {other:?}"
+                    )))),
+            }
+            taken += 1;
+        }
+        taken
+    }
+
     /// The replies to the requests the commit in flight held back, once it is durable (with
-    /// `wait`, waits for it). `None` while it is still in flight.
+    /// `wait`, waits for it). `None` while it is still in flight. A group staged behind it is in
+    /// flight after this, and the next poll answers it.
     pub fn poll(&mut self, wait: bool) -> Option<Vec<Reply>> {
+        if let Some(replies) = self.ready.pop_front() {
+            return Some(replies);
+        }
         let f = self.flying.as_ref()?;
         let results = match self.store.poll_write_batch(wait) {
             Ok(None) => return None,
@@ -402,6 +500,20 @@ impl<D: BlockDevice> ReplicaService<D> {
             mut replies,
             writes,
         } = self.flying.take().expect("in flight");
+        // The staged group's commit started with this one's end: it is in flight now. With no
+        // store request staged (all of them answered already), it has no commit and is done.
+        if let Some(st) = self.staged.take() {
+            if st.writes.is_empty() {
+                self.ready.push_back(
+                    st.replies
+                        .into_iter()
+                        .map(|r| r.expect("answered"))
+                        .collect(),
+                );
+            } else {
+                self.flying = Some(st);
+            }
+        }
         for ((at, req), r) in writes.into_iter().zip(results) {
             fill(&mut replies[at], req, r);
         }
@@ -413,9 +525,9 @@ impl<D: BlockDevice> ReplicaService<D> {
         )
     }
 
-    /// True while a commit is in flight.
+    /// True while a commit is in flight (or staged replies wait to be handed out).
     pub fn commit_in_flight(&self) -> bool {
-        self.flying.is_some()
+        self.flying.is_some() || !self.ready.is_empty()
     }
 
     /// The progress of `start` when a commit stays in flight: the requests up to its first

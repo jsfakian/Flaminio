@@ -125,6 +125,11 @@ impl BatchBuilder {
         align_up(self.buf.len() as u64, BLOCK_SIZE_U64)
     }
 
+    /// Length of the finished batch with `extra` more bytes of records.
+    pub fn total_len_with(&self, extra: usize) -> u64 {
+        align_up((self.buf.len() + extra) as u64, BLOCK_SIZE_U64)
+    }
+
     /// Seals the batch for position `offset` with sequence number `batch_seq`.
     pub fn finish(mut self, nonce: u64, batch_seq: u64, offset: u64) -> Vec<u8> {
         let payload_len = self.buf.len() - BATCH_HEADER_LEN;

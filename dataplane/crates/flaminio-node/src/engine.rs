@@ -390,6 +390,8 @@ pub struct Engine<D: BlockDevice> {
     /// Who sent the requests the local replica's commit in flight holds back, in order, and
     /// how many of them are writes.
     committing: Option<(Vec<LocalFrom>, usize)>,
+    /// The same for the group staged behind it, whose commit starts when it lands.
+    staged: Option<(Vec<LocalFrom>, usize)>,
     /// After a commit completes, the next waits until this many writes are queued, or until the
     /// instant (see `finish_commit`).
     gather: Option<(usize, Instant)>,
@@ -397,9 +399,9 @@ pub struct Engine<D: BlockDevice> {
     gather_window: Duration,
     /// A wait for writes to gather began: the driver arms a timer for it.
     gather_timer: Option<Duration>,
-    /// Local commits since the last report: how many, their writes, and how many started when
-    /// their wait for writes to gather ran out.
-    commit_stats: (u64, u64, u64),
+    /// Local commits since the last report: how many, their writes, how many started when
+    /// their wait for writes to gather ran out, and how many were staged.
+    commit_stats: (u64, u64, u64, u64),
     /// Whether the local replica's commits may stay in flight between turns. Off, each commit is
     /// waited for: for a thread that cannot learn when one completes.
     async_commits: bool,
@@ -436,10 +438,11 @@ impl<D: BlockDevice> Engine<D> {
             next_sub: 1,
             local: Vec::new(),
             committing: None,
+            staged: None,
             gather: None,
             gather_window: DEFAULT_GATHER,
             gather_timer: None,
-            commit_stats: (0, 0, 0),
+            commit_stats: (0, 0, 0, 0),
             async_commits: false,
             out: Vec::new(),
             local_reads: BTreeMap::new(),
@@ -689,10 +692,10 @@ impl<D: BlockDevice> Engine<D> {
         if !on {
             self.finish_commit(now, true);
             self.gather = None;
-            let (commits, writes, expired) = std::mem::take(&mut self.commit_stats);
+            let (commits, writes, expired, staged) = std::mem::take(&mut self.commit_stats);
             if commits > 0 {
                 eprintln!(
-                    "flaminio-node: {commits} local commits, {:.1} writes each; {expired} started when their wait for writes ran out",
+                    "flaminio-node: {commits} local commits ({staged} staged), {:.1} writes each; {expired} started when their wait for writes ran out",
                     writes as f64 / commits as f64
                 );
             }
@@ -719,7 +722,11 @@ impl<D: BlockDevice> Engine<D> {
     /// or a commit stays in flight.
     fn flush_local(&mut self, now: Instant) {
         for _ in 0..16 {
-            if !self.finish_commit(now, !self.async_commits) || self.local.is_empty() {
+            if !self.finish_commit(now, !self.async_commits) {
+                self.stage_local();
+                return;
+            }
+            if self.local.is_empty() {
                 return;
             }
             if let Some((target, until)) = self.gather {
@@ -775,20 +782,69 @@ impl<D: BlockDevice> Engine<D> {
     /// two halves that commit in turn, each commit carrying half (4K QD32: 13 writes per commit
     /// against 23). A client with one write in flight waits for nothing: its next write is the
     /// target.
+    ///
+    /// A group staged behind the commit takes its place, its commit started already.
     fn finish_commit(&mut self, now: Instant, wait: bool) -> bool {
-        if self.committing.is_none() {
+        loop {
+            if self.committing.is_none() {
+                return true;
+            }
+            let Some(replies) = self.service.poll(wait) else {
+                return false;
+            };
+            let (from, writes) = self.committing.take().expect("a commit in flight");
+            self.deliver_local(now, from, replies);
+            if let Some((from, writes)) = self.staged.take() {
+                self.commit_stats.0 += 1;
+                self.commit_stats.1 += writes as u64;
+                self.commit_stats.3 += 1;
+                self.committing = Some((from, writes));
+                continue;
+            }
+            if self.async_commits && !self.gather_window.is_zero() {
+                self.gather = Some((writes + self.queued_writes(), now + self.gather_window));
+                self.gather_timer = Some(self.gather_window);
+            }
             return true;
         }
-        let Some(replies) = self.service.poll(wait) else {
-            return false;
-        };
-        let (from, writes) = self.committing.take().expect("a commit in flight");
-        self.deliver_local(now, from, replies);
-        if self.async_commits && !self.gather_window.is_zero() {
-            self.gather = Some((writes + self.queued_writes(), now + self.gather_window));
-            self.gather_timer = Some(self.gather_window);
+    }
+
+    /// While a commit is in flight, stages the writes at the head of the local queue behind
+    /// it (`ReplicaService::stage`): their data goes to the disk during its flush, and their
+    /// commit starts as soon as it lands.
+    fn stage_local(&mut self) {
+        if !self.async_commits || self.committing.is_none() {
+            return;
         }
-        true
+        let n = self
+            .local
+            .iter()
+            .take_while(|(_, _, f)| matches!(f, Frame::Write { .. }))
+            .count();
+        if n == 0 {
+            return;
+        }
+        let mut from = Vec::with_capacity(n);
+        let mut items = Vec::with_capacity(n);
+        for (f, s, frame) in self.local.drain(..n) {
+            from.push(f);
+            items.push((s, frame));
+        }
+        let taken = self.service.stage(&items);
+        let rest: Vec<_> = from
+            .drain(taken..)
+            .zip(items.drain(taken..))
+            .map(|(f, (s, frame))| (f, s, frame))
+            .collect();
+        if !rest.is_empty() {
+            let newer = std::mem::replace(&mut self.local, rest);
+            self.local.extend(newer);
+        }
+        if taken > 0 {
+            let st = self.staged.get_or_insert_with(|| (Vec::new(), 0));
+            st.0.extend(from);
+            st.1 += taken;
+        }
     }
 
     /// Everything queued for the local replica handled and durable: before using the replica
