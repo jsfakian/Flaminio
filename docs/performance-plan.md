@@ -43,12 +43,20 @@ Flaminio runs, each followed by an integrity check: 0 errors, 0 checksum failure
 **Not met:** 1M and the mixed job. Both are limited by synchronous commits on the ublk queue
 thread, which block the next group and every read.
 
-**Since (2026-10-16):** W4.1 is in, with commits off the queue thread and gathering (see W4).
-- **Short validations:** 1M sequential about 1 000 MiB/s (50% of raw), the 70/30 mix at
-  raw's level, and 4K QD32 as before.
-- **In progress:** the full RF 1 campaign on this build, then RF 2 (comparison B) on the same
-  build.
-- **After that:** W4.2, overlapped commits, for 1M.
+**After W4.1 (2026-10-17):** commits off the queue thread, with gathering
+([results](benchmarks/2026-10-17-writes-rf1-w41.md)). 36 integrity checks: 0 errors, 0
+checksum failures.
+
+| Write job, O_DSYNC | Raw | Flaminio, RF 1 | Share |
+|---|---:|---:|---:|
+| 4K random, QD1 | 477 IOPS | 409 IOPS | **86%** |
+| 4K random, QD32 | 8 344 IOPS | 10 236 IOPS | **123%** |
+| 1M sequential, QD8 | 1 737 MiB/s (about 1 000 outside the drive's cache) | 541 MiB/s | 31% (about 53%) |
+| 70/30 random, 4K QD32 | 24 010 IOPS | 26 534 IOPS | **111%** |
+
+**Not met:** 1M. Its commits run strictly in turn, about 4 MiB each.
+
+Next: RF 2 (comparison B) on this build; then W4.2, overlapped commits.
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
@@ -274,13 +282,13 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
      second ring while the queue thread serves reads and gathers the next group.
    - **Gathering.** After a commit, the next one waits up to 300 µs for the writes it
      acknowledged to come back.
-   - **Results so far** (short validations): 1M sequential from 591 to about 1 000 MiB/s, and
-     the 70/30 mix at raw's level. 4K QD32 equals blocking commits, with a better p99.
-   - The full campaign is in progress.
+   - **Results** (full campaign, [results](benchmarks/2026-10-17-writes-rf1-w41.md)): the
+     70/30 mix from 36% to 111% of raw, 4K QD32 at 123%, 1M sequential unchanged (541 MiB/s:
+     see W4.2).
 2. **Overlapped commits: the next group's data written during the current flush.** Today one
    commit is in flight at a time: the next group's writes start only when the current flush
-   has completed, so at 1M each commit pays its 8 MiB of data, then its flush, in turn (about
-   50% of raw).
+   has completed, so at 1M each commit pays its data (about 4 MiB), then its flush, in turn
+   (541 MiB/s, about 53% of raw written outside the drive's cache).
    - **What overlaps:** the next group's redirect-on-write data goes to the device while the
      current flush runs. Its journal batch, and its own flush, still wait for the current
      flush to complete.
