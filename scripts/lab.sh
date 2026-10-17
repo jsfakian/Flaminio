@@ -653,7 +653,7 @@ meta_endpoints() {
 
 node_env() {
     local vm=$1
-    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0} GATHER_US=${GATHER_US:-} SYNC_COMMITS=${SYNC_COMMITS:-0}"
+    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0} GATHER_US=${GATHER_US:-} SYNC_COMMITS=${SYNC_COMMITS:-0} FIRST_FIT=${FIRST_FIT:-0}"
 }
 
 # node up|down|status [VM selector, default all]: the data VMs' nodes, replicas only.
@@ -1518,11 +1518,14 @@ write_reset() {
     return 0
 }
 
-# Deletes wbench from the metadata service, then its replicas from every data node: a
-# volume's replicas outlive its metadata, and a new wbench (epoch 1 again) would be deposed by
-# old replicas fenced at a later epoch.
+# Detaches wbench wherever it is attached, deletes it from the metadata service, then its
+# replicas from every data node: a volume's replicas outlive its metadata, and a new wbench
+# (epoch 1 again) would be deposed by old replicas fenced at a later epoch.
 delete_wbench() {
     local vm
+    for vm in $(vms_of all) "$VM_C"; do
+        ENV_VARS="VOLUME=wbench" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
+    done
     metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
     for vm in $(vms_of all) "$VM_C"; do
         ENV_VARS="VOLUME=wbench" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" delete >/dev/null

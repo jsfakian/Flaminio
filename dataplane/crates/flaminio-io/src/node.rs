@@ -27,7 +27,7 @@ use flaminio_node::engine::{Engine, EngineConfig, Input, Output};
 use flaminio_node::net::{self, NetConfig, ServerSide};
 use flaminio_node::replica::ReplicaService;
 use flaminio_repl::types::Timing;
-use flaminio_store::{BlockDevice, Store, StoreConfig};
+use flaminio_store::{Allocation, BlockDevice, Store, StoreConfig};
 
 use crate::cli::{format_if_asked, parse_size};
 
@@ -59,6 +59,8 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
                            (default 300; 0: never waits)
       --sync-commits       commits block the queue thread until durable (as before commits
                            went asynchronous): for comparing
+      --first-fit          new data goes to the lowest free clusters, reusing freed space,
+                           instead of continuing from the last allocation: for comparing
       --id N               ublk device id (default: first free)
       --control PATH       control socket for attach and detach (default /run/flaminio/node.sock)
 
@@ -89,6 +91,7 @@ pub(crate) struct NodeConfig {
     pub poll_us: u64,
     pub gather_us: Option<u64>,
     pub sync_commits: bool,
+    pub first_fit: bool,
 }
 
 fn parse(args: &[String]) -> Result<NodeConfig, String> {
@@ -115,6 +118,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         poll_us: 0,
         gather_us: None,
         sync_commits: false,
+        first_fit: false,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -151,6 +155,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
                 c.gather_us = Some(value()?.parse().map_err(|_| "invalid --gather-us")?)
             }
             "--sync-commits" => c.sync_commits = true,
+            "--first-fit" => c.first_fit = true,
             "--queues" => {
                 c.queues = value()?.parse().map_err(|_| "invalid --queues")?;
                 if c.queues == 0 || c.queues > 64 {
@@ -196,7 +201,15 @@ pub(crate) fn build<D: BlockDevice + 'static>(
     wake: Wake,
 ) -> Result<Parts<D>, String> {
     format_if_asked(&dev, &c.device, c.format, c.force)?;
-    let store = Store::open(dev, StoreConfig::default()).map_err(|e| format!("open store: {e}"))?;
+    let config = StoreConfig {
+        allocation: if c.first_fit {
+            Allocation::FirstFit
+        } else {
+            Allocation::NextFit
+        },
+        ..StoreConfig::default()
+    };
+    let store = Store::open(dev, config).map_err(|e| format!("open store: {e}"))?;
     let stats = store.stats();
     eprintln!(
         "flaminio-io: store ready, {} chunk replicas, {} of {} clusters used",
