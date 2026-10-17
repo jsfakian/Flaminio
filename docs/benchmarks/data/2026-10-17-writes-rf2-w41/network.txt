@@ -1,0 +1,4 @@
+before fl-b -> fl-a: 112 MB/s out, 112 MB/s in, RTT 1.962 ms avg, 0.336 ms mdev
+before fl-b -> fl-c: 112 MB/s out, 112 MB/s in, RTT 1.549 ms avg, 0.256 ms mdev
+after fl-b -> fl-a: 112 MB/s out, 112 MB/s in, RTT 1.802 ms avg, 0.248 ms mdev
+after fl-b -> fl-c: 112 MB/s out, 112 MB/s in, RTT 1.652 ms avg, 0.251 ms mdev

@@ -56,7 +56,21 @@ checksum failures.
 
 **Not met:** 1M. Its commits run strictly in turn, about 4 MiB each.
 
-Next: RF 2 (comparison B) on this build; then W4.2, overlapped commits.
+**RF 2, comparison B (2026-10-17):** same build ([results](benchmarks/2026-10-17-writes-rf2-w41.md)).
+Network measured in the same campaign: 112 MB/s each way, round trip 1.5–2.0 ms. 36
+integrity checks, all clean.
+
+| Write job, O_DSYNC | RF 1 | RF 2 | RF 2 / RF 1 | RF 2 / raw |
+|---|---:|---:|---:|---:|
+| 4K random, QD1 | 409 IOPS | 386 IOPS | 94% | 83% |
+| 4K random, QD32 | 10 236 IOPS | 9 458 IOPS | 92% | 115% |
+| 70/30 random, 4K QD32 | 26 534 IOPS | 25 238 IOPS | 95% | 103% |
+| 1M sequential, QD8 | 541 MiB/s | 106 MiB/s (the 1 GbE link) | 20% | 5% |
+
+Replication costs 5–8% on small writes: the peer commits in parallel with the local
+replica. At 1M, RF 2 runs at the link's speed, the plan's bound.
+
+Next: W4.2, overlapped commits, for 1M at RF 1.
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
