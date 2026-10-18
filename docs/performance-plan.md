@@ -315,6 +315,25 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
        go through the journal as today.
    - **Measure:** 1M sequential, against W4.1's result. Crash tests and the store's crash
      proptest cover an early data write whose batch never commits.
+
+   *Done (2026-10-18), commits `104f7d2` and `0f6bd66`:*
+   - **What is staged:** only writes that cover a whole cluster, whose data can go early.
+     Staging small journaled writes gained nothing, and it bypassed gathering: 4K QD32 fell
+     to 6 700 IOPS until they were left out.
+   - **Other conditions:** a staged write touches no cluster of the commit in flight, and the
+     metadata pool and the journal have room for it. Checkpoints wait while a group is
+     staged.
+   - **The device's flush:** the device submits a commit's flush once that commit's writes
+     have completed. IOSQE_IO_DRAIN would also have held back the early writes queued after
+     it.
+   - **Tests:** a power cut at 4 points of a staging pipeline × 8 crash images keeps exactly
+     the landed writes, and a pipeline that fills the journal stops staging and goes on.
+   - **Short validation** (one repetition, settled):
+     - 1M sequential at 689 MiB/s, against 541 with W4.1: about 69% of raw written across the
+       disk.
+     - 4K QD32 at 10 136 IOPS and the 70/30 mix at 25 760, as with W4.1.
+     - 10 minutes of 1M: 590–720 MiB/s sustained, against 500–560.
+   - **In progress:** the full RF 1 campaign on this build.
 3. **Zero-copy writes** (performance item 1.3): the data goes from the request to the store
    and the network without a copy into a `Vec`.
 4. **Several queues for writes** (R4 brings them for reads).
