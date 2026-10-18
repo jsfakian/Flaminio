@@ -807,8 +807,14 @@ impl<D: BlockDevice> Store<D> {
     }
 
     /// True if [`Self::stage_writes`] would take this write now: a commit is in flight, the
-    /// write touches none of its clusters nor those of the requests staged already, and the
-    /// metadata pool and the journal have room for it.
+    /// write covers at least one whole cluster, touches none of the in-flight commit's clusters
+    /// nor those of the requests staged already, and the metadata pool and the journal have room
+    /// for it.
+    ///
+    /// Only writes with redirect-on-write data are staged: that data is what goes to the disk
+    /// early. A small write into a mapped cluster is all journal, so staging it gains nothing,
+    /// and taking it at once would split a client's writes between two commits that gathering
+    /// would have committed together (4K QD32: 6 700 against 10 200 IOPS).
     pub fn can_stage(&self, key: ChunkKey, offset: u64, len: u64) -> bool {
         self.stage_check(key, offset, len).is_some()
     }
@@ -827,6 +833,9 @@ impl<D: BlockDevice> Store<D> {
         let slot = self.state.slot_of(key).ok()?;
         let cs = self.state.cluster_size();
         let clusters = offset / cs..=(offset + len - 1) / cs;
+        if offset.div_ceil(cs) * cs + cs > offset + len {
+            return None; // no whole cluster
+        }
         let staged = self.staged.as_ref();
         let busy = |x: u64| {
             f.touched.contains(&(slot, x))

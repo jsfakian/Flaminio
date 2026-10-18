@@ -324,9 +324,11 @@ fn staged_writes_are_answered_after_their_own_commit() {
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let p = s.start(&[(sess, write(2, 0, 0, &[1], 1))]);
     assert!(p.in_flight());
-    // Behind it: a write elsewhere is staged; one into its cluster is not, nor what follows.
+    // Behind it: a whole-cluster write elsewhere is staged; one into its cluster is not, nor
+    // what follows. A small write is not staged either.
+    assert_eq!(s.stage(&[(sess, write(9, 0, 128, &[7], 9))]), 0);
     let rest = [
-        (sess, write(3, 0, 64, &[2], 2)),
+        (sess, write(3, 0, 64, &[2; 16], 2)),
         (sess, write(4, 0, 1, &[3], 3)),
         (sess, read(5, 0, 64, 1)),
     ];

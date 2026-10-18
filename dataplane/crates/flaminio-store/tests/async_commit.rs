@@ -11,8 +11,12 @@ use flaminio_store::{
 };
 
 fn store() -> Store<DeferredDevice> {
+    store_with_journal(16)
+}
+
+fn store_with_journal(mib: u64) -> Store<DeferredDevice> {
     let dev = MemDevice::new(DEVICE);
-    Store::format(&dev, &options(16)).unwrap();
+    Store::format(&dev, &options(mib)).unwrap();
     let mut s = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
     s.create_chunk(key(0), CHUNK, 64 * MIB, 1).unwrap();
     s
@@ -177,6 +181,10 @@ fn staged_writes_commit_right_after_the_batch_in_flight() {
     // A write elsewhere is staged; one to a cluster of the batch in flight is not.
     assert_eq!(s.stage_writes(&[req(256 * 4096, &b, 2)]).unwrap(), 1);
     assert!(!s.can_stage(key(0), 0, 16 * 4096));
+    assert!(
+        !s.can_stage(key(0), 512 * 4096, 15 * 4096),
+        "a write without a whole cluster is not staged"
+    );
     assert_eq!(s.stage_writes(&[req(0, &c, 3)]).unwrap(), 0);
     assert!(s.start_write_batch(&[req(0, &c, 3)]).is_err());
 
@@ -265,13 +273,13 @@ fn a_fence_waits_for_the_staged_group_too() {
 #[test]
 fn staging_through_full_journals_keeps_the_data() {
     // A continuous pipeline, as the engine runs it: a group is staged behind every commit, so
-    // checkpoints keep waiting, the 16 MiB journal fills with journaled small writes (15 blocks
-    // into mapped clusters), and staging stops until a commit can checkpoint.
-    let mut s = store();
+    // checkpoints keep waiting, the 4 MiB journal fills (a batch takes at least 4 KiB), and
+    // staging stops until a commit can checkpoint. Whole-cluster writes: only those are staged.
+    let mut s = store_with_journal(4);
     let fill = blocks(9, 0, 1024);
     s.write(key(0), 0, &fill, 1, 1).unwrap();
     let mut expect = fill.clone();
-    let write = |i: u64| (i % 64, blocks(2 + i as u32, (i % 64) * 16, 15));
+    let write = |i: u64| (i % 64, blocks(2 + i as u32, (i % 64) * 16, 16));
     let (x, d) = write(0);
     assert!(matches!(
         s.start_write_batch(&[req(x * 16 * 4096, &d, 2)]).unwrap(),
@@ -279,7 +287,7 @@ fn staging_through_full_journals_keeps_the_data() {
     ));
     expect[(x * 16 * 4096) as usize..][..d.len()].copy_from_slice(&d);
     let (mut staged, mut refused) = (0, 0);
-    for i in 1..800u64 {
+    for i in 1..1500u64 {
         let (x, d) = write(i);
         let took = s.stage_writes(&[req(x * 16 * 4096, &d, 2 + i)]).unwrap();
         // The commit in flight lands; the staged group, if any, takes its place.
@@ -305,14 +313,14 @@ fn staging_through_full_journals_keeps_the_data() {
         }
         s.poll_write_batch(false).unwrap();
     }
-    assert!(staged > 100, "staged {staged}");
+    assert!(staged > 1000, "staged {staged}");
     assert!(
         refused > 0,
         "refused {refused}: the journal never ran short"
     );
     assert_eq!(read(&s, 0, 1024 * 4096), expect);
     s.fsck(true).unwrap();
-    let s = reopen(s);
+    let s = Store::open(s.into_device().into_inner(), StoreConfig::default()).unwrap();
     let mut buf = vec![0u8; 1024 * 4096];
     s.read(key(0), 0, &mut buf, 1).unwrap();
     assert!(buf == expect, "after recovery");
