@@ -4,3 +4,6 @@
 /dataplane/fuzz/artifacts/
 .DS_Store
 /.lab/
+# Capability-token test vectors (high-entropy); generated locally with UPDATE_VECTORS=1.
+/pkg/captoken/testdata/vectors.json
+

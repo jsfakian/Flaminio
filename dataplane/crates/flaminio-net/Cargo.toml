@@ -21,7 +21,6 @@ thiserror.workspace = true
 [dev-dependencies]
 smol.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
-serde_json = "1"
 
 [lints]
 workspace = true

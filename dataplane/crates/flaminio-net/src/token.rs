@@ -104,48 +104,97 @@ impl TokenKey {
 mod tests {
     use super::*;
 
-    fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    /// Same seed as Go's `pkg/captoken` tests. Vectors are built here so signed tokens are
+    /// never stored in the repository (GitGuardian).
+    const SEED: [u8; 32] = [7; 32];
+
+    fn sign(kp: &Ed25519KeyPair, volume: &str, epoch: u64, node: &str, issued_at: i64) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(MAGIC);
+        body.push(1);
+        body.extend_from_slice(&(volume.len() as u16).to_be_bytes());
+        body.extend_from_slice(volume.as_bytes());
+        body.extend_from_slice(&epoch.to_be_bytes());
+        body.extend_from_slice(&(node.len() as u16).to_be_bytes());
+        body.extend_from_slice(node.as_bytes());
+        body.extend_from_slice(&(issued_at as u64).to_be_bytes());
+        let sig = kp.sign(&body);
+        body.extend_from_slice(sig.as_ref());
+        body
     }
 
-    /// The vectors written by Go's pkg/captoken.
     #[test]
-    fn go_vectors() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../pkg/captoken/testdata/vectors.json"
+    fn go_compatible_vectors() {
+        let kp = Ed25519KeyPair::from_seed_unchecked(&SEED).unwrap();
+        let key = TokenKey::from_raw(kp.public_key().as_ref()).unwrap();
+        let good = sign(&kp, "pvc-0b1c", 7, "fl-b", 1791500000);
+        let c = key.verify(&good).unwrap();
+        assert_eq!(c.volume, "pvc-0b1c");
+        assert_eq!(c.epoch, 7);
+        assert_eq!(c.node, "fl-b");
+        assert_eq!(c.issued_at, 1791500000);
+
+        let long_vol = "v".repeat(255);
+        let long = sign(&kp, &long_vol, u64::MAX, "n", -1);
+        let c = key.verify(&long).unwrap();
+        assert_eq!(c.volume, long_vol);
+        assert_eq!(c.epoch, u64::MAX);
+        assert_eq!(c.node, "n");
+        assert_eq!(c.issued_at, -1);
+
+        let mut flipped = good.clone();
+        flipped[10] ^= 1;
+        assert_eq!(key.verify(&flipped), Err(TokenError::Invalid));
+        assert_eq!(
+            key.verify(&good[..good.len() - 1]),
+            Err(TokenError::Invalid)
         );
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let key = TokenKey::from_raw(&hex(v["public_key"].as_str().unwrap())).unwrap();
-        let vectors = v["vectors"].as_array().unwrap();
-        assert!(vectors.len() >= 6);
-        for t in vectors {
-            let name = t["name"].as_str().unwrap();
-            let got = key.verify(&hex(t["token"].as_str().unwrap()));
-            if t["valid"].as_bool().unwrap() {
-                let c = got.unwrap_or_else(|e| panic!("{name}: {e}"));
-                assert_eq!(c.volume, t["volume"].as_str().unwrap(), "{name}");
-                assert_eq!(c.epoch, t["epoch"].as_u64().unwrap(), "{name}");
-                assert_eq!(c.node, t["node"].as_str().unwrap(), "{name}");
-                assert_eq!(c.issued_at, t["issued_at"].as_i64().unwrap(), "{name}");
-            } else {
-                assert_eq!(got, Err(TokenError::Invalid), "{name}");
-            }
-        }
+        assert_eq!(key.verify(&[]), Err(TokenError::Invalid));
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert_eq!(key.verify(&trailing), Err(TokenError::Invalid));
     }
 
     #[test]
     fn pem_key() {
-        let pem = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=\n-----END PUBLIC KEY-----\n";
-        let k = TokenKey::from_pem(pem).unwrap();
-        assert_eq!(
-            k.0,
-            hex("ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c")
+        let kp = Ed25519KeyPair::from_seed_unchecked(&SEED).unwrap();
+        let raw = kp.public_key().as_ref();
+        let mut der = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        der.extend_from_slice(raw);
+        fn b64_std(data: &[u8]) -> String {
+            const T: &[u8] =
+                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            let mut s = String::new();
+            for chunk in data.chunks(3) {
+                let a = u32::from(chunk[0]);
+                let b = u32::from(chunk.get(1).copied().unwrap_or(0));
+                let c = u32::from(chunk.get(2).copied().unwrap_or(0));
+                let n = (a << 16) | (b << 8) | c;
+                s.push(T[(n >> 18) as usize] as char);
+                s.push(T[((n >> 12) & 63) as usize] as char);
+                s.push(if chunk.len() > 1 {
+                    T[((n >> 6) & 63) as usize] as char
+                } else {
+                    '='
+                });
+                s.push(if chunk.len() > 2 {
+                    T[(n & 63) as usize] as char
+                } else {
+                    '='
+                });
+            }
+            s
+        }
+        let pem = format!(
+            "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+            b64_std(&der)
         );
+        let k = TokenKey::from_pem(&pem).unwrap();
+        assert_eq!(k.0, raw);
         assert!(TokenKey::from_pem("nonsense").is_err());
     }
 }
