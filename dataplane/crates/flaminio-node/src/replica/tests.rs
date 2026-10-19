@@ -10,6 +10,13 @@ const MIB: u64 = 1 << 20;
 const CHUNK: u64 = 4 * MIB;
 const BLOCKS: u32 = (CHUNK / BLOCK as u64) as u32;
 
+fn pipeline_config() -> StoreConfig {
+    StoreConfig {
+        pipelined_commits: true,
+        ..StoreConfig::default()
+    }
+}
+
 fn store_on(dev: MemDevice) -> Store<MemDevice> {
     Store::open(dev, StoreConfig::default()).unwrap()
 }
@@ -20,7 +27,7 @@ fn service() -> ReplicaService<MemDevice> {
 
 /// A service whose commits stay in flight until the test completes them.
 fn deferred_service() -> ReplicaService<DeferredDevice> {
-    let store = Store::open(DeferredDevice::new(formatted()), StoreConfig::default()).unwrap();
+    let store = Store::open(DeferredDevice::new(formatted()), pipeline_config()).unwrap();
     ReplicaService::new(store)
 }
 
@@ -351,4 +358,28 @@ fn staged_writes_are_answered_after_their_own_commit() {
     let r = s.handle(&rest[1..]);
     assert_eq!(r[0], Reply::Send(Frame::Ok { req: 4 }));
     assert_eq!(blocks(&r[1]), vec![2], "the staged write reads back");
+}
+
+#[test]
+fn pipelined_commits_answer_in_order() {
+    let mut s = deferred_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    // Two more groups of whole clusters, each launched behind the commits in flight.
+    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    assert!(s.launch());
+    assert_eq!(s.stage(&[(sess, write(4, 0, 32, &[3; 16], 3))]), 1);
+    assert!(s.launch());
+    assert_eq!(s.store().device().commits_in_flight(), 3);
+    for req in [2, 3, 4] {
+        assert!(s.poll(false).is_none());
+        s.store().device().complete();
+        assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req })]));
+    }
+    assert!(!s.commit_in_flight());
+    let r = s.handle(&[(sess, read(5, 0, 0, 48))]);
+    assert_eq!(
+        blocks(&r[0]),
+        [vec![1u8; 16], vec![2; 16], vec![3; 16]].concat()
+    );
 }

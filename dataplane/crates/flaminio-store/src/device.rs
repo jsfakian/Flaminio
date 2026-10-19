@@ -49,7 +49,9 @@ pub trait BlockDevice {
     /// flushes, without waiting for either. The flush also covers the early writes started
     /// before ([`start_writes`](Self::start_writes)). The device keeps its own copy of the
     /// data. Returns true if the commit is already complete and durable; otherwise
-    /// [`poll_commit`](Self::poll_commit) reports its outcome. At most one commit is in flight.
+    /// [`poll_commit`](Self::poll_commit) reports its outcome. Several commits may be in
+    /// flight; they land in order, and [`poll_commit`](Self::poll_commit) reports the oldest
+    /// first.
     ///
     /// The default does it all before returning.
     fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
@@ -58,8 +60,8 @@ pub trait BlockDevice {
         Ok(true)
     }
 
-    /// The outcome of the commit in flight, once its writes and flush are complete (with
-    /// `wait`, waits for them). `None` while it is still in flight. Called only after
+    /// The outcome of the oldest commit in flight, once its writes and flush are complete
+    /// (with `wait`, waits for them). `None` while it is still in flight. Called only after
     /// [`start_commit`](Self::start_commit) returned false.
     fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
         let _ = wait;
@@ -392,10 +394,19 @@ type OwnedWrites = Vec<(u64, Vec<u8>)>;
 
 /// A [`MemDevice`] whose commits ([`BlockDevice::start_commit`]) stay in flight until
 /// [`complete`](Self::complete) lands them, or until the store waits for them: for testing
-/// asynchronous commits.
+/// asynchronous and pipelined commits. Several may be in flight; they land in order.
+///
+/// By default a commit's writes are held until it lands. With
+/// [`writing_through`](Self::writing_through), they reach the device's volatile cache at once
+/// and only the flush waits: a [`crash`](Self::crash) then keeps, loses or tears each of them,
+/// as a power cut would with commits in flight.
 pub struct DeferredDevice {
     inner: MemDevice,
-    pending: RefCell<Option<OwnedWrites>>,
+    through: bool,
+    /// The commits in flight, oldest first: their writes, unless written through.
+    pending: RefCell<std::collections::VecDeque<OwnedWrites>>,
+    /// Commits landed and not reported by `poll_commit` yet.
+    landed: std::cell::Cell<usize>,
     fail: std::cell::Cell<bool>,
 }
 
@@ -403,40 +414,63 @@ impl DeferredDevice {
     pub fn new(inner: MemDevice) -> Self {
         Self {
             inner,
-            pending: RefCell::new(None),
+            through: false,
+            pending: RefCell::new(std::collections::VecDeque::new()),
+            landed: std::cell::Cell::new(0),
             fail: std::cell::Cell::new(false),
+        }
+    }
+
+    /// A device whose commits' writes reach the cache at once; only their flushes wait.
+    pub fn writing_through(inner: MemDevice) -> Self {
+        Self {
+            through: true,
+            ..Self::new(inner)
         }
     }
 
     /// True while a commit is in flight.
     pub fn in_flight(&self) -> bool {
-        self.pending.borrow().is_some()
+        !self.pending.borrow().is_empty()
     }
 
-    /// The writes of the commit in flight (its data writes and its journal batch).
+    /// How many commits are in flight.
+    pub fn commits_in_flight(&self) -> usize {
+        self.pending.borrow().len()
+    }
+
+    /// The writes of the oldest commit in flight (its data writes and its journal batch).
     pub fn pending_writes(&self) -> usize {
-        self.pending.borrow().as_ref().map_or(0, Vec::len)
+        self.pending.borrow().front().map_or(0, Vec::len)
     }
 
-    /// Lands the commit in flight: its writes, then the flush.
+    /// Lands the oldest commit in flight: its writes, then the flush.
     pub fn complete(&self) {
         let writes = self
             .pending
             .borrow_mut()
-            .take()
+            .pop_front()
             .expect("a commit in flight");
-        for (o, d) in writes {
-            self.inner.write_at(o, &d).expect("in memory");
+        if !self.through {
+            for (o, d) in writes {
+                self.inner.write_at(o, &d).expect("in memory");
+            }
         }
         self.inner.flush().expect("in memory");
+        self.landed.set(self.landed.get() + 1);
     }
 
-    /// Makes the commit in flight fail (its writes are lost).
+    /// Makes the oldest commit in flight fail (its writes are lost).
     pub fn fail_commit(&self) {
         self.fail.set(true);
     }
 
-    /// The device underneath, without what is still in flight: as a crash would leave it.
+    /// The image a power cut would leave now (see [`MemDevice::crash`]).
+    pub fn crash(&self, seed: u64) -> MemDevice {
+        self.inner.crash(seed)
+    }
+
+    /// The device underneath, without what is still held in flight.
     pub fn into_inner(self) -> MemDevice {
         self.inner
     }
@@ -460,23 +494,28 @@ impl BlockDevice for DeferredDevice {
     }
 
     fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
-        let mut p = self.pending.borrow_mut();
-        assert!(p.is_none(), "one commit in flight at a time");
-        *p = Some(writes.iter().map(|(o, d)| (*o, d.to_vec())).collect());
+        if self.through {
+            for (o, d) in writes {
+                self.inner.write_at(*o, d)?;
+            }
+        }
+        let owned = writes.iter().map(|(o, d)| (*o, d.to_vec())).collect();
+        self.pending.borrow_mut().push_back(owned);
         Ok(false)
     }
 
     fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
         if self.fail.replace(false) {
-            self.pending.borrow_mut().take();
+            self.pending.borrow_mut().pop_front();
             return Some(Err(io::Error::other("injected commit failure")));
         }
-        if self.in_flight() {
+        if self.landed.get() == 0 && self.in_flight() {
             if !wait {
                 return None;
             }
             self.complete();
         }
+        self.landed.set(self.landed.get().saturating_sub(1));
         Some(Ok(()))
     }
 }

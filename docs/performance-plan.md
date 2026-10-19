@@ -85,6 +85,21 @@ replica. At 1M, RF 2 runs at the link's speed, the plan's bound.
 - **1M is at about 70%** of raw written outside the drive's cache. The flush, one per commit,
   limits it now.
 
+**After W4.3 (2026-10-19):** zero-copy writes, commit `a64ef64`: one copy of a write's data in
+user space, down from four ([results](benchmarks/2026-10-19-writes-rf1-w43.md)). A short
+validation, one repetition: **not a full 3-repetition campaign.** Integrity clean: 4 runs, 12
+checks (RF 1: 9, RF 2: 3), 0 errors, 0 checksum failures.
+
+| Write job, O_DSYNC, RF 1 | Raw | W4.2 | **W4.3** | Share of raw |
+|---|---:|---:|---:|---:|
+| 4K random, QD32 | unsteady | 9 847 IOPS | **10 512** | – |
+| 70/30 random, 4K QD32 | 23 634 IOPS | 26 317 | **27 112** | 114% |
+| 1M sequential, QD8 | 1 653 MiB/s (about 1 000 outside the drive's cache) | 701 | **697** | 42% (about 70%) |
+| 4K random, QD1, RF 2 | 469 IOPS | 386 (W4.1) | **386** | 82% |
+
+Throughput is flat against W4.2, as expected: writes wait on the flush. The gain is CPU, about
+10% less on the queue thread per unit of work (the commit's measurement).
+
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
 | Read job | Flaminio (pod or node) | Raw | Share |
@@ -350,6 +365,26 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
      701 MiB/s, up 30%; QD1, QD32 and the mixed job as with W4.1.
 3. **Zero-copy writes** (performance item 1.3): the data goes from the request to the store
    and the network without a copy into a `Vec`.
+
+   *Done (2026-10-19), commit `a64ef64`:*
+   - **One copy instead of four** in user space: from the ublk staging slot into an aligned
+     buffer shared as `bytes::Bytes`. The engine, the frames of every replica, the store and
+     the device take slices of it.
+   - **CPU:** about 10% less on the queue thread per unit of work (1M: 0.049 → 0.044% of a core
+     per MiB/s). Throughput is expected unchanged, since writes are bound by the flush.
+   - **Short validation** ([results](benchmarks/2026-10-19-writes-rf1-w43.md); one repetition,
+     not a full campaign):
+     - RF 1: 4K QD32 at 10 512 IOPS, the 70/30 mix at 27 112, 1M sequential at 697 MiB/s
+       (W4.2: 9 847, 26 317, 701): flat.
+     - RF 2, 4K QD1: 386 IOPS, as with W4.1.
+     - 4 integrity runs, 12 checks: 0 errors, 0 checksum failures.
+
+   **Pipelined commits (tried 2026-10-19):** up to 4 commits in flight. Short validation
+   ([results](benchmarks/2026-10-19-writes-rf1-pipeline.md)): 1M sequential **548 MiB/s**
+   against W4.3's 697 (about −20%); small writes flat; integrity clean. The first
+   implementation launched every staged group at once and bypassed gathering. **Off by
+   default** (`--pipelined-commits`). Gather-before-launch is coded for a re-measure; not
+   claimed done until 1M beats W4.3.
 4. **Several queues for writes** (R4 brings them for reads).
 5. **Write amplification:** journal writes for large sequential writes. Large aligned writes
    could bypass the journal (written in place, then one metadata update).

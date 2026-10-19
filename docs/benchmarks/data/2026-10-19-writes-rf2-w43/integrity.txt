@@ -1,0 +1,5 @@
+randwrite-4k-qd1 rep 1
+  sequential: 16 GiB written, 16 GiB read back and checked, errors 0
+  random: 2 GiB written, 2 GiB read back and checked, errors 0
+  random, after a restart: 2 GiB read back and checked, errors 0
+  Flaminio checksum failures: 0

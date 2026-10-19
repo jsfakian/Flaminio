@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, RawFd};
@@ -18,8 +18,9 @@ use crate::aligned::{AlignedBuf, is_aligned};
 /// Submission queue size. Larger batches are submitted in windows of this many operations.
 const QUEUE_DEPTH: u32 = 256;
 
-/// The flush's tag on the commit ring (writes are tagged by a counter).
-const COMMIT_FLUSH: u64 = u64::MAX;
+/// A commit's flush is tagged with this bit and the commit's generation (writes are tagged by
+/// a counter, which never reaches it).
+const FLUSH_TAG: u64 = 1 << 63;
 
 /// A file or block device driven through io_uring.
 ///
@@ -53,8 +54,23 @@ struct Commits {
     next_gen: u64,
     /// Errors of completed writes, by commit.
     errors: BTreeMap<u64, io::Error>,
-    /// The commit in flight, and where its flush is.
-    current: Option<(u64, Flush)>,
+    /// The commits in flight, oldest first, and where their flushes are. Several may be in
+    /// flight (pipelined commits): each one's flush is submitted once its writes, and those of
+    /// every commit before it, have completed, so a completed flush makes every earlier commit
+    /// durable too.
+    current: VecDeque<(u64, Flush)>,
+}
+
+impl Commits {
+    /// Operations in flight on the commit ring.
+    fn in_flight(&self) -> usize {
+        self.writes.len()
+            + self
+                .current
+                .iter()
+                .filter(|(_, f)| matches!(f, Flush::Submitted))
+                .count()
+    }
 }
 
 /// A buffer the kernel reads for a write in flight.
@@ -304,9 +320,10 @@ impl UringDevice {
         for cqe in ring.completion() {
             let tag = cqe.user_data();
             let res = cqe.result();
-            if tag == COMMIT_FLUSH {
+            if tag & FLUSH_TAG != 0 {
+                let generation = tag & !FLUSH_TAG;
                 let error = (res < 0).then(|| io::Error::from_raw_os_error(-res));
-                if let Some((_, flush)) = st.current.as_mut() {
+                if let Some((_, flush)) = st.current.iter_mut().find(|(g, _)| *g == generation) {
                     *flush = Flush::Done(error);
                 }
                 continue;
@@ -331,26 +348,50 @@ impl UringDevice {
         }
     }
 
-    /// Submits the current commit's flush once every write that belongs to it has completed.
+    /// Submits each commit's flush, in order, once every write that belongs to it or to an
+    /// earlier commit has completed.
     fn advance_commit(&self, st: &mut Commits, ring: &mut IoUring) {
-        let Some((generation, flush @ Flush::Waiting)) = st.current.as_mut() else {
-            return;
-        };
-        if st.writes.values().any(|(_, g)| *g <= *generation) {
-            return;
+        let Commits {
+            writes, current, ..
+        } = st;
+        let mut submitted = false;
+        for (generation, flush) in current.iter_mut() {
+            if !matches!(flush, Flush::Waiting) {
+                continue;
+            }
+            if writes.values().any(|(_, g)| *g <= *generation) {
+                break;
+            }
+            let entry = opcode::Fsync::new(types::Fd(self.file.as_raw_fd()))
+                .flags(types::FsyncFlags::DATASYNC)
+                .build()
+                .user_data(FLUSH_TAG | *generation);
+            // SAFETY: references no memory. make_room keeps the ring from filling.
+            unsafe {
+                ring.submission()
+                    .push(&entry)
+                    .expect("fits the commit ring")
+            };
+            *flush = Flush::Submitted;
+            submitted = true;
         }
-        let entry = opcode::Fsync::new(types::Fd(self.file.as_raw_fd()))
-            .flags(types::FsyncFlags::DATASYNC)
-            .build()
-            .user_data(COMMIT_FLUSH);
-        // SAFETY: references no memory.
-        unsafe {
-            ring.submission()
-                .push(&entry)
-                .expect("fits the commit ring")
-        };
-        *flush = Flush::Submitted;
-        submit_or_abort(ring, "a commit's flush");
+        if submitted {
+            submit_or_abort(ring, "a commit's flush");
+        }
+    }
+
+    /// Waits until `n` more writes and a flush fit on the commit ring. Returns false if they
+    /// do not fit even with nothing in flight.
+    fn make_room(&self, st: &mut Commits, ring: &mut IoUring, n: usize) -> bool {
+        while st.in_flight() + n + 1 > QUEUE_DEPTH as usize {
+            if st.in_flight() == 0 {
+                return false;
+            }
+            Self::wait_commits(ring);
+            Self::reap_commits(st, ring);
+            self.advance_commit(st, ring);
+        }
+        true
     }
 
     /// Waits for at least one completion on the commit ring.
@@ -393,8 +434,7 @@ impl Drop for UringDevice {
         let ring = self.commit_ring.get_mut();
         loop {
             Self::reap_commits(st, ring);
-            let flushing = matches!(st.current, Some((_, Flush::Submitted)));
-            if st.writes.is_empty() && !flushing {
+            if st.in_flight() == 0 {
                 return;
             }
             Self::wait_commits(ring);
@@ -430,33 +470,30 @@ impl BlockDevice for UringDevice {
     }
 
     /// Early writes go on the commit ring, as part of the next commit: its flush waits for
-    /// them. Too many operations in flight: written at once instead.
+    /// them. Too many for the ring even when empty: written at once instead.
     fn start_writes(&self, writes: &[(u64, Bytes)]) -> io::Result<()> {
         let mut st = self.commits.borrow_mut();
-        if st.writes.len() + writes.len() + 1 >= QUEUE_DEPTH as usize {
-            drop(st);
+        let mut ring = self.commit_ring.borrow_mut();
+        if !self.make_room(&mut st, &mut ring, writes.len()) {
+            drop((st, ring));
             let views: Vec<(u64, &[u8])> = writes.iter().map(|(o, d)| (*o, &d[..])).collect();
             return self.write_many(&views);
         }
         let generation = st.next_gen;
-        let mut ring = self.commit_ring.borrow_mut();
         self.submit_commit_writes(&mut st, &mut ring, writes, generation)
     }
 
-    /// The writes on the commit ring, then an `fdatasync` once they, and the early writes that
-    /// belong to this commit, have completed. The data is copied into aligned buffers. With too
-    /// many operations in flight, done synchronously (after this commit's early writes).
+    /// The writes on the commit ring, then an `fdatasync` once they, the early writes that
+    /// belong to this commit, and the writes of every commit before it have completed. Commits
+    /// already in flight stay so (pipelined commits); they complete in order. A commit too big
+    /// for the ring even when empty is done synchronously.
     fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
         let mut st = self.commits.borrow_mut();
-        assert!(st.current.is_none(), "one commit in flight at a time");
         let generation = st.next_gen;
         st.next_gen += 1;
         let mut ring = self.commit_ring.borrow_mut();
-        if st.writes.len() + writes.len() + 1 >= QUEUE_DEPTH as usize {
-            while st.writes.values().any(|(_, g)| *g <= generation) {
-                Self::wait_commits(&mut ring);
-                Self::reap_commits(&mut st, &mut ring);
-            }
+        if !self.make_room(&mut st, &mut ring, writes.len()) {
+            // Nothing in flight: no earlier commit to stay ahead of.
             let early = st.errors.remove(&generation);
             drop((st, ring));
             if let Some(e) = early {
@@ -468,7 +505,7 @@ impl BlockDevice for UringDevice {
             return Ok(true);
         }
         self.submit_commit_writes(&mut st, &mut ring, writes, generation)?;
-        st.current = Some((generation, Flush::Waiting));
+        st.current.push_back((generation, Flush::Waiting));
         self.advance_commit(&mut st, &mut ring);
         Ok(false)
     }
@@ -479,10 +516,11 @@ impl BlockDevice for UringDevice {
         loop {
             Self::reap_commits(&mut st, &mut ring);
             self.advance_commit(&mut st, &mut ring);
-            match st.current {
+            // The oldest commit first: commits complete in order.
+            match st.current.front() {
                 None => return Some(Ok(())),
-                Some((generation, Flush::Done(_))) => {
-                    let Some((_, Flush::Done(flush))) = st.current.take() else {
+                Some(&(generation, Flush::Done(_))) => {
+                    let Some((_, Flush::Done(flush))) = st.current.pop_front() else {
                         unreachable!("matched above")
                     };
                     // Errors of this commit's writes, early ones included, come first.
@@ -616,6 +654,37 @@ mod tests {
             assert!(buf.iter().all(|&x| x == 2), "direct={direct}");
             dev.read_at(0, &mut buf).unwrap();
             assert!(buf.iter().all(|&x| x == 1), "direct={direct}");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn pipelined_commits_complete_in_order() {
+        for direct in [false, true] {
+            let (dev, path) = temp_device(8 << 20, direct);
+            let bufs: Vec<Bytes> = (0..4u8)
+                .map(|i| AlignedBuf::shared_copy_of(&[i + 1; 8192]))
+                .collect();
+            // Four commits in flight at once; the third has an error, which is its own.
+            for (i, b) in bufs.iter().enumerate() {
+                let mut writes = vec![(i as u64 * 65536, b.clone())];
+                if i == 2 {
+                    writes.push((u64::MAX - 8191, b.clone()));
+                }
+                assert!(!dev.start_commit(&writes).unwrap(), "direct={direct}");
+            }
+            let outcomes: Vec<bool> = (0..4)
+                .map(|_| dev.poll_commit(true).unwrap().is_ok())
+                .collect();
+            assert_eq!(outcomes, [true, true, false, true], "direct={direct}");
+            let mut buf = vec![0u8; 8192];
+            for i in [0u8, 1, 3] {
+                dev.read_at(u64::from(i) * 65536, &mut buf).unwrap();
+                assert!(
+                    buf.iter().all(|&x| x == i + 1),
+                    "direct={direct} commit {i}"
+                );
+            }
             std::fs::remove_file(path).unwrap();
         }
     }

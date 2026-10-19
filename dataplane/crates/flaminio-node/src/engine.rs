@@ -391,13 +391,15 @@ pub struct Engine<D: BlockDevice> {
     meta_waits: BTreeMap<u64, MetaWait>,
     next_sub: u64,
     local: Vec<(LocalFrom, SessionRef, Frame)>,
-    /// Who sent the requests the local replica's commit in flight holds back, in order, and
-    /// how many of them are writes.
-    committing: Option<(Vec<LocalFrom>, usize)>,
-    /// The same for the group staged behind it, whose commit starts when it lands.
+    /// For each of the local replica's commits in flight, oldest first (several with pipelined
+    /// commits): who sent the requests it holds back, in order, and how many are writes.
+    committing: std::collections::VecDeque<(Vec<LocalFrom>, usize)>,
+    /// The same for the group staged behind them. With pipelined commits it launches after a
+    /// gather wait (see [`Self::maybe_launch_staged`]); otherwise its commit starts when the
+    /// oldest in flight lands.
     staged: Option<(Vec<LocalFrom>, usize)>,
-    /// After a commit completes, the next waits until this many writes are queued, or until the
-    /// instant (see `finish_commit`).
+    /// After a commit completes (or a staged group is waiting to launch), the next waits until
+    /// this many writes are queued or staged, or until the instant (see `finish_commit`).
     gather: Option<(usize, Instant)>,
     /// How long the next commit may wait for writes to gather.
     gather_window: Duration,
@@ -441,7 +443,7 @@ impl<D: BlockDevice> Engine<D> {
             meta_waits: BTreeMap::new(),
             next_sub: 1,
             local: Vec::new(),
-            committing: None,
+            committing: std::collections::VecDeque::new(),
             staged: None,
             gather: None,
             gather_window: DEFAULT_GATHER,
@@ -728,6 +730,7 @@ impl<D: BlockDevice> Engine<D> {
         for _ in 0..16 {
             if !self.finish_commit(now, !self.async_commits) {
                 self.stage_local();
+                self.maybe_launch_staged(now);
                 return;
             }
             if self.local.is_empty() {
@@ -768,7 +771,7 @@ impl<D: BlockDevice> Engine<D> {
                     .count();
                 self.commit_stats.0 += 1;
                 self.commit_stats.1 += writes as u64;
-                self.committing = Some((held, writes));
+                self.committing.push_back((held, writes));
             }
             self.deliver_local(now, from, p.replies);
         }
@@ -787,22 +790,23 @@ impl<D: BlockDevice> Engine<D> {
     /// against 23). A client with one write in flight waits for nothing: its next write is the
     /// target.
     ///
-    /// A group staged behind the commit takes its place, its commit started already.
+    /// Commits land in order. A group staged behind them joins them when the oldest lands, its
+    /// commit started then.
     fn finish_commit(&mut self, now: Instant, wait: bool) -> bool {
         loop {
-            if self.committing.is_none() {
+            if self.committing.is_empty() {
                 return true;
             }
             let Some(replies) = self.service.poll(wait) else {
                 return false;
             };
-            let (from, writes) = self.committing.take().expect("a commit in flight");
+            let (from, writes) = self.committing.pop_front().expect("a commit in flight");
             self.deliver_local(now, from, replies);
-            if let Some((from, writes)) = self.staged.take() {
-                self.commit_stats.0 += 1;
-                self.commit_stats.1 += writes as u64;
-                self.commit_stats.3 += 1;
-                self.committing = Some((from, writes));
+            if let Some(st) = self.staged.take() {
+                self.count_staged(st.1);
+                self.committing.push_back(st);
+            }
+            if !self.committing.is_empty() {
                 continue;
             }
             if self.async_commits && !self.gather_window.is_zero() {
@@ -814,10 +818,11 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     /// While a commit is in flight, stages the writes at the head of the local queue behind
-    /// it (`ReplicaService::stage`): their data goes to the disk during its flush, and their
-    /// commit starts as soon as it lands.
+    /// it (`ReplicaService::stage`): their data goes to the disk during its flush. The staged
+    /// group's own commit starts when the oldest lands, or sooner with pipelined commits after
+    /// [`Self::maybe_launch_staged`] has gathered.
     fn stage_local(&mut self) {
-        if !self.async_commits || self.committing.is_none() {
+        if !self.async_commits || self.committing.is_empty() {
             return;
         }
         let n = self
@@ -851,10 +856,48 @@ impl<D: BlockDevice> Engine<D> {
         }
     }
 
+    /// With pipelined commits, starts the staged group's commit behind those in flight once it
+    /// has gathered (same window as after a landing). Launching at the first staged write
+    /// bypassed gathering and cut 1M sequential from about 700 to 548 MiB/s.
+    fn maybe_launch_staged(&mut self, now: Instant) {
+        let staged_n = match &self.staged {
+            Some((_, n)) if *n > 0 => *n,
+            _ => return,
+        };
+        if self.async_commits && !self.gather_window.is_zero() {
+            if self.gather.is_none() {
+                let target = staged_n + self.queued_writes();
+                self.gather = Some((target.max(staged_n), now + self.gather_window));
+                self.gather_timer = Some(self.gather_window);
+                return;
+            }
+            let (target, until) = self.gather.expect("armed");
+            let n = self.staged.as_ref().map(|s| s.1).unwrap_or(0);
+            if n < target && now < until {
+                return;
+            }
+            if n < target {
+                self.commit_stats.2 += 1;
+            }
+            self.gather = None;
+        }
+        if self.service.launch() {
+            let st = self.staged.take().expect("staged");
+            self.count_staged(st.1);
+            self.committing.push_back(st);
+        }
+    }
+
+    fn count_staged(&mut self, writes: usize) {
+        self.commit_stats.0 += 1;
+        self.commit_stats.1 += writes as u64;
+        self.commit_stats.3 += 1;
+    }
+
     /// Everything queued for the local replica handled and durable: before using the replica
     /// directly.
     fn settle_local(&mut self, now: Instant) {
-        while self.committing.is_some() || !self.local.is_empty() {
+        while !self.committing.is_empty() || !self.local.is_empty() {
             self.finish_commit(now, true);
             self.flush_local(now);
         }

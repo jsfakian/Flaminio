@@ -65,5 +65,10 @@ pub const PAGE_TABLE_ENTRIES: usize = 506;
 pub const KNOWN_FEATURES_COMPAT: u64 = 0;
 /// `features_ro_compat` bits this implementation understands.
 pub const KNOWN_FEATURES_RO_COMPAT: u64 = 0;
+/// `features_incompat` bit 0: pipelined commits (spec §6.2). Up to [`PIPELINE_DEPTH`] batches
+/// commit at once, and replay checks the data of the last [`PIPELINE_DEPTH`].
+pub const FEATURE_INCOMPAT_PIPELINED_COMMITS: u64 = 1;
 /// `features_incompat` bits this implementation understands.
-pub const KNOWN_FEATURES_INCOMPAT: u64 = 0;
+pub const KNOWN_FEATURES_INCOMPAT: u64 = FEATURE_INCOMPAT_PIPELINED_COMMITS;
+/// How many batches may commit at once with pipelined commits: D in spec §6.2.
+pub const PIPELINE_DEPTH: usize = 4;

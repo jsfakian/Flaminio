@@ -1,0 +1,3 @@
+rep	side	job	fresh	steady	rounds	client_bytes	disk_bytes	drive_bytes	temp
+1	raw	randwrite-4k-qd1	142	469	6	647958528	647958528	1048064000	48
+1	flaminio	randwrite-4k-qd1	140	386	5	475365376	1588412416	1642496000	47

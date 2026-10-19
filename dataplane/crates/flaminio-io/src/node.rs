@@ -59,6 +59,9 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
                            (default 300; 0: never waits)
       --sync-commits       commits block the queue thread until durable (as before commits
                            went asynchronous): for comparing
+      --pipelined-commits  up to 4 commits in flight (spec §6.2): for measuring. Off by
+                           default; opening with this sets the on-disk feature. A disk that
+                           already has it still recovers by its rules without this flag
       --first-fit          new data goes to the lowest free clusters, reusing freed space,
                            instead of continuing from the last allocation: for comparing
       --id N               ublk device id (default: first free)
@@ -91,6 +94,7 @@ pub(crate) struct NodeConfig {
     pub poll_us: u64,
     pub gather_us: Option<u64>,
     pub sync_commits: bool,
+    pub pipelined_commits: bool,
     pub first_fit: bool,
 }
 
@@ -118,6 +122,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         poll_us: 0,
         gather_us: None,
         sync_commits: false,
+        pipelined_commits: false,
         first_fit: false,
     };
     let mut it = args.iter();
@@ -155,6 +160,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
                 c.gather_us = Some(value()?.parse().map_err(|_| "invalid --gather-us")?)
             }
             "--sync-commits" => c.sync_commits = true,
+            "--pipelined-commits" => c.pipelined_commits = true,
             "--first-fit" => c.first_fit = true,
             "--queues" => {
                 c.queues = value()?.parse().map_err(|_| "invalid --queues")?;
@@ -207,6 +213,7 @@ pub(crate) fn build<D: BlockDevice + 'static>(
         } else {
             Allocation::NextFit
         },
+        pipelined_commits: c.pipelined_commits,
         ..StoreConfig::default()
     };
     let store = Store::open(dev, config).map_err(|e| format!("open store: {e}"))?;

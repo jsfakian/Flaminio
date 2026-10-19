@@ -10,6 +10,13 @@ use flaminio_store::{
     DeferredDevice, MemDevice, Started, Store, StoreConfig, StoreError, WriteReq,
 };
 
+fn pipeline_config() -> StoreConfig {
+    StoreConfig {
+        pipelined_commits: true,
+        ..StoreConfig::default()
+    }
+}
+
 fn store() -> Store<DeferredDevice> {
     store_with_journal(16)
 }
@@ -17,7 +24,7 @@ fn store() -> Store<DeferredDevice> {
 fn store_with_journal(mib: u64) -> Store<DeferredDevice> {
     let dev = MemDevice::new(DEVICE);
     Store::format(&dev, &options(mib)).unwrap();
-    let mut s = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
+    let mut s = Store::open(DeferredDevice::new(dev), pipeline_config()).unwrap();
     s.create_chunk(key(0), CHUNK, 64 * MIB, 1).unwrap();
     s
 }
@@ -420,4 +427,249 @@ fn shared_write_data_outlives_the_callers_buffer() {
     let mut buf = vec![0u8; 32 * 4096];
     s.read(key(0), 0, &mut buf, 1).unwrap();
     assert_eq!(buf, expect_whole, "after recovery");
+}
+
+// Pipelined commits (spec §6.2): up to PIPELINE_DEPTH commits in flight at once.
+
+#[test]
+fn an_empty_staged_group_does_not_jump_the_queue() {
+    // Every request in the staged group fails on its own (stale epoch): no journal records.
+    // Its results must wait behind the commit already in flight; otherwise poll would hand
+    // the failing group's Err to the earlier write's caller, and that write's Ok to the later
+    // one.
+    let mut s = store();
+    let (o, d) = whole(0);
+    assert!(matches!(
+        s.start_write_batch(&[req(o, &d, 1)]).unwrap(),
+        Started::InFlight
+    ));
+    let (o2, d2) = whole(1);
+    let stale = WriteReq {
+        key: key(0),
+        offset: o2,
+        data: (&d2).into(),
+        write_seq: 2,
+        epoch: 0,
+    };
+    assert_eq!(s.stage_writes(&[stale]).unwrap(), 1);
+    assert!(s.launch_staged().unwrap());
+    assert_eq!(
+        s.device().commits_in_flight(),
+        1,
+        "the empty group has no device commit"
+    );
+    assert!(
+        s.poll_write_batch(false).unwrap().is_none(),
+        "the empty group must not settle ahead of the commit in flight"
+    );
+    s.device().complete();
+    let first = s.poll_write_batch(false).unwrap().expect("the first commit");
+    assert!(first.iter().all(Result::is_ok), "{first:?}");
+    assert_eq!(&read(&s, o, d.len() as u64), &d);
+    let second = s
+        .poll_write_batch(false)
+        .unwrap()
+        .expect("the empty staged group");
+    assert_eq!(second.len(), 1);
+    assert!(matches!(second[0], Err(StoreError::StaleEpoch { .. })), "{second:?}");
+    assert!(!s.commit_in_flight());
+}
+
+fn whole(i: u64) -> (u64, Vec<u8>) {
+    // Whole clusters (16 blocks), each write to its own cluster: stageable.
+    let x = i % 60;
+    (x * 16 * 4096, blocks(1 + i as u32, x * 16, 16))
+}
+
+#[test]
+fn pipelined_commits_land_in_order() {
+    let mut s = store();
+    let w: Vec<(u64, Vec<u8>)> = (0..6).map(whole).collect();
+    assert!(matches!(
+        s.start_write_batch(&[req(w[0].0, &w[0].1, 1)]).unwrap(),
+        Started::InFlight
+    ));
+    let mut launched = 1;
+    for (i, (o, d)) in w.iter().enumerate().skip(1) {
+        assert_eq!(s.stage_writes(&[req(*o, d, 1 + i as u64)]).unwrap(), 1);
+        if s.launch_staged().unwrap() {
+            launched += 1;
+        }
+    }
+    assert_eq!(launched, flaminio_format::consts::PIPELINE_DEPTH);
+    assert_eq!(
+        s.device().commits_in_flight(),
+        launched,
+        "the window is full"
+    );
+    // The last two writes were staged together behind the full window.
+    let mut landed = 0;
+    while s.commit_in_flight() {
+        if s.device().in_flight() {
+            s.device().complete();
+        }
+        if let Some(r) = s.poll_write_batch(false).unwrap() {
+            assert!(r.iter().all(Result::is_ok));
+            landed += r.len();
+        }
+    }
+    assert_eq!(landed, 6);
+    for (o, d) in &w {
+        assert_eq!(&read(&s, *o, d.len() as u64), d);
+    }
+    s.fsck(true).unwrap();
+    let s = reopen(s);
+    let mut buf = vec![0u8; 16 * 4096];
+    for (o, d) in &w {
+        s.read(key(0), *o, &mut buf, 1).unwrap();
+        assert_eq!(&buf, d, "after recovery");
+    }
+}
+
+#[test]
+fn a_power_cut_with_commits_in_flight_keeps_a_prefix_of_them() {
+    // The writes of commits in flight reach the cache at once, and the crash keeps, loses or
+    // tears each unflushed block independently: a later batch's journal may survive an
+    // earlier batch's data. Recovery must show the landed commits and a prefix of the others,
+    // each whole or absent.
+    let (mut most_in_flight, mut kept, mut lost) = (0, 0, 0);
+    for stop in [2u64, 5, 9, 23] {
+        for seed in 0..16 {
+            let dev = MemDevice::new(DEVICE);
+            Store::format(&dev, &options(16)).unwrap();
+            let mut s =
+                Store::open(DeferredDevice::writing_through(dev), pipeline_config()).unwrap();
+            s.create_chunk(key(0), CHUNK, 64 * MIB, 1).unwrap();
+            let old = blocks(9, 0, 1024);
+            s.write(key(0), 0, &old, 1, 1).unwrap();
+            let mut landed = old.clone();
+            let mut flying: std::collections::VecDeque<Vec<(u64, Vec<u8>)>> = Default::default();
+            let (o, d) = whole(0);
+            assert!(matches!(
+                s.start_write_batch(&[req(o, &d, 2)]).unwrap(),
+                Started::InFlight
+            ));
+            flying.push_back(vec![(o, d)]);
+            let mut staged = Vec::new();
+            for i in 1..stop {
+                let (o, d) = whole(i);
+                if s.stage_writes(&[req(o, &d, 2 + i)]).unwrap() == 1 {
+                    staged.push((o, d));
+                }
+                if s.launch_staged().unwrap() {
+                    flying.push_back(std::mem::take(&mut staged));
+                }
+                // Now and then, the oldest lands.
+                if (i + seed) % 3 == 0 {
+                    s.device().complete();
+                    let r = s.poll_write_batch(false).unwrap().expect("landed");
+                    assert!(r.iter().all(Result::is_ok));
+                    for (o, d) in flying.pop_front().expect("in flight") {
+                        landed[o as usize..][..d.len()].copy_from_slice(&d);
+                    }
+                    if s.commit_in_flight()
+                        && !staged.is_empty()
+                        && s.device().commits_in_flight() == flying.len() + 1
+                    {
+                        flying.push_back(std::mem::take(&mut staged));
+                    }
+                }
+            }
+            most_in_flight = most_in_flight.max(flying.len());
+            let image = s.device().crash(seed);
+            let s = Store::open(image, pipeline_config()).unwrap();
+            let mut got = vec![0u8; 1024 * 4096];
+            s.read(key(0), 0, &mut got, 1).unwrap();
+            // Every landed write is there; the commits in flight form a prefix.
+            let mut gap = false;
+            for group in &flying {
+                let present = group
+                    .iter()
+                    .all(|(o, d)| got[*o as usize..][..d.len()] == d[..]);
+                let absent = group.iter().all(|(o, d)| {
+                    got[*o as usize..][..d.len()] == landed[*o as usize..][..d.len()]
+                });
+                assert!(
+                    present || absent,
+                    "stop {stop} seed {seed}: a commit half there"
+                );
+                if present && !absent {
+                    kept += 1;
+                    assert!(
+                        !gap,
+                        "stop {stop} seed {seed}: a later commit without an earlier one"
+                    );
+                    for (o, d) in group {
+                        landed[*o as usize..][..d.len()].copy_from_slice(d);
+                    }
+                } else if !present {
+                    lost += 1;
+                    gap = true;
+                }
+            }
+            assert!(got == landed, "stop {stop} seed {seed}: landed writes lost");
+            s.fsck(true).unwrap();
+        }
+    }
+    // The cases that matter happened: several commits in flight, some kept and some lost.
+    assert!(most_in_flight >= 3, "at most {most_in_flight} in flight");
+    assert!(kept > 0 && lost > 0, "kept {kept}, lost {lost}");
+}
+
+#[test]
+fn pipelining_through_full_journals_keeps_the_data() {
+    // A full window kept up for long: checkpoints wait until nothing is in flight, staging
+    // stops when the journal runs short, and everything lands.
+    let mut s = store_with_journal(4);
+    let mut expect = vec![0u8; 1024 * 4096];
+    let (o, d) = whole(0);
+    assert!(matches!(
+        s.start_write_batch(&[req(o, &d, 1)]).unwrap(),
+        Started::InFlight
+    ));
+    expect[o as usize..][..d.len()].copy_from_slice(&d);
+    let mut launches = 0;
+    for i in 1..3000u64 {
+        let (o, d) = whole(i);
+        // Writes to a cluster still in flight wait (not staged): commit them alone after.
+        if s.stage_writes(&[req(o, &d, 1 + i)]).unwrap() == 0 {
+            while s.commit_in_flight() {
+                if s.device().in_flight() {
+                    s.device().complete();
+                }
+                s.poll_write_batch(false).unwrap();
+            }
+            assert!(matches!(
+                s.start_write_batch(&[req(o, &d, 1 + i)]).unwrap(),
+                Started::InFlight
+            ));
+        } else if s.launch_staged().unwrap() {
+            launches += 1;
+        }
+        expect[o as usize..][..d.len()].copy_from_slice(&d);
+        if s.device().commits_in_flight() >= flaminio_format::consts::PIPELINE_DEPTH {
+            s.device().complete();
+            assert!(
+                s.poll_write_batch(false)
+                    .unwrap()
+                    .unwrap()
+                    .iter()
+                    .all(Result::is_ok)
+            );
+        }
+    }
+    while s.commit_in_flight() {
+        if s.device().in_flight() {
+            s.device().complete();
+        }
+        s.poll_write_batch(false).unwrap();
+    }
+    assert!(launches > 1000, "launches {launches}");
+    assert_eq!(read(&s, 0, 1024 * 4096), expect);
+    s.fsck(true).unwrap();
+    let s = Store::open(s.into_device().into_inner(), StoreConfig::default()).unwrap();
+    let mut buf = vec![0u8; 1024 * 4096];
+    s.read(key(0), 0, &mut buf, 1).unwrap();
+    assert!(buf == expect, "after recovery");
+    s.fsck(true).unwrap();
 }

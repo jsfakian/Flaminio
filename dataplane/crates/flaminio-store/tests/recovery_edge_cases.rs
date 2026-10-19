@@ -8,11 +8,12 @@ use flaminio_store::{Allocation, MemDevice, Store, StoreConfig, StoreError, Writ
 
 const CLUSTER: u64 = 64 * 1024;
 
-fn open(dev: &MemDevice) -> Store<&MemDevice> {
+fn open(dev: &MemDevice, pipelined: bool) -> Store<&MemDevice> {
     Store::open(
         dev,
         StoreConfig {
             allocation: Allocation::FirstFit,
+            pipelined_commits: pipelined,
             ..StoreConfig::default()
         },
     )
@@ -20,17 +21,24 @@ fn open(dev: &MemDevice) -> Store<&MemDevice> {
 }
 
 /// A batch whose journal block reached the disk but whose data did not is rejected by
-/// recovery. Its header must be erased: otherwise, when the next batch reuses its sequence
-/// number but has to wrap to offset 0, the next recovery finds the stale batch first, rejects
-/// it again, and loses the new, acknowledged batch.
+/// recovery. It must not be found again: otherwise, when the next batch has to wrap to offset
+/// 0, the next recovery finds the stale batch first, rejects it again, and loses the new,
+/// acknowledged batch. Without pipelined commits its header is erased; with them, the next
+/// batch's sequence number skips past it.
 #[test]
 fn rejected_batch_cannot_shadow_a_wrapped_successor() {
+    for pipelined in [false, true] {
+        rejected_batch_scenario(pipelined);
+    }
+}
+
+fn rejected_batch_scenario(pipelined: bool) {
     let dev = MemDevice::new(DEVICE);
     Store::format(&dev, &options(4)).unwrap();
     let journal = 4 * MIB;
     let layout;
     {
-        let mut s = open(&dev);
+        let mut s = open(&dev, pipelined);
         layout = s.superblock().layout;
         s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
         s.write(key(0), 0, &blocks(1, 0, 1024), 1, 1).unwrap();
@@ -64,7 +72,7 @@ fn rejected_batch_cannot_shadow_a_wrapped_successor() {
     // Recovery rejects the batch.
     let before;
     {
-        let mut s = open(&img);
+        let mut s = open(&img, pipelined);
         let mut b = vec![0u8; CLUSTER as usize];
         s.read(key(0), 512 * 4096, &mut b, 1).unwrap();
         assert_eq!(
@@ -100,7 +108,7 @@ fn rejected_batch_cannot_shadow_a_wrapped_successor() {
     }
 
     // Recover again: the wrapped batch is acknowledged and must be there.
-    let s = open(&img);
+    let s = open(&img, pipelined);
     let mut b = vec![0u8; 15 * 4096];
     s.read(key(0), 33 * 4096, &mut b, 1).unwrap();
     assert_eq!(b, blocks(7, 33, 15));

@@ -50,6 +50,7 @@ up() {
     [[ ${POLL_US:-0} != 0 ]] && args+=(--poll-us "$POLL_US")
     [[ -n ${GATHER_US:-} ]] && args+=(--gather-us "$GATHER_US")
     [[ ${SYNC_COMMITS:-0} == 1 ]] && args+=(--sync-commits)
+    [[ ${PIPELINED_COMMITS:-0} == 1 ]] && args+=(--pipelined-commits)
     [[ ${FIRST_FIT:-0} == 1 ]] && args+=(--first-fit)
     if [[ -n ${ATTACH:-} ]]; then
         sudo install -d -m 700 /run/flaminio

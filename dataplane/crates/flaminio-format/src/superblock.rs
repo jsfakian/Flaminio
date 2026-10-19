@@ -222,14 +222,20 @@ pub(crate) mod tests {
         torn[500] ^= 1;
         assert_eq!(Superblock::decode(&torn[..]), Err(FormatError::Checksum));
 
+        // Bit 0 (pipelined commits) is known; bit 1 is not.
         let newer = Superblock {
-            features_incompat: 1,
+            features_incompat: FEATURE_INCOMPAT_PIPELINED_COMMITS | 2,
             ..sample()
         };
         assert_eq!(
             Superblock::decode(&newer.encode()[..]),
-            Err(FormatError::IncompatFeatures(1))
+            Err(FormatError::IncompatFeatures(2))
         );
+        let pipelined = Superblock {
+            features_incompat: FEATURE_INCOMPAT_PIPELINED_COMMITS,
+            ..sample()
+        };
+        assert_eq!(Superblock::decode(&pipelined.encode()[..]), Ok(pipelined));
 
         let ro = Superblock {
             features_ro_compat: 1 << 5,

@@ -902,12 +902,17 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         2,
         "still the commit of write 14"
     );
+    assert_eq!(
+        engine.device().commits_in_flight(),
+        2,
+        "pipelined: their commit went out behind it at once"
+    );
     engine.device().complete();
     assert_eq!(run(&mut engine, &mut buf, until, &done(14)).len(), 1);
     run(&mut engine, &mut buf, 5, &done(15));
     assert!(
         engine.device().in_flight(),
-        "the staged commit started with the landing"
+        "the second commit, launched behind the first, is still in flight"
     );
     assert_eq!(engine.device().pending_writes(), 1, "their batch only");
     engine.device().complete();

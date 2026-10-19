@@ -259,11 +259,15 @@ fn verify(
     Ok(())
 }
 
-fn open(dev: &MemDevice, allocation: Allocation) -> Result<Store<&MemDevice>, StoreError> {
+fn open(
+    dev: &MemDevice,
+    (allocation, pipelined): (Allocation, bool),
+) -> Result<Store<&MemDevice>, StoreError> {
     Store::open(
         dev,
         StoreConfig {
             allocation,
+            pipelined_commits: pipelined,
             ..StoreConfig::default()
         },
     )
@@ -279,10 +283,14 @@ proptest! {
         seed in any::<u64>(),
         second_crash in prop::option::of((0u64..80, any::<u64>())),
         first_fit in any::<bool>(),
+        pipelined in any::<bool>(),
     ) {
         // First-fit reuses freed clusters immediately, which next-fit on a large device rarely
         // does. Both must hold up.
         let allocation = if first_fit { Allocation::FirstFit } else { Allocation::NextFit };
+        // Pipelined commits change recovery (spec §6.2): the last batches' data is checked, and
+        // sequence numbers skip ahead.
+        let allocation = (allocation, pipelined);
         // A 4 MiB journal makes wrap-around and automatic checkpoints frequent.
         let dev = MemDevice::new(DEVICE);
         Store::format(&dev, &options(4)).unwrap();

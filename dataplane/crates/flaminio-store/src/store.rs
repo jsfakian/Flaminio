@@ -9,7 +9,10 @@ use std::collections::{HashSet, VecDeque};
 
 use flaminio_format::FormatError;
 use flaminio_format::checksum::{block_checksums, crc32c};
-use flaminio_format::consts::{BITS_PER_BITMAP_PAGE, BLOCK_SIZE, BLOCK_SIZE_U64, MIB};
+use flaminio_format::consts::{
+    BITS_PER_BITMAP_PAGE, BLOCK_SIZE, BLOCK_SIZE_U64, FEATURE_INCOMPAT_PIPELINED_COMMITS, MIB,
+    PIPELINE_DEPTH,
+};
 use flaminio_format::journal::{Batch, BatchBuilder, JournalPosition, JournalScanner, place_batch};
 use flaminio_format::layout::Layout;
 use flaminio_format::meta::{
@@ -46,12 +49,21 @@ pub struct StoreConfig {
     pub max_batch_bytes: usize,
     /// Free-space policy for data clusters and metadata pages.
     pub allocation: Allocation,
+    /// Commit up to `PIPELINE_DEPTH` batches at once (spec §6.2). Opening a disk without the
+    /// feature sets it, after recovery; without this, a disk that has it is still recovered by
+    /// its rules, and commits one batch at a time.
+    ///
+    /// Off by default: a short validation that launched every staged group at once lost about
+    /// 20% on 1M sequential (548 against ~700 MiB/s) by bypassing gathering. Opt in once the
+    /// engine gathers before launching.
+    pub pipelined_commits: bool,
 }
 
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
             checkpoint_threshold: 0.5,
+            pipelined_commits: false,
             max_batch_bytes: 4 * MIB as usize,
             allocation: Allocation::NextFit,
         }
@@ -183,7 +195,8 @@ impl<'a> Plan<'a> {
 
 /// A group commit whose I/O is in flight (see [`Store::start_write_batch`]).
 struct InFlight {
-    /// The journal batch, applied once durable, as replay would apply it.
+    /// The journal batch, applied once durable, as replay would apply it. Empty when
+    /// [`device`](Self::device) is false.
     batch: Bytes,
     /// The results of the requests of the call that started it: `None` for the requests in
     /// the batch, which succeed once it is durable.
@@ -193,6 +206,9 @@ struct InFlight {
     touched: HashSet<(u32, u64)>,
     /// Metadata pages its records may take from the pool when applied.
     pool_budget: u64,
+    /// False when every request failed on its own: no device commit. Still sits in
+    /// `in_flight` so [`poll_write_batch`](Store::poll_write_batch) returns results in order.
+    device: bool,
 }
 
 /// The next group, staged while a commit is in flight ([`Store::stage_writes`]): its records
@@ -368,9 +384,10 @@ pub struct Store<D: BlockDevice> {
     poisoned: bool,
     /// Plans handed out by plan_read and not yet finished.
     reads_in_flight: Cell<u64>,
-    /// The group commit in flight, if any. Only one at a time: recovery relies on every batch
-    /// but the last being durable, data included (format spec §6.2).
-    in_flight: Option<InFlight>,
+    /// The group commits in flight, oldest first: one at a time, or with pipelined commits up
+    /// to `PIPELINE_DEPTH` (spec §6.2). Recovery relies on every batch but the last of those
+    /// being durable, data included.
+    in_flight: VecDeque<InFlight>,
     /// The next group, staged behind the commit in flight.
     staged: Option<Staged>,
     /// The results of commits that another change waited for (see [`Store::guard`]), in order,
@@ -532,6 +549,9 @@ impl<D: BlockDevice> Store<D> {
         // (spec §6.2). Only the last batch of the log can therefore be missing data: every
         // later batch was written after that flush completed. So batches are applied one
         // behind, and the last is applied only if its data matches the checksums it carries.
+        // With pipelined commits, the same holds for the last PIPELINE_DEPTH batches: they are
+        // applied in order while their data matches, and the log ends at the first that does
+        // not.
         let apply_batch = |state: &mut State, batch: &Batch| -> Result<(), StoreError> {
             for record in batch.records() {
                 for (o, d) in state.apply(&record?)? {
@@ -540,29 +560,51 @@ impl<D: BlockDevice> Store<D> {
             }
             Ok(())
         };
+        let pipelined = sb.features_incompat & FEATURE_INCOMPAT_PIPELINED_COMMITS != 0;
+        let window = if pipelined { PIPELINE_DEPTH } else { 1 };
         let reader = Reader(&dev);
         let mut scan = JournalScanner::new(&reader, &layout, nonce, start);
-        let mut last = None;
+        let mut tail: VecDeque<Batch> = VecDeque::with_capacity(window + 1);
         for batch in scan.by_ref() {
-            if let Some(previous) = last.replace(batch?) {
-                apply_batch(&mut state, &previous)?;
+            tail.push_back(batch?);
+            if tail.len() > window {
+                apply_batch(&mut state, &tail.pop_front().expect("over the window"))?;
             }
         }
         let mut head = scan.position();
-        if let Some(batch) = last {
-            if batch_data_is_durable(&dev, &layout, &batch)? {
+        while let Some(batch) = tail.pop_front() {
+            // Clusters a later batch rewrites in place: not checked (spec §6.2).
+            let mut rewritten = HashSet::new();
+            for later in &tail {
+                for record in later.records() {
+                    if let Record::DeferredWrite { slot, offset, .. } = record? {
+                        rewritten
+                            .insert((slot, u64::from(offset) / u64::from(layout.cluster_size)));
+                    }
+                }
+            }
+            if batch_data_is_durable(&dev, &layout, &batch, &rewritten)? {
                 apply_batch(&mut state, &batch)?;
-            } else {
-                // Its flush never completed, so nothing in it was acknowledged. Erase its header
-                // so it cannot be mistaken for a later batch with the same sequence number.
-                let h = *batch.header();
+                continue;
+            }
+            // Its flush never completed, so nothing in it, or after it, was acknowledged.
+            let h = *batch.header();
+            head = JournalPosition {
+                offset: h.offset,
+                seq: h.batch_seq,
+            };
+            if !pipelined {
+                // Erase its header so it cannot be mistaken for a later batch with the same
+                // sequence number.
                 dev.write_at(layout.journal_offset + h.offset, &[0u8; BLOCK_SIZE])?;
                 dev.flush()?;
-                head = JournalPosition {
-                    offset: h.offset,
-                    seq: h.batch_seq,
-                };
             }
+            break;
+        }
+        if pipelined {
+            // Stale batches (rejected ones, and any beyond a lost batch) all have sequence
+            // numbers below the next one replay will expect.
+            head.seq += PIPELINE_DEPTH as u64;
         }
         let journal = Journal {
             offset: layout.journal_offset,
@@ -589,12 +631,42 @@ impl<D: BlockDevice> Store<D> {
             config,
             poisoned: false,
             reads_in_flight: Cell::new(0),
-            in_flight: None,
+            in_flight: VecDeque::new(),
             staged: None,
             settled: VecDeque::new(),
         };
         store.checkpoint_inner()?;
+        if store.config.pipelined_commits && !pipelined {
+            store.set_pipelined_commits()?;
+        }
         Ok(store)
+    }
+
+    /// Sets the pipelined-commits feature (spec §6.2): both superblock copies, the next
+    /// generation, each flushed. Only right after a checkpoint, with nothing in flight: no batch
+    /// written before is replayed by the new rules.
+    fn set_pipelined_commits(&mut self) -> Result<(), StoreError> {
+        let mut sb = self.sb.clone();
+        sb.features_incompat |= FEATURE_INCOMPAT_PIPELINED_COMMITS;
+        sb.sb_generation += 1;
+        let page = sb.encode();
+        for offset in [0, sb.layout.superblock_b_offset()] {
+            self.dev.write_at(offset, &page[..])?;
+            self.dev.flush()?;
+        }
+        self.sb = sb;
+        Ok(())
+    }
+
+    /// How many batches may commit at once on this disk.
+    fn pipeline_depth(&self) -> usize {
+        if self.config.pipelined_commits
+            && self.sb.features_incompat & FEATURE_INCOMPAT_PIPELINED_COMMITS != 0
+        {
+            PIPELINE_DEPTH
+        } else {
+            1
+        }
     }
 
     /// The disk's superblock.
@@ -782,10 +854,12 @@ impl<D: BlockDevice> Store<D> {
         if !in_place.is_empty() {
             self.dev.write_many(&in_place)?;
         }
-        // Not while a group is staged: its reserved clusters would reach the bitmaps on disk
-        // before its batch does, and leak in a crash. The next commit checkpoints instead (and
-        // staging stops when the journal runs out of room).
+        // Not while a group is staged or another commit is in flight: their reserved clusters
+        // would reach the bitmaps on disk before their batches do, and leak in a crash, and the
+        // journal start would move past batches not applied yet. A later commit checkpoints
+        // instead (staging stops when the journal runs out of room).
         if self.staged.is_none()
+            && self.in_flight.is_empty()
             && self.journal.live_bytes() as f64
                 > self.journal.size as f64 * self.config.checkpoint_threshold
         {
@@ -794,13 +868,15 @@ impl<D: BlockDevice> Store<D> {
         Ok(())
     }
 
-    /// Waits for the commit in flight, and the staged one after it, and applies them, keeping
-    /// their results for [`Self::poll_write_batch`]. Every other change waits for them this way
-    /// (from [`Self::guard`]), so batches stay durable in order.
+    /// Waits for the commits in flight, and the staged one after them, and applies them in
+    /// order, keeping their results for [`Self::poll_write_batch`]. Every other change waits
+    /// for them this way (from [`Self::guard`]), so batches stay durable in order.
     fn settle(&mut self) -> Result<(), StoreError> {
         loop {
-            if let Some(f) = self.in_flight.take() {
-                self.dev.poll_commit(true).expect("waited for the commit")?;
+            while let Some(f) = self.in_flight.pop_front() {
+                if f.device {
+                    self.dev.poll_commit(true).expect("waited for the commit")?;
+                }
                 let results = self.finish_in_flight(f)?;
                 self.settled.push_back(results);
             }
@@ -812,24 +888,29 @@ impl<D: BlockDevice> Store<D> {
     }
 
     fn finish_in_flight(&mut self, f: InFlight) -> Result<Vec<Result<(), StoreError>>, StoreError> {
-        self.execute_finish(f.batch)?;
+        if f.device {
+            self.execute_finish(f.batch)?;
+        }
         Ok(f.results.into_iter().map(|r| r.unwrap_or(Ok(()))).collect())
     }
 
-    /// Starts the staged group's commit, once the batch before it is durable and applied: its
-    /// journal batch, then a flush that also covers its data, written already.
+    /// Starts the staged group's commit: its journal batch, then a flush that also covers its
+    /// data, written already. Once the batch before it is durable and applied, or, with
+    /// pipelined commits, behind fewer than `PIPELINE_DEPTH` batches in flight.
     fn promote_staged(&mut self) -> Result<(), StoreError> {
         let Some(st) = self.staged.take() else {
             return Ok(());
         };
         if st.batch.record_count() == 0 {
-            // Every staged request failed on its own.
-            let results = st
-                .results
-                .into_iter()
-                .map(|r| r.unwrap_or(Ok(())))
-                .collect();
-            self.settled.push_back(results);
+            // Every staged request failed on its own: no device commit, but keep the slot in
+            // `in_flight` so results stay ordered with the commits ahead of it.
+            self.in_flight.push_back(InFlight {
+                batch: Bytes::new(),
+                results: st.results,
+                touched: st.touched,
+                pool_budget: st.pool_budget,
+                device: false,
+            });
             return Ok(());
         }
         let len = st.batch.total_len();
@@ -850,14 +931,32 @@ impl<D: BlockDevice> Store<D> {
             results: st.results,
             touched: st.touched,
             pool_budget: st.pool_budget,
+            device: true,
         };
         if done {
+            // Only a device with nothing in flight completes a commit at once.
+            debug_assert!(self.in_flight.is_empty());
             let results = self.finish_in_flight(f)?;
             self.settled.push_back(results);
         } else {
-            self.in_flight = Some(f);
+            self.in_flight.push_back(f);
         }
         Ok(())
+    }
+
+    /// Starts the staged group's commit now, without waiting for the commits in flight to land,
+    /// if the disk has pipelined commits and fewer than `PIPELINE_DEPTH` are in flight (spec
+    /// §6.2). Returns whether it did. [`Self::poll_write_batch`] returns the results of the
+    /// batches in flight in order.
+    pub fn launch_staged(&mut self) -> Result<bool, StoreError> {
+        if self.staged.is_none()
+            || self.in_flight.is_empty()
+            || self.in_flight.len() >= self.pipeline_depth()
+        {
+            return Ok(false);
+        }
+        self.poisoning(Self::promote_staged)?;
+        Ok(true)
     }
 
     /// True if [`Self::stage_writes`] would take this write now: a commit is in flight, the
@@ -880,8 +979,7 @@ impl<D: BlockDevice> Store<D> {
         offset: u64,
         len: u64,
     ) -> Option<(u32, std::ops::RangeInclusive<u64>, u64)> {
-        let f = self.in_flight.as_ref()?;
-        if self.poisoned || len == 0 {
+        if self.in_flight.is_empty() || self.poisoned || len == 0 {
             return None;
         }
         let slot = self.state.slot_of(key).ok()?;
@@ -892,14 +990,17 @@ impl<D: BlockDevice> Store<D> {
         }
         let staged = self.staged.as_ref();
         let busy = |x: u64| {
-            f.touched.contains(&(slot, x))
+            self.in_flight
+                .iter()
+                .any(|f| f.touched.contains(&(slot, x)))
                 || staged.is_some_and(|st| st.touched.contains(&(slot, x)))
         };
         if clusters.clone().any(busy) {
             return None;
         }
         let needed = self.state.pool_needed(slot, clusters.clone());
-        let budget = f.pool_budget + staged.map_or(0, |st| st.pool_budget);
+        let budget = self.in_flight.iter().map(|f| f.pool_budget).sum::<u64>()
+            + staged.map_or(0, |st| st.pool_budget);
         if self.state.pool.free() < budget + needed {
             return None;
         }
@@ -1205,11 +1306,12 @@ impl<D: BlockDevice> Store<D> {
             next += consumed;
             if let Some(f) = flying {
                 if next == pending.len() {
-                    self.in_flight = Some(InFlight {
+                    self.in_flight.push_back(InFlight {
                         batch: f.bytes,
                         results,
                         touched: f.touched,
                         pool_budget: f.pool_budget,
+                        device: true,
                     });
                     return Ok(Started::InFlight);
                 }
@@ -1243,13 +1345,26 @@ impl<D: BlockDevice> Store<D> {
         if self.poisoned {
             return Err(StoreError::Poisoned);
         }
-        if self.in_flight.is_none() {
+        if self.in_flight.is_empty() {
             return Err(StoreError::invalid("no write batch in flight"));
+        }
+        // A front entry with no device I/O completes without waiting.
+        if !self.in_flight.front().expect("in flight").device {
+            let f = self.in_flight.pop_front().expect("in flight");
+            return self
+                .poisoning(|s| {
+                    let results = s.finish_in_flight(f)?;
+                    s.promote_staged()?;
+                    Ok(results)
+                })
+                .map(Some);
         }
         let Some(outcome) = self.dev.poll_commit(wait) else {
             return Ok(None);
         };
-        let f = self.in_flight.take().expect("in flight");
+        // The device reports the oldest commit first.
+        let f = self.in_flight.pop_front().expect("in flight");
+        debug_assert!(f.device);
         // Not `guard`: it would wait for the staged group too.
         self.poisoning(|s| {
             outcome?;
@@ -1263,7 +1378,7 @@ impl<D: BlockDevice> Store<D> {
     /// True from [`Self::start_write_batch`] returning [`Started::InFlight`] until
     /// [`Self::poll_write_batch`] has returned the results of every batch in flight or staged.
     pub fn commit_in_flight(&self) -> bool {
-        self.in_flight.is_some() || self.staged.is_some() || !self.settled.is_empty()
+        !self.in_flight.is_empty() || self.staged.is_some() || !self.settled.is_empty()
     }
 
     /// Plans and commits the longest prefix of `pending` that forms a valid group. Returns how
@@ -1885,14 +2000,19 @@ impl<D: BlockDevice> Store<D> {
 
 /// Whether the redirect-on-write data of every `MapUpdate` in `batch` is on disk, according to
 /// the checksums the records carry.
+/// Whether the redirect-on-write data of `batch` is on the disk, except for the clusters in
+/// `rewritten` ((slot, chunk-relative cluster)), which are not checked.
 fn batch_data_is_durable<D: BlockDevice>(
     dev: &D,
     layout: &Layout,
     batch: &Batch,
+    rewritten: &HashSet<(u32, u64)>,
 ) -> Result<bool, StoreError> {
     let mut buf = vec![0u8; layout.cluster_size as usize];
     for record in batch.records() {
         let Record::MapUpdate {
+            slot,
+            first_cluster,
             count,
             csums_per_cluster,
             phys_first,
@@ -1912,6 +2032,9 @@ fn batch_data_is_durable<D: BlockDevice>(
             ));
         }
         for i in 0..count as usize {
+            if rewritten.contains(&(slot, u64::from(first_cluster) + i as u64)) {
+                continue;
+            }
             dev.read_at(layout.data_cluster_offset(phys_first + i as u64), &mut buf)?;
             let expected = &csums[i * cpc..(i + 1) * cpc];
             if buf

@@ -72,12 +72,11 @@ pub struct ReplicaService<D: BlockDevice> {
     core: ReplicaCore,
     vols: BTreeMap<Uuid, Vol>,
     next_id: VolumeId,
-    /// The group commit in flight, if any.
-    flying: Option<Flying>,
-    /// The next group, staged behind it (see [`ReplicaService::stage`]).
+    /// The group commits in flight, oldest first (several with pipelined commits). A group
+    /// whose requests were all answered without a commit waits here too, for its turn.
+    flying: std::collections::VecDeque<Flying>,
+    /// The next group, staged behind them (see [`ReplicaService::stage`]).
     staged: Option<Flying>,
-    /// Replies of staged groups that needed no commit, for the next polls.
-    ready: std::collections::VecDeque<Vec<Reply>>,
 }
 
 /// What [`ReplicaService::start`] did with a batch of requests.
@@ -128,9 +127,8 @@ impl<D: BlockDevice> ReplicaService<D> {
             core: ReplicaCore::default(),
             vols: BTreeMap::new(),
             next_id: 1,
-            flying: None,
+            flying: std::collections::VecDeque::new(),
             staged: None,
-            ready: std::collections::VecDeque::new(),
         };
         for c in s.store.chunks() {
             let id = s.vol_id(c.key.volume, c.volume_size, c.chunk_size);
@@ -400,7 +398,7 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// holds their replies for their own commit, which starts as soon as the one in flight is
     /// durable. Returns how many items it took; the rest wait, in order.
     pub fn stage(&mut self, items: &[(SessionRef, Frame)]) -> usize {
-        if self.flying.is_none() {
+        if self.flying.is_empty() {
             return 0;
         }
         let mut taken = 0;
@@ -483,14 +481,22 @@ impl<D: BlockDevice> ReplicaService<D> {
         taken
     }
 
-    /// The replies to the requests the commit in flight held back, once it is durable (with
-    /// `wait`, waits for it). `None` while it is still in flight. A group staged behind it is in
-    /// flight after this, and the next poll answers it.
+    /// The replies to the requests the oldest commit in flight held back, once it is durable
+    /// (with `wait`, waits for it). `None` while it is still in flight. A group staged behind
+    /// the commits in flight joins them when the oldest lands (its commit starts then), and a
+    /// later poll answers it.
     pub fn poll(&mut self, wait: bool) -> Option<Vec<Reply>> {
-        if let Some(replies) = self.ready.pop_front() {
-            return Some(replies);
+        let f = self.flying.front()?;
+        if f.writes.is_empty() {
+            // Answered without a commit: its turn has come.
+            let f = self.flying.pop_front().expect("in flight");
+            return Some(
+                f.replies
+                    .into_iter()
+                    .map(|r| r.expect("answered"))
+                    .collect(),
+            );
         }
-        let f = self.flying.as_ref()?;
         let results = match self.store.poll_write_batch(wait) {
             Ok(None) => return None,
             Ok(Some(r)) => r,
@@ -499,20 +505,10 @@ impl<D: BlockDevice> ReplicaService<D> {
         let Flying {
             mut replies,
             writes,
-        } = self.flying.take().expect("in flight");
-        // The staged group's commit started with this one's end: it is in flight now. With no
-        // store request staged (all of them answered already), it has no commit and is done.
+        } = self.flying.pop_front().expect("in flight");
+        // The store started the staged group's commit with this one's landing.
         if let Some(st) = self.staged.take() {
-            if st.writes.is_empty() {
-                self.ready.push_back(
-                    st.replies
-                        .into_iter()
-                        .map(|r| r.expect("answered"))
-                        .collect(),
-                );
-            } else {
-                self.flying = Some(st);
-            }
+            self.flying.push_back(st);
         }
         for ((at, req), r) in writes.into_iter().zip(results) {
             fill(&mut replies[at], req, r);
@@ -525,15 +521,34 @@ impl<D: BlockDevice> ReplicaService<D> {
         )
     }
 
-    /// True while a commit is in flight (or staged replies wait to be handed out).
+    /// True while a commit is in flight.
     pub fn commit_in_flight(&self) -> bool {
-        self.flying.is_some() || !self.ready.is_empty()
+        !self.flying.is_empty()
+    }
+
+    /// Starts the staged group's commit now, behind the commits in flight, if the store can
+    /// (pipelined commits, below their depth: `Store::launch_staged`). Returns whether it did.
+    pub fn launch(&mut self) -> bool {
+        match &self.staged {
+            Some(st) if !st.writes.is_empty() => {}
+            // Nothing for the store to commit: it waits for the next landing.
+            _ => return false,
+        }
+        match self.store.launch_staged() {
+            Ok(true) => {
+                let st = self.staged.take().expect("staged");
+                self.flying.push_back(st);
+                true
+            }
+            // A store failure shows at the next poll.
+            Ok(false) | Err(_) => false,
+        }
     }
 
     /// The progress of `start` when a commit stays in flight: the requests up to its first
     /// write are answered; those up to `handled` are held for it.
     fn held(&mut self, replies: Vec<Option<Reply>>, handled: usize) -> Progress {
-        let f = self.flying.as_mut().expect("a commit in flight");
+        let f = self.flying.back_mut().expect("a commit in flight");
         let first = f.writes.first().expect("a commit has writes").0;
         let mut replies = replies;
         replies.truncate(handled);
@@ -582,7 +597,7 @@ impl<D: BlockDevice> ReplicaService<D> {
             .collect();
         let results: Vec<Result<(), StoreError>> = match started {
             Ok(Started::InFlight) => {
-                self.flying = Some(Flying {
+                self.flying.push_back(Flying {
                     replies: Vec::new(),
                     writes,
                 });

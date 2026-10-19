@@ -83,7 +83,7 @@ higher `sb_generation`, and if the generations are equal it uses A.
 | 12 | 4 | `sb_size` | 4096 |
 | 16 | 8 | `features_compat` | Unknown bits: ignore |
 | 24 | 8 | `features_ro_compat` | Unknown bits: open read-only |
-| 32 | 8 | `features_incompat` | Unknown bits: refuse to open |
+| 32 | 8 | `features_incompat` | Unknown bits: refuse to open. Bit 0: pipelined commits (§6.2) |
 | 40 | 16 | `disk_uuid` | |
 | 56 | 16 | `cluster_uuid` | The Flaminio cluster this disk belongs to |
 | 72 | 8 | `format_nonce` | §1 |
@@ -296,6 +296,41 @@ because every later batch was written after the previous flush had completed. Re
 A cluster that happened to contain the right bytes already passes the check, and that is
 correct, because the contents are what the record describes.
 
+**Pipelined commits (incompat feature bit 0).** With the bit set, up to **D = 4** batches may be
+committing at once, so their flushes overlap. A reader that does not know the bit refuses the
+disk: its replay would check only the last batch's data.
+
+- **Write ordering:**
+  1. Batch *k* (with its data) may be written once the flush of batch *k − D* has completed.
+  2. The flush of batch *k* is issued only after the writes of batch *k*, and of every batch
+     before it, have completed.
+  3. Batch *k* is committed when its flush completes, and batches are acknowledged in order.
+
+  Rule 2 means that a completed flush makes its batch and every earlier batch durable.
+- **Replay** applies every batch except the last *D* unconditionally. Then it checks the last
+  *D* in order, as above. It applies each whose data matches, and ends the log at the first
+  that does not match.
+  - It does not check a cluster that a later batch of the log rewrites in place
+    (`DeferredWrite`): the in-place write may have changed it.
+  - That cluster's batch is durable anyway. A batch never touches clusters of a batch still
+    committing, so the later one was written after the earlier one's flush had completed.
+- **After replay,** the next batch's sequence number skips *D* (the checkpoint written at open
+  records it as `journal_start_seq`), instead of zeroing rejected batches.
+  - A stale batch can be a rejected one, or one beyond a lost batch, whose journal write may have
+    survived while an earlier one's did not.
+  - Every stale batch has a sequence number below the next one replay expects, so it is never
+    accepted, wherever it lies.
+- **Why it is correct:**
+  - By rule 1, when the last batch *N* in the log was written, the flush of *N − D* had
+    completed: every batch up to *N − D* is durable with its data. Only the last *D* can lack
+    theirs.
+  - If a batch *k* lacks its data, no flush issued after its writes completed had completed.
+    By rule 2, then, no batch from *k* on was acknowledged, and ending the log at *k* loses
+    nothing that was acknowledged.
+- **Setting the bit:** the store sets it when it opens a disk it will pipeline on, right after
+  recovery, before any pipelined batch. It writes both superblock copies with the next
+  `sb_generation` and flushes after each.
+
 **Reuse of freed space.** A data cluster or page-pool pair freed by a record must not be reused
 until a checkpoint that includes the record has **completed**. Being durable in the journal is
 not enough. Replay redoes `DeferredWrite` records in place, so if a freed cluster were reused
@@ -341,7 +376,9 @@ reference counts. Linked clones (phase 3) will add a cross-slot reference type.
 3. Load the bitmaps and the chunk headers (and, lazily, the page tables and map pages), always
    choosing slots with `seq ≤ K`.
 4. Replay the journal from the checkpoint's start until the end of the log (§6.2). Apply each
-   record to the in-memory state, including redoing `DeferredWrite` data in place.
+   record to the in-memory state, including redoing `DeferredWrite` data in place. With
+   pipelined commits (incompat bit 0), check the last *D* batches' data, and skip *D* sequence
+   numbers (§6.2).
 5. Write a new checkpoint `K+1`.
 
 ## 8. Known costs and limits (v1)

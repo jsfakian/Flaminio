@@ -1,0 +1,14 @@
+rep	side	job	phase	round	IOPS	MiB/s	p50	p99	read_IOPS
+1	raw	randwrite-4k-qd1	fresh	0	142	0.5	6455	12517	0
+1	raw	randwrite-4k-qd1	round	1	287	1.1	3194	6717	0
+1	raw	randwrite-4k-qd1	round	2	462	1.8	1925	5341	0
+1	raw	randwrite-4k-qd1	round	3	472	1.8	1941	5341	0
+1	raw	randwrite-4k-qd1	round	4	472	1.8	1941	5406	0
+1	raw	randwrite-4k-qd1	round	5	467	1.8	1925	5406	0
+1	raw	randwrite-4k-qd1	round	6	474	1.8	1941	5341	0
+1	flaminio	randwrite-4k-qd1	fresh	0	140	0.5	6586	12517	0
+1	flaminio	randwrite-4k-qd1	round	1	385	1.5	2244	5734	0
+1	flaminio	randwrite-4k-qd1	round	2	399	1.5	2244	5668	0
+1	flaminio	randwrite-4k-qd1	round	3	387	1.5	2244	5668	0
+1	flaminio	randwrite-4k-qd1	round	4	395	1.5	2244	5734	0
+1	flaminio	randwrite-4k-qd1	round	5	365	1.4	2277	5734	0
