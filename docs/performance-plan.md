@@ -8,7 +8,7 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## Status (2026-10-16)
+## Status (2026-10-19)
 
 R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)). Measured on fl-b at 4 vCPUs,
 against raw on 16 GiB spans of the same disk, caches dropped before every job, medians of 3
@@ -70,7 +70,20 @@ integrity checks, all clean.
 Replication costs 5–8% on small writes: the peer commits in parallel with the local
 replica. At 1M, RF 2 runs at the link's speed, the plan's bound.
 
-Next: W4.2, overlapped commits, for 1M at RF 1.
+**After W4.2 (2026-10-19):** overlapped commits ([results](benchmarks/2026-10-19-writes-rf1-w42.md)).
+36 integrity checks, all clean.
+
+| Write job, O_DSYNC, RF 1 | Raw | W4.1 | **W4.2** | Share of raw |
+|---|---:|---:|---:|---:|
+| 4K random, QD1 | 463 IOPS | 409 | **396** | 86% |
+| 4K random, QD32 | 7 927 IOPS | 10 236 | **9 847** | **124%** |
+| 70/30 random, 4K QD32 | 23 686 IOPS | 26 534 | **26 317** | **111%** |
+| 1M sequential, QD8 | 1 655–1 967 MiB/s (about 1 000 outside the drive's cache) | 541 | **701** | about 70% |
+
+**Where writes stand against the plan's bound** (≥ 80% of raw O_DSYNC):
+- **Met:** QD1, QD32 and the mixed job.
+- **1M is at about 70%** of raw written outside the drive's cache. The flush, one per commit,
+  limits it now.
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
@@ -333,7 +346,8 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
        disk.
      - 4K QD32 at 10 136 IOPS and the 70/30 mix at 25 760, as with W4.1.
      - 10 minutes of 1M: 590–720 MiB/s sustained, against 500–560.
-   - **In progress:** the full RF 1 campaign on this build.
+   - **Full campaign** ([results](benchmarks/2026-10-19-writes-rf1-w42.md)): 1M sequential at
+     701 MiB/s, up 30%; QD1, QD32 and the mixed job as with W4.1.
 3. **Zero-copy writes** (performance item 1.3): the data goes from the request to the store
    and the network without a copy into a `Vec`.
 4. **Several queues for writes** (R4 brings them for reads).
