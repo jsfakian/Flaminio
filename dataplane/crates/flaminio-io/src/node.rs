@@ -62,6 +62,9 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --pipelined-commits  up to 4 commits in flight (spec §6.2): for measuring. Off by
                            default; opening with this sets the on-disk feature. A disk that
                            already has it still recovers by its rules without this flag
+      --defer-taskrun      EXPERIMENT: queue rings with IORING_SETUP_SINGLE_ISSUER and
+                           DEFER_TASKRUN (completion work runs only when the queue thread asks
+                           for events). Not with --poll-us
       --first-fit          new data goes to the lowest free clusters, reusing freed space,
                            instead of continuing from the last allocation: for comparing
       --id N               ublk device id (default: first free)
@@ -96,6 +99,7 @@ pub(crate) struct NodeConfig {
     pub sync_commits: bool,
     pub pipelined_commits: bool,
     pub first_fit: bool,
+    pub defer_taskrun: bool,
 }
 
 fn parse(args: &[String]) -> Result<NodeConfig, String> {
@@ -124,6 +128,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         sync_commits: false,
         pipelined_commits: false,
         first_fit: false,
+        defer_taskrun: false,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -162,6 +167,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
             "--sync-commits" => c.sync_commits = true,
             "--pipelined-commits" => c.pipelined_commits = true,
             "--first-fit" => c.first_fit = true,
+            "--defer-taskrun" => c.defer_taskrun = true,
             "--queues" => {
                 c.queues = value()?.parse().map_err(|_| "invalid --queues")?;
                 if c.queues == 0 || c.queues > 64 {
@@ -185,6 +191,11 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
     // A write or read travels as one frame of at most 1 MiB of data.
     if c.io_buf == 0 || c.io_buf > (1 << 20) || !c.io_buf.is_multiple_of(4096) {
         return Err("--io-buf must be a multiple of 4K, at most 1M".into());
+    }
+    if c.defer_taskrun && c.poll_us != 0 {
+        // Polling checks the ring without entering the kernel, where deferred completion work
+        // would run.
+        return Err("--defer-taskrun does not work with --poll-us".into());
     }
     Ok(c)
 }

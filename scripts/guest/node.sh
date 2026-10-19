@@ -52,6 +52,7 @@ up() {
     [[ ${SYNC_COMMITS:-0} == 1 ]] && args+=(--sync-commits)
     [[ ${PIPELINED_COMMITS:-0} == 1 ]] && args+=(--pipelined-commits)
     [[ ${FIRST_FIT:-0} == 1 ]] && args+=(--first-fit)
+    [[ ${DEFER_TASKRUN:-0} == 1 ]] && args+=(--defer-taskrun)
     if [[ -n ${ATTACH:-} ]]; then
         sudo install -d -m 700 /run/flaminio
         echo "${TOKEN:?}" | base64 -d | sudo tee "/run/flaminio/$ATTACH.token" >/dev/null

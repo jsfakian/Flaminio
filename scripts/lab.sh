@@ -653,7 +653,7 @@ meta_endpoints() {
 
 node_env() {
     local vm=$1
-    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0} GATHER_US=${GATHER_US:-} SYNC_COMMITS=${SYNC_COMMITS:-0} PIPELINED_COMMITS=${PIPELINED_COMMITS:-0} FIRST_FIT=${FIRST_FIT:-0}"
+    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0} GATHER_US=${GATHER_US:-} SYNC_COMMITS=${SYNC_COMMITS:-0} PIPELINED_COMMITS=${PIPELINED_COMMITS:-0} FIRST_FIT=${FIRST_FIT:-0} DEFER_TASKRUN=${DEFER_TASKRUN:-0}"
 }
 
 # node up|down|status [VM selector, default all]: the data VMs' nodes, replicas only.
@@ -1394,7 +1394,7 @@ cmd_bench_reads() {
     local node mode=${MODE:-zero-copy} reps=${REPS:-3} runtime=${RUNTIME:-30} span=16G
     local dir raw zc=0 r spec name rw bs qd side dev off row t0 t1 since
     node=$(vms_of "${NODE:-b}")
-    local nv=0 flags want queues=${QUEUES:-1} poll=${POLL_US:-0} jobs=${NUMJOBS:-1}
+    local nv=0 flags want queues=${QUEUES:-1} poll=${POLL_US:-0} jobs=${NUMJOBS:-1} defer=${DEFER_TASKRUN:-0}
     case $mode in
         zero-copy) zc=1 ;;
         verify) ;;
@@ -1406,14 +1406,15 @@ cmd_bench_reads() {
     ((nv)) && want+="--no-verify "
     ((queues != 1)) && want+="--queues $queues "
     ((poll != 0)) && want+="--poll-us $poll "
-    dir="$LOCAL_STATE_DIR/bench/reads-$mode-q$queues-poll$poll-jobs$jobs-$(date +%Y%m%dT%H%M%S)"
+    ((defer)) && want+="--defer-taskrun "
+    dir="$LOCAL_STATE_DIR/bench/reads-$mode-q$queues-poll$poll-jobs$jobs-defer$defer-$(date +%Y%m%dT%H%M%S)"
     mkdir -p "$dir"
     release_lab_volume
     # The node runs in the mode asked for: restart it if not.
-    flags=$(vssh "$node" "systemctl show -p ExecStart --value flaminio-node | grep -o -- '--zero-copy\|--no-verify\|--queues [0-9]*\|--poll-us [0-9]*' | tr '\n' ' '" || true)
+    flags=$(vssh "$node" "systemctl show -p ExecStart --value flaminio-node | grep -o -- '--zero-copy\|--no-verify\|--queues [0-9]*\|--poll-us [0-9]*\|--defer-taskrun' | tr '\n' ' '" || true)
     if [[ $flags != "$want" ]] || ! vssh "$node" "systemctl is-active --quiet flaminio-node"; then
         log "$node: node in $mode mode"
-        ZERO_COPY=$zc NO_VERIFY=$nv QUEUES=$queues POLL_US=$poll cmd_node up "$(vms_of "$node")" >/dev/null
+        ZERO_COPY=$zc NO_VERIFY=$nv QUEUES=$queues POLL_US=$poll DEFER_TASKRUN=$defer cmd_node up "$(vms_of "$node")" >/dev/null
     fi
     ensure_nodes
     cmd_vol attach "${node#fl-}" >/dev/null

@@ -519,6 +519,8 @@ struct Shared {
     verify: bool,
     /// How long a queue thread checks its ring without sleeping after a completion.
     poll: Duration,
+    /// Queue rings with SINGLE_ISSUER and DEFER_TASKRUN (an experiment).
+    defer_taskrun: bool,
     /// Per queue: what wakes its thread when another thread completes one of its operations.
     /// Queue 0's is the node's eventfd, which the network and metadata threads signal too.
     wakes: Vec<Arc<EventFd>>,
@@ -883,6 +885,7 @@ fn run_device(
         dev_id: ctrl.dev_info().dev_id as i32,
         verify,
         poll: Duration::from_micros(c.poll_us),
+        defer_taskrun: c.defer_taskrun,
         wakes,
     });
     let (qshared, zero_copy) = (shared.clone(), c.zero_copy);
@@ -938,6 +941,27 @@ fn run_device(
 /// Serves one ublk queue on this thread: its tag tasks, its wake-ups, and on queue 0 the
 /// engine's ticks.
 fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Result<(), String> {
+    if ctx.shared.defer_taskrun {
+        // The queue's ring, as libublk would build it (its sizes), plus SINGLE_ISSUER and
+        // DEFER_TASKRUN: completion work runs only when this thread asks for events, instead
+        // of interrupting it.
+        let (sq, cq) = (u32::from(dev.tgt.sq_depth), u32::from(dev.tgt.cq_depth));
+        libublk::ublk_init_task_ring(|cell| {
+            if cell.get().is_none() {
+                let ring = io_uring::IoUring::builder()
+                    .setup_cqsize(cq)
+                    .setup_coop_taskrun()
+                    .setup_single_issuer()
+                    .setup_defer_taskrun()
+                    .build(sq)
+                    .map_err(UblkError::IOError)?;
+                cell.set(RefCell::new(ring))
+                    .map_err(|_| UblkError::OtherError(-libc::EEXIST))?;
+            }
+            Ok(())
+        })
+        .map_err(|e| format!("queue ring: {e}"))?;
+    }
     let q = Rc::new(UblkQueue::new(qid, dev).map_err(|e| format!("ublk queue: {e}"))?);
     let depth = dev.dev_info.queue_depth;
     let buf_bytes = dev.dev_info.max_io_buf_bytes as usize;
