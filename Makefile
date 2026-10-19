@@ -222,9 +222,10 @@ bench-writes: ## Writes against raw O_DSYNC, each run from an empty, reset disk 
 	    JOBS='$(if $(filter file,$(origin JOBS)),.,$(JOBS))' $(LAB) bench-writes
 
 .PHONY: bench-reads
-bench-reads: ## vol1 against the same 16 GiB of the raw disk, by the plan's rules (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30, QUEUES=1, POLL_US=0, NUMJOBS=1)
+bench-reads: ## vol1 against the same 16 GiB of the raw disk (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30, QUEUES=1, POLL_US=0, NUMJOBS=1, DEFER_TASKRUN=0, JOBS=regex)
 	MODE=$(or $(MODE),zero-copy) NODE=$(or $(NODE),b) REPS=$(or $(REPS),3) RUNTIME=$(RUNTIME) FILL=$(FILL) \
-	    QUEUES=$(or $(QUEUES),1) POLL_US=$(or $(POLL_US),0) NUMJOBS=$(or $(NUMJOBS),1) $(LAB) bench-reads
+	    QUEUES=$(or $(QUEUES),1) POLL_US=$(or $(POLL_US),0) NUMJOBS=$(or $(NUMJOBS),1) \
+	    DEFER_TASKRUN=$(or $(DEFER_TASKRUN),0) JOBS='$(if $(filter file,$(origin JOBS)),.,$(JOBS))' $(LAB) bench-reads
 
 .PHONY: bench-pod
 bench-pod: ## Reads from a pod with a 16 GiB Flaminio volume (NODE=fl-b, RUNTIME=30), against the node's raw disk

@@ -1,0 +1,15 @@
+randwrite-4k-qd32 rep 1
+  sequential: 16 GiB written, 16 GiB read back and checked, errors 0
+  random: 2 GiB written, 2 GiB read back and checked, errors 0
+  random, after a restart: 2 GiB read back and checked, errors 0
+  Flaminio checksum failures: 0
+write-1m-qd8 rep 1
+  sequential: 16 GiB written, 16 GiB read back and checked, errors 0
+  random: 2 GiB written, 2 GiB read back and checked, errors 0
+  random, after a restart: 2 GiB read back and checked, errors 0
+  Flaminio checksum failures: 0
+randrw-70-30-4k-qd32 rep 1
+  sequential: 16 GiB written, 16 GiB read back and checked, errors 0
+  random: 2 GiB written, 2 GiB read back and checked, errors 0
+  random, after a restart: 2 GiB read back and checked, errors 0
+  Flaminio checksum failures: 0

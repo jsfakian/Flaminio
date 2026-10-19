@@ -1,15 +1,15 @@
-# Writes, RF 1, pipelined commits: short validation (2026-10-19)
+# Writes, RF 1, pipelined commits: short validations (2026-10-19)
 
-Comparison A after enabling up to 4 commits in flight (spec §6.2), on the W4.3
-zero-copy build plus the uncommitted pipelining work. Same method as the
-[W4.3 validation](2026-10-19-writes-rf1-w43.md): one repetition, not a campaign.
+Comparison A with up to 4 commits in flight (spec §6.2), on the W4.3 zero-copy build.
+Same method as the [W4.3 validation](2026-10-19-writes-rf1-w43.md): one repetition, not a
+campaign.
 
-**Verdict: not a win.** 1M sequential fell about 20%. Pipelined commits stay off by
-default (`--pipelined-commits` / `PIPELINED_COMMITS=1` to opt in).
+**Verdict: not a win.** Pipelined commits stay **off by default**
+(`--pipelined-commits` / `PIPELINED_COMMITS=1` to opt in).
 
-## Results
+## First try: launch every staged group
 
-Steady state, one repetition:
+Steady state, one repetition (build that launched as soon as anything was staged):
 
 | Job | W4.3 | **Pipeline** | Notes |
 |---|---:|---:|---|
@@ -20,15 +20,26 @@ Steady state, one repetition:
 
 Integrity: 4 Flaminio runs, 12 checks, 0 errors, 0 checksum failures.
 
-## 1M sequential
-
-Rounds for Flaminio (MiB/s): fresh 382; then **745**, 531, 566, 541, 547, 557.
-Steady window means **548**. Round 1 nearly matched W4.2/W4.3; later rounds sat near
-W4.1 (541).
-
-**Likely cause:** the engine launched every staged group as soon as anything was
-staged, so gathering never filled a ~4 MiB batch before the next flush. Concurrent
-flushes on the file-backed disk then cost more than they gained. A gather-before-launch
-change is in the tree for a later re-measure with `PIPELINED_COMMITS=1`.
+1M rounds (MiB/s): fresh 382; then **745**, 531, 566, 541, 547, 557 → steady **548**.
+Gathering was bypassed; concurrent flushes on the file-backed disk cost more than they
+gained.
 
 Data: [`.lab/bench/writes-rf1-20261019T151438`](../../.lab/bench/writes-rf1-20261019T151438).
+
+## Re-measure: gather before launch
+
+Same flag, with the engine waiting the gather window before launching a staged group
+(`debc3c8` lineage). Jobs matched by `qd32|write-1m` (so QD32, 1M, and the 70/30 mix):
+
+| Job | W4.3 | **Gather then launch** |
+|---|---:|---:|
+| 4K random, QD32 | 10 512 | **10 229** |
+| 70/30 random, 4K QD32 | 27 112 | **26 133** (106% of raw) |
+| 1M sequential, QD8 | 697 | **588** |
+
+Integrity: 3 Flaminio runs, 9 checks, 0 errors, 0 checksum failures.
+
+1M rounds (MiB/s): fresh 478; then **812**, 549, 587, 620, 589, 597 → steady **588**.
+Better than 548, still short of W4.3. Leave opt-in.
+
+Data: [`data/2026-10-19-writes-rf1-pipeline-gather/`](data/2026-10-19-writes-rf1-pipeline-gather/).

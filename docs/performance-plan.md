@@ -379,12 +379,10 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
      - RF 2, 4K QD1: 386 IOPS, as with W4.1.
      - 4 integrity runs, 12 checks: 0 errors, 0 checksum failures.
 
-   **Pipelined commits (tried 2026-10-19):** up to 4 commits in flight. Short validation
-   ([results](benchmarks/2026-10-19-writes-rf1-pipeline.md)): 1M sequential **548 MiB/s**
-   against W4.3's 697 (about −20%); small writes flat; integrity clean. The first
-   implementation launched every staged group at once and bypassed gathering. **Off by
-   default** (`--pipelined-commits`). Gather-before-launch is coded for a re-measure; not
-   claimed done until 1M beats W4.3.
+   **Pipelined commits (tried 2026-10-19):** up to 4 commits in flight
+   ([results](benchmarks/2026-10-19-writes-rf1-pipeline.md)). Launch-every-stage: 1M at
+   **548 MiB/s**. Gather-before-launch: **588 MiB/s**. Both below W4.3's 697; small writes
+   flat; integrity clean. **Off by default** (`--pipelined-commits`); leave opt-in.
 4. **Several queues for writes** (R4 brings them for reads).
 5. **Write amplification:** journal writes for large sequential writes. Large aligned writes
    could bypass the journal (written in place, then one metadata update).

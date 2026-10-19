@@ -1428,11 +1428,13 @@ cmd_bench_reads() {
     log "warm-up read of $VOL (waits for reconciliation after a restart)"
     run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" warm /dev/ublkb1 "$span"
 
-    log "$node, $mode, $queues queue(s), ${poll} us polling, $jobs fio job(s), $(vssh "$node" nproc) vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
+    local filter=${JOBS:-.}
+    log "$node, $mode, $queues queue(s), ${poll} us polling, $jobs fio job(s), defer=$defer, filter=$filter, $(vssh "$node" nproc) vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
     printf 'rep\tside\tjob\tIOPS\tMiB/s\tp50\tp99\tfio_cpu\tqueue_cpu\ttemp\n' >"$dir/runs.tsv"
     for r in $(seq 1 "$reps"); do
         for spec in "randread-4k-qd1 randread 4k 1" "randread-4k-qd32 randread 4k 32" "read-1m-qd8 read 1m 8"; do
             read -r name rw bs qd <<<"$spec"
+            [[ $name =~ $filter ]] || continue
             for side in raw flaminio; do
                 # The raw disk reads at different speeds in different regions (6.4–6.7 GB/s
                 # sequential on fl-b), and the store's data is spread over all of them: each
