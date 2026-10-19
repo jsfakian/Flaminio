@@ -7,6 +7,7 @@ use std::io::{self, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 
+use bytes::Bytes;
 use flaminio_format::consts::{BLOCK_SIZE, BLOCK_SIZE_U64};
 
 /// A device with positioned I/O and an explicit cache flush.
@@ -40,8 +41,8 @@ pub trait BlockDevice {
     /// flush of a commit already in flight need not wait for them.
     ///
     /// The default writes them before returning.
-    fn start_writes(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
-        self.write_many(writes)
+    fn start_writes(&self, writes: &[(u64, Bytes)]) -> io::Result<()> {
+        self.write_many(&as_slices(writes))
     }
 
     /// Starts a commit's I/O: writes `writes` (as [`write_many`](Self::write_many)), then
@@ -51,8 +52,8 @@ pub trait BlockDevice {
     /// [`poll_commit`](Self::poll_commit) reports its outcome. At most one commit is in flight.
     ///
     /// The default does it all before returning.
-    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
-        self.write_many(writes)?;
+    fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
+        self.write_many(&as_slices(writes))?;
         self.flush()?;
         Ok(true)
     }
@@ -91,11 +92,11 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &D {
         (**self).read_many(reads)
     }
 
-    fn start_writes(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+    fn start_writes(&self, writes: &[(u64, Bytes)]) -> io::Result<()> {
         (**self).start_writes(writes)
     }
 
-    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+    fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
         (**self).start_commit(writes)
     }
 
@@ -129,17 +130,22 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
         (**self).read_many(reads)
     }
 
-    fn start_writes(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+    fn start_writes(&self, writes: &[(u64, Bytes)]) -> io::Result<()> {
         (**self).start_writes(writes)
     }
 
-    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+    fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
         (**self).start_commit(writes)
     }
 
     fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
         (**self).poll_commit(wait)
     }
+}
+
+/// Borrowed views of shared writes, for [`BlockDevice::write_many`].
+fn as_slices(writes: &[(u64, Bytes)]) -> Vec<(u64, &[u8])> {
+    writes.iter().map(|(o, d)| (*o, &d[..])).collect()
 }
 
 /// Adapter so the format crate's journal scanner can read from any [`BlockDevice`].
@@ -453,7 +459,7 @@ impl BlockDevice for DeferredDevice {
         self.inner.flush()
     }
 
-    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+    fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
         let mut p = self.pending.borrow_mut();
         assert!(p.is_none(), "one commit in flight at a time");
         *p = Some(writes.iter().map(|(o, d)| (*o, d.to_vec())).collect());

@@ -350,7 +350,7 @@ fn replicated_volume_through_a_replica_failure() {
             i as u64,
             Io::Write {
                 offset: off,
-                data: pattern(seed, len),
+                data: pattern(seed, len).into(),
             },
         );
     }
@@ -374,7 +374,7 @@ fn replicated_volume_through_a_replica_failure() {
         10,
         Io::Write {
             offset: 2 * MIB,
-            data: pattern(4, 64 << 10),
+            data: pattern(4, 64 << 10).into(),
         },
     );
     eprintln!("write with fl-b deaf completed after {:?}", t.elapsed());
@@ -529,7 +529,7 @@ fn direct_reads_from_the_local_replica() {
             op: 1,
             io: Io::Write {
                 offset: off,
-                data: pattern(9, 2 * MIB),
+                data: pattern(9, 2 * MIB).into(),
             },
         },
     );
@@ -608,7 +608,7 @@ fn direct_reads_from_the_local_replica() {
             op: 3,
             io: Io::Write {
                 offset: off,
-                data: pattern(10, 2 * MIB),
+                data: pattern(10, 2 * MIB).into(),
             },
         },
     );
@@ -765,7 +765,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         1,
         Io::Write {
             offset: 0,
-            data: pattern(1, 64 * 1024),
+            data: pattern(1, 64 * 1024).into(),
         },
     );
     assert!(
@@ -779,7 +779,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         2,
         Io::Write {
             offset: MIB,
-            data: pattern(2, 64 * 1024),
+            data: pattern(2, 64 * 1024).into(),
         },
     );
     io(
@@ -841,7 +841,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
                 op,
                 io: Io::Write {
                     offset: at(i),
-                    data: pattern(op as u8, cluster),
+                    data: pattern(op as u8, cluster).into(),
                 },
             },
         );

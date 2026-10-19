@@ -256,7 +256,7 @@ fn group_commit_orders_overlaps_and_isolates_failures() {
         WriteReq {
             key: key(0),
             offset: 3 * 4096,
-            data: &a,
+            data: (&a).into(),
             write_seq: 2,
             epoch: 1,
         },
@@ -264,14 +264,14 @@ fn group_commit_orders_overlaps_and_isolates_failures() {
         WriteReq {
             key: key(0),
             offset: 3 * 4096,
-            data: &b,
+            data: (&b).into(),
             write_seq: 3,
             epoch: 1,
         },
         WriteReq {
             key: key(0),
             offset: 500 * 4096,
-            data: &c,
+            data: (&c).into(),
             write_seq: 4,
             epoch: 1,
         },
@@ -279,14 +279,14 @@ fn group_commit_orders_overlaps_and_isolates_failures() {
         WriteReq {
             key: key(1),
             offset: 0,
-            data: &d,
+            data: (&d).into(),
             write_seq: 5,
             epoch: 4,
         },
         WriteReq {
             key: key(0),
             offset: 7,
-            data: &d,
+            data: (&d).into(),
             write_seq: 6,
             epoch: 1,
         },
@@ -346,7 +346,7 @@ fn group_commit_shares_flushes() {
         .map(|i| WriteReq {
             key: key(0),
             offset: i * 32 * 4096,
-            data: &data[i as usize],
+            data: (&data[i as usize]).into(),
             write_seq: 2 + i,
             epoch: 1,
         })
@@ -354,7 +354,7 @@ fn group_commit_shares_flushes() {
 
     let before = s.device().flushes();
     for r in &reqs {
-        s.write(r.key, r.offset, r.data, r.write_seq, 1).unwrap();
+        s.write(r.key, r.offset, &r.data, r.write_seq, 1).unwrap();
     }
     let one_by_one = s.device().flushes() - before;
 

@@ -9,6 +9,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
+use bytes::Bytes;
 use flaminio_store::BlockDevice;
 use io_uring::{IoUring, opcode, types};
 
@@ -46,7 +47,7 @@ pub struct UringDevice {
 struct Commits {
     /// Writes in flight, by tag: their buffers (the kernel's to read until they complete) and
     /// the commit they belong to.
-    writes: HashMap<u64, (AlignedBuf, u64)>,
+    writes: HashMap<u64, (Held, u64)>,
     next_tag: u64,
     /// The commit the next writes belong to: the next one to start.
     next_gen: u64,
@@ -54,6 +55,31 @@ struct Commits {
     errors: BTreeMap<u64, io::Error>,
     /// The commit in flight, and where its flush is.
     current: Option<(u64, Flush)>,
+}
+
+/// A buffer the kernel reads for a write in flight.
+enum Held {
+    /// Shared and already aligned: written as is.
+    Shared(Bytes),
+    /// An aligned copy.
+    Copied(AlignedBuf),
+}
+
+impl Held {
+    fn new(data: &Bytes, direct: bool) -> Self {
+        if !direct || is_aligned(data) {
+            Held::Shared(data.clone())
+        } else {
+            Held::Copied(AlignedBuf::copy_of(data))
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Held::Shared(b) => b,
+            Held::Copied(b) => b,
+        }
+    }
 }
 
 enum Flush {
@@ -235,12 +261,14 @@ impl std::os::fd::AsRawFd for UringDevice {
 }
 
 impl UringDevice {
-    /// Copies `writes` and submits them on the commit ring, as part of commit `generation`.
+    /// Submits `writes` on the commit ring, as part of commit `generation`. Aligned shared
+    /// buffers are written as they are (a reference is held until completion); others are
+    /// copied into aligned buffers.
     fn submit_commit_writes(
         &self,
         st: &mut Commits,
         ring: &mut IoUring,
-        writes: &[(u64, &[u8])],
+        writes: &[(u64, Bytes)],
         generation: u64,
     ) -> io::Result<()> {
         let lens = writes
@@ -251,16 +279,18 @@ impl UringDevice {
         {
             let mut sq = ring.submission();
             for ((offset, data), len) in writes.iter().zip(lens) {
-                let buf = AlignedBuf::copy_of(data);
+                let buf = Held::new(data, self.direct);
                 let tag = st.next_tag;
                 st.next_tag += 1;
-                let entry = opcode::Write::new(fd, buf.as_ptr(), len)
+                let entry = opcode::Write::new(fd, buf.bytes().as_ptr(), len)
                     .offset(*offset)
                     .build()
                     .user_data(tag);
-                // SAFETY: the buffer moves into `st.writes` below and stays there until this
-                // operation's completion is reaped (`reap_commits`, also on drop). The callers
-                // keep fewer than QUEUE_DEPTH operations in flight on this ring: it fits.
+                // SAFETY: the buffer (an owned copy, or a reference to immutable shared bytes)
+                // moves into `st.writes` below and stays there until this operation's
+                // completion is reaped (`reap_commits`, also on drop); moving a `Held` does not
+                // move the bytes it points to. The callers keep fewer than QUEUE_DEPTH
+                // operations in flight on this ring: it fits.
                 unsafe { sq.push(&entry).expect("fits the commit ring") };
                 st.writes.insert(tag, (buf, generation));
             }
@@ -284,12 +314,13 @@ impl UringDevice {
             let Some((buf, generation)) = st.writes.remove(&tag) else {
                 continue;
             };
+            let len = buf.bytes().len();
             let error = if res < 0 {
                 Some(io::Error::from_raw_os_error(-res))
-            } else if res as usize != buf.len() {
+            } else if res as usize != len {
                 Some(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
-                    format!("short commit write: {res} of {} bytes", buf.len()),
+                    format!("short commit write: {res} of {len} bytes"),
                 ))
             } else {
                 None
@@ -400,11 +431,12 @@ impl BlockDevice for UringDevice {
 
     /// Early writes go on the commit ring, as part of the next commit: its flush waits for
     /// them. Too many operations in flight: written at once instead.
-    fn start_writes(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
+    fn start_writes(&self, writes: &[(u64, Bytes)]) -> io::Result<()> {
         let mut st = self.commits.borrow_mut();
         if st.writes.len() + writes.len() + 1 >= QUEUE_DEPTH as usize {
             drop(st);
-            return self.write_many(writes);
+            let views: Vec<(u64, &[u8])> = writes.iter().map(|(o, d)| (*o, &d[..])).collect();
+            return self.write_many(&views);
         }
         let generation = st.next_gen;
         let mut ring = self.commit_ring.borrow_mut();
@@ -414,7 +446,7 @@ impl BlockDevice for UringDevice {
     /// The writes on the commit ring, then an `fdatasync` once they, and the early writes that
     /// belong to this commit, have completed. The data is copied into aligned buffers. With too
     /// many operations in flight, done synchronously (after this commit's early writes).
-    fn start_commit(&self, writes: &[(u64, &[u8])]) -> io::Result<bool> {
+    fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
         let mut st = self.commits.borrow_mut();
         assert!(st.current.is_none(), "one commit in flight at a time");
         let generation = st.next_gen;
@@ -430,7 +462,8 @@ impl BlockDevice for UringDevice {
             if let Some(e) = early {
                 return Err(e);
             }
-            self.write_many(writes)?;
+            let views: Vec<(u64, &[u8])> = writes.iter().map(|(o, d)| (*o, &d[..])).collect();
+            self.write_many(&views)?;
             self.flush()?;
             return Ok(true);
         }
@@ -526,14 +559,20 @@ mod tests {
             let (dev, path) = temp_device(12 << 20, direct);
             let efd = crate::EventFd::new().unwrap();
             dev.notify_commits(efd.as_raw_fd()).unwrap();
-            let data: Vec<Vec<u8>> = (0..40u8).map(|i| vec![i; 8192]).collect();
-            let writes: Vec<(u64, &[u8])> = data
-                .iter()
-                .enumerate()
-                .map(|(i, d)| (i as u64 * 16384, &d[..]))
+            // Half shared and aligned (written as they are), half not (copied).
+            let writes: Vec<(u64, Bytes)> = (0..40u8)
+                .map(|i| {
+                    let d = vec![i; 8192];
+                    let b = if i % 2 == 0 {
+                        AlignedBuf::shared_copy_of(&d)
+                    } else {
+                        Bytes::from(d)
+                    };
+                    (u64::from(i) * 16384, b)
+                })
                 .collect();
             assert!(!dev.start_commit(&writes).unwrap(), "in flight");
-            drop(data); // the device kept its own copy
+            drop(writes); // the device holds what it needs
             assert!(dev.poll_commit(true).unwrap().is_ok());
             assert!(efd.drain(), "the eventfd was signalled");
             let mut buf = vec![0u8; 8192];
@@ -543,8 +582,11 @@ mod tests {
             }
             // An error (an offset no file can have: negative as a file offset) is reported
             // once everything completed.
-            let b = vec![1u8; 4096];
-            assert!(!dev.start_commit(&[(0, &b), (u64::MAX - 8191, &b)]).unwrap());
+            let b = Bytes::from(vec![1u8; 4096]);
+            assert!(
+                !dev.start_commit(&[(0, b.clone()), (u64::MAX - 8191, b)])
+                    .unwrap()
+            );
             assert!(dev.poll_commit(true).unwrap().is_err());
             std::fs::remove_file(path).unwrap();
         }
@@ -554,20 +596,20 @@ mod tests {
     fn early_writes_belong_to_the_next_commit() {
         for direct in [false, true] {
             let (dev, path) = temp_device(10 << 20, direct);
-            let a = vec![1u8; 8192];
-            let b = vec![2u8; 8192];
-            let c = vec![3u8; 4096];
-            assert!(!dev.start_commit(&[(0, &a)]).unwrap());
+            let a = AlignedBuf::shared_copy_of(&[1u8; 8192]);
+            let b = Bytes::from(vec![2u8; 8192]);
+            let c = AlignedBuf::shared_copy_of(&[3u8; 4096]);
+            assert!(!dev.start_commit(&[(0, a)]).unwrap());
             // Early writes for the next commit, while this one is in flight: they do not hold
             // it back, and an error among them is the next commit's.
-            dev.start_writes(&[(65536, &b), (u64::MAX - 8191, &c)])
+            dev.start_writes(&[(65536, b.clone()), (u64::MAX - 8191, c.clone())])
                 .unwrap();
             assert!(dev.poll_commit(true).unwrap().is_ok(), "direct={direct}");
-            assert!(!dev.start_commit(&[(131072, &c)]).unwrap());
+            assert!(!dev.start_commit(&[(131072, c.clone())]).unwrap());
             assert!(dev.poll_commit(true).unwrap().is_err(), "direct={direct}");
             // Without errors, the next commit covers its early writes.
-            dev.start_writes(&[(65536, &b)]).unwrap();
-            assert!(!dev.start_commit(&[(131072, &c)]).unwrap());
+            dev.start_writes(&[(65536, b.clone())]).unwrap();
+            assert!(!dev.start_commit(&[(131072, c.clone())]).unwrap());
             assert!(dev.poll_commit(true).unwrap().is_ok());
             let mut buf = vec![0u8; 8192];
             dev.read_at(65536, &mut buf).unwrap();

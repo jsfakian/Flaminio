@@ -1,6 +1,9 @@
 //! The replica store: recovery, the write and read paths, and checkpoints.
 
 use std::borrow::Cow;
+use std::ops::Deref;
+
+use bytes::Bytes;
 use std::cell::Cell;
 use std::collections::{HashSet, VecDeque};
 
@@ -162,8 +165,8 @@ impl Journal {
 /// Work prepared by the planner, committed as one journal batch.
 struct Plan<'a> {
     records: Vec<Record<'a>>,
-    /// Redirect-on-write data, written before the batch.
-    data_writes: Vec<(u64, Cow<'a, [u8]>)>,
+    /// Redirect-on-write data, written before the batch (shared with the device: no copy).
+    data_writes: Vec<(u64, Bytes)>,
     /// Data clusters reserved for `data_writes`. Released if the plan is not committed.
     reserved: Vec<(u64, u64)>,
 }
@@ -181,7 +184,7 @@ impl<'a> Plan<'a> {
 /// A group commit whose I/O is in flight (see [`Store::start_write_batch`]).
 struct InFlight {
     /// The journal batch, applied once durable, as replay would apply it.
-    batch: Vec<u8>,
+    batch: Bytes,
     /// The results of the requests of the call that started it: `None` for the requests in
     /// the batch, which succeed once it is durable.
     results: Vec<Option<Result<(), StoreError>>>,
@@ -216,7 +219,7 @@ pub enum Started {
 
 /// A group whose batch is in flight, from [`Store::commit_group`].
 struct Flying {
-    bytes: Vec<u8>,
+    bytes: Bytes,
     touched: HashSet<(u32, u64)>,
     pool_budget: u64,
 }
@@ -228,18 +231,67 @@ enum Exec {
     /// Durable and applied.
     Done,
     /// Written and flushed asynchronously: apply this batch once the device reports it done.
-    InFlight(Vec<u8>),
+    InFlight(Bytes),
+}
+
+/// The data of a [`WriteReq`].
+#[derive(Debug, Clone)]
+pub enum WriteData<'a> {
+    /// Borrowed: the store copies what it writes asynchronously.
+    Slice(&'a [u8]),
+    /// Shared: the store hands slices of it to the device, without a copy. Best 4 KiB aligned
+    /// (an aligned buffer is written as is with `O_DIRECT`).
+    Shared(Bytes),
+}
+
+impl Deref for WriteData<'_> {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match self {
+            WriteData::Slice(s) => s,
+            WriteData::Shared(b) => b,
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for WriteData<'a> {
+    fn from(s: &'a [u8]) -> Self {
+        WriteData::Slice(s)
+    }
+}
+
+impl<'a> From<&'a Vec<u8>> for WriteData<'a> {
+    fn from(v: &'a Vec<u8>) -> Self {
+        WriteData::Slice(v)
+    }
+}
+
+impl From<Bytes> for WriteData<'_> {
+    fn from(b: Bytes) -> Self {
+        WriteData::Shared(b)
+    }
+}
+
+impl WriteData<'_> {
+    /// `range` of the data, shared: a slice of the buffer, or a copy of borrowed data.
+    fn shared(&self, range: std::ops::Range<usize>) -> Bytes {
+        match self {
+            WriteData::Slice(s) => Bytes::copy_from_slice(&s[range]),
+            WriteData::Shared(b) => b.slice(range),
+        }
+    }
 }
 
 /// One write of a [`Store::write_batch`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct WriteReq<'a> {
     /// Chunk to write.
     pub key: ChunkKey,
     /// Byte offset within the chunk (4 KiB aligned).
     pub offset: u64,
     /// Data (a multiple of 4 KiB).
-    pub data: &'a [u8],
+    pub data: WriteData<'a>,
     /// The target's write sequence number.
     pub write_seq: u64,
     /// The writer's epoch.
@@ -704,11 +756,11 @@ impl<D: BlockDevice> Store<D> {
             self.release(&plan.reserved);
             return Ok(Exec::NoRoom);
         };
-        let bytes = batch.finish(self.sb.format_nonce, self.journal.head.seq, at);
-        let mut writes: Vec<(u64, &[u8])> =
-            plan.data_writes.iter().map(|(o, d)| (*o, &d[..])).collect();
-        writes.push((self.journal.offset + at, &bytes));
+        let bytes = Bytes::from(batch.finish(self.sb.format_nonce, self.journal.head.seq, at));
+        let mut writes = plan.data_writes;
+        writes.push((self.journal.offset + at, bytes.clone()));
         let done = self.dev.start_commit(&writes)?;
+        drop(writes);
         self.journal.advance(at, len);
         if done {
             self.execute_finish(bytes)?;
@@ -720,8 +772,9 @@ impl<D: BlockDevice> Store<D> {
     /// Ends the commit protocol once the batch is durable: applies its records, decoded from
     /// the batch as replay decodes them, writes deferred writes in place, and checkpoints if
     /// the journal is full enough.
-    fn execute_finish(&mut self, bytes: Vec<u8>) -> Result<(), StoreError> {
-        let batch = Batch::from_bytes(bytes, self.sb.format_nonce)?;
+    fn execute_finish(&mut self, bytes: Bytes) -> Result<(), StoreError> {
+        // The device has let go of its reference: no copy when this is the last one.
+        let batch = Batch::from_bytes(Vec::from(bytes), self.sb.format_nonce)?;
         let mut in_place = Vec::new();
         for r in batch.records() {
             in_place.extend(self.state.apply(&r?)?);
@@ -784,12 +837,13 @@ impl<D: BlockDevice> Store<D> {
             .journal
             .place(len)
             .ok_or_else(|| StoreError::corrupt("a staged batch lost its room in the journal"))?;
-        let bytes = st
-            .batch
-            .finish(self.sb.format_nonce, self.journal.head.seq, at);
+        let bytes = Bytes::from(
+            st.batch
+                .finish(self.sb.format_nonce, self.journal.head.seq, at),
+        );
         let done = self
             .dev
-            .start_commit(&[(self.journal.offset + at, &bytes[..])])?;
+            .start_commit(&[(self.journal.offset + at, bytes.clone())])?;
         self.journal.advance(at, len);
         let f = InFlight {
             batch: bytes,
@@ -905,7 +959,7 @@ impl<D: BlockDevice> Store<D> {
             };
             let range = (*clusters.start(), *clusters.end());
             let planned = self.poisoning(|s| {
-                match s.fill_write_plan(&mut plan, slot, r.offset, r.data, r.write_seq, range) {
+                match s.fill_write_plan(&mut plan, slot, r.offset, &r.data, r.write_seq, range) {
                     Ok(()) => Ok(None),
                     Err(e @ (StoreError::Io(_) | StoreError::Corrupt(_))) => Err(e),
                     Err(e) => Ok(Some(e)),
@@ -928,10 +982,8 @@ impl<D: BlockDevice> Store<D> {
                 }
                 Ok(None) => {}
             }
-            let writes: Vec<(u64, &[u8])> =
-                plan.data_writes.iter().map(|(o, d)| (*o, &d[..])).collect();
-            if !writes.is_empty() {
-                let started = self.dev.start_writes(&writes);
+            if !plan.data_writes.is_empty() {
+                let started = self.dev.start_writes(&plan.data_writes);
                 self.poisoning(|_| started.map_err(StoreError::from))?;
             }
             let st = self.staged.as_mut().expect("staged");
@@ -1078,7 +1130,7 @@ impl<D: BlockDevice> Store<D> {
         let req = WriteReq {
             key,
             offset,
-            data,
+            data: data.into(),
             write_seq,
             epoch,
         };
@@ -1255,7 +1307,7 @@ impl<D: BlockDevice> Store<D> {
             };
             let range = (*clusters.start(), *clusters.end());
             if let Err(e) =
-                self.fill_write_plan(&mut plan, slot, r.offset, r.data, r.write_seq, range)
+                self.fill_write_plan(&mut plan, slot, r.offset, &r.data, r.write_seq, range)
             {
                 self.release(&plan.reserved);
                 if matches!(e, StoreError::Io(_) | StoreError::Corrupt(_)) {
@@ -1315,10 +1367,11 @@ impl<D: BlockDevice> Store<D> {
         plan: &mut Plan<'a>,
         slot: u32,
         offset: u64,
-        data: &'a [u8],
+        write: &'a WriteData<'a>,
         write_seq: u64,
         (first_x, last_x): (u64, u64),
     ) -> Result<(), StoreError> {
+        let data: &'a [u8] = write;
         let cs = self.state.cluster_size();
         let cpc = self.state.cpc as u32;
         let end = offset + data.len() as u64;
@@ -1339,10 +1392,11 @@ impl<D: BlockDevice> Store<D> {
                         .ok_or(StoreError::OutOfSpace("data clusters"))?;
                     plan.reserved.push((p, got));
                     let lo = ((x + done) * cs - offset) as usize;
-                    let piece = &data[lo..lo + (got * cs) as usize];
+                    let range = lo..lo + (got * cs) as usize;
+                    let piece = &data[range.clone()];
                     plan.data_writes.push((
                         self.state.layout.data_cluster_offset(p),
-                        Cow::Borrowed(piece),
+                        write.shared(range),
                     ));
                     plan.records.push(Record::MapUpdate {
                         slot,
@@ -1388,7 +1442,7 @@ impl<D: BlockDevice> Store<D> {
                     csums: Cow::Owned(block_checksums(&buf)),
                 });
                 plan.data_writes
-                    .push((self.state.layout.data_cluster_offset(p), Cow::Owned(buf)));
+                    .push((self.state.layout.data_cluster_offset(p), Bytes::from(buf)));
             }
             x += 1;
         }

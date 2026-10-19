@@ -23,10 +23,10 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use flaminio_metaclient::{Answer, Call, MetaClient, pb};
 use flaminio_net::BLOCK;
 use flaminio_net::frame::Frame;
@@ -46,8 +46,9 @@ use crate::replica::{ReplicaService, Reply, SessionRef};
 /// Data in flight.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Payload {
-    /// A shared, immutable buffer.
-    Bytes(Arc<Vec<u8>>),
+    /// A shared, immutable buffer: sliced and passed on (to frames, to the store) without a
+    /// copy.
+    Bytes(Bytes),
     /// A client read's data, already placed in the client's buffer by the frontend.
     Placed(usize),
 }
@@ -64,9 +65,10 @@ impl Payload {
         self.len() == 0
     }
 
-    fn bytes(&self) -> &[u8] {
+    /// The bytes, shared (no copy).
+    fn shared(&self) -> Bytes {
         match self {
-            Payload::Bytes(b) => b,
+            Payload::Bytes(b) => b.clone(),
             Payload::Placed(_) => unreachable!("placed data is never forwarded"),
         }
     }
@@ -125,7 +127,9 @@ pub enum Io {
     },
     Write {
         offset: u64,
-        data: Vec<u8>,
+        /// Shared: sliced per chunk and passed to the replicas without a copy. Best 4 KiB
+        /// aligned, so the local store writes it as is.
+        data: Bytes,
     },
 }
 
@@ -252,7 +256,7 @@ pub enum Output {
     Piece {
         op: u64,
         at: usize,
-        data: Arc<Vec<u8>>,
+        data: Bytes,
     },
 }
 
@@ -1183,7 +1187,7 @@ impl<D: BlockDevice> Engine<D> {
                 Io::Write { data, .. } => Op::Write {
                     chunk,
                     ext,
-                    data: Payload::Bytes(Arc::new(data[at..at + n].to_vec())),
+                    data: Payload::Bytes(data.slice(at..at + n)),
                 },
             };
             rt.sm.submit(us, sub, kind);
@@ -1781,7 +1785,7 @@ fn to_frame(m: &ToReplica<Payload>) -> Frame {
             ext: *ext,
             version: *version,
             prune: *prune,
-            data: data.bytes().to_vec(),
+            data: data.shared(),
         },
         Request::Read { chunk, ext } => Frame::Read {
             req,
@@ -1798,7 +1802,7 @@ fn to_frame(m: &ToReplica<Payload>) -> Frame {
             req,
             chunk: *chunk,
             ext: *ext,
-            data: data.bytes().to_vec(),
+            data: data.shared(),
         },
     }
 }
@@ -1807,7 +1811,7 @@ fn from_frame(f: Frame) -> Option<(u64, Response<Payload>)> {
     Some(match f {
         Frame::Fenced { req, uncertain } => (req, Response::Fenced { uncertain }),
         Frame::Ok { req } => (req, Response::Ok),
-        Frame::Data { req, data } => (req, Response::Data(Payload::Bytes(Arc::new(data)))),
+        Frame::Data { req, data } => (req, Response::Data(Payload::Bytes(Bytes::from(data)))),
         Frame::Stale { req, fenced } => (req, Response::Stale { fenced }),
         _ => return None,
     })

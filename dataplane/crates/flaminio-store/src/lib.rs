@@ -20,5 +20,5 @@ pub use error::StoreError;
 pub use state::ChunkKey;
 pub use store::{
     Allocation, ChunkInfo, FsckReport, PlannedRead, ReadPlan, ReadReq, Started, Stats, Store,
-    StoreConfig, WriteReq,
+    StoreConfig, WriteData, WriteReq,
 };

@@ -80,14 +80,14 @@ fn rejected_batch_cannot_shadow_a_wrapped_successor() {
             WriteReq {
                 key: key(0),
                 offset: 33 * 4096,
-                data: &x,
+                data: (&x).into(),
                 write_seq: 10_000,
                 epoch: 1,
             },
             WriteReq {
                 key: key(0),
                 offset: 65 * 4096,
-                data: &y,
+                data: (&y).into(),
                 write_seq: 10_001,
                 epoch: 1,
             },

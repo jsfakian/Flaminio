@@ -8,6 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+bytes.workspace = true
 flaminio-format.workspace = true
 flaminio-store.workspace = true
 flaminio-repl = { path = "../flaminio-repl" }

@@ -338,7 +338,7 @@ impl<D: BlockDevice> Volume<D> {
                 writes.push(WriteReq {
                     key: self.layout.key(p.chunk),
                     offset: p.chunk_offset,
-                    data: &r.buf[p.buf_offset..p.buf_offset + p.len as usize],
+                    data: r.buf[p.buf_offset..p.buf_offset + p.len as usize].into(),
                     write_seq: self.next_seq,
                     epoch: self.epoch,
                 });

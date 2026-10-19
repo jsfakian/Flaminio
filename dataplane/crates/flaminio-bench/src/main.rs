@@ -278,7 +278,7 @@ fn run(a: Args) -> Result<()> {
                         WriteReq {
                             key: k,
                             offset: m * MIB,
-                            data: &data,
+                            data: (&data[..]).into(),
                             write_seq,
                             epoch: 1,
                         }
@@ -344,7 +344,7 @@ fn run(a: Args) -> Result<()> {
                     WriteReq {
                         key,
                         offset,
-                        data: b,
+                        data: (&b[..]).into(),
                         write_seq,
                         epoch: 1,
                     }

@@ -1,7 +1,7 @@
 //! Page-aligned heap buffers.
 #![allow(unsafe_code)]
 
-use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+use std::alloc::{Layout, alloc, alloc_zeroed, dealloc, handle_alloc_error};
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
@@ -38,13 +38,33 @@ impl AlignedBuf {
 
     /// An aligned copy of `data`.
     pub fn copy_of(data: &[u8]) -> Self {
-        let mut b = Self::zeroed(data.len());
-        b.copy_from_slice(data);
-        b
+        let layout = Self::layout_for(data.len());
+        // SAFETY: the layout has a non-zero size (layout_for rounds 0 up to ALIGN).
+        let raw = unsafe { alloc(layout) };
+        let ptr = NonNull::new(raw).unwrap_or_else(|| handle_alloc_error(layout));
+        // SAFETY: the allocation holds at least data.len() bytes and cannot overlap `data`; the
+        // bytes past data.len() (up to ALIGN for an empty buffer) are never read.
+        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.as_ptr(), data.len()) };
+        Self {
+            ptr,
+            len: data.len(),
+        }
+    }
+
+    /// An aligned copy of `data`, as shared bytes (for zero-copy writes: the store and the
+    /// device take slices of it without copying).
+    pub fn shared_copy_of(data: &[u8]) -> bytes::Bytes {
+        bytes::Bytes::from_owner(Self::copy_of(data))
     }
 
     fn layout_for(len: usize) -> Layout {
         Layout::from_size_align(len.max(ALIGN), ALIGN).expect("buffer size overflows")
+    }
+}
+
+impl AsRef<[u8]> for AlignedBuf {
+    fn as_ref(&self) -> &[u8] {
+        self
     }
 }
 

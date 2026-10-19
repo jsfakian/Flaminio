@@ -3,6 +3,7 @@
 //! A connection carries one session (see [`crate::session`]): `Hello` names the volume, the
 //! epoch and the session once, and later requests carry only a request id.
 
+use bytes::Bytes;
 use flaminio_repl::extent::Extent;
 use flaminio_repl::types::Version;
 
@@ -43,7 +44,8 @@ pub enum Frame {
         ext: Extent,
         version: Version,
         prune: Option<Version>,
-        data: Vec<u8>,
+        /// Shared: the same bytes go to every replica, and to the local store, without a copy.
+        data: Bytes,
     },
     Read {
         req: u64,
@@ -63,7 +65,7 @@ pub enum Frame {
         req: u64,
         chunk: u32,
         ext: Extent,
-        data: Vec<u8>,
+        data: Bytes,
     },
     // Replies, replica → target.
     Fenced {
@@ -329,7 +331,7 @@ impl Frame {
                     1 => Some(r.version()?),
                     _ => return Err(DecodeError::Invalid("prune flag")),
                 };
-                let data = r.data(ext)?;
+                let data = Bytes::from(r.data(ext)?);
                 Frame::Write {
                     req,
                     chunk,
@@ -357,7 +359,7 @@ impl Frame {
                 let req = r.u64()?;
                 let chunk = r.u32()?;
                 let ext = r.ext()?;
-                let data = r.data(ext)?;
+                let data = Bytes::from(r.data(ext)?);
                 Frame::Copy {
                     req,
                     chunk,
@@ -507,7 +509,7 @@ mod tests {
                 ext,
                 version: Version { epoch: 7, seq: 40 },
                 prune: Some(Version { epoch: 7, seq: 38 }),
-                data: (0..2 * BLOCK).map(|i| i as u8).collect(),
+                data: (0..2 * BLOCK).map(|i| i as u8).collect::<Vec<u8>>().into(),
             },
             Frame::Write {
                 req: 4,
@@ -515,7 +517,7 @@ mod tests {
                 ext: Extent { start: 0, len: 1 },
                 version: Version { epoch: 7, seq: 41 },
                 prune: None,
-                data: vec![1; BLOCK],
+                data: vec![1; BLOCK].into(),
             },
             Frame::Read {
                 req: 5,
@@ -532,7 +534,7 @@ mod tests {
                 req: 7,
                 chunk: 4,
                 ext,
-                data: vec![2; 2 * BLOCK],
+                data: vec![2; 2 * BLOCK].into(),
             },
             Frame::Fenced {
                 req: 8,

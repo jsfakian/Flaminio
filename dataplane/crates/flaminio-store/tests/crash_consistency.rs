@@ -102,7 +102,7 @@ fn run(store: &mut Store<&MemDevice>, model: &Model, op: &Op, id: u32) -> Result
                 .map(|((first, _), d)| WriteReq {
                     key: key(chunk),
                     offset: first * BLOCK as u64,
-                    data: d,
+                    data: d.into(),
                     write_seq: u64::from(id),
                     epoch: 1,
                 })

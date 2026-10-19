@@ -71,7 +71,11 @@ fn write(req: u64, chunk: u32, start: u32, blocks: &[u8], seq: u64) -> Frame {
         ext: Extent::new(start, blocks.len() as u32),
         version: Version { epoch: 1, seq },
         prune: None,
-        data: blocks.iter().flat_map(|&b| vec![b; BLOCK]).collect(),
+        data: blocks
+            .iter()
+            .flat_map(|&b| vec![b; BLOCK])
+            .collect::<Vec<u8>>()
+            .into(),
     }
 }
 

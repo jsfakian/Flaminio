@@ -102,7 +102,7 @@ fn handle<D: BlockDevice>(
                 .map(|it| WriteReq {
                     key: l.key(it.chunk),
                     offset: it.offset,
-                    data: &it.data,
+                    data: (&it.data).into(),
                     write_seq: it.write_seq,
                     epoch,
                 })

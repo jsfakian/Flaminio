@@ -545,6 +545,7 @@ dependencies = [
 name = "flaminio-io"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "flaminio-format",
  "flaminio-metaclient",
  "flaminio-net",
@@ -573,6 +574,7 @@ dependencies = [
 name = "flaminio-net"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "flaminio-repl",
  "futures-lite",
  "futures-rustls",
@@ -590,6 +592,7 @@ dependencies = [
 name = "flaminio-node"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "flaminio-format",
  "flaminio-metaclient",
  "flaminio-net",
@@ -611,6 +614,7 @@ version = "0.1.0"
 name = "flaminio-store"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "flaminio-format",
  "proptest",
  "thiserror 2.0.21",
@@ -620,6 +624,7 @@ dependencies = [
 name = "flaminio-uring"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "flaminio-store",
  "io-uring",
  "libc",

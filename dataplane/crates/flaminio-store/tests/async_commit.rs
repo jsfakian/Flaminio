@@ -32,7 +32,7 @@ fn req(offset: u64, data: &[u8], seq: u64) -> WriteReq<'_> {
     WriteReq {
         key: key(0),
         offset,
-        data,
+        data: data.into(),
         write_seq: seq,
         epoch: 1,
     }
@@ -380,4 +380,44 @@ fn a_crash_in_the_pipeline_keeps_exactly_the_landed_writes() {
             s.fsck(true).unwrap();
         }
     }
+}
+
+#[test]
+fn shared_write_data_outlives_the_callers_buffer() {
+    // W4.3: a write handed over as shared bytes, whole clusters and a small write, committed
+    // after the caller let go of its own reference.
+    let mut s = store();
+    let whole = bytes::Bytes::from(blocks(1, 0, 32));
+    let small = bytes::Bytes::from(blocks(2, 40, 2));
+    let reqs = [
+        WriteReq {
+            key: key(0),
+            offset: 0,
+            data: whole.clone().into(),
+            write_seq: 1,
+            epoch: 1,
+        },
+        WriteReq {
+            key: key(0),
+            offset: 40 * 4096,
+            data: small.clone().into(),
+            write_seq: 2,
+            epoch: 1,
+        },
+    ];
+    assert!(matches!(
+        s.start_write_batch(&reqs).unwrap(),
+        Started::InFlight
+    ));
+    let (expect_whole, expect_small) = (whole.to_vec(), small.to_vec());
+    drop((reqs, whole, small));
+    s.device().complete();
+    let results = s.poll_write_batch(false).unwrap().unwrap();
+    assert!(results.iter().all(Result::is_ok));
+    assert_eq!(read(&s, 0, 32 * 4096), expect_whole);
+    assert_eq!(read(&s, 40 * 4096, 2 * 4096), expect_small);
+    let s = reopen(s);
+    let mut buf = vec![0u8; 32 * 4096];
+    s.read(key(0), 0, &mut buf, 1).unwrap();
+    assert_eq!(buf, expect_whole, "after recovery");
 }

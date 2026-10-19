@@ -483,7 +483,7 @@ use std::thread;
 use std::time::Instant;
 
 use flaminio_node::engine::{Input, Io, IoError, LocalRead, Output};
-use flaminio_uring::{EventFd, Staging};
+use flaminio_uring::{AlignedBuf, EventFd, Staging};
 
 use crate::node::{NodeConfig, Parts, drive_until, log_output, read_token};
 
@@ -494,7 +494,7 @@ enum Event {
     /// A piece that came from another replica.
     Piece {
         at: usize,
-        data: Arc<Vec<u8>>,
+        data: bytes::Bytes,
     },
     Done(Result<Option<Vec<u8>>, IoError>),
 }
@@ -1083,9 +1083,11 @@ async fn engine_io_task(
                 let io = if op == sys::UBLK_IO_OP_READ {
                     Io::Read { offset, len }
                 } else {
+                    // One copy, into an aligned shared buffer: the store and the replicas take
+                    // slices of it.
                     Io::Write {
                         offset,
-                        data: bufs[tag as usize].borrow()[..n].to_vec(),
+                        data: AlignedBuf::shared_copy_of(&bufs[tag as usize].borrow()[..n]),
                     }
                 };
                 ctx.submit(io, done_tx.clone());
@@ -1250,7 +1252,10 @@ async fn engine_io_task_zc(
                     if copied != n as i32 {
                         -libc::EIO
                     } else {
-                        let data = st.with_slot(tag as usize, |b| b[..n].to_vec());
+                        // The one copy of the write's data in user space: into an aligned
+                        // shared buffer, which the store writes as is and the replicas share.
+                        let data =
+                            st.with_slot(tag as usize, |b| AlignedBuf::shared_copy_of(&b[..n]));
                         ctx.submit(Io::Write { offset, data }, done_tx.clone());
                         match done_rx.recv().await {
                             Ok(Event::Done(Ok(_))) => len as i32,

@@ -8,6 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
+bytes.workspace = true
 flaminio-repl = { path = "../flaminio-repl" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 futures-rustls = { version = "0.26", default-features = false, features = ["ring"] }

@@ -440,7 +440,7 @@ impl<D: BlockDevice> ReplicaService<D> {
                     let w = WriteReq {
                         key,
                         offset: at,
-                        data,
+                        data: data.clone().into(),
                         write_seq: version.seq,
                         epoch: s.epoch,
                     };
@@ -567,7 +567,10 @@ impl<D: BlockDevice> ReplicaService<D> {
             .map(|p| WriteReq {
                 key: p.key,
                 offset: p.offset,
-                data: &payload(&items[p.item].1)[p.range.clone()],
+                // A slice of the frame's shared buffer: the store writes it without a copy.
+                data: shared_payload(&items[p.item].1)
+                    .slice(p.range.clone())
+                    .into(),
                 write_seq: p.seq,
                 epoch: p.epoch,
             })
@@ -708,6 +711,14 @@ fn key(volume: Uuid, chunk: u32) -> ChunkKey {
 
 fn offset(ext: Extent) -> u64 {
     u64::from(ext.start) * BLOCK as u64
+}
+
+/// The shared payload of a write or a copy.
+fn shared_payload(f: &Frame) -> &bytes::Bytes {
+    match f {
+        Frame::Write { data, .. } | Frame::Copy { data, .. } => data,
+        _ => unreachable!("only writes and copies carry a payload to store"),
+    }
 }
 
 fn payload(f: &Frame) -> &[u8] {

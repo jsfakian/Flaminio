@@ -12,6 +12,7 @@ name = "flaminio-io"
 path = "src/main.rs"
 
 [dependencies]
+bytes.workspace = true
 flaminio-format.workspace = true
 flaminio-store.workspace = true
 flaminio-uring.workspace = true

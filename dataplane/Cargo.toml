@@ -31,6 +31,7 @@ smol = "2.0.2"
 crc32c = "0.6.8"
 crc-fast = { version = "1.10.0", default-features = false, features = ["std"] }
 thiserror = "2.0.12"
+bytes = "1.12.1"
 proptest = "1.6.0"
 
 [workspace.lints.rust]
