@@ -86,10 +86,20 @@ host_jump() {
     fi
 }
 
+# True when this machine is HOST (its uplink IP is assigned locally). Lab commands often run on
+# HOST_B itself; jumping through HOST_B to a local VM then hangs (SSH to the public IP of self).
+on_host() {
+    local hip
+    hip=$(host_ip "$1")
+    ip -4 -o addr show 2>/dev/null | grep -q "inet ${hip}/"
+}
+
 # The -J value for reaching a VM: its host, preceded by the host's relay if any.
+# Empty when the VM's host is this machine (SSH straight to the VM IP).
 vm_jump() {
     local host jump
     host=$(vmvar "$1" HOST)
+    on_host "$host" && return 0
     jump=$(host_jump "$host")
     echo "${jump:+$jump,}$host"
 }
@@ -98,6 +108,12 @@ vm_jump() {
 hsh() {
     local host=$1 jump
     shift
+    if on_host "$host"; then
+        # Already on this host: do not SSH to the public IP (or localhost — sshd may not
+        # listen on 127.0.0.1).
+        bash -c "$*"
+        return
+    fi
     jump=$(host_jump "$host")
     ssh "${SSH_OPTS[@]}" ${jump:+-J "$jump"} "$host" "$@"
 }
@@ -113,15 +129,20 @@ run_on_host() {
     shift 2
     local args=""
     (($#)) && args=$(printf ' %q' "$@")
+    if on_host "$host"; then
+        env ${ENV_VARS:-} bash -c "$REMOTE_RUNNER" _$args <"$script"
+        return
+    fi
     local jump
     jump=$(host_jump "$host")
     ssh "${SSH_OPTS[@]}" ${jump:+-J "$jump"} "$host" "env ${ENV_VARS:-} bash -c $(printf %q "$REMOTE_RUNNER") _$args" <"$script"
 }
 
 vssh() {
-    local vm=$1
+    local vm=$1 jump
     shift
-    ssh "${VM_SSH_OPTS[@]}" -J "$(vm_jump "$vm")" "$VM_USER@$(vmvar "$vm" IP)" "$@"
+    jump=$(vm_jump "$vm")
+    ssh "${VM_SSH_OPTS[@]}" ${jump:+-J "$jump"} "$VM_USER@$(vmvar "$vm" IP)" "$@"
 }
 
 run_on_vm() {

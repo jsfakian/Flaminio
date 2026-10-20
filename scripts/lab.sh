@@ -177,14 +177,20 @@ cmd_status() {
 
 cmd_ssh() { vssh_tty "$(vms_of "${1:-a}")"; }
 vssh_tty() {
+    local jump
+    jump=$(vm_jump "$1")
     ssh -t -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new \
-        -J "$(vm_jump "$1")" "$VM_USER@$(vmvar "$1" IP)"
+        ${jump:+-J "$jump"} "$VM_USER@$(vmvar "$1" IP)"
 }
 
 cmd_console() {
     local vm host jump
     vm=$(vms_of "${1:-a}")
     host=$(vmvar "$vm" HOST)
+    if on_host "$host"; then
+        virsh -c qemu:///system console "$vm"
+        return
+    fi
     jump=$(host_jump "$host")
     ssh -t ${jump:+-J "$jump"} "$host" "virsh -c qemu:///system console $vm"
 }
@@ -1418,6 +1424,13 @@ cmd_bench_reads() {
     fi
     ensure_nodes
     cmd_vol attach "${node#fl-}" >/dev/null
+    # Local reads only: every chunk must have a replica on the target node. After a write
+    # campaign the restore can leave the ISR elsewhere; measuring then reads over the wire.
+    local n_chunks local_n
+    n_chunks=$(metactl "$VM_A" "$VM_A" get "$VOL" | jq '.volume.chunks | length')
+    local_n=$(chunks_on "$node")
+    [[ $local_n == "$n_chunks" ]] ||
+        die "$VOL: only $local_n/$n_chunks chunks have a replica on $node (need local ISR for read benches)"
     since=$(vssh "$node" "date '+%Y-%m-%d %H:%M:%S'")
     raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)
     if [[ ${FILL:-0} == 1 ]] || ! vssh "$node" "test -f ~/.flaminio-bench-filled-$VOL"; then
