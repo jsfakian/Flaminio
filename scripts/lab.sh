@@ -1671,20 +1671,31 @@ steady_mean() {
 
 # W2–W3: NODE (fl-b), RF (1: the volume on NODE's own disk, against raw O_DSYNC; 2: a second
 # replica elsewhere), REPS (3), IDLE (300 s), ROUND (60 s), MAX_ROUNDS (12), JOBS (a regex over
-# the job names). NODE's replicas of other volumes move away first and come back after.
+# the job names), QUEUES (ublk queues, 1), NUMJOBS (fio jobs on both sides, 1). NODE's replicas
+# of other volumes move away first and come back after.
 cmd_bench_writes() {
     local node rf=${RF:-1} reps=${REPS:-3} round=${ROUND:-60} max=${MAX_ROUNDS:-12} filter=${JOBS:-.}
+    local queues=${QUEUES:-1} jobs=${NUMJOBS:-1}
     local dir raw spec name rw bs qd mix r side dev k row mean fresh w0 w1 c0 c1 bytes
     node=$(vms_of "${NODE:-b}")
-    dir=${RESUME:-$LOCAL_STATE_DIR/bench/writes-rf$rf-$(date +%Y%m%dT%H%M%S)}
+    dir=${RESUME:-$LOCAL_STATE_DIR/bench/writes-rf$rf-q$queues-jobs$jobs-$(date +%Y%m%dT%H%M%S)}
     mkdir -p "$dir"
     raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)
-    if [[ $(chunks_on "$node") != 0 ]]; then
-        log "moving $VOL's replicas off $node first: its disk is about to be reset"
-        metactl "$VM_A" "$VM_A" drain "$node" >/dev/null
+    # The write campaign reformats NODE's disk: drop $VOL rather than draining (a drain can
+    # stall when the only other replicas are remote and resync does not finish).
+    if metactl "$VM_A" "$VM_A" get "$VOL" >/dev/null 2>&1; then
+        log "removing $VOL before the write campaign (NODE's disk will be reset)"
+        ENV_VARS="VOLUME=$VOL" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
+        metactl "$VM_A" "$VM_A" delete "$VOL" >/dev/null 2>&1 || true
     fi
-    metactl "$VM_A" "$VM_A" undrain "$node" >/dev/null
-    log "$node, RF $rf, $reps repetitions, $round s rounds (steady: 5 within ±10%, at most $max), idle ${IDLE:-300} s after each reset"
+    local vm
+    for vm in $(vms_of all) "$VM_C"; do
+        ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" delete >/dev/null 2>&1 || true
+    done
+    metactl "$VM_A" "$VM_A" undrain "$node" >/dev/null 2>&1 || true
+    # QUEUES reaches write_volume → node_env for every Flaminio reset in this campaign.
+    export QUEUES=$queues
+    log "$node, RF $rf, $queues queue(s), $jobs fio job(s), $reps repetitions, $round s rounds (steady: 5 within ±10%, at most $max), idle ${IDLE:-300} s after each reset"
     ((rf > 1)) && write_network "$node" before | tee -a "$dir/network.txt"
     [[ -e $dir/INTEGRITY_FAILED ]] && die "$dir: an integrity check failed; not resuming"
     if [[ -n ${RESUME:-} && -f $dir/runs.tsv ]]; then
@@ -1709,7 +1720,7 @@ cmd_bench_writes() {
                 rm -f "$dir/.disk"
                 write_reset "$node" "$side" "$rf"
                 if [[ $side == raw ]]; then dev=$raw; else dev=/dev/ublkb1; fi
-                row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix")
+                row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix" "$jobs")
                 fresh=$(write_metric "$bs" "$row")
                 printf '%s\t%s\t%s\tfresh\t0\t%s\n' "$r" "$side" "$name" "$row" | cut -f1-4,5,7- >>"$dir/rounds.tsv"
                 write_whole "$node" "$side" "$rf"
@@ -1723,7 +1734,7 @@ cmd_bench_writes() {
                 bytes=0 mean=""
                 for k in $(seq 1 "$max"); do
                     w0=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" written)
-                    row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix")
+                    row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" job "$dev" 16G "$name" "$rw" "$bs" "$qd" "$round" /tmp/bench-w.json "$mix" "$jobs")
                     w1=$(run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" written)
                     write_metric "$bs" "$row" >>"$dir/.window"
                     bytes=$((bytes + $(vssh "$node" "jq '.jobs[0].write.io_bytes' /tmp/bench-w.json")))
@@ -1845,8 +1856,8 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   data-node-up fl-c, a third data node: VM, overlay, identities, build, disk claimed by the agent, node
   drain-test   verified writes while $VM_B is drained into $VM_C; $VM_C alone then serves every byte
   chaos        ROUNDS (4) of random faults under a verified write load, each ending with a crashed target
-  bench-writes writes against raw O_DSYNC from an empty state each run: NODE, RF, REPS, IDLE, ROUND, JOBS
-  bench-reads  vol1 against the same span of the raw disk: MODE=zero-copy|verify, NODE, REPS, RUNTIME
+  bench-writes writes against raw O_DSYNC from an empty state each run: NODE, RF, REPS, IDLE, ROUND, JOBS, QUEUES, NUMJOBS
+  bench-reads  vol1 against the same span of the raw disk: MODE=zero-copy|verify, NODE, REPS, RUNTIME, QUEUES, NUMJOBS
   bench-pod    reads from a pod with a Flaminio volume (NODE=fl-b, RUNTIME=30), against the raw disk
   partition    $VM_A (the target) cut off the overlay; $VM_B takes over; no stale reads, no lost writes
   pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)

@@ -8,7 +8,7 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## Status (2026-10-19)
+## Status (2026-10-21)
 
 R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)). Measured on fl-b at 4 vCPUs,
 against raw on 16 GiB spans of the same disk, caches dropped before every job, medians of 3
@@ -99,6 +99,17 @@ checks (RF 1: 9, RF 2: 3), 0 errors, 0 checksum failures.
 
 Throughput is flat against W4.2, as expected: writes wait on the flush. The gain is CPU, about
 10% less on the queue thread per unit of work (the commit's measurement).
+
+**Pipelined commits / `--defer-taskrun` (2026-10-19–20):** not wins; both stay opt-in
+([pipeline](benchmarks/2026-10-19-writes-rf1-pipeline.md),
+[defer](benchmarks/2026-10-20-reads-qd1-defer.md)).
+
+**After W4.4 (2026-10-20):** several ublk queues for writes
+([results](benchmarks/2026-10-20-writes-queues.md)). Short validation, one repetition:
+`QUEUES=2 NUMJOBS=2` vs `1×1` raised aggregate Flaminio 4K QD32 by ~19% (10 444 → 12 389)
+and 1M by ~64% (676 → 1 108 MiB/s). Default remains one queue; use `--queues` with several
+fio submitters. **Single-stream 1M is unchanged** (~70% of across-disk raw): next lever is
+larger commits / fewer flushes per GiB, not more queues.
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
@@ -384,8 +395,16 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
    **548 MiB/s**. Gather-before-launch: **588 MiB/s**. Both below W4.3's 697; small writes
    flat; integrity clean. **Off by default** (`--pipelined-commits`); leave opt-in.
 4. **Several queues for writes** (R4 brings them for reads).
-5. **Write amplification:** journal writes for large sequential writes. Large aligned writes
-   could bypass the journal (written in place, then one metadata update).
+
+   *Done (2026-10-20), short validation
+   ([results](benchmarks/2026-10-20-writes-queues.md)):* `bench-writes` honors `QUEUES` /
+   `NUMJOBS`. Two queues with two fio jobs raise aggregate 4K QD32 and 1M; default stays 1
+   queue. Does not move single-job 1M.
+5. **Larger commits / fewer flushes for 1M** (the remaining ~30% of across-disk raw). Disk
+   write amp for 1M is already 1.00; the limit is one flush per ~4 MiB commit. Journal bypass
+   for large aligned writes was listed here earlier; measured amp shows it would not close
+   this hole — prefer gathering or commit sizing so each flush covers more whole-cluster
+   data, without regressing 4K QD32 (staging small writes once did).
 
 ## 5. Order, and what is needed
 

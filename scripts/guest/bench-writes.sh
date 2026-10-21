@@ -8,15 +8,23 @@
 #                                        sequential, then 2 GiB of 4K random writes over it;
 #                                        each read back and checked
 #   bench-writes.sh integrity-read DEV SPAN    the random writes read back and checked again
-#   bench-writes.sh job DEV SPAN NAME RW BS QD RUNTIME OUT [MIX]
+#   bench-writes.sh job DEV SPAN NAME RW BS QD RUNTIME OUT [MIX] [JOBS]
 #                                        one measured round, writes durable when acknowledged
-#                                        (O_DSYNC); prints a TSV row: name, write IOPS, write
-#                                        MiB/s, write p50 and p99 (us), read IOPS
+#                                        (O_DSYNC); JOBS fio jobs (default 1). Sequential writes
+#                                        split SPAN into non-overlapping regions; random jobs
+#                                        share the whole SPAN. Prints a TSV row: name, write
+#                                        IOPS, write MiB/s, write p50 and p99 (us), read IOPS
 # Both sides use O_DSYNC: Flaminio acknowledges a write once it is durable on every ISR member,
 # and the raw disk's writes are durable only with it (the virtio disk has a write cache).
 drop_caches() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; }
 # fio creates a missing file: a vanished device would silently become a file in /dev.
 block_device() { [[ -b $1 ]] || die "$1 is not a block device"; }
+# SPAN like 16G → unit G and number 16. Used to split sequential multi-job runs.
+span_parts() {
+    local span=$1
+    [[ $span =~ ^([0-9]+)([KMGTP]?)$ ]] || die "span must look like 16G (got $span)"
+    echo "${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+}
 check=(--verify=crc32c --verify_fatal=1 --ioengine=io_uring --direct=1 --output-format=json)
 random=(--rw=randwrite --bs=4k --iodepth=32 --io_size=2G --randseed=7411)
 # fio_checked NAME OUT FIO_ARGS...: runs a checked fio job, prints what it verified.
@@ -73,13 +81,23 @@ case "${1:-}" in
         READ_ONLY=1 fio_checked "random, after a restart" /tmp/bench-int-read.json --filename="$2" --size="$3" "${random[@]}" --verify_only
         ;;
     job)
-        dev=$2 span=$3 name=$4 rw=$5 bs=$6 qd=$7 runtime=$8 out=$9 mix=${10:-}
+        dev=$2 span=$3 name=$4 rw=$5 bs=$6 qd=$7 runtime=$8 out=$9 mix=${10:-} jobs=${11:-1}
         block_device "$dev"
+        ((jobs >= 1)) || die "JOBS must be >= 1"
         drop_caches
         extra=()
         [[ -n $mix ]] && extra=(--rwmixread="$mix")
-        sudo fio --name="$name" --filename="$dev" --size="$span" --rw="$rw" --bs="$bs" --iodepth="$qd" \
-            --numjobs=1 --time_based --runtime="$runtime" --sync=dsync "${extra[@]}" \
+        # Sequential multi-job: each job gets SPAN/JOBS, offset by that much, so they do not
+        # overwrite each other. Random multi-job: same SPAN (as read benches).
+        size_args=(--size="$span")
+        if ((jobs > 1)) && [[ $rw == write || $rw == read ]]; then
+            read -r n unit <<<"$(span_parts "$span")"
+            ((n % jobs == 0)) || die "span $span not divisible by $jobs jobs"
+            per=$((n / jobs))
+            size_args=(--size="${per}${unit}" --offset_increment="${per}${unit}")
+        fi
+        sudo fio --name="$name" --filename="$dev" "${size_args[@]}" --rw="$rw" --bs="$bs" --iodepth="$qd" \
+            --numjobs="$jobs" --time_based --runtime="$runtime" --sync=dsync "${extra[@]}" \
             --ioengine=io_uring --direct=1 --group_reporting --output-format=json --output="$out" >/dev/null
         jq -r --arg n "$name" '.jobs[0] | .write as $w |
             [$n, ($w.iops|floor), (($w.bw_bytes/1048576)*10|floor/10),
