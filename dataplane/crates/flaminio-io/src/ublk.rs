@@ -864,6 +864,9 @@ fn run_device(
     if let Some(us) = c.gather_us {
         engine.set_commit_gather(Duration::from_micros(us));
     }
+    if let Some(mib) = c.commit_target_mib {
+        engine.set_commit_target_bytes(mib << 20);
+    }
     let mut wakes = vec![efd];
     for _ in 1..c.queues {
         wakes.push(Arc::new(

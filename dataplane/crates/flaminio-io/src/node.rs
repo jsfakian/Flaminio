@@ -57,6 +57,9 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --gather-us N        after a commit, the next waits up to N microseconds for the writes
                            just acknowledged to come back, so that they commit together
                            (default 300; 0: never waits)
+      --commit-target-mib N
+                           gather at least N MiB of write data into one commit when the
+                           client's writes are large (default 0: count/time only; try 8)
       --sync-commits       commits block the queue thread until durable (as before commits
                            went asynchronous): for comparing
       --pipelined-commits  up to 4 commits in flight (spec §6.2): for measuring. Off by
@@ -96,6 +99,8 @@ pub(crate) struct NodeConfig {
     pub queues: u16,
     pub poll_us: u64,
     pub gather_us: Option<u64>,
+    /// `None`: default (off); `Some(n)`: n MiB byte floor (0: same as off).
+    pub commit_target_mib: Option<u64>,
     pub sync_commits: bool,
     pub pipelined_commits: bool,
     pub first_fit: bool,
@@ -125,6 +130,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         queues: 1,
         poll_us: 0,
         gather_us: None,
+        commit_target_mib: None,
         sync_commits: false,
         pipelined_commits: false,
         first_fit: false,
@@ -163,6 +169,10 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
             "--poll-us" => c.poll_us = value()?.parse().map_err(|_| "invalid --poll-us")?,
             "--gather-us" => {
                 c.gather_us = Some(value()?.parse().map_err(|_| "invalid --gather-us")?)
+            }
+            "--commit-target-mib" => {
+                c.commit_target_mib =
+                    Some(value()?.parse().map_err(|_| "invalid --commit-target-mib")?)
             }
             "--sync-commits" => c.sync_commits = true,
             "--pipelined-commits" => c.pipelined_commits = true,

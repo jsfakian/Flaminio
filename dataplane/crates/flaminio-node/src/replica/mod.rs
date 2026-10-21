@@ -77,6 +77,9 @@ pub struct ReplicaService<D: BlockDevice> {
     flying: std::collections::VecDeque<Flying>,
     /// The next group, staged behind them (see [`ReplicaService::stage`]).
     staged: Option<Flying>,
+    /// When true, [`Self::poll`] does not move the staged group into flight: the engine grows
+    /// it and starts it with [`Self::launch`] (see [`Store::set_hold_staged`]).
+    hold_staged: bool,
 }
 
 /// What [`ReplicaService::start`] did with a batch of requests.
@@ -129,6 +132,7 @@ impl<D: BlockDevice> ReplicaService<D> {
             next_id: 1,
             flying: std::collections::VecDeque::new(),
             staged: None,
+            hold_staged: false,
         };
         for c in s.store.chunks() {
             let id = s.vol_id(c.key.volume, c.volume_size, c.chunk_size);
@@ -397,8 +401,16 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// the longest prefix of `items` made of writes the store can stage now, decides them, and
     /// holds their replies for their own commit, which starts as soon as the one in flight is
     /// durable. Returns how many items it took; the rest wait, in order.
+    /// Defers starting the staged group when a commit lands (see [`Store::set_hold_staged`]).
+    pub fn set_hold_staged(&mut self, hold: bool) {
+        self.hold_staged = hold;
+        self.store.set_hold_staged(hold);
+    }
+
     pub fn stage(&mut self, items: &[(SessionRef, Frame)]) -> usize {
-        if self.flying.is_empty() {
+        // Normally a commit must be in flight. With hold_staged, append to an existing staged
+        // group after that commit landed.
+        if self.flying.is_empty() && !(self.hold_staged && self.staged.is_some()) {
             return 0;
         }
         let mut taken = 0;
@@ -506,8 +518,10 @@ impl<D: BlockDevice> ReplicaService<D> {
             mut replies,
             writes,
         } = self.flying.pop_front().expect("in flight");
-        // The store started the staged group's commit with this one's landing.
-        if let Some(st) = self.staged.take() {
+        // Without hold, the store started the staged group's commit with this one's landing.
+        if !self.hold_staged
+            && let Some(st) = self.staged.take()
+        {
             self.flying.push_back(st);
         }
         for ((at, req), r) in writes.into_iter().zip(results) {

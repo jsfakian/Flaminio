@@ -108,8 +108,13 @@ Throughput is flat against W4.2, as expected: writes wait on the flush. The gain
 ([results](benchmarks/2026-10-20-writes-queues.md)). Short validation, one repetition:
 `QUEUES=2 NUMJOBS=2` vs `1×1` raised aggregate Flaminio 4K QD32 by ~19% (10 444 → 12 389)
 and 1M by ~64% (676 → 1 108 MiB/s). Default remains one queue; use `--queues` with several
-fio submitters. **Single-stream 1M is unchanged** (~70% of across-disk raw): next lever is
-larger commits / fewer flushes per GiB, not more queues.
+fio submitters. **Single-stream 1M is unchanged** (~70% of across-disk raw).
+
+**After W4.5 (2026-10-21):** byte-targeted commit gather (`--commit-target-mib`)
+([results](benchmarks/2026-10-21-writes-commit-target.md)). Short validation: 8 MiB floor
+(with and without holding the staged group) did **not** move single-stream 1M off ~670–685
+MiB/s; holding staged regresses it. Default stays off (`0`). The 1M gap remains one flush
+per ~4 MiB of overlapped commit.
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
@@ -403,8 +408,12 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
 5. **Larger commits / fewer flushes for 1M** (the remaining ~30% of across-disk raw). Disk
    write amp for 1M is already 1.00; the limit is one flush per ~4 MiB commit. Journal bypass
    for large aligned writes was listed here earlier; measured amp shows it would not close
-   this hole — prefer gathering or commit sizing so each flush covers more whole-cluster
-   data, without regressing 4K QD32 (staging small writes once did).
+   this hole.
+
+   *Tried (2026-10-21), short validation
+   ([results](benchmarks/2026-10-21-writes-commit-target.md)):* `--commit-target-mib` byte
+   gather floor (and held staging). Flat or worse on 1M; **off by default**. A different
+   commit shape is still needed for ≥ ~80% of across-disk raw.
 
 ## 5. Order, and what is needed
 

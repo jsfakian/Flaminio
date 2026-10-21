@@ -390,6 +390,9 @@ pub struct Store<D: BlockDevice> {
     in_flight: VecDeque<InFlight>,
     /// The next group, staged behind the commit in flight.
     staged: Option<Staged>,
+    /// When true, [`Self::poll_write_batch`] does not start the staged group's commit: the
+    /// engine grows it toward a byte floor, then calls [`Self::launch_staged`].
+    hold_staged: bool,
     /// The results of commits that another change waited for (see [`Store::guard`]), in order,
     /// until [`Store::poll_write_batch`] hands them out.
     settled: VecDeque<Vec<Result<(), StoreError>>>,
@@ -633,6 +636,7 @@ impl<D: BlockDevice> Store<D> {
             reads_in_flight: Cell::new(0),
             in_flight: VecDeque::new(),
             staged: None,
+            hold_staged: false,
             settled: VecDeque::new(),
         };
         store.checkpoint_inner()?;
@@ -944,15 +948,27 @@ impl<D: BlockDevice> Store<D> {
         Ok(())
     }
 
-    /// Starts the staged group's commit now, without waiting for the commits in flight to land,
-    /// if the disk has pipelined commits and fewer than `PIPELINE_DEPTH` are in flight (spec
-    /// §6.2). Returns whether it did. [`Self::poll_write_batch`] returns the results of the
-    /// batches in flight in order.
+    /// When true, landing a commit does not start the staged group ([`Self::poll_write_batch`]);
+    /// the caller grows it and starts it with [`Self::launch_staged`].
+    pub fn set_hold_staged(&mut self, hold: bool) {
+        self.hold_staged = hold;
+    }
+
+    /// Starts the staged group's commit now. With pipelined commits, behind those in flight if
+    /// fewer than `PIPELINE_DEPTH` are already out (spec §6.2). With [`Self::set_hold_staged`],
+    /// also when nothing is in flight (the previous commit landed and promotion was deferred).
+    /// Returns whether it did.
     pub fn launch_staged(&mut self) -> Result<bool, StoreError> {
-        if self.staged.is_none()
-            || self.in_flight.is_empty()
-            || self.in_flight.len() >= self.pipeline_depth()
-        {
+        if self.staged.is_none() {
+            return Ok(false);
+        }
+        let n = self.in_flight.len();
+        let depth = self.pipeline_depth();
+        if n >= depth || (n > 0 && depth == 1) {
+            return Ok(false);
+        }
+        // n == 0: only when holding a staged group after the previous commit landed.
+        if n == 0 && !self.hold_staged {
             return Ok(false);
         }
         self.poisoning(Self::promote_staged)?;
@@ -979,7 +995,12 @@ impl<D: BlockDevice> Store<D> {
         offset: u64,
         len: u64,
     ) -> Option<(u32, std::ops::RangeInclusive<u64>, u64)> {
-        if self.in_flight.is_empty() || self.poisoned || len == 0 {
+        if self.poisoned || len == 0 {
+            return None;
+        }
+        // Normally a commit must be in flight. With hold_staged, append to an existing staged
+        // group after that commit landed (growing toward a byte floor).
+        if self.in_flight.is_empty() && !(self.hold_staged && self.staged.is_some()) {
             return None;
         }
         let slot = self.state.slot_of(key).ok()?;
@@ -1354,7 +1375,9 @@ impl<D: BlockDevice> Store<D> {
             return self
                 .poisoning(|s| {
                     let results = s.finish_in_flight(f)?;
-                    s.promote_staged()?;
+                    if !s.hold_staged {
+                        s.promote_staged()?;
+                    }
                     Ok(results)
                 })
                 .map(Some);
@@ -1369,7 +1392,9 @@ impl<D: BlockDevice> Store<D> {
         self.poisoning(|s| {
             outcome?;
             let results = s.finish_in_flight(f)?;
-            s.promote_staged()?;
+            if !s.hold_staged {
+                s.promote_staged()?;
+            }
             Ok(results)
         })
         .map(Some)

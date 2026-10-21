@@ -676,15 +676,17 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     let deferred = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
     let mut engine = Engine::new(cfg, ReplicaService::new(deferred), net, meta);
     engine.set_async_commits(Instant::now(), true);
+    // Count/time gather for the paths below; the byte-floor section turns this back on.
+    engine.set_commit_target_bytes(0);
     model.lock().unwrap().volume = Some(pb::Volume {
         id: "v".into(),
-        size_bytes: 2 * CHUNK,
+        size_bytes: 4 * CHUNK,
         chunk_bytes: CHUNK,
         replicas: 1,
         min_isr: 1,
         epoch: 1,
         target: "fl-a".into(),
-        chunks: (0..2)
+        chunks: (0..4)
             .map(|_| pb::ChunkMeta {
                 replicas: vec!["fl-a".into()],
                 isr: vec!["fl-a".into()],
@@ -862,7 +864,8 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     };
 
     // Gathering: after a commit of two writes, with nothing staged, the next commit waits for
-    // two writes before it starts.
+    // two writes before it starts. Count/time only (byte floor off).
+    engine.set_commit_target_bytes(0);
     engine.set_commit_gather(Duration::from_secs(10));
     write(&mut engine, 10, 0);
     write(&mut engine, 11, 1);
@@ -904,15 +907,15 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     );
     assert_eq!(
         engine.device().commits_in_flight(),
-        2,
-        "pipelined: their commit went out behind it at once"
+        1,
+        "staged group waits for the landing (pipelined commits off)"
     );
     engine.device().complete();
     assert_eq!(run(&mut engine, &mut buf, until, &done(14)).len(), 1);
     run(&mut engine, &mut buf, 5, &done(15));
     assert!(
         engine.device().in_flight(),
-        "the second commit, launched behind the first, is still in flight"
+        "the staged group's commit started when the first landed"
     );
     assert_eq!(engine.device().pending_writes(), 1, "their batch only");
     engine.device().complete();
@@ -932,6 +935,73 @@ fn commits_in_flight_hold_writes_but_not_reads() {
             "write {op} reads back"
         );
     }
+
+    // Byte floor: after four 1 MiB whole-cluster writes, the next commit waits for eight (8 MiB)
+    // before starting, so one flush covers a full QD8 of 1 MiB traffic.
+    engine.set_commit_target_bytes(8 << 20);
+    engine.set_commit_gather(Duration::from_secs(10));
+    let write_mib = |engine: &mut Engine<DeferredDevice>, op: u64, i: u64| {
+        engine.handle(
+            Instant::now(),
+            Input::Io {
+                volume: "v".into(),
+                op,
+                io: Io::Write {
+                    offset: i * MIB,
+                    data: pattern(op as u8, MIB).into(),
+                },
+            },
+        );
+    };
+    for (op, i) in [(20u64, 0u64), (21, 1), (22, 2), (23, 3)] {
+        write_mib(&mut engine, op, i);
+    }
+    run(&mut engine, &mut buf, 5, &done(20));
+    assert!(engine.device().in_flight());
+    engine.device().complete();
+    acked(&mut engine, &mut buf, 20..=23);
+    // Four more would match the previous count target; the byte floor raises it to eight.
+    for (op, i) in [(24u64, 0u64), (25, 1), (26, 2), (27, 3)] {
+        write_mib(&mut engine, op, i);
+    }
+    run(&mut engine, &mut buf, 20, &done(24));
+    assert!(
+        !engine.device().in_flight(),
+        "byte floor: four 1 MiB writes are not enough"
+    );
+    for (op, i) in [(28u64, 4u64), (29, 5), (30, 6), (31, 7)] {
+        write_mib(&mut engine, op, i);
+    }
+    run(&mut engine, &mut buf, 5, &done(24));
+    assert_eq!(
+        engine.device().pending_writes(),
+        9,
+        "eight 1 MiB writes in one commit (8 data + journal)"
+    );
+    // Arm the next gather with a short window before this commit lands.
+    engine.set_commit_gather(Duration::from_millis(5));
+    engine.device().complete();
+    acked(&mut engine, &mut buf, 24..=31);
+
+    // 4K path: byte floor does not hold the commit for 8 MiB; the gather window ends it.
+    engine.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op: 40,
+            io: Io::Write {
+                offset: 0,
+                data: pattern(40, 4096).into(),
+            },
+        },
+    );
+    run(&mut engine, &mut buf, 30, &done(40));
+    assert!(
+        engine.device().in_flight(),
+        "4K started alone after the gather window, without waiting for 8 MiB"
+    );
+    engine.device().complete();
+    acked(&mut engine, &mut buf, 40..=40);
 
     engine.set_async_commits(Instant::now(), false);
     std::fs::remove_dir_all(&dir).unwrap();

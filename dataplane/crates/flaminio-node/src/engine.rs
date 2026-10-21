@@ -98,6 +98,12 @@ impl MetaPort for MetaClient {
 /// queue thread, and longer windows gained nothing.
 pub const DEFAULT_GATHER: Duration = Duration::from_micros(300);
 
+/// Default floor on write-data bytes gathered into one commit (see [`Engine::set_commit_target_bytes`]).
+/// Zero: count/time gather only. A short lab with 8 MiB (and held staging) did not raise single-
+/// stream 1M above ~700 MiB/s, so the floor stays off until a sizing that clears ~80% of
+/// across-disk raw is found; opt in with `--commit-target-mib`.
+pub const DEFAULT_COMMIT_TARGET_BYTES: u64 = 0;
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// This node's name.
@@ -392,12 +398,13 @@ pub struct Engine<D: BlockDevice> {
     next_sub: u64,
     local: Vec<(LocalFrom, SessionRef, Frame)>,
     /// For each of the local replica's commits in flight, oldest first (several with pipelined
-    /// commits): who sent the requests it holds back, in order, and how many are writes.
-    committing: std::collections::VecDeque<(Vec<LocalFrom>, usize)>,
+    /// commits): who sent the requests it holds back, in order, how many are writes, and their
+    /// payload bytes.
+    committing: std::collections::VecDeque<(Vec<LocalFrom>, usize, u64)>,
     /// The same for the group staged behind them. With pipelined commits it launches after a
     /// gather wait (see [`Self::maybe_launch_staged`]); otherwise its commit starts when the
     /// oldest in flight lands.
-    staged: Option<(Vec<LocalFrom>, usize)>,
+    staged: Option<(Vec<LocalFrom>, usize, u64)>,
     /// After a commit completes (or a staged group is waiting to launch), the next waits until
     /// this many writes are queued or staged, or until the instant (see `finish_commit`).
     gather: Option<(usize, Instant)>,
@@ -405,6 +412,10 @@ pub struct Engine<D: BlockDevice> {
     gather_window: Duration,
     /// A wait for writes to gather began: the driver arms a timer for it.
     gather_timer: Option<Duration>,
+    /// Floor on write-data bytes before the next commit starts (0: count/time only). Raised into
+    /// the count target as `ceil(bytes / avg_write)`, so 1 MiB traffic packs toward 8 MiB while
+    /// 4K still ends the wait on the time window.
+    commit_target_bytes: u64,
     /// Local commits since the last report: how many, their writes, how many started when
     /// their wait for writes to gather ran out, and how many were staged.
     commit_stats: (u64, u64, u64, u64),
@@ -448,6 +459,7 @@ impl<D: BlockDevice> Engine<D> {
             gather: None,
             gather_window: DEFAULT_GATHER,
             gather_timer: None,
+            commit_target_bytes: DEFAULT_COMMIT_TARGET_BYTES,
             commit_stats: (0, 0, 0, 0),
             async_commits: false,
             out: Vec::new(),
@@ -713,6 +725,14 @@ impl<D: BlockDevice> Engine<D> {
         self.gather_window = window;
     }
 
+    /// Floor on write-data bytes gathered into one commit (see [`DEFAULT_COMMIT_TARGET_BYTES`]).
+    /// Zero: gather by write count and time only, as before the byte floor. Non-zero also holds
+    /// the staged group after a landing so it can grow to the floor before its flush.
+    pub fn set_commit_target_bytes(&mut self, bytes: u64) {
+        self.commit_target_bytes = bytes;
+        self.service.set_hold_staged(bytes > 0);
+    }
+
     /// The timer to arm, once, when the next commit starts waiting for writes to gather: the
     /// driver pumps the engine when it fires.
     pub fn take_gather_timer(&mut self) -> Option<Duration> {
@@ -724,6 +744,64 @@ impl<D: BlockDevice> Engine<D> {
         self.local.iter().filter(|(_, _, f)| is_write(f)).count()
     }
 
+    fn queued_write_bytes(&self) -> u64 {
+        self.local
+            .iter()
+            .filter(|(_, _, f)| is_write(f))
+            .map(|(_, _, f)| write_data_len(f))
+            .sum()
+    }
+
+    fn pending_write_count(&self) -> usize {
+        self.queued_writes() + self.staged.as_ref().map(|s| s.1).unwrap_or(0)
+    }
+
+    fn pending_write_bytes(&self) -> u64 {
+        self.queued_write_bytes() + self.staged.as_ref().map(|s| s.2).unwrap_or(0)
+    }
+
+    /// Arms the gather wait after a commit of `writes` with `write_bytes` of payload. The count
+    /// target is at least those writes plus what is already queued. When the just-finished
+    /// commit's writes were large (≥ 64 KiB) and a byte floor is set, the count target is also
+    /// at least `ceil(commit_target_bytes / avg_write)` and the wait is at least 2 ms, so a
+    /// client can refill a full depth of 1 MiB writes. Small (4K) traffic keeps the short
+    /// window and the previous write count, so QD32 is not held for 8 MiB.
+    fn arm_gather(&mut self, now: Instant, writes: usize, write_bytes: u64) {
+        if self.gather_window.is_zero() {
+            return;
+        }
+        let mut target = writes + self.queued_writes();
+        let mut window = self.gather_window;
+        if self.commit_target_bytes > 0 && writes > 0 && write_bytes > 0 {
+            let avg = write_bytes / writes as u64;
+            if avg >= 64 << 10 {
+                let as_writes = self.commit_target_bytes.div_ceil(avg) as usize;
+                target = target.max(as_writes);
+                window = window.max(Duration::from_millis(2));
+            }
+        }
+        self.gather = Some((target, now + window));
+        self.gather_timer = Some(window);
+    }
+
+    /// Whether the gather wait is over: enough writes, enough payload bytes, or the window ran
+    /// out. Returns `(ready, expired)`.
+    fn gather_ready(&self, now: Instant, count: usize) -> (bool, bool) {
+        let Some((target, until)) = self.gather else {
+            return (true, false);
+        };
+        if self.commit_target_bytes > 0 && self.pending_write_bytes() >= self.commit_target_bytes {
+            return (true, false);
+        }
+        if count >= target {
+            return (true, false);
+        }
+        if now >= until {
+            return (true, true);
+        }
+        (false, false)
+    }
+
     /// Sends the requests queued for the local replica, a batch at a time, until none are left
     /// or a commit stays in flight.
     fn flush_local(&mut self, now: Instant) {
@@ -733,14 +811,23 @@ impl<D: BlockDevice> Engine<D> {
                 self.maybe_launch_staged(now);
                 return;
             }
+            // Held staged group: grow it from the local queue, then launch when gather is ready.
+            if self.commit_target_bytes > 0 && self.staged.is_some() {
+                self.stage_local();
+                self.maybe_launch_staged(now);
+                if self.staged.is_some() || !self.committing.is_empty() {
+                    return;
+                }
+            }
             if self.local.is_empty() {
                 return;
             }
-            if let Some((target, until)) = self.gather {
-                if self.queued_writes() < target {
-                    if now < until {
-                        return;
-                    }
+            if self.gather.is_some() {
+                let (ready, expired) = self.gather_ready(now, self.queued_writes());
+                if !ready {
+                    return;
+                }
+                if expired {
                     self.commit_stats.2 += 1;
                 }
                 self.gather = None;
@@ -765,13 +852,16 @@ impl<D: BlockDevice> Engine<D> {
             }
             let held = from.split_off(p.replies.len());
             if !held.is_empty() {
-                let writes = items[p.replies.len()..]
+                let held_items = &items[p.replies.len()..];
+                let writes = held_items.iter().filter(|(_, f)| is_write(f)).count();
+                let bytes: u64 = held_items
                     .iter()
                     .filter(|(_, f)| is_write(f))
-                    .count();
+                    .map(|(_, f)| write_data_len(f))
+                    .sum();
                 self.commit_stats.0 += 1;
                 self.commit_stats.1 += writes as u64;
-                self.committing.push_back((held, writes));
+                self.committing.push_back((held, writes, bytes));
             }
             self.deliver_local(now, from, p.replies);
         }
@@ -788,7 +878,8 @@ impl<D: BlockDevice> Engine<D> {
     /// its queue full sends again at once. Starting at once would split the client's writes into
     /// two halves that commit in turn, each commit carrying half (4K QD32: 13 writes per commit
     /// against 23). A client with one write in flight waits for nothing: its next write is the
-    /// target.
+    /// target. With [`Self::set_commit_target_bytes`], the wait also aims at that many payload
+    /// bytes (via a raised count floor), so 1 MiB QD8 packs toward one flush.
     ///
     /// Commits land in order. A group staged behind them joins them when the oldest lands, its
     /// commit started then.
@@ -800,18 +891,30 @@ impl<D: BlockDevice> Engine<D> {
             let Some(replies) = self.service.poll(wait) else {
                 return false;
             };
-            let (from, writes) = self.committing.pop_front().expect("a commit in flight");
+            let (from, writes, write_bytes) =
+                self.committing.pop_front().expect("a commit in flight");
             self.deliver_local(now, from, replies);
-            if let Some(st) = self.staged.take() {
-                self.count_staged(st.1);
-                self.committing.push_back(st);
+            if self.commit_target_bytes == 0 {
+                if let Some(st) = self.staged.take() {
+                    self.count_staged(st.1);
+                    self.committing.push_back(st);
+                }
+            } else if let Some((_, n, b)) = self.staged.as_ref() {
+                // Held: launch now if the staged group already meets the byte floor.
+                if *b >= self.commit_target_bytes && self.service.launch() {
+                    let st = self.staged.take().expect("staged");
+                    self.count_staged(st.1);
+                    self.committing.push_back(st);
+                } else if *n > 0 {
+                    // Grow it under the gather wait (see flush_local / maybe_launch_staged).
+                    self.arm_gather(now, *n, *b);
+                }
             }
             if !self.committing.is_empty() {
                 continue;
             }
-            if self.async_commits && !self.gather_window.is_zero() {
-                self.gather = Some((writes + self.queued_writes(), now + self.gather_window));
-                self.gather_timer = Some(self.gather_window);
+            if self.async_commits && self.staged.is_none() {
+                self.arm_gather(now, writes, write_bytes);
             }
             return true;
         }
@@ -820,9 +923,14 @@ impl<D: BlockDevice> Engine<D> {
     /// While a commit is in flight, stages the writes at the head of the local queue behind
     /// it (`ReplicaService::stage`): their data goes to the disk during its flush. The staged
     /// group's own commit starts when the oldest lands, or sooner with pipelined commits after
-    /// [`Self::maybe_launch_staged`] has gathered.
+    /// [`Self::maybe_launch_staged`] has gathered. With a byte floor, also appends after the
+    /// landing while the staged group is held.
     fn stage_local(&mut self) {
-        if !self.async_commits || self.committing.is_empty() {
+        if !self.async_commits {
+            return;
+        }
+        let holding = self.commit_target_bytes > 0 && self.staged.is_some();
+        if self.committing.is_empty() && !holding {
             return;
         }
         let n = self
@@ -850,9 +958,14 @@ impl<D: BlockDevice> Engine<D> {
             self.local.extend(newer);
         }
         if taken > 0 {
-            let st = self.staged.get_or_insert_with(|| (Vec::new(), 0));
+            let bytes: u64 = items[..taken]
+                .iter()
+                .map(|(_, f)| write_data_len(f))
+                .sum();
+            let st = self.staged.get_or_insert_with(|| (Vec::new(), 0, 0));
             st.0.extend(from);
             st.1 += taken;
+            st.2 += bytes;
         }
     }
 
@@ -860,23 +973,23 @@ impl<D: BlockDevice> Engine<D> {
     /// has gathered (same window as after a landing). Launching at the first staged write
     /// bypassed gathering and cut 1M sequential from about 700 to 548 MiB/s.
     fn maybe_launch_staged(&mut self, now: Instant) {
-        let staged_n = match &self.staged {
-            Some((_, n)) if *n > 0 => *n,
+        let (staged_n, staged_bytes) = match &self.staged {
+            Some((_, n, b)) if *n > 0 => (*n, *b),
             _ => return,
         };
         if self.async_commits && !self.gather_window.is_zero() {
             if self.gather.is_none() {
-                let target = staged_n + self.queued_writes();
-                self.gather = Some((target.max(staged_n), now + self.gather_window));
-                self.gather_timer = Some(self.gather_window);
+                self.arm_gather(now, staged_n, staged_bytes);
+                if let Some((t, _)) = self.gather.as_mut() {
+                    *t = (*t).max(staged_n);
+                }
                 return;
             }
-            let (target, until) = self.gather.expect("armed");
-            let n = self.staged.as_ref().map(|s| s.1).unwrap_or(0);
-            if n < target && now < until {
+            let (ready, expired) = self.gather_ready(now, self.pending_write_count());
+            if !ready {
                 return;
             }
-            if n < target {
+            if expired {
                 self.commit_stats.2 += 1;
             }
             self.gather = None;
@@ -1809,6 +1922,13 @@ impl<D: BlockDevice> Engine<D> {
 /// Whether a frame for the local replica writes to its store.
 fn is_write(f: &Frame) -> bool {
     matches!(f, Frame::Write { .. } | Frame::Copy { .. })
+}
+
+fn write_data_len(f: &Frame) -> u64 {
+    match f {
+        Frame::Write { data, .. } | Frame::Copy { data, .. } => data.len() as u64,
+        _ => 0,
+    }
 }
 
 fn to_frame(m: &ToReplica<Payload>) -> Frame {
