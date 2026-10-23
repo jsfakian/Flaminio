@@ -582,7 +582,6 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-pki-types",
- "serde_json",
  "smol",
  "thiserror 2.0.21",
  "x509-parser",
