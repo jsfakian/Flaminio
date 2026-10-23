@@ -673,3 +673,79 @@ fn pipelining_through_full_journals_keeps_the_data() {
     assert!(buf == expect, "after recovery");
     s.fsck(true).unwrap();
 }
+
+fn coalesce_store() -> Store<DeferredDevice> {
+    let dev = MemDevice::new(DEVICE);
+    Store::format(&dev, &options(16)).unwrap();
+    let mut s = Store::open(
+        DeferredDevice::new(dev),
+        StoreConfig {
+            flush_coalesce: 2,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    s.create_chunk(key(0), CHUNK, 64 * MIB, 1).unwrap();
+    s
+}
+
+#[test]
+fn flush_coalesce_shares_one_flush_across_two_commits() {
+    let mut s = coalesce_store();
+    let a = blocks(1, 0, 16);
+    let b = blocks(2, 16, 16);
+    assert!(matches!(
+        s.start_write_batch(&[req(0, &a, 1)]).unwrap(),
+        Started::InFlight
+    ));
+    assert_eq!(s.device().commits_in_flight(), 1);
+    assert_eq!(s.stage_writes(&[req(16 * 4096, &b, 2)]).unwrap(), 1);
+    assert!(
+        s.maybe_coalesce_partner().unwrap(),
+        "partner joins for a shared flush"
+    );
+    assert_eq!(s.device().commits_in_flight(), 2);
+    assert!(s.poll_write_batch(false).unwrap().is_none());
+    s.device().complete();
+    let r1 = s.poll_write_batch(false).unwrap().expect("first commit");
+    assert!(r1.iter().all(Result::is_ok));
+    let r2 = s.poll_write_batch(false).unwrap().expect("second commit");
+    assert!(r2.iter().all(Result::is_ok));
+    assert!(!s.commit_in_flight());
+    assert_eq!(read(&s, 0, 16 * 4096), a);
+    assert_eq!(read(&s, 16 * 4096, 16 * 4096), b);
+}
+
+#[test]
+fn flush_coalesce_crash_before_shared_flush_loses_both() {
+    let mut s = coalesce_store();
+    let a = blocks(1, 0, 16);
+    let b = blocks(2, 16, 16);
+    let _ = s.start_write_batch(&[req(0, &a, 1)]).unwrap();
+    s.stage_writes(&[req(16 * 4096, &b, 2)]).unwrap();
+    assert!(s.maybe_coalesce_partner().unwrap());
+    let image = s.into_device().crash(7);
+    let s = Store::open(image, StoreConfig::default()).unwrap();
+    let mut buf = vec![0u8; 32 * 4096];
+    s.read(key(0), 0, &mut buf, 1).unwrap();
+    assert_eq!(buf, vec![0u8; 32 * 4096], "neither commit was flushed");
+}
+
+#[test]
+fn flush_coalesce_after_shared_flush_keeps_both() {
+    let mut s = coalesce_store();
+    let a = blocks(1, 0, 16);
+    let b = blocks(2, 16, 16);
+    let _ = s.start_write_batch(&[req(0, &a, 1)]).unwrap();
+    s.stage_writes(&[req(16 * 4096, &b, 2)]).unwrap();
+    assert!(s.maybe_coalesce_partner().unwrap());
+    s.device().complete();
+    assert!(s.poll_write_batch(false).unwrap().is_some());
+    assert!(s.poll_write_batch(false).unwrap().is_some());
+    let s = reopen(s);
+    let mut buf = vec![0u8; 32 * 4096];
+    s.read(key(0), 0, &mut buf, 1).unwrap();
+    let mut expect = a;
+    expect.extend_from_slice(&b);
+    assert_eq!(buf, expect);
+}

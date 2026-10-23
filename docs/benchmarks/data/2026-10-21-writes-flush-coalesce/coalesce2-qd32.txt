@@ -1,0 +1,4 @@
+# FLUSH_COALESCE=2, from 2026-10-21 arms (integrity reattach timed out; 1M not reached)
+job                   side           fresh     steady
+randwrite-4k-qd32     flaminio        3310      10592
+randwrite-4k-qd32     flaminio        3296      10617

@@ -116,6 +116,11 @@ fio submitters. **Single-stream 1M is unchanged** (~70% of across-disk raw).
 MiB/s; holding staged regresses it. Default stays off (`0`). The 1M gap remains one flush
 per ~4 MiB of overlapped commit.
 
+**After W4.6 (2026-10-21–23):** flush coalesce depth 2 (`--flush-coalesce 2`)
+([results](benchmarks/2026-10-21-writes-flush-coalesce.md)). Sharing one `fdatasync` across
+two overlapped commits **regressed** single-stream 1M (696 → 511 MiB/s). 4K QD32 stayed
+~10.6k. Default stays off (`0`).
+
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
 | Read job | Flaminio (pod or node) | Raw | Share |

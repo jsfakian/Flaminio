@@ -1,7 +1,7 @@
 //! A block device on io_uring with O_DIRECT.
 #![allow(unsafe_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
@@ -41,6 +41,10 @@ pub struct UringDevice {
     ring: RefCell<IoUring>,
     commit_ring: RefCell<IoUring>,
     commits: RefCell<Commits>,
+    /// 0/1: one fsync per commit; 2: up to two commits share one fdatasync.
+    flush_coalesce: Cell<u8>,
+    /// Defer the oldest ready flush while the store may still promote a staged partner.
+    expect_coalesce_partner: Cell<bool>,
 }
 
 /// The commit ring's state.
@@ -68,7 +72,7 @@ impl Commits {
             + self
                 .current
                 .iter()
-                .filter(|(_, f)| matches!(f, Flush::Submitted))
+                .filter(|(_, f)| matches!(f, Flush::Submitted | Flush::Covered))
                 .count()
     }
 }
@@ -101,7 +105,11 @@ impl Held {
 enum Flush {
     /// Waiting for the commit's writes.
     Waiting,
+    /// This commit's own fsync is in flight (covers only itself, or is the tag for a coalesced
+    /// group — see [`Flush::Covered`]).
     Submitted,
+    /// Shares the previous commit's in-flight fsync; becomes Done when that CQE arrives.
+    Covered,
     Done(Option<io::Error>),
 }
 
@@ -140,6 +148,8 @@ impl UringDevice {
             ring: RefCell::new(ring),
             commit_ring: RefCell::new(commit_ring),
             commits: RefCell::new(Commits::default()),
+            flush_coalesce: Cell::new(0),
+            expect_coalesce_partner: Cell::new(false),
         })
     }
 
@@ -270,6 +280,10 @@ fn len32(len: usize) -> io::Result<u32> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "I/O larger than 4 GiB"))
 }
 
+fn clone_err(e: &io::Error) -> io::Error {
+    io::Error::new(e.kind(), e.to_string())
+}
+
 impl std::os::fd::AsRawFd for UringDevice {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.file.as_raw_fd()
@@ -323,8 +337,21 @@ impl UringDevice {
             if tag & FLUSH_TAG != 0 {
                 let generation = tag & !FLUSH_TAG;
                 let error = (res < 0).then(|| io::Error::from_raw_os_error(-res));
-                if let Some((_, flush)) = st.current.iter_mut().find(|(g, _)| *g == generation) {
-                    *flush = Flush::Done(error);
+                // The tagged commit and any Covered partners that share this fsync.
+                let mut marking = false;
+                for (g, flush) in st.current.iter_mut() {
+                    if *g == generation {
+                        *flush = Flush::Done(error.as_ref().map(clone_err));
+                        marking = true;
+                        continue;
+                    }
+                    if marking && matches!(flush, Flush::Covered) {
+                        *flush = Flush::Done(error.as_ref().map(clone_err));
+                        continue;
+                    }
+                    if marking {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -349,35 +376,71 @@ impl UringDevice {
     }
 
     /// Submits each commit's flush, in order, once every write that belongs to it or to an
-    /// earlier commit has completed.
+    /// earlier commit has completed. With flush coalesce, up to two ready commits share one
+    /// `fdatasync`; the oldest waits for a partner while [`Self::set_expect_coalesce_partner`]
+    /// is set and no second commit is in flight yet.
     fn advance_commit(&self, st: &mut Commits, ring: &mut IoUring) {
-        let Commits {
-            writes, current, ..
-        } = st;
-        let mut submitted = false;
-        for (generation, flush) in current.iter_mut() {
+        let coalesce = self.flush_coalesce.get().max(1) as usize;
+        // First Waiting commit whose writes (and earlier gens') are done.
+        let Some(start) = st.current.iter().position(|(generation, flush)| {
+            matches!(flush, Flush::Waiting) && !st.writes.values().any(|(_, g)| *g <= *generation)
+        }) else {
+            return;
+        };
+        // An earlier commit still in flight must finish first.
+        if st.current.iter().take(start).any(|(_, f)| {
+            matches!(f, Flush::Waiting | Flush::Submitted | Flush::Covered)
+        }) {
+            return;
+        }
+        let mut n = 0usize;
+        for (generation, flush) in st.current.iter().skip(start) {
             if !matches!(flush, Flush::Waiting) {
-                continue;
-            }
-            if writes.values().any(|(_, g)| *g <= *generation) {
                 break;
             }
-            let entry = opcode::Fsync::new(types::Fd(self.file.as_raw_fd()))
-                .flags(types::FsyncFlags::DATASYNC)
-                .build()
-                .user_data(FLUSH_TAG | *generation);
-            // SAFETY: references no memory. make_room keeps the ring from filling.
-            unsafe {
-                ring.submission()
-                    .push(&entry)
-                    .expect("fits the commit ring")
-            };
-            *flush = Flush::Submitted;
-            submitted = true;
+            if st.writes.values().any(|(_, g)| *g <= *generation) {
+                break;
+            }
+            n += 1;
+            if n >= coalesce {
+                break;
+            }
         }
-        if submitted {
-            submit_or_abort(ring, "a commit's flush");
+        if n == 0 {
+            return;
         }
+        if n == 1 && coalesce >= 2 {
+            let has_later = st.current.len() > start + 1;
+            if !has_later && self.expect_coalesce_partner.get() {
+                return;
+            }
+            if has_later
+                && matches!(
+                    st.current.get(start + 1).map(|(_, f)| f),
+                    Some(Flush::Waiting)
+                )
+            {
+                // Partner's writes are still in flight.
+                return;
+            }
+        }
+        let take = n.min(coalesce);
+        let tag_gen = st.current[start].0;
+        let entry = opcode::Fsync::new(types::Fd(self.file.as_raw_fd()))
+            .flags(types::FsyncFlags::DATASYNC)
+            .build()
+            .user_data(FLUSH_TAG | tag_gen);
+        // SAFETY: references no memory. make_room keeps the ring from filling.
+        unsafe {
+            ring.submission()
+                .push(&entry)
+                .expect("fits the commit ring")
+        };
+        st.current[start].1 = Flush::Submitted;
+        for i in 1..take {
+            st.current[start + i].1 = Flush::Covered;
+        }
+        submit_or_abort(ring, "a commit's flush");
     }
 
     /// Waits until `n` more writes and a flush fit on the commit ring. Returns false if they
@@ -539,6 +602,20 @@ impl BlockDevice for UringDevice {
                 Some(_) if !wait => return None,
                 Some(_) => Self::wait_commits(&mut ring),
             }
+        }
+    }
+
+    fn set_flush_coalesce(&self, n: u8) {
+        self.flush_coalesce.set(n);
+    }
+
+    fn set_expect_coalesce_partner(&self, expect: bool) {
+        self.expect_coalesce_partner.set(expect);
+        if !expect {
+            // Partner will not join: flush any commit that was waiting alone.
+            let mut st = self.commits.borrow_mut();
+            let mut ring = self.commit_ring.borrow_mut();
+            self.advance_commit(&mut st, &mut ring);
         }
     }
 }

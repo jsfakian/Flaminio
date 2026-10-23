@@ -1,0 +1,5 @@
+# FLUSH_COALESCE=2, JOBS=write-1m, ZERO_COPY=1, 1×1, 2026-10-23
+# Campaign EXIT=255: integrity reattach timed out after fio checks (errors 0).
+job                   side           fresh     steady
+write-1m-qd8          raw            911.5       1873
+write-1m-qd8          flaminio       437.8        511

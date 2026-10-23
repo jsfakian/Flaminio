@@ -939,6 +939,7 @@ impl<D: BlockDevice> Engine<D> {
             .take_while(|(_, _, f)| matches!(f, Frame::Write { .. }))
             .count();
         if n == 0 {
+            self.service.clear_coalesce_expect();
             return;
         }
         let mut from = Vec::with_capacity(n);
@@ -948,6 +949,9 @@ impl<D: BlockDevice> Engine<D> {
             items.push((s, frame));
         }
         let taken = self.service.stage(&items);
+        if taken == 0 {
+            self.service.clear_coalesce_expect();
+        }
         let rest: Vec<_> = from
             .drain(taken..)
             .zip(items.drain(taken..))
@@ -966,6 +970,12 @@ impl<D: BlockDevice> Engine<D> {
             st.0.extend(from);
             st.1 += taken;
             st.2 += bytes;
+            // Flush coalesce: partner's journal joins now; track it like launch().
+            if self.service.coalesce_partner() {
+                let st = self.staged.take().expect("staged");
+                self.count_staged(st.1);
+                self.committing.push_back(st);
+            }
         }
     }
 

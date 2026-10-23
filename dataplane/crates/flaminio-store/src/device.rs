@@ -67,6 +67,15 @@ pub trait BlockDevice {
         let _ = wait;
         Some(Ok(()))
     }
+
+    /// How many commits may share one device flush (0 or 1: one flush per commit; 2: two
+    /// commits' writes then one `fdatasync`). Default: off.
+    fn set_flush_coalesce(&self, _n: u8) {}
+
+    /// When true and flush coalesce is on, the device defers the oldest commit's flush until a
+    /// second commit is in flight (or this is cleared). The store sets it while a staged partner
+    /// may still join.
+    fn set_expect_coalesce_partner(&self, _expect: bool) {}
 }
 
 impl<D: BlockDevice + ?Sized> BlockDevice for &D {
@@ -105,6 +114,14 @@ impl<D: BlockDevice + ?Sized> BlockDevice for &D {
     fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
         (**self).poll_commit(wait)
     }
+
+    fn set_flush_coalesce(&self, n: u8) {
+        (**self).set_flush_coalesce(n)
+    }
+
+    fn set_expect_coalesce_partner(&self, expect: bool) {
+        (**self).set_expect_coalesce_partner(expect)
+    }
 }
 
 impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
@@ -142,6 +159,14 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
 
     fn poll_commit(&self, wait: bool) -> Option<io::Result<()>> {
         (**self).poll_commit(wait)
+    }
+
+    fn set_flush_coalesce(&self, n: u8) {
+        (**self).set_flush_coalesce(n)
+    }
+
+    fn set_expect_coalesce_partner(&self, expect: bool) {
+        (**self).set_expect_coalesce_partner(expect)
     }
 }
 
@@ -408,6 +433,8 @@ pub struct DeferredDevice {
     /// Commits landed and not reported by `poll_commit` yet.
     landed: std::cell::Cell<usize>,
     fail: std::cell::Cell<bool>,
+    flush_coalesce: std::cell::Cell<u8>,
+    expect_coalesce_partner: std::cell::Cell<bool>,
 }
 
 impl DeferredDevice {
@@ -418,6 +445,8 @@ impl DeferredDevice {
             pending: RefCell::new(std::collections::VecDeque::new()),
             landed: std::cell::Cell::new(0),
             fail: std::cell::Cell::new(false),
+            flush_coalesce: std::cell::Cell::new(0),
+            expect_coalesce_partner: std::cell::Cell::new(false),
         }
     }
 
@@ -444,20 +473,27 @@ impl DeferredDevice {
         self.pending.borrow().front().map_or(0, Vec::len)
     }
 
-    /// Lands the oldest commit in flight: its writes, then the flush.
+    /// Lands the oldest commit in flight: its writes, then the flush. With flush coalesce 2 and
+    /// a second commit pending, both share one flush.
     pub fn complete(&self) {
-        let writes = self
-            .pending
-            .borrow_mut()
-            .pop_front()
-            .expect("a commit in flight");
-        if !self.through {
-            for (o, d) in writes {
-                self.inner.write_at(o, &d).expect("in memory");
+        let coalesce = self.flush_coalesce.get().max(1) as usize;
+        let mut pending = self.pending.borrow_mut();
+        let n = if coalesce >= 2 && pending.len() >= 2 {
+            2
+        } else {
+            1
+        };
+        for _ in 0..n {
+            let writes = pending.pop_front().expect("a commit in flight");
+            if !self.through {
+                for (o, d) in writes {
+                    self.inner.write_at(o, &d).expect("in memory");
+                }
             }
         }
+        drop(pending);
         self.inner.flush().expect("in memory");
-        self.landed.set(self.landed.get() + 1);
+        self.landed.set(self.landed.get() + n);
     }
 
     /// Makes the oldest commit in flight fail (its writes are lost).
@@ -510,13 +546,29 @@ impl BlockDevice for DeferredDevice {
             return Some(Err(io::Error::other("injected commit failure")));
         }
         if self.landed.get() == 0 && self.in_flight() {
+            let coalesce = self.flush_coalesce.get().max(1);
             if !wait {
+                if coalesce >= 2
+                    && self.pending.borrow().len() == 1
+                    && self.expect_coalesce_partner.get()
+                {
+                    // Waiting for a partner commit before the shared flush.
+                    return None;
+                }
                 return None;
             }
             self.complete();
         }
         self.landed.set(self.landed.get().saturating_sub(1));
         Some(Ok(()))
+    }
+
+    fn set_flush_coalesce(&self, n: u8) {
+        self.flush_coalesce.set(n);
+    }
+
+    fn set_expect_coalesce_partner(&self, expect: bool) {
+        self.expect_coalesce_partner.set(expect);
     }
 }
 

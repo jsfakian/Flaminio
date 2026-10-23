@@ -57,6 +57,10 @@ pub struct StoreConfig {
     /// 20% on 1M sequential (548 against ~700 MiB/s) by bypassing gathering. Opt in once the
     /// engine gathers before launching.
     pub pipelined_commits: bool,
+    /// How many commits may share one device flush (0 or 1: off; 2: two journal batches then
+    /// one `fdatasync`). Keeps early data writes of the partner (W4.2) while amortizing flush
+    /// cost. Off by default until lab-proven on 1M.
+    pub flush_coalesce: u8,
 }
 
 impl Default for StoreConfig {
@@ -66,6 +70,7 @@ impl Default for StoreConfig {
             pipelined_commits: false,
             max_batch_bytes: 4 * MIB as usize,
             allocation: Allocation::NextFit,
+            flush_coalesce: 0,
         }
     }
 }
@@ -643,6 +648,9 @@ impl<D: BlockDevice> Store<D> {
         if store.config.pipelined_commits && !pipelined {
             store.set_pipelined_commits()?;
         }
+        store
+            .dev
+            .set_flush_coalesce(store.config.flush_coalesce);
         Ok(store)
     }
 
@@ -876,6 +884,7 @@ impl<D: BlockDevice> Store<D> {
     /// order, keeping their results for [`Self::poll_write_batch`]. Every other change waits
     /// for them this way (from [`Self::guard`]), so batches stay durable in order.
     fn settle(&mut self) -> Result<(), StoreError> {
+        self.dev.set_expect_coalesce_partner(false);
         loop {
             while let Some(f) = self.in_flight.pop_front() {
                 if f.device {
@@ -889,6 +898,23 @@ impl<D: BlockDevice> Store<D> {
             }
             self.promote_staged()?;
         }
+    }
+
+    /// With flush coalesce, promotes the staged journal batch behind the commit in flight so
+    /// both share one device flush. Returns whether it promoted. No-op if coalesce is off,
+    /// hold_staged is on, or there is nothing to promote.
+    pub fn maybe_coalesce_partner(&mut self) -> Result<bool, StoreError> {
+        if self.config.flush_coalesce < 2
+            || self.hold_staged
+            || self.staged.is_none()
+            || self.in_flight.len() != 1
+        {
+            return Ok(false);
+        }
+        self.promote_staged()?;
+        // Partner is on the device: flush when both writes are done.
+        self.dev.set_expect_coalesce_partner(false);
+        Ok(true)
     }
 
     fn finish_in_flight(&mut self, f: InFlight) -> Result<Vec<Result<(), StoreError>>, StoreError> {
@@ -1121,7 +1147,16 @@ impl<D: BlockDevice> Store<D> {
             st.results.push(None);
             taken += 1;
         }
+        if self.config.flush_coalesce >= 2 && self.staged.is_none() && taken == 0 {
+            // Nothing staged: flush the commit in flight alone.
+            self.dev.set_expect_coalesce_partner(false);
+        }
         Ok(taken)
+    }
+
+    /// Clears a deferred coalesce wait so the commit in flight flushes alone (no staged partner).
+    pub fn clear_coalesce_expect(&mut self) {
+        self.dev.set_expect_coalesce_partner(false);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1334,6 +1369,11 @@ impl<D: BlockDevice> Store<D> {
                         pool_budget: f.pool_budget,
                         device: true,
                     });
+                    // Defer this commit's flush until stage_writes promotes a partner or the
+                    // engine reports nothing to stage (clear_coalesce_expect).
+                    if self.config.flush_coalesce >= 2 {
+                        self.dev.set_expect_coalesce_partner(true);
+                    }
                     return Ok(Started::InFlight);
                 }
                 // Groups commit one after the other: only the last stays in flight.

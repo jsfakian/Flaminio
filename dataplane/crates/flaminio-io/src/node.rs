@@ -60,6 +60,8 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --commit-target-mib N
                            gather at least N MiB of write data into one commit when the
                            client's writes are large (default 0: count/time only; try 8)
+      --flush-coalesce N   up to N commits share one fdatasync (0/1: off; 2: partner with
+                           staged early data). Default 0
       --sync-commits       commits block the queue thread until durable (as before commits
                            went asynchronous): for comparing
       --pipelined-commits  up to 4 commits in flight (spec §6.2): for measuring. Off by
@@ -101,6 +103,8 @@ pub(crate) struct NodeConfig {
     pub gather_us: Option<u64>,
     /// `None`: default (off); `Some(n)`: n MiB byte floor (0: same as off).
     pub commit_target_mib: Option<u64>,
+    /// 0/1: off; 2: two commits share one fdatasync.
+    pub flush_coalesce: u8,
     pub sync_commits: bool,
     pub pipelined_commits: bool,
     pub first_fit: bool,
@@ -131,6 +135,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         poll_us: 0,
         gather_us: None,
         commit_target_mib: None,
+        flush_coalesce: 0,
         sync_commits: false,
         pipelined_commits: false,
         first_fit: false,
@@ -173,6 +178,12 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
             "--commit-target-mib" => {
                 c.commit_target_mib =
                     Some(value()?.parse().map_err(|_| "invalid --commit-target-mib")?)
+            }
+            "--flush-coalesce" => {
+                c.flush_coalesce = value()?.parse().map_err(|_| "invalid --flush-coalesce")?;
+                if c.flush_coalesce > 2 {
+                    return Err("--flush-coalesce must be 0, 1, or 2".into());
+                }
             }
             "--sync-commits" => c.sync_commits = true,
             "--pipelined-commits" => c.pipelined_commits = true,
@@ -235,6 +246,7 @@ pub(crate) fn build<D: BlockDevice + 'static>(
             Allocation::NextFit
         },
         pipelined_commits: c.pipelined_commits,
+        flush_coalesce: c.flush_coalesce,
         ..StoreConfig::default()
     };
     let store = Store::open(dev, config).map_err(|e| format!("open store: {e}"))?;

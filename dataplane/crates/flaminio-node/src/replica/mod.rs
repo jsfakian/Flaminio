@@ -397,16 +397,22 @@ impl<D: BlockDevice> ReplicaService<D> {
         }
     }
 
-    /// Stages writes behind the commit in flight (the store's [`Store::stage_writes`]): takes
-    /// the longest prefix of `items` made of writes the store can stage now, decides them, and
-    /// holds their replies for their own commit, which starts as soon as the one in flight is
-    /// durable. Returns how many items it took; the rest wait, in order.
     /// Defers starting the staged group when a commit lands (see [`Store::set_hold_staged`]).
     pub fn set_hold_staged(&mut self, hold: bool) {
         self.hold_staged = hold;
         self.store.set_hold_staged(hold);
     }
 
+    /// No staged partner for flush coalesce: let the commit in flight flush alone.
+    pub fn clear_coalesce_expect(&mut self) {
+        self.store.clear_coalesce_expect();
+    }
+
+    /// Stages writes behind the commit in flight (the store's [`Store::stage_writes`]): takes
+    /// the longest prefix of `items` made of writes the store can stage now, decides them, and
+    /// holds their replies for their own commit, which starts as soon as the one in flight is
+    /// durable (or sooner via [`Self::coalesce_partner`] / [`Self::launch`]). Returns how many
+    /// items it took; the rest wait, in order.
     pub fn stage(&mut self, items: &[(SessionRef, Frame)]) -> usize {
         // Normally a commit must be in flight. With hold_staged, append to an existing staged
         // group after that commit landed.
@@ -491,6 +497,22 @@ impl<D: BlockDevice> ReplicaService<D> {
             taken += 1;
         }
         taken
+    }
+
+    /// With flush coalesce, promotes the staged group's journal behind the commit in flight so
+    /// both share one fdatasync. Returns whether it did: the caller must move its staged
+    /// tracking into the commits in flight, as with [`Self::launch`].
+    pub fn coalesce_partner(&mut self) -> bool {
+        match self.store.maybe_coalesce_partner() {
+            Ok(true) => {
+                if let Some(st) = self.staged.take() {
+                    self.flying.push_back(st);
+                }
+                true
+            }
+            // A store failure shows at the next poll.
+            Ok(false) | Err(_) => false,
+        }
     }
 
     /// The replies to the requests the oldest commit in flight held back, once it is durable

@@ -50,6 +50,7 @@ up() {
     [[ ${POLL_US:-0} != 0 ]] && args+=(--poll-us "$POLL_US")
     [[ -n ${GATHER_US:-} ]] && args+=(--gather-us "$GATHER_US")
     [[ -n ${COMMIT_TARGET_MIB:-} ]] && args+=(--commit-target-mib "$COMMIT_TARGET_MIB")
+    [[ -n ${FLUSH_COALESCE:-} ]] && args+=(--flush-coalesce "$FLUSH_COALESCE")
     [[ ${SYNC_COMMITS:-0} == 1 ]] && args+=(--sync-commits)
     [[ ${PIPELINED_COMMITS:-0} == 1 ]] && args+=(--pipelined-commits)
     [[ ${FIRST_FIT:-0} == 1 ]] && args+=(--first-fit)

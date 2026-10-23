@@ -31,6 +31,18 @@ fn deferred_service() -> ReplicaService<DeferredDevice> {
     ReplicaService::new(store)
 }
 
+fn coalesce_service() -> ReplicaService<DeferredDevice> {
+    let store = Store::open(
+        DeferredDevice::new(formatted()),
+        StoreConfig {
+            flush_coalesce: 2,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    ReplicaService::new(store)
+}
+
 fn formatted() -> MemDevice {
     let dev = MemDevice::new(256 * MIB);
     let opts = FormatOptions {
@@ -358,6 +370,48 @@ fn staged_writes_are_answered_after_their_own_commit() {
     let r = s.handle(&rest[1..]);
     assert_eq!(r[0], Reply::Send(Frame::Ok { req: 4 }));
     assert_eq!(blocks(&r[1]), vec![2], "the staged write reads back");
+}
+
+#[test]
+fn flush_coalesce_answers_both_after_one_device_flush() {
+    let mut s = coalesce_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    assert!(
+        s.coalesce_partner(),
+        "partner journal joined before the shared flush"
+    );
+    assert_eq!(s.store().device().commits_in_flight(), 2);
+    assert!(s.poll(false).is_none());
+    s.store().device().complete();
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 2 })]));
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 3 })]));
+    assert!(!s.commit_in_flight());
+    let r = s.handle(&[(sess, read(4, 0, 0, 32))]);
+    assert_eq!(blocks(&r[0]), [vec![1u8; 16], vec![2; 16]].concat());
+}
+
+#[test]
+fn flush_coalesce_then_stage_again_stays_ordered() {
+    // After the partner joins flying, further staged writes are a new group: the engine's
+    // committing / staged tracking must not merge them (that desync panics in start).
+    let mut s = coalesce_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    assert!(s.coalesce_partner());
+    assert_eq!(s.stage(&[(sess, write(4, 0, 32, &[3; 16], 3))]), 1);
+    assert!(!s.coalesce_partner(), "depth 2: third group stays staged");
+    s.store().device().complete();
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 2 })]));
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 3 })]));
+    // Oldest landing promotes the third group's commit.
+    assert!(s.commit_in_flight());
+    assert!(s.poll(false).is_none());
+    s.store().device().complete();
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 4 })]));
+    assert!(!s.commit_in_flight());
 }
 
 #[test]

@@ -1,0 +1,79 @@
+[1;34m==>[0m fl-b, RF 1, 1 queue(s), 1 fio job(s), 1 repetitions, 30 s rounds (steady: 5 within ±10%, at most 8), idle 60 s after each reset
+[1;34m[fl-a][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m wbench: 0 replicas deleted
+[1;34m[fl-c][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m flaminio-node stopped
+reset fl-b-data.img: trimmed and preallocated again (100 GiB)
+  whole disk written: 100 GiB at 2589 MiB/s
+  preconditioned: 32 GiB at 1958 MiB/s
+[1;34m==>[0m   randwrite-4k-qd32 rep 1 raw: fresh 4241, steady not reached after 8 rounds (48 °C)
+[1;34m[fl-a][0m wbench: 0 replicas deleted
+[1;34m[fl-c][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m flaminio-node stopped
+reset fl-b-data.img: trimmed and preallocated again (100 GiB)
+[1;34m[fl-b][0m flaminio-io: store ready, 0 chunk replicas, 0 of 1626719 clusters used flaminio-io: serving replicas; control socket /run/flaminio/node.sock 
+[1;34m[fl-b][0m attached wbench: /dev/ublkb1
+[1;34m[fl-a][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m wbench: 64 replicas deleted
+[1;34m[fl-c][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m flaminio-node stopped
+  whole disk written: 100 GiB at 2223 MiB/s
+[1;34m[fl-b][0m flaminio-io: store ready, 0 chunk replicas, 0 of 1626719 clusters used flaminio-io: serving replicas; control socket /run/flaminio/node.sock 
+[1;34m[fl-b][0m attached wbench: /dev/ublkb1
+  preconditioned: 32 GiB at 375 MiB/s
+[1;34m==>[0m   randwrite-4k-qd32 rep 1 flaminio: fresh 3312, steady 10567 after 5 rounds (47 °C)
+randwrite-4k-qd32 rep 1
+  sequential: 16 GiB written, 16 GiB read back and checked, errors 0
+  random: 2 GiB written, 2 GiB read back and checked, errors 0
+[1;34m[fl-b][0m flaminio-node stopped
+[1;34m[fl-b][0m flaminio-io: store ready, 64 chunk replicas, 262144 of 1626719 clusters used flaminio-io: serving replicas; control socket /run/flaminio/node.sock 
+[1;34m[fl-b][0m attached wbench: /dev/ublkb1
+  random, after a restart: 2 GiB read back and checked, errors 0
+  Flaminio checksum failures: 0
+[1;34m[fl-a][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m wbench: 64 replicas deleted
+[1;34m[fl-c][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m flaminio-node stopped
+reset fl-b-data.img: trimmed and preallocated again (100 GiB)
+  whole disk written: 100 GiB at 2608 MiB/s
+  preconditioned: 32 GiB at 1949 MiB/s
+[1;34m==>[0m   write-1m-qd8 rep 1 raw: fresh 968.8, steady 1940 after 6 rounds (54 °C)
+[1;34m[fl-a][0m wbench: 0 replicas deleted
+[1;34m[fl-c][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m flaminio-node stopped
+reset fl-b-data.img: trimmed and preallocated again (100 GiB)
+[1;34m[fl-b][0m flaminio-io: store ready, 0 chunk replicas, 0 of 1626719 clusters used flaminio-io: serving replicas; control socket /run/flaminio/node.sock 
+[1;34m[fl-b][0m attached wbench: /dev/ublkb1
+[1;34m[fl-a][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m wbench: 64 replicas deleted
+[1;34m[fl-c][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m flaminio-node stopped
+  whole disk written: 100 GiB at 2143 MiB/s
+[1;34m[fl-b][0m flaminio-io: store ready, 0 chunk replicas, 0 of 1626719 clusters used flaminio-io: serving replicas; control socket /run/flaminio/node.sock 
+[1;34m[fl-b][0m attached wbench: /dev/ublkb1
+  preconditioned: 32 GiB at 382 MiB/s
+[1;34m==>[0m   write-1m-qd8 rep 1 flaminio: fresh 634.9, steady 696 after 7 rounds (54 °C)
+write-1m-qd8 rep 1
+  sequential: 16 GiB written, 16 GiB read back and checked, errors 0
+  random: 2 GiB written, 2 GiB read back and checked, errors 0
+[1;34m[fl-b][0m flaminio-node stopped
+[1;34m[fl-b][0m flaminio-io: store ready, 64 chunk replicas, 262144 of 1626719 clusters used flaminio-io: serving replicas; control socket /run/flaminio/node.sock 
+[1;34m[fl-b][0m attached wbench: /dev/ublkb1
+  random, after a restart: 2 GiB read back and checked, errors 0
+  Flaminio checksum failures: 0
+job                   side           fresh     steady   share   disk WA  drive WA
+write-1m-qd8          raw              968       1940       -      1.00      1.00
+write-1m-qd8          flaminio         634        696     35%      1.00      1.00
+randwrite-4k-qd32     raw             4241   unsteady       -      1.00      1.00
+randwrite-4k-qd32     flaminio        3312      10567       -      2.22      1.00
+[1;34m==>[0m restoring fl-b: a clean store, and vol1's replicas moved back
+[1;34m[fl-a][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m wbench: 64 replicas deleted
+[1;34m[fl-c][0m wbench: 0 replicas deleted
+[1;34m[fl-b][0m flaminio-node stopped
+[1;34m[fl-b][0m flaminio-io: store ready, 0 chunk replicas, 0 of 1626719 clusters used flaminio-io: serving replicas; control socket /run/flaminio/node.sock 
+flaminio-meta: rpc error: code = NotFound desc = not found: volume "vol1"
+flaminio-meta: rpc error: code = NotFound desc = not found: volume "vol1"
+   0s fl-c: 0 chunk replicas left, 0 moving
+[1;34m==>[0m results in /home/jsfakian/flaminio/.lab/bench/writes-rf1-q1-jobs1-20261021T144849
+EXIT=0
