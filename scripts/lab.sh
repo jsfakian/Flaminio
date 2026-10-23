@@ -349,9 +349,10 @@ cmd_repl_fault() {
 }
 
 # The port forwards each host needs, as forward.sh rules: replication to VM b (TCP), and the
-# overlay port of every VM (UDP), each open to the other server only.
+# overlay port of every VM (UDP), each open to the other server only. When DEMO_CP_SRC_IP is set
+# (Mac control-plane demo), the same UDP forwards also accept that source.
 forward_rules() {
-    local host=$1 vm other rules=()
+    local host=$1 vm other rules=() src
     if [[ $host == "$HOST_B" ]]; then
         rules+=("tcp/$REPL_PORT/$VM_B_IP/$REPL_PORT/$HOST_A_IP")
     fi
@@ -360,6 +361,9 @@ forward_rules() {
         other=$HOST_A_IP
         [[ $host == "$HOST_A" ]] && other=$HOST_B_IP
         rules+=("udp/$(vmvar "$vm" WG_FWD)/$(vmvar "$vm" IP)/$WG_PORT/$other")
+        if [[ -n ${DEMO_CP_SRC_IP:-} ]]; then
+            rules+=("udp/$(vmvar "$vm" WG_FWD)/$(vmvar "$vm" IP)/$WG_PORT/$DEMO_CP_SRC_IP")
+        fi
     done
     echo "${rules[*]}"
 }
@@ -865,6 +869,38 @@ cmd_partition() {
 
 kubectl_w() { vssh "$VM_W" "sudo k3s kubectl $(printf '%q ' "$@")"; }
 
+# Demo mode (make demo-up): API on the Mac Lima CP; kubeconfig at .lab/kubeconfig.
+demo_active() { [[ -f $LOCAL_STATE_DIR/demo/active ]]; }
+
+kubectl_lab() {
+    if demo_active; then
+        command kubectl --kubeconfig="$LOCAL_STATE_DIR/kubeconfig" "$@"
+    else
+        kubectl_w "$@"
+    fi
+}
+
+# Apply a manifest from stdin on the active cluster.
+kubectl_apply() {
+    if demo_active; then
+        kubectl_lab apply -f -
+    else
+        vssh "$VM_W" "sudo k3s kubectl apply -f -"
+    fi
+}
+
+# Create a generic secret from files already on this workstation (demo) or on fl-w (lab).
+kubectl_create_tls_secret() {
+    local name=$1 ns=$2 crt=$3 key=$4 ca=$5
+    if demo_active; then
+        kubectl_lab create secret generic -n "$ns" "$name" \
+            --from-file=tls.crt="$crt" --from-file=tls.key="$key" --from-file=ca.crt="$ca"
+    else
+        vssh "$VM_W" "sudo k3s kubectl create secret generic -n $ns $name \
+            --from-file=tls.crt=$crt --from-file=tls.key=$key --from-file=ca.crt=$ca"
+    fi
+}
+
 # k8s up|down|status|uninstall|smoke|kubeconfig|tunnel: the k3s server (control plane) on the
 # witness, agents on the data VMs.
 cmd_k8s() {
@@ -938,56 +974,81 @@ cmd_csi() {
     local dir="$LOCAL_STATE_DIR/pki" vm tag
     case "${1:-status}" in
         deploy)
-            kubectl_w get nodes >/dev/null 2>&1 || die "no Kubernetes (make k8s-up)"
+            kubectl_lab get nodes >/dev/null 2>&1 || die "no Kubernetes (make k8s-up or make demo-up)"
             # Identities: each data node's agent (node plugin), and the controller's, made on
-            # fl-w and kept only there and in a Secret (Kubernetes encrypts Secrets at rest).
+            # fl-w and kept in a Secret (Kubernetes encrypts Secrets at rest).
             for vm in $(vms_of all); do
                 vssh "$vm" "sudo test -f /etc/flaminio/pki/agent.crt" ||
                     issue "$vm" agent "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/node/$vm/agent" --client
             done
-            vssh "$VM_W" "sudo k3s kubectl apply -f -" <"$REPO_ROOT/deploy/csi/rbac.yaml" >/dev/null
-            if ! kubectl_w get secret -n flaminio-system flaminio-csi-controller-tls >/dev/null 2>&1; then
+            kubectl_apply <"$REPO_ROOT/deploy/csi/rbac.yaml" >/dev/null
+            if ! kubectl_lab get secret -n flaminio-system flaminio-csi-controller-tls >/dev/null 2>&1; then
                 issue "$VM_W" csi-controller "$dir/flaminio" "spiffe://$TRUST_DOMAIN/flaminio/admin/csi-controller" --client
-                vssh "$VM_W" "sudo k3s kubectl create secret generic -n flaminio-system flaminio-csi-controller-tls \
-                    --from-file=tls.crt=/etc/flaminio/pki/csi-controller.crt \
-                    --from-file=tls.key=/etc/flaminio/pki/csi-controller.key \
-                    --from-file=ca.crt=/etc/flaminio/pki/ca.crt" >/dev/null
+                if demo_active; then
+                    mkdir -p "$LOCAL_STATE_DIR/demo/csi-tls"
+                    vssh "$VM_W" "sudo cat /etc/flaminio/pki/csi-controller.crt" >"$LOCAL_STATE_DIR/demo/csi-tls/tls.crt"
+                    vssh "$VM_W" "sudo cat /etc/flaminio/pki/csi-controller.key" >"$LOCAL_STATE_DIR/demo/csi-tls/tls.key"
+                    vssh "$VM_W" "sudo cat /etc/flaminio/pki/ca.crt" >"$LOCAL_STATE_DIR/demo/csi-tls/ca.crt"
+                    kubectl_create_tls_secret flaminio-csi-controller-tls flaminio-system \
+                        "$LOCAL_STATE_DIR/demo/csi-tls/tls.crt" \
+                        "$LOCAL_STATE_DIR/demo/csi-tls/tls.key" \
+                        "$LOCAL_STATE_DIR/demo/csi-tls/ca.crt" >/dev/null
+                else
+                    kubectl_create_tls_secret flaminio-csi-controller-tls flaminio-system \
+                        /etc/flaminio/pki/csi-controller.crt \
+                        /etc/flaminio/pki/csi-controller.key \
+                        /etc/flaminio/pki/ca.crt >/dev/null
+                fi
                 log "controller identity in Secret flaminio-system/flaminio-csi-controller-tls"
             fi
-            # The image goes straight into each node's containerd: no registry. The controllers
-            # run on the witness, the node plugin on the data VMs.
+            # The image goes straight into each node's containerd: no registry. Controllers run
+            # on the witness (fl-w or the Mac demo CP); the node plugin on the data VMs.
             tag="docker.io/flaminio/csi:dev-$(date +%Y%m%d%H%M%S)"
             "$SCRIPTS/dev/csi-image.sh" "$LOCAL_STATE_DIR/csi-image.tar" "$tag"
-            for vm in $(vms_of cluster); do
-                vssh "$vm" "sudo k3s ctr -n k8s.io images import -" <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null
-                log "$vm: imported $tag"
-            done
+            if demo_active; then
+                for vm in $(vms_of all); do
+                    vssh "$vm" "sudo k3s ctr -n k8s.io images import -" <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null
+                    log "$vm: imported $tag"
+                done
+                limactl shell "$DEMO_CP_LIMA" -- sudo k3s ctr -n k8s.io images import - \
+                    <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null
+                log "$DEMO_CP_LIMA: imported $tag"
+            else
+                for vm in $(vms_of cluster); do
+                    vssh "$vm" "sudo k3s ctr -n k8s.io images import -" <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null
+                    log "$vm: imported $tag"
+                done
+            fi
             CSI_IMAGE=$tag META_ENDPOINTS=$(meta_endpoints) render "$REPO_ROOT/deploy/csi/driver.yaml" |
-                vssh "$VM_W" "sudo k3s kubectl apply -f -"
-            kubectl_w rollout status -n flaminio-system deploy/flaminio-csi-controller --timeout=180s
-            kubectl_w rollout status -n flaminio-system deploy/flaminio-failover --timeout=180s
-            kubectl_w rollout status -n flaminio-system ds/flaminio-csi-node --timeout=180s
+                kubectl_apply
+            kubectl_lab rollout status -n flaminio-system deploy/flaminio-csi-controller --timeout=180s
+            kubectl_lab rollout status -n flaminio-system deploy/flaminio-failover --timeout=180s
+            kubectl_lab rollout status -n flaminio-system ds/flaminio-csi-node --timeout=180s
             ;;
         status)
-            kubectl_w get pods -n flaminio-system -o wide
-            kubectl_w get storageclass,pv,volumeattachments
-            kubectl_w get pvc,pods -n flaminio-test -o wide 2>/dev/null || true
+            kubectl_lab get pods -n flaminio-system -o wide
+            kubectl_lab get storageclass,pv,volumeattachments
+            kubectl_lab get pvc,pods -n flaminio-test -o wide 2>/dev/null || true
             ;;
         logs)
-            kubectl_w logs -n flaminio-system deploy/flaminio-csi-controller -c flaminio-csi --tail=30
+            kubectl_lab logs -n flaminio-system deploy/flaminio-csi-controller -c flaminio-csi --tail=30
             log "failover controller"
-            kubectl_w logs -n flaminio-system deploy/flaminio-failover --tail=10
+            kubectl_lab logs -n flaminio-system deploy/flaminio-failover --tail=10
             for vm in $(vms_of all); do
                 log "node plugin on $vm"
-                kubectl_w logs -n flaminio-system "$(kubectl_w get pods -n flaminio-system -l app=flaminio-csi-node \
+                kubectl_lab logs -n flaminio-system "$(kubectl_lab get pods -n flaminio-system -l app=flaminio-csi-node \
                     --field-selector "spec.nodeName=$vm" -o name)" -c flaminio-csi --tail=30 || true
             done
             ;;
         test) csi_test ;;
         failover) csi_failover ;;
         undeploy)
-            kubectl_w delete namespace flaminio-test --ignore-not-found --wait=true
-            render_csi_placeholder | vssh "$VM_W" "sudo k3s kubectl delete --ignore-not-found -f -"
+            kubectl_lab delete namespace flaminio-test --ignore-not-found --wait=true
+            if demo_active; then
+                render_csi_placeholder | kubectl_lab delete --ignore-not-found -f -
+            else
+                render_csi_placeholder | vssh "$VM_W" "sudo k3s kubectl delete --ignore-not-found -f -"
+            fi
             ;;
         *) die "usage: csi deploy|status|logs|test|failover|undeploy" ;;
     esac
@@ -1007,12 +1068,12 @@ release_lab_volume() {
 }
 
 # The test pod's node, and its log's last line.
-data_pod_node() { kubectl_w get pod -n flaminio-test data-0 -o jsonpath='{.spec.nodeName}'; }
-data_pod_says() { kubectl_w logs -n flaminio-test data-0 | tail -1; }
+data_pod_node() { kubectl_lab get pod -n flaminio-test data-0 -o jsonpath='{.spec.nodeName}'; }
+data_pod_says() { kubectl_lab logs -n flaminio-test data-0 | tail -1; }
 
 wait_data_pod() {
-    kubectl_w wait -n flaminio-test --for=condition=Ready pod/data-0 --timeout="${1:-300}s" >/dev/null || {
-        kubectl_w describe pod -n flaminio-test data-0 | tail -15
+    kubectl_lab wait -n flaminio-test --for=condition=Ready pod/data-0 --timeout="${1:-300}s" >/dev/null || {
+        kubectl_lab describe pod -n flaminio-test data-0 | tail -15
         die "the test pod did not become Ready"
     }
 }
@@ -1022,32 +1083,32 @@ wait_data_pod() {
 csi_test() {
     local first second start
     release_lab_volume
-    kubectl_w delete namespace flaminio-test --ignore-not-found --wait=true >/dev/null
-    vssh "$VM_W" "sudo k3s kubectl apply -f -" <"$REPO_ROOT/deploy/lab/csi-test.yaml" >/dev/null
+    kubectl_lab delete namespace flaminio-test --ignore-not-found --wait=true >/dev/null
+    kubectl_apply <"$REPO_ROOT/deploy/lab/csi-test.yaml" >/dev/null
     start=$SECONDS
     wait_data_pod 300
     first=$(data_pod_node)
     log "pod Ready on $first after $((SECONDS - start)) s: $(data_pod_says)"
     [[ $(data_pod_says) == "created on $first" ]] || die "unexpected first start: $(data_pod_says)"
-    log "volume $(kubectl_w get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}'): $(
-        metactl "$VM_A" "$VM_A" get "$(kubectl_w get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}')" |
+    log "volume $(kubectl_lab get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}'): $(
+        metactl "$VM_A" "$VM_A" get "$(kubectl_lab get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}')" |
             jq -r '"epoch \(.volume.epoch), target \(.volume.target), replicas \([.volume.chunks[].replicas | join("+")] | unique | join(" "))"')"
 
     log "moving the pod off $first"
-    kubectl_w cordon "$first" >/dev/null
-    trap 'kubectl_w uncordon "'"$first"'" >/dev/null 2>&1' EXIT
-    kubectl_w delete pod -n flaminio-test data-0 --wait=true >/dev/null
+    kubectl_lab cordon "$first" >/dev/null
+    trap 'kubectl_lab uncordon "'"$first"'" >/dev/null 2>&1' EXIT
+    kubectl_lab delete pod -n flaminio-test data-0 --wait=true >/dev/null
     start=$SECONDS
     wait_data_pod 300
     second=$(data_pod_node)
-    kubectl_w uncordon "$first" >/dev/null
+    kubectl_lab uncordon "$first" >/dev/null
     trap - EXIT
     log "pod Ready on $second after $((SECONDS - start)) s: $(data_pod_says)"
     [[ $second != "$first" ]] || die "the pod did not move"
     [[ $(data_pod_says) == "verified on $second" ]] || die "after the move: $(data_pod_says)"
     log "OK: provisioned, attached, formatted, written on $first; moved to $second with its data intact"
     [[ ${KEEP:-0} == 1 ]] || {
-        kubectl_w delete namespace flaminio-test --wait=true >/dev/null
+        kubectl_lab delete namespace flaminio-test --wait=true >/dev/null
         log "test namespace and volume deleted"
     }
 }
@@ -1060,14 +1121,14 @@ since() { echo "$((SECONDS - ${1:?}))s"; }
 # node rejoins, and the mark comes off.
 csi_failover() {
     local lost other start vol taint
-    if ! kubectl_w get pod -n flaminio-test data-0 >/dev/null 2>&1; then
+    if ! kubectl_lab get pod -n flaminio-test data-0 >/dev/null 2>&1; then
         release_lab_volume
-        vssh "$VM_W" "sudo k3s kubectl apply -f -" <"$REPO_ROOT/deploy/lab/csi-test.yaml" >/dev/null
+        kubectl_apply <"$REPO_ROOT/deploy/lab/csi-test.yaml" >/dev/null
     fi
     wait_data_pod 300
     lost=$(data_pod_node)
     other=$(vms_of all | tr ' ' '\n' | grep -vx "$lost")
-    vol=$(kubectl_w get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}')
+    vol=$(kubectl_lab get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}')
     log "pod on $lost ($(data_pod_says)); volume $vol"
 
     log "powering $lost off (virsh destroy: no shutdown, no flush)"
@@ -1076,20 +1137,20 @@ csi_failover() {
     # Restore the lab whatever happens.
     trap 'warn "starting $lost again after a failure"; hsh "$(vmvar "'"$lost"'" HOST)" "virsh -c qemu:///system start '"$lost"'" >/dev/null 2>&1' EXIT
 
-    until [[ $(kubectl_w get node "$lost" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') != True ]]; do
+    until [[ $(kubectl_lab get node "$lost" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') != True ]]; do
         ((SECONDS - start < 300)) || die "$lost still Ready after 300 s"
         sleep 2
     done
     log "$(since "$start"): Kubernetes sees $lost not Ready"
-    until taint=$(kubectl_w get node "$lost" -o jsonpath='{.spec.taints[*].key}') && [[ $taint == *out-of-service* ]]; do
+    until taint=$(kubectl_lab get node "$lost" -o jsonpath='{.spec.taints[*].key}') && [[ $taint == *out-of-service* ]]; do
         ((SECONDS - start < 400)) || die "$lost not marked out of service after 400 s"
         sleep 2
     done
     log "$(since "$start"): the failover controller marked $lost out of service"
     until [[ $(data_pod_node 2>/dev/null) == "$other" ]] &&
-        kubectl_w wait -n flaminio-test --for=condition=Ready pod/data-0 --timeout=5s >/dev/null 2>&1; do
+        kubectl_lab wait -n flaminio-test --for=condition=Ready pod/data-0 --timeout=5s >/dev/null 2>&1; do
         ((SECONDS - start < 900)) || {
-            kubectl_w describe pod -n flaminio-test data-0 | tail -15
+            kubectl_lab describe pod -n flaminio-test data-0 | tail -15
             die "the pod is not Ready on $other after 900 s"
         }
         sleep 3
@@ -1104,7 +1165,7 @@ csi_failover() {
     wait_for "SSH on $lost" 300 vssh "$lost" true
     cmd_node up "$(vms_of "$lost")"
     start=$SECONDS
-    until [[ $(kubectl_w get node "$lost" -o jsonpath='{.spec.taints[*].key}') != *out-of-service* ]]; do
+    until [[ $(kubectl_lab get node "$lost" -o jsonpath='{.spec.taints[*].key}') != *out-of-service* ]]; do
         ((SECONDS - start < 300)) || die "the out-of-service mark is still on $lost after 300 s"
         sleep 3
     done
@@ -1117,7 +1178,7 @@ csi_failover() {
     log "$(since "$start"): $lost's replicas of $vol are back in every ISR"
     log "OK: $lost lost without warning; the pod came back on $other with its data; $lost rejoined"
     [[ ${KEEP:-0} == 1 ]] || {
-        kubectl_w delete namespace flaminio-test --wait=true >/dev/null
+        kubectl_lab delete namespace flaminio-test --wait=true >/dev/null
         log "test namespace and volume deleted"
     }
 }
@@ -1255,20 +1316,20 @@ cmd_bench_pod() {
     mkdir -p "$LOCAL_STATE_DIR/bench"
     image=$(fio_image)
     release_lab_volume
-    kubectl_w delete namespace flaminio-bench --ignore-not-found --wait=true >/dev/null
+    kubectl_lab delete namespace flaminio-bench --ignore-not-found --wait=true >/dev/null
     NODE=$node FIO_IMAGE=$image SIZE=16Gi RUNTIME=$runtime render "$REPO_ROOT/deploy/lab/bench-pod.yaml" |
-        vssh "$VM_W" "sudo k3s kubectl apply -f -" >/dev/null
+        kubectl_apply >/dev/null
     log "fio pod on $node: fills 16 GiB once, then reads ${runtime}s per job"
     start=$SECONDS
-    until [[ $(kubectl_w get pod -n flaminio-bench fio -o jsonpath='{.status.phase}' 2>/dev/null) =~ ^(Succeeded|Failed)$ ]]; do
+    until [[ $(kubectl_lab get pod -n flaminio-bench fio -o jsonpath='{.status.phase}' 2>/dev/null) =~ ^(Succeeded|Failed)$ ]]; do
         ((SECONDS - start < 1800)) || die "the benchmark pod did not finish in 30 min"
         sleep 10
     done
-    kubectl_w logs -n flaminio-bench fio >"$log"
-    [[ $(kubectl_w get pod -n flaminio-bench fio -o jsonpath='{.status.phase}') == Succeeded ]] ||
+    kubectl_lab logs -n flaminio-bench fio >"$log"
+    [[ $(kubectl_lab get pod -n flaminio-bench fio -o jsonpath='{.status.phase}') == Succeeded ]] ||
         { tail -20 "$log"; die "the benchmark pod failed"; }
     local vol
-    vol=$(kubectl_w get pvc -n flaminio-bench bench -o jsonpath='{.spec.volumeName}')
+    vol=$(kubectl_lab get pvc -n flaminio-bench bench -o jsonpath='{.spec.volumeName}')
     log "volume $vol: $(metactl "$VM_A" "$VM_A" get "$vol" | jq -r --arg n "$node" \
         '"target \(.volume.target), \([.volume.chunks[] | select(.replicas | index($n))] | length) of \(.volume.chunks | length) chunks with a replica on \($n)"')"
     fio_table "$log" >"$LOCAL_STATE_DIR/bench/pod.tsv"
@@ -1288,7 +1349,7 @@ cmd_bench_pod() {
     join -t $'\t' -a 1 "$LOCAL_STATE_DIR/bench/pod.tsv" "$LOCAL_STATE_DIR/bench/raw.tsv" |
         awk -F'\t' '{share = ($6 > 0) ? sprintf("%d%%", 100 * $2 / $6) : "-";
             printf "%-18s %10s %10s %10s %10s %10s %8s\n", $1, $2, $3, $4, $5, ($6 ? $6 : "-"), share}'
-    [[ ${KEEP:-0} == 1 ]] || kubectl_w delete namespace flaminio-bench --wait=false >/dev/null
+    [[ ${KEEP:-0} == 1 ]] || kubectl_lab delete namespace flaminio-bench --wait=false >/dev/null
 }
 
 # One fault on the replica node $1 (not the target), for about 15–25 s; prints what it was.
@@ -1911,7 +1972,7 @@ case "$cmd" in
     data-node-up) cmd_data_node_up ;;
     drain-test) cmd_drain_test ;;
     k8s) cmd_k8s "$@" ;;
-    kubectl) kubectl_w "$@" ;;
+    kubectl) kubectl_lab "$@" ;;
     csi) cmd_csi "$@" ;;
     ssh) cmd_ssh "$@" ;;
     console) cmd_console "$@" ;;

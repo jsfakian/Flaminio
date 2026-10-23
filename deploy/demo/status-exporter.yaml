@@ -1,0 +1,136 @@
+# Thin Prometheus exporter: TCP reachability of flaminio-meta on the overlay (hostNetwork on
+# the control plane). Not a substitute for dataplane histograms.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flaminio-demo
+  labels:
+    # Exporter uses hostNetwork on the CP; demo workload is still non-root.
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flaminio-status-exporter
+  namespace: flaminio-demo
+data:
+  exporter.py: |
+    #!/usr/bin/env python3
+    import os, socket, time, urllib.request
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    META = os.environ.get("META_ADDRS", "10.77.0.1:7400,10.77.0.2:7400,10.77.0.3:7400").split(",")
+    PORT = int(os.environ.get("PORT", "9105"))
+
+    def tcp_up(addr, timeout=1.0):
+        host, _, port = addr.partition(":")
+        try:
+            with socket.create_connection((host, int(port)), timeout=timeout):
+                return 1
+        except OSError:
+            return 0
+
+    def metrics():
+        lines = [
+            "# HELP flaminio_meta_up 1 if TCP connect to flaminio-meta succeeds",
+            "# TYPE flaminio_meta_up gauge",
+        ]
+        for addr in META:
+            addr = addr.strip()
+            if not addr:
+                continue
+            name = addr.split(":")[0].replace(".", "_")
+            lines.append(f'flaminio_meta_up{{endpoint="{addr}",node="{name}"}} {tcp_up(addr)}')
+        lines += [
+            "# HELP flaminio_exporter_up Always 1 when the exporter is serving",
+            "# TYPE flaminio_exporter_up gauge",
+            "flaminio_exporter_up 1",
+        ]
+        return "\n".join(lines) + "\n"
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path not in ("/metrics", "/"):
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = metrics().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *args):
+            pass
+
+    HTTPServer(("0.0.0.0", PORT), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flaminio-status-exporter
+  namespace: flaminio-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: flaminio-status-exporter}
+  template:
+    metadata:
+      labels: {app: flaminio-status-exporter}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9105"
+    spec:
+      nodeSelector: {flaminio.io/witness: "true"}
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: exporter
+          image: python:3.12-alpine
+          command: [python3, /exporter/exporter.py]
+          env:
+            - name: META_ADDRS
+              value: "10.77.0.1:7400,10.77.0.2:7400,10.77.0.3:7400"
+            - name: PORT
+              value: "9105"
+          ports:
+            - {containerPort: 9105, name: metrics}
+          volumeMounts:
+            - {name: code, mountPath: /exporter}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 64Mi}
+      volumes:
+        - name: code
+          configMap: {name: flaminio-status-exporter}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flaminio-status-exporter
+  namespace: flaminio-demo
+  labels: {app: flaminio-status-exporter}
+spec:
+  selector: {app: flaminio-status-exporter}
+  ports:
+    - {name: metrics, port: 9105, targetPort: 9105}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: flaminio-status-exporter
+  namespace: flaminio-demo
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels: {app: flaminio-status-exporter}
+  endpoints:
+    - port: metrics
+      interval: 15s

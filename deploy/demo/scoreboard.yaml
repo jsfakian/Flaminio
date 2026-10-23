@@ -1,0 +1,110 @@
+# Static scoreboard: architecture matrix + canned Flaminio-vs-raw numbers + competitor notes.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scoreboard
+  namespace: flaminio-demo
+data:
+  index.html: |
+    <!doctype html>
+    <html lang="en">
+    <head>
+      <meta charset="utf-8"/>
+      <title>Flaminio demo scoreboard</title>
+      <style>
+        :root { --bg: #0f1419; --fg: #e7ecf1; --muted: #8b9aab; --accent: #3d9a6a; --warn: #c4a35a; }
+        body { margin: 0; font-family: "IBM Plex Sans", "Source Sans 3", system-ui, sans-serif;
+               background: radial-gradient(1200px 600px at 10% -10%, #1a2a22, var(--bg));
+               color: var(--fg); line-height: 1.45; }
+        main { max-width: 960px; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+        h1 { font-size: 2rem; letter-spacing: -0.02em; margin: 0 0 0.25rem; }
+        .sub { color: var(--muted); margin-bottom: 2rem; }
+        h2 { font-size: 1.1rem; text-transform: uppercase; letter-spacing: 0.08em;
+             color: var(--muted); margin: 2rem 0 0.75rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+        th, td { text-align: left; padding: 0.55rem 0.6rem; border-bottom: 1px solid #243040; vertical-align: top; }
+        th { color: var(--muted); font-weight: 500; }
+        .shipped { color: var(--accent); }
+        .partial { color: var(--warn); }
+        .planned { color: var(--muted); }
+        .note { color: var(--muted); font-size: 0.85rem; margin-top: 0.5rem; }
+        a { color: #7eb8ff; }
+      </style>
+    </head>
+    <body>
+      <main>
+        <h1>Flaminio</h1>
+        <p class="sub">Demo scoreboard — Site A (rhythm / fl-a) · Site B (rhythm-backup / fl-b) · CP on this Mac</p>
+
+        <h2>vs Longhorn (architecture)</h2>
+        <table>
+          <thead><tr><th>Dimension</th><th>Flaminio</th><th>Longhorn v1</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td>Replica storage</td><td>Raw block + own format</td><td>Sparse files on host FS</td><td class="shipped">shipped</td></tr>
+            <tr><td>Data path</td><td>Rust, io_uring, ublk</td><td>Per-volume engine, iSCSI</td><td class="shipped">shipped</td></tr>
+            <tr><td>Replication</td><td>Sync RF2, ISR + epochs</td><td>Sync volume replicas</td><td class="shipped">shipped</td></tr>
+            <tr><td>Fencing</td><td>Epochs at replicas</td><td>Node / attach oriented</td><td class="shipped">shipped</td></tr>
+            <tr><td>Metadata</td><td>Dedicated etcd meta, off I/O path</td><td>Kubernetes CRDs</td><td class="shipped">shipped</td></tr>
+            <tr><td>Rebuild</td><td>Dirty-region (full many-to-many later)</td><td>Mostly full replica rebuild</td><td class="partial">partial</td></tr>
+            <tr><td>Encryption at rest</td><td>Built-in (planned default)</td><td>LUKS / CSI options</td><td class="planned">planned</td></tr>
+            <tr><td>Ops UI</td><td>Thin CSI today</td><td>Mature UI / operator</td><td class="planned">planned</td></tr>
+          </tbody>
+        </table>
+        <p class="note">Mayastor: NVMe-class peer we will bench head-to-head later. Rook-Ceph: wrong weight class for a 2-node edge story.</p>
+
+        <h2>Performance vs raw (canned, this lab)</h2>
+        <table>
+          <thead><tr><th>Workload</th><th>Flaminio</th><th>Share of raw</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr><td>Reads, zero-copy</td><td>~raw</td><td>~95–100%</td><td>docs/benchmarks</td></tr>
+            <tr><td>4K random write QD32 (RF1)</td><td>~10k IOPS</td><td>competitive / often ≥ raw steady</td><td>W4.3</td></tr>
+            <tr><td>1M sequential write QD8 (RF1)</td><td>~700 MiB/s</td><td>~42% of raw (open gap)</td><td>W4.3</td></tr>
+            <tr><td>RF2 replication tax</td><td>near bandwidth bound</td><td>see comparison B</td><td>2026-10-17</td></tr>
+          </tbody>
+        </table>
+        <p class="note">Do not claim 1M write at 80%+. Live Longhorn numbers only if LONGHORN=1 and bench-compare ran on this hardware.</p>
+
+        <h2>Links</h2>
+        <p>Grafana (after observability.sh): <code>kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80</code> — user <code>admin</code>; password in <code>.lab/demo/grafana-admin-password</code></p>
+      </main>
+    </body>
+    </html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scoreboard
+  namespace: flaminio-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: scoreboard}
+  template:
+    metadata:
+      labels: {app: scoreboard}
+    spec:
+      nodeSelector: {flaminio.io/witness: "true"}
+      tolerations:
+        - {key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule}
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports: [{containerPort: 80}]
+          volumeMounts:
+            - {name: www, mountPath: /usr/share/nginx/html, readOnly: true}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: www
+          configMap: {name: scoreboard}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scoreboard
+  namespace: flaminio-demo
+spec:
+  selector: {app: scoreboard}
+  ports:
+    - {port: 80, targetPort: 80}

@@ -1,0 +1,38 @@
+# Grafana dashboards (sidecar picks up grafana_dashboard=1). Numbers in the perf panel are
+# canned from docs/benchmarks — label them as such in the talk track.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flaminio-demo-dashboards
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  flaminio-cluster.json: |
+    {
+      "title": "Flaminio demo — cluster",
+      "uid": "flaminio-demo-cluster",
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "panels": [
+        {
+          "type": "stat",
+          "title": "Nodes Ready",
+          "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+          "targets": [{"expr": "count(kube_node_status_condition{condition=\"Ready\",status=\"true\"})"}]
+        },
+        {
+          "type": "stat",
+          "title": "flaminio-meta up",
+          "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+          "targets": [{"expr": "sum(flaminio_meta_up)"}]
+        },
+        {
+          "type": "table",
+          "title": "Nodes",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+          "targets": [{"expr": "kube_node_info", "format": "table", "instant": true}]
+        }
+      ]
+    }

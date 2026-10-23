@@ -324,6 +324,27 @@ csi-failover: ## Power off the test pod's data VM: the pod must come back on the
 csi-undeploy: ## Remove the CSI driver (and the test namespace)
 	$(LAB) csi undeploy
 
+##@ Demo (Mac control plane + fl-a/fl-b workers; see docs/demo.md)
+
+.PHONY: demo-up demo-down demo demo-obs demo-longhorn demo-compare
+demo-up: ## Lima k3s CP on this Mac + join fl-a/fl-b (requires DEMO_CP_SRC_IP=…)
+	DEMO_CP_SRC_IP=$(DEMO_CP_SRC_IP) DEMO_CP_ENDPOINT=$(DEMO_CP_ENDPOINT) scripts/demo/demo-up.sh
+
+demo-down: ## Tear down demo namespaces; RESTORE_LAB_K8S=1 restores fl-w k3s; DESTROY_LIMA=1 deletes Lima
+	RESTORE_LAB_K8S=$(RESTORE_LAB_K8S) DESTROY_LIMA=$(DESTROY_LIMA) KEEP_MONITORING=$(KEEP_MONITORING) scripts/demo/reset.sh
+
+demo-obs: ## Prometheus + Grafana + status exporter + scoreboard (needs demo-up + helm)
+	scripts/demo/observability.sh
+
+demo-longhorn: ## Optional Longhorn install for live comparison (LONGHORN_VERSION in lab.conf)
+	scripts/demo/install-longhorn.sh
+
+demo-compare: ## Wall-clock provision compare Flaminio vs Longhorn (if installed)
+	scripts/demo/bench-compare.sh
+
+demo: ## Interactive talk track (SCENARIOS=0,1,2,… DEMO_AUTO=1 unattended; LONGHORN=1 for live compare)
+	SCENARIOS='$(SCENARIOS)' DEMO_AUTO=$(DEMO_AUTO) LONGHORN=$(LONGHORN) scripts/demo/demo.sh
+
 ##@ Test suites
 
 .PHONY: check lab-test

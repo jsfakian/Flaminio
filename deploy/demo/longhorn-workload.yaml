@@ -1,0 +1,72 @@
+# Twin of workload.yaml on StorageClass longhorn (only when Longhorn is installed).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: longhorn-demo
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: demo
+  namespace: longhorn-demo
+spec:
+  serviceName: demo
+  replicas: 1
+  selector:
+    matchLabels: {app: demo}
+  template:
+    metadata:
+      labels: {app: demo}
+    spec:
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: demo
+          image: busybox:1.37
+          env:
+            - name: NODE
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              cd /data
+              if [ -f blob.sha256 ]; then
+                if sha256sum -c blob.sha256 >/dev/null; then echo "verified on $NODE"; else echo "CORRUPT on $NODE"; exit 1; fi
+              else
+                head -c 67108864 /dev/urandom > blob
+                printf 'longhorn-demo\n' >> blob
+                sha256sum blob > blob.sha256
+                sync
+                echo "created on $NODE"
+              fi
+              touch /tmp/ready
+              exec sleep 2147483647
+          readinessProbe:
+            exec: {command: [test, -f, /tmp/ready]}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: longhorn
+        resources:
+          requests: {storage: 4Gi}

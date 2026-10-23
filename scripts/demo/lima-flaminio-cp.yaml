@@ -1,0 +1,32 @@
+# Lima guest that hosts the demo k3s control plane (k3s is Linux-only).
+# Driven by scripts/demo/setup-mac-cp.sh. Do not start with limactl start directly unless
+# you also run the WireGuard and k3s steps in that script.
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+cpus: 2
+memory: "4GiB"
+disk: "20GiB"
+plain: false
+ssh:
+  loadDotSSHPubKeys: true
+portForwards:
+  - guestPort: 6443
+    hostPort: 6443
+  - guestPort: 51825
+    hostPort: 51825
+    proto: udp
+  - guestPort: 3000
+    hostPort: 3000
+  - guestPort: 9090
+    hostPort: 9090
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq wireguard-tools curl ca-certificates jq >/dev/null

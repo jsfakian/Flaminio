@@ -226,6 +226,19 @@ Checks, each on one VM's clock:
 The probe logs are kept in `.lab/partition-{reader,writer}.log`. Afterwards vol1's target is
 fl-b; `make vol-attach VM=a` moves it back.
 
+## Investor / colleague demo (Mac control plane)
+
+For a talk with the k3s server on this Mac (Lima guest, NoSchedule) and workers on fl-a / fl-b,
+see [demo.md](demo.md) and [demo-competitors.md](demo-competitors.md):
+
+```bash
+export DEMO_CP_SRC_IP=…           # this Mac as the lab hosts see it
+make demo-up && make csi-deploy && make demo-obs && make demo
+```
+
+The day-to-day lab control plane remains fl-w (`make k8s-up` below). `make demo-up` moves the
+API to the Mac; `RESTORE_LAB_K8S=1 make demo-down` puts it back.
+
 ## Kubernetes (k3s)
 
 ```bash
