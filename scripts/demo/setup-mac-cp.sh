@@ -43,11 +43,12 @@ log "wg0 on $DEMO_CP_LIMA: $DEMO_CP_WG (UDP $DEMO_CP_WG_PORT forwarded to the Ma
 
 # k3s server: witness label + NoSchedule, same pin as the lab.
 demo_lima sudo install -d /etc/rancher/k3s
+# Do not set bind-address: the default listens on all interfaces (needed for Lima's
+# host→guest :6443 forward). advertise-address/node-ip stay on the overlay for agents.
 demo_lima sudo tee /etc/rancher/k3s/config.yaml >/dev/null <<EOF
 node-ip: $DEMO_CP_WG
 advertise-address: $DEMO_CP_WG
-bind-address: $DEMO_CP_WG
-tls-san: [$DEMO_CP_WG, 127.0.0.1, host.lima.internal]
+tls-san: [$DEMO_CP_WG, 127.0.0.1, localhost, host.lima.internal]
 flannel-iface: wg0
 disable: [traefik, servicelb, local-storage]
 write-kubeconfig-mode: "0644"
@@ -61,6 +62,9 @@ if ! demo_lima bash -c "k3s --version 2>/dev/null | awk 'NR==1 {print \$3}' | gr
     demo_lima sudo bash -c "curl -sfL https://raw.githubusercontent.com/k3s-io/k3s/${K3S_VERSION}/install.sh -o /tmp/k3s-install.sh"
     demo_lima sudo env INSTALL_K3S_VERSION="$K3S_VERSION" INSTALL_K3S_EXEC=server \
         sh /tmp/k3s-install.sh >/dev/null
+else
+    log "restarting k3s with updated config"
+    demo_lima sudo systemctl restart k3s
 fi
 
 # Wait for Ready.

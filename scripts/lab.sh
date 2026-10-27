@@ -1003,16 +1003,18 @@ cmd_csi() {
             fi
             # The image goes straight into each node's containerd: no registry. Controllers run
             # on the witness (fl-w or the Mac demo CP); the node plugin on the data VMs.
+            # Lab VMs are amd64; the Lima demo CP is arm64 — build both when demo is active.
             tag="docker.io/flaminio/csi:dev-$(date +%Y%m%d%H%M%S)"
             "$SCRIPTS/dev/csi-image.sh" "$LOCAL_STATE_DIR/csi-image.tar" "$tag"
             if demo_active; then
                 for vm in $(vms_of all); do
                     vssh "$vm" "sudo k3s ctr -n k8s.io images import -" <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null
-                    log "$vm: imported $tag"
+                    log "$vm: imported $tag (amd64)"
                 done
+                GOARCH=arm64 "$SCRIPTS/dev/csi-image.sh" "$LOCAL_STATE_DIR/csi-image-arm64.tar" "$tag"
                 limactl shell "$DEMO_CP_LIMA" -- sudo k3s ctr -n k8s.io images import - \
-                    <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null
-                log "$DEMO_CP_LIMA: imported $tag"
+                    <"$LOCAL_STATE_DIR/csi-image-arm64.tar" >/dev/null
+                log "$DEMO_CP_LIMA: imported $tag (arm64)"
             else
                 for vm in $(vms_of cluster); do
                     vssh "$vm" "sudo k3s ctr -n k8s.io images import -" <"$LOCAL_STATE_DIR/csi-image.tar" >/dev/null

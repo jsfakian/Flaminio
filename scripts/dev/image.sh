@@ -29,5 +29,8 @@ with tarfile.open(out, "w", format=tarfile.PAX_FORMAT) as t:
         with open(f, "rb") as fh:
             t.addfile(info, fh)
 PY
-crane append --platform linux/amd64 -b "$base" -f "$dir/layer.tar" -t "$tag" -o "$out" >/dev/null
-echo "$out: $tag on $base"
+# PLATFORM_ARCH is the image's arch. Clear GOARCH for `go run crane` (host binary).
+arch=${PLATFORM_ARCH:-${GOARCH:-amd64}}
+unset GOARCH GOOS GOARM
+crane append --platform "linux/$arch" -b "$base" -f "$dir/layer.tar" -t "$tag" -o "$out" >/dev/null
+echo "$out: $tag on $base (linux/$arch)"
