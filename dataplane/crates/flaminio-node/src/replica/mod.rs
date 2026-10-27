@@ -383,6 +383,14 @@ impl<D: BlockDevice> ReplicaService<D> {
                         Err(e) => Reply::Close(e.to_string()),
                     });
                 }
+                Action::Digest { chunk, ext } => {
+                    replies[i] = Some(
+                        match self.store.digests(key(uuid, chunk), offset(ext), len(ext)) {
+                            Ok(sums) => Reply::Send(Frame::Digests { req, sums }),
+                            Err(e) => Reply::Close(e.to_string()),
+                        },
+                    );
+                }
             }
         }
         if self.commit(items, &mut pending, &mut replies) {
@@ -764,6 +772,10 @@ fn offset(ext: Extent) -> u64 {
     u64::from(ext.start) * BLOCK as u64
 }
 
+fn len(ext: Extent) -> u64 {
+    u64::from(ext.len) * BLOCK as u64
+}
+
 /// The shared payload of a write or a copy.
 fn shared_payload(f: &Frame) -> &bytes::Bytes {
     match f {
@@ -785,12 +797,14 @@ fn req_of(f: &Frame) -> u64 {
         | Frame::Heartbeat { req }
         | Frame::Write { req, .. }
         | Frame::Read { req, .. }
+        | Frame::Digest { req, .. }
         | Frame::BeginResync { req, .. }
         | Frame::Settle { req, .. }
         | Frame::Copy { req, .. }
         | Frame::Fenced { req, .. }
         | Frame::Ok { req }
         | Frame::Data { req, .. }
+        | Frame::Digests { req, .. }
         | Frame::Stale { req, .. } => *req,
         Frame::Refused { .. } => 0,
     }
@@ -818,6 +832,7 @@ fn to_request(f: &Frame) -> Option<(u64, Request<()>)> {
             },
         ),
         Frame::Read { req, chunk, ext } => (req, Request::Read { chunk, ext }),
+        Frame::Digest { req, chunk, ext } => (req, Request::Digest { chunk, ext }),
         Frame::BeginResync { req, chunk } => (req, Request::BeginResync { chunk }),
         Frame::Settle { req, chunk, below } => (req, Request::Settle { chunk, below }),
         Frame::Copy {
@@ -842,6 +857,7 @@ fn response_frame(req: u64, r: Response<()>) -> Frame {
         Response::Ok => Frame::Ok { req },
         Response::Stale { fenced } => Frame::Stale { req, fenced },
         Response::Data(()) => unreachable!("reads are carried out by the service"),
+        Response::Digests(_) => unreachable!("digests are carried out by the service"),
     }
 }
 

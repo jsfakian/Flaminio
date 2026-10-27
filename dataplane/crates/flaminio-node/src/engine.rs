@@ -962,10 +962,7 @@ impl<D: BlockDevice> Engine<D> {
             self.local.extend(newer);
         }
         if taken > 0 {
-            let bytes: u64 = items[..taken]
-                .iter()
-                .map(|(_, f)| write_data_len(f))
-                .sum();
+            let bytes: u64 = items[..taken].iter().map(|(_, f)| write_data_len(f)).sum();
             let st = self.staged.get_or_insert_with(|| (Vec::new(), 0, 0));
             st.0.extend(from);
             st.1 += taken;
@@ -1965,6 +1962,11 @@ fn to_frame(m: &ToReplica<Payload>) -> Frame {
             chunk: *chunk,
             ext: *ext,
         },
+        Request::Digest { chunk, ext } => Frame::Digest {
+            req,
+            chunk: *chunk,
+            ext: *ext,
+        },
         Request::BeginResync { chunk } => Frame::BeginResync { req, chunk: *chunk },
         Request::Settle { chunk, below } => Frame::Settle {
             req,
@@ -1985,6 +1987,7 @@ fn from_frame(f: Frame) -> Option<(u64, Response<Payload>)> {
         Frame::Fenced { req, uncertain } => (req, Response::Fenced { uncertain }),
         Frame::Ok { req } => (req, Response::Ok),
         Frame::Data { req, data } => (req, Response::Data(Payload::Bytes(Bytes::from(data)))),
+        Frame::Digests { req, sums } => (req, Response::Digests(sums)),
         Frame::Stale { req, fenced } => (req, Response::Stale { fenced }),
         _ => return None,
     })

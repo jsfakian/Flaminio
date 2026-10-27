@@ -48,6 +48,9 @@ pub enum Request<P> {
         ext: Extent,
         data: P,
     },
+    /// Per-block digests for an extent (follow-ups §2). Reply: [`Response::Digests`].
+    /// Unwritten blocks are `None` on the wire; the simulator uses each block's value.
+    Digest { chunk: ChunkIdx, ext: Extent },
 }
 
 /// A reply from a replica node.
@@ -69,6 +72,9 @@ pub enum Response<P> {
     },
     Ok,
     Data(P),
+    /// One CRC-32C (or simulator block value as `u32`) per block of the requested extent.
+    /// `None` means the block is unwritten on that replica.
+    Digests(Vec<Option<u32>>),
     /// The volume is fenced at a higher epoch: the sender has been deposed.
     Stale {
         fenced: Epoch,

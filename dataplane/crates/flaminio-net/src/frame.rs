@@ -67,6 +67,11 @@ pub enum Frame {
         ext: Extent,
         data: Bytes,
     },
+    Digest {
+        req: u64,
+        chunk: u32,
+        ext: Extent,
+    },
     // Replies, replica → target.
     Fenced {
         req: u64,
@@ -78,6 +83,11 @@ pub enum Frame {
     Data {
         req: u64,
         data: Vec<u8>,
+    },
+    /// One optional CRC-32C per block of the digest request's extent.
+    Digests {
+        req: u64,
+        sums: Vec<Option<u32>>,
     },
     Stale {
         req: u64,
@@ -109,11 +119,13 @@ mod tag {
     pub const BEGIN_RESYNC: u8 = 5;
     pub const COPY: u8 = 6;
     pub const SETTLE: u8 = 7;
+    pub const DIGEST: u8 = 8;
     pub const FENCED: u8 = 64;
     pub const OK: u8 = 65;
     pub const DATA: u8 = 66;
     pub const STALE: u8 = 67;
     pub const REFUSED: u8 = 68;
+    pub const DIGESTS: u8 = 69;
 }
 
 struct W(Vec<u8>);
@@ -233,6 +245,12 @@ impl Frame {
                 w.ext(ext);
                 w.0.extend_from_slice(data);
             }
+            Frame::Digest { req, chunk, ext } => {
+                w.u8(tag::DIGEST);
+                w.u64(*req);
+                w.u32(*chunk);
+                w.ext(ext);
+            }
             Frame::Fenced { req, uncertain } => {
                 w.u8(tag::FENCED);
                 w.u64(*req);
@@ -253,6 +271,21 @@ impl Frame {
                 w.u8(tag::DATA);
                 w.u64(*req);
                 w.0.extend_from_slice(data);
+            }
+            Frame::Digests { req, sums } => {
+                assert!(sums.len() <= MAX_BLOCKS as usize, "too many digests");
+                w.u8(tag::DIGESTS);
+                w.u64(*req);
+                w.u32(sums.len() as u32);
+                for s in sums {
+                    match s {
+                        None => w.u8(0),
+                        Some(c) => {
+                            w.u8(1);
+                            w.u32(*c);
+                        }
+                    }
+                }
             }
             Frame::Stale { req, fenced } => {
                 w.u8(tag::STALE);
@@ -367,6 +400,11 @@ impl Frame {
                     data,
                 }
             }
+            tag::DIGEST => Frame::Digest {
+                req: r.u64()?,
+                chunk: r.u32()?,
+                ext: r.ext()?,
+            },
             tag::FENCED => {
                 let req = r.u64()?;
                 let n = r.u32()? as usize;
@@ -403,6 +441,22 @@ impl Frame {
                     req,
                     data: data.to_vec(),
                 }
+            }
+            tag::DIGESTS => {
+                let req = r.u64()?;
+                let n = r.u32()? as usize;
+                if n == 0 || n > MAX_BLOCKS as usize {
+                    return Err(DecodeError::Invalid("digest count"));
+                }
+                let mut sums = Vec::with_capacity(n);
+                for _ in 0..n {
+                    match r.u8()? {
+                        0 => sums.push(None),
+                        1 => sums.push(Some(r.u32()?)),
+                        _ => return Err(DecodeError::Invalid("digest flag")),
+                    }
+                }
+                Frame::Digests { req, sums }
             }
             tag::STALE => Frame::Stale {
                 req: r.u64()?,
@@ -535,6 +589,15 @@ mod tests {
                 chunk: 4,
                 ext,
                 data: vec![2; 2 * BLOCK].into(),
+            },
+            Frame::Digest {
+                req: 13,
+                chunk: 1,
+                ext,
+            },
+            Frame::Digests {
+                req: 14,
+                sums: vec![None, Some(0xdead_beef)],
             },
             Frame::Fenced {
                 req: 8,

@@ -44,6 +44,8 @@ pub enum Action<P> {
         data: P,
         parts: Vec<Extent>,
     },
+    /// Return digests for the extent (store metadata or simulator block values).
+    Digest { chunk: ChunkIdx, ext: Extent },
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +191,10 @@ impl ReplicaCore {
                 chunk: *chunk,
                 ext: *ext,
             },
+            Request::Digest { chunk, ext } if in_range(chunk, ext) => Action::Digest {
+                chunk: *chunk,
+                ext: *ext,
+            },
             Request::Write {
                 chunk,
                 ext,
@@ -317,6 +323,18 @@ impl Replica {
                 Response::Data(
                     ext.blocks()
                         .map(|b| c.get(&b).copied().unwrap_or(0))
+                        .collect(),
+                )
+            }
+            Action::Digest { chunk, ext } => {
+                // Simulator digests are the block values (follow-ups §2). Never-written = 0.
+                let c = self.data.get(&(m.vol, chunk));
+                Response::Digests(
+                    ext.blocks()
+                        .map(|b| {
+                            let v = c.and_then(|m| m.get(&b).copied()).unwrap_or(0);
+                            Some(v as u32)
+                        })
                         .collect(),
                 )
             }

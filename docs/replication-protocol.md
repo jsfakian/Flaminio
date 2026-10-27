@@ -157,10 +157,15 @@ A new target starts from `Attach`, which bumps the epoch. For each chunk:
      same unfinished write.
    - After the wait, the old lease has expired, because it needed the fenced member's
      confirmation.
-3. **Reconcile.** Pick one ISR member as the **authority**. For every block in the union of the
-   ISR members' uncertain sets, read the authority's value and write it to the whole ISR as an
-   ordinary write of the new epoch. When those writes complete, every ISR member agrees on every
-   block. Blocks outside the union already agreed, because their last write completed.
+3. **Reconcile.** For every extent in the union of the ISR members' uncertain sets, send
+   `Digest{chunk, ext}` to every ISR member. Each reply is one optional CRC-32C per block
+   (unwritten blocks are none; the simulator uses the block's value). Repair only the blocks
+   whose digests disagree: pick one ISR member as the **authority**, read its value and write
+   it to the whole ISR as an ordinary write of the new epoch. When those writes complete (or
+   when every digest already matched), every ISR member agrees on every block. Blocks outside
+   the union already agreed, because their last write completed.
+   - A member removed from the ISR while reconciliation is still running may not have been
+     compared. Its dirty set for the later resync is the whole chunk, not only writes in flight.
 4. **Serve.** The chunk is ready.
 
 **When no wait is needed.** If every ISR member answers, the chunk serves as soon as it is
@@ -325,6 +330,7 @@ the simulator then fails:
 | Acknowledge once a removal is proposed, not committed (§4) | seed 19 |
 | Accept requests from an old session (§3) | seed 1 |
 | No reconciliation after failover (§6) | seed 1 |
+| Trust digests from a single ISR member (§6) | seed 1 |
 | Reconciliation writes prune uncertain sets (§6) | seed 71 |
 | Settling before the repairs are done (§6) | seed 109 |
 | No lease check on reads (§5) | seed 288, split-brain scenario |
@@ -337,7 +343,7 @@ the simulator then fails:
 | A move drops its source before the destination is in the ISR (§7, moves) | seed 1; in 400 seeds, 49 runs show lost or stale data, 60 a stall |
 | Fast reads without the lease check (§5, fast reads) | seed 967; split-brain scenario |
 | Fast reads without the membership check (§5, fast reads) | seed 3206 |
-| Fast reads without the fencing check at completion (§5, fast reads) | seed 70955: a slow device read must straddle a complete takeover |
+| Fast reads without the fencing check at completion (§5, fast reads) | seed 3626767: a slow device read must straddle a complete takeover |
 
 The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
 and 60 000 for reconciliation pruning. That bug is rare by nature: the target must die between

@@ -168,6 +168,7 @@ pub fn check_request(f: &Frame) -> Result<(), &'static str> {
         Frame::Heartbeat { .. }
         | Frame::Write { .. }
         | Frame::Read { .. }
+        | Frame::Digest { .. }
         | Frame::BeginResync { .. }
         | Frame::Settle { .. }
         | Frame::Copy { .. } => Ok(()),

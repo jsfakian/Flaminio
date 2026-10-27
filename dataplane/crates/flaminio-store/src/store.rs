@@ -648,9 +648,7 @@ impl<D: BlockDevice> Store<D> {
         if store.config.pipelined_commits && !pipelined {
             store.set_pipelined_commits()?;
         }
-        store
-            .dev
-            .set_flush_coalesce(store.config.flush_coalesce);
+        store.dev.set_flush_coalesce(store.config.flush_coalesce);
         Ok(store)
     }
 
@@ -1201,6 +1199,51 @@ impl<D: BlockDevice> Store<D> {
             s.check_epoch(slot, epoch)?;
             s.run(|_| Ok(Plan::records(vec![Record::ChunkDelete { slot }])))
         })
+    }
+
+    /// Per-block CRC-32C digests for `[offset, offset+len)` from map metadata only: no data is
+    /// read from the device. Unwritten / unmapped / zero-phys blocks are `None`. `offset` and
+    /// `len` must be multiples of 4 KiB. Used by digest-first reconciliation (follow-ups §2).
+    pub fn digests(
+        &self,
+        key: ChunkKey,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<Option<u32>>, StoreError> {
+        let slot = self.state.slot_of(key)?;
+        let chunk = self.state.chunk(slot);
+        let size = chunk.chunk_size;
+        if len == 0
+            || !offset.is_multiple_of(BLOCK_SIZE_U64)
+            || !len.is_multiple_of(BLOCK_SIZE_U64)
+            || offset.checked_add(len).is_none_or(|e| e > size)
+        {
+            return Err(StoreError::invalid(format!(
+                "digests at {offset}+{len} must be 4 KiB aligned, non-empty and inside the {size}-byte chunk"
+            )));
+        }
+        let cs = self.state.cluster_size();
+        let n_blocks = (len / BLOCK_SIZE_U64) as usize;
+        let mut out = Vec::with_capacity(n_blocks);
+        let mut pos = 0u64;
+        while pos < len {
+            let o = offset + pos;
+            let (x, within) = (o / cs, o % cs);
+            let n = ((cs - within).min(len - pos)) as usize;
+            let n_blk = n / BLOCK_SIZE;
+            match chunk.resolve(self.state.epp, x) {
+                Resolved::Zeros => out.extend(std::iter::repeat_n(None, n_blk)),
+                Resolved::Data { csums, .. } => {
+                    let first = (within / BLOCK_SIZE_U64) as usize;
+                    for s in &csums[first..first + n_blk] {
+                        out.push(Some(*s));
+                    }
+                }
+            }
+            pos += n as u64;
+        }
+        debug_assert_eq!(out.len(), n_blocks);
+        Ok(out)
     }
 
     /// Raises the fenced epoch of every chunk of `volume` on this disk (ARCHITECTURE §8.4).

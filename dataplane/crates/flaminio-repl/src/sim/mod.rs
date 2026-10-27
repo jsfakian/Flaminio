@@ -664,7 +664,8 @@ impl Sim {
                     let watched = match m.body {
                         R::Write { chunk, ext, .. }
                         | R::Copy { chunk, ext, .. }
-                        | R::Read { chunk, ext } => chunk == tc && ext.contains(tb),
+                        | R::Read { chunk, ext }
+                        | R::Digest { chunk, ext } => chunk == tc && ext.contains(tb),
                         R::BeginResync { chunk } | R::Settle { chunk, .. } => chunk == tc,
                         R::Hello => true,
                         R::Heartbeat => false,

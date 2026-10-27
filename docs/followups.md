@@ -51,14 +51,14 @@ A restarted replica reports whole chunks as uncertain (replication-protocol.md Â
 new target copies them all.
 
 **Steps:**
-1. **Digest-first reconciliation.**
+1. **Digest-first reconciliation.** âœ… (protocol, simulator, store, data plane)
    - A new request, `Digest{chunk, ext}`, returns per-block CRC-32C values taken from the
      store's metadata. Unwritten blocks have none, so no data is read.
    - The target repairs only the blocks whose digests differ between ISR members.
    - In the simulator, a replica's digest is its block values. A new mutation, trusting
-     digests from a single member, must be caught.
-   - *Done when:* after restarting both replicas of a 16 GiB volume, the first read waits under
-     5 s.
+     digests from a single member, must be caught (`catches_trust_single_digest`).
+   - *Lab check still open:* after restarting both replicas of a 16 GiB volume, the first read
+     waits under 5 s.
 2. **Persisting the uncertain set at checkpoints** (a format v1 compat feature), so a restart
    reports only what was really uncertain. Optional once item 1 is in.
 

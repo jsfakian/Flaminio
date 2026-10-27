@@ -86,6 +86,8 @@ pub struct Bugs {
     /// (Checked by the caller, which owns the replica.) Complete fast reads without checking
     /// that the local replica is still fenced at the read's epoch.
     pub fast_read_no_fence_check: bool,
+    /// Trust digests from a single ISR member and skip repair (must be caught by the checker).
+    pub trust_single_digest: bool,
 }
 
 /// A read admitted by [`Target::try_fast_read`]: carried out by the caller on the local
@@ -195,6 +197,11 @@ enum Work<P> {
         op: u64,
         kind: Op<P>,
     },
+    /// Compare digests across the ISR before repairing (follow-ups §2).
+    Digest {
+        chunk: ChunkIdx,
+        ext: Extent,
+    },
     Repair {
         chunk: ChunkIdx,
         ext: Extent,
@@ -204,6 +211,14 @@ enum Work<P> {
         round: u64,
         ext: Extent,
     },
+}
+
+#[derive(Debug)]
+struct DigestOp {
+    chunk: ChunkIdx,
+    ext: Extent,
+    need: BTreeSet<NodeId>,
+    got: BTreeMap<NodeId, Vec<Option<u32>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -252,6 +267,9 @@ enum ReqKind {
         round: u64,
         ext: Extent,
     },
+    Digest {
+        id: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -287,6 +305,7 @@ pub struct Target<P> {
     next_seq: u64,
     next_read: u64,
     next_round: u64,
+    next_digest: u64,
     /// Repairs and resync copies in flight, and the most allowed. Bulk work shares the
     /// sessions with client I/O and heartbeats, so it is bounded: unbounded, it would queue
     /// enough data ahead of them to make their requests time out.
@@ -294,6 +313,7 @@ pub struct Target<P> {
     max_bulk: usize,
     writes: BTreeMap<u64, WriteOp<P>>,
     reads: BTreeMap<u64, ReadOp>,
+    digests: BTreeMap<u64, DigestOp>,
     queue: VecDeque<Work<P>>,
     meta_inflight: Option<(u64, Time)>,
     next_heartbeat: Time,
@@ -363,10 +383,12 @@ impl<P: Clone + Debug> Target<P> {
             next_seq: 0,
             next_read: 0,
             next_round: 0,
+            next_digest: 0,
             bulk: 0,
             max_bulk: DEFAULT_MAX_BULK,
             writes: BTreeMap::new(),
             reads: BTreeMap::new(),
+            digests: BTreeMap::new(),
             queue: VecDeque::new(),
             meta_inflight: None,
             next_heartbeat: now,
@@ -420,6 +442,7 @@ impl<P: Clone + Debug> Target<P> {
             && self.queue.is_empty()
             && self.writes.is_empty()
             && self.reads.is_empty()
+            && self.digests.is_empty()
             && self.meta_inflight.is_none()
             && self.chunks.iter().all(|c| {
                 c.phase == Phase::Ready
@@ -727,6 +750,11 @@ impl<P: Clone + Debug> Target<P> {
                 self.on_read(now, id, data);
                 scope = Scope::Queue;
             }
+            (ReqKind::Digest { id }, Response::Digests(sums)) => {
+                let sums = sums.clone();
+                self.on_digest(now, from, id, sums);
+                scope = Scope::All;
+            }
             (ReqKind::BeginResync { chunk, round }, Response::Ok) => {
                 let max_io = self.max_io;
                 if let Some(r) = self.resync_mut(chunk, round) {
@@ -823,6 +851,7 @@ impl<P: Clone + Debug> Target<P> {
         self.queue.clear();
         self.reads.clear();
         self.writes.clear();
+        self.digests.clear();
         self.peers.clear();
         self.meta_inflight = None;
         self.refresh_inflight = None;
@@ -886,6 +915,15 @@ impl<P: Clone + Debug> Target<P> {
         for (_, kind) in s.inflight.into_values().rev() {
             if let ReqKind::Copy { .. } = kind {
                 self.release_bulk();
+            }
+            if let ReqKind::Digest { id } = kind
+                && let Some(d) = self.digests.remove(&id)
+            {
+                self.release_bulk();
+                self.queue.push_front(Work::Digest {
+                    chunk: d.chunk,
+                    ext: d.ext,
+                });
             }
             if let ReqKind::Read { id } = kind
                 && let Some(r) = self.reads.remove(&id)
@@ -1072,6 +1110,52 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// Digests from one ISR member. When every member has answered, repair only the blocks
+    /// where digests disagree (or skip repair entirely when they all match).
+    fn on_digest(&mut self, now: Time, from: NodeId, id: u64, sums: Vec<Option<u32>>) {
+        let Some(d) = self.digests.get_mut(&id) else {
+            return;
+        };
+        if !d.need.contains(&from) || sums.len() != d.ext.len as usize {
+            self.events.push(Event::SessionFailed {
+                node: from,
+                reason: "a digest reply did not answer its request",
+            });
+            self.fail_peer(now, from);
+            return;
+        }
+        d.got.insert(from, sums);
+        #[cfg(test)]
+        let trust_one = self.bugs.trust_single_digest;
+        #[cfg(not(test))]
+        let trust_one = false;
+        let ready = trust_one || d.got.len() == d.need.len();
+        if !ready {
+            return;
+        }
+        let d = self.digests.remove(&id).expect("digest");
+        self.release_bulk();
+        let mismatch = if trust_one {
+            // Bug: treat the first reply as agreement and never repair.
+            ExtentSet::new()
+        } else {
+            digest_mismatch(&d.ext, &d.got)
+        };
+        let i = d.chunk as usize;
+        if let Phase::Reconciling { pending } = &mut self.chunks[i].phase {
+            // Agreed blocks need no copy; remove the whole piece, then re-queue mismatches.
+            pending.remove(&d.ext);
+            for ext in mismatch.pieces(self.max_io).into_iter().rev() {
+                pending.insert(ext);
+                self.queue.push_front(Work::Repair {
+                    chunk: d.chunk,
+                    ext,
+                });
+            }
+        }
+        let _ = now;
+    }
+
     fn on_read(&mut self, now: Time, id: u64, data: P) {
         let Some(r) = self.reads.remove(&id) else {
             return;
@@ -1232,6 +1316,39 @@ impl<P: Clone + Debug> Target<P> {
                     }
                 }
             }
+            &Work::Digest { chunk, ext } => {
+                let i = chunk as usize;
+                let c = &self.chunks[i];
+                if !matches!(c.phase, Phase::Reconciling { .. }) || self.bulk >= self.max_bulk {
+                    return false;
+                }
+                let need: BTreeSet<NodeId> = c.isr.iter().copied().collect();
+                if need.is_empty() || need.iter().any(|&n| self.session_of(n).is_none()) {
+                    return false;
+                }
+                let id = self.next_digest;
+                self.next_digest += 1;
+                self.bulk += 1;
+                self.digests.insert(
+                    id,
+                    DigestOp {
+                        chunk,
+                        ext,
+                        need: need.clone(),
+                        got: BTreeMap::new(),
+                    },
+                );
+                let body = Request::Digest { chunk, ext };
+                for n in need {
+                    if !self.send(now, n, body.clone(), ReqKind::Digest { id }) {
+                        // Session vanished mid-send: fail the digest and retry later.
+                        self.digests.remove(&id);
+                        self.release_bulk();
+                        return false;
+                    }
+                }
+                true
+            }
             &Work::Repair { chunk, ext } => {
                 let i = chunk as usize;
                 let c = &self.chunks[i];
@@ -1339,9 +1456,9 @@ impl<P: Clone + Debug> Target<P> {
                         } else {
                             pending
                         };
-                        // Repairs go first: client operations wait for the chunk anyway.
+                        // Digests first, then repairs only where ISR members disagree.
                         for ext in pending.pieces(self.max_io).into_iter().rev() {
-                            self.queue.push_front(Work::Repair {
+                            self.queue.push_front(Work::Digest {
                                 chunk: i as ChunkIdx,
                                 ext,
                             });
@@ -1604,12 +1721,19 @@ impl<P: Clone + Debug> Target<P> {
             }
             let removed: Vec<NodeId> = c.isr.difference(&m.isr).copied().collect();
             let during_io = c.phase != Phase::Fencing;
+            // Digest-first reconciliation may shrink the ISR before every member has been
+            // compared: an empty inflight set must not mean "already in sync".
+            let reconciling = matches!(c.phase, Phase::Reconciling { .. });
+            let blocks = self.blocks_per_chunk;
             for r in removed {
                 let mut d = ExtentSet::new();
                 for w in self.writes.values() {
                     if w.chunk as usize == i && !w.acked.contains(&r) {
                         d.insert(w.ext);
                     }
+                }
+                if reconciling {
+                    d = ExtentSet::of(Extent::new(0, blocks));
                 }
                 #[cfg(test)]
                 if self.bugs.no_dirty_inflight {
@@ -1714,4 +1838,22 @@ impl<P: Clone + Debug> Target<P> {
             }
         }
     }
+}
+
+/// Blocks of `ext` where ISR digest replies disagree (or a reply is the wrong length).
+fn digest_mismatch(ext: &Extent, got: &BTreeMap<NodeId, Vec<Option<u32>>>) -> ExtentSet {
+    let mut bad = ExtentSet::new();
+    let Some(first) = got.values().next() else {
+        return bad;
+    };
+    for i in 0..ext.len as usize {
+        let want = first.get(i).copied().unwrap_or(None);
+        if got
+            .values()
+            .any(|v| v.get(i).copied().unwrap_or(None) != want)
+        {
+            bad.insert(Extent::new(ext.start + i as u32, 1));
+        }
+    }
+    bad
 }
