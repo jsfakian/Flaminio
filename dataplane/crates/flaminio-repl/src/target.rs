@@ -133,9 +133,16 @@ struct Resync {
     round: u64,
     /// The member's session that carried `BeginResync`.
     session: u64,
+    /// Waiting for the source's mapped extents before `BeginResync` (follow-ups §3).
+    awaiting_mapped: bool,
     started: bool,
     /// Blocks not yet copied and acknowledged.
     todo: ExtentSet,
+    /// Writes that landed on the ISR while Mapped was in flight: always copy these, even if
+    /// the stale Mapped reply omitted them.
+    force_copy: ExtentSet,
+    /// Unmapped on the source: discard on the joiner so stale data does not survive.
+    discard: ExtentSet,
     /// Blocks of live writes sent to the member since `BeginResync`.
     live: ExtentSet,
     /// Live writes sent to the member and not yet acknowledged by it, completed or not.
@@ -211,6 +218,18 @@ enum Work<P> {
         round: u64,
         ext: Extent,
     },
+    /// Discard unmapped holes on a joining replica (follow-ups §3).
+    Discard {
+        chunk: ChunkIdx,
+        round: u64,
+        ext: Extent,
+    },
+    /// Compare source vs joiner digests before copying (follow-ups §3).
+    ResyncDigest {
+        chunk: ChunkIdx,
+        round: u64,
+        ext: Extent,
+    },
 }
 
 #[derive(Debug)]
@@ -219,6 +238,8 @@ struct DigestOp {
     ext: Extent,
     need: BTreeSet<NodeId>,
     got: BTreeMap<NodeId, Vec<Option<u32>>>,
+    /// When set, shrink that resync round's `todo` to digest mismatches instead of repairing.
+    resync: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -269,6 +290,15 @@ enum ReqKind {
     },
     Digest {
         id: u64,
+    },
+    Mapped {
+        chunk: ChunkIdx,
+        round: u64,
+    },
+    Discard {
+        chunk: ChunkIdx,
+        round: u64,
+        ext: Extent,
     },
 }
 
@@ -755,13 +785,28 @@ impl<P: Clone + Debug> Target<P> {
                 self.on_digest(now, from, id, sums);
                 scope = Scope::All;
             }
+            (ReqKind::Mapped { chunk, round }, Response::Mapped(exts)) => {
+                self.on_mapped(now, chunk, round, exts);
+            }
             (ReqKind::BeginResync { chunk, round }, Response::Ok) => {
                 let max_io = self.max_io;
                 if let Some(r) = self.resync_mut(chunk, round) {
+                    // Writes that landed after Mapped was applied, before this Ack.
+                    let force = std::mem::take(&mut r.force_copy);
+                    r.todo.extend(&force);
+                    for e in force.iter() {
+                        r.discard.remove(&e);
+                    }
                     r.started = true;
-                    let pieces = r.todo.pieces(max_io);
-                    for ext in pieces {
-                        self.queue.push_back(Work::Copy { chunk, round, ext });
+                    let discards = r.discard.pieces(max_io);
+                    let digests = r.todo.pieces(max_io);
+                    for ext in discards {
+                        self.queue.push_back(Work::Discard { chunk, round, ext });
+                    }
+                    // Digests first: copy only blocks that still disagree with the source.
+                    for ext in digests {
+                        self.queue
+                            .push_back(Work::ResyncDigest { chunk, round, ext });
                     }
                 }
             }
@@ -769,6 +814,12 @@ impl<P: Clone + Debug> Target<P> {
                 self.release_bulk();
                 if let Some(r) = self.resync_mut(chunk, round) {
                     r.todo.remove(&ext);
+                }
+            }
+            (ReqKind::Discard { chunk, round, ext }, Response::Ok) => {
+                self.release_bulk();
+                if let Some(r) = self.resync_mut(chunk, round) {
+                    r.discard.remove(&ext);
                 }
             }
             _ => {
@@ -913,17 +964,35 @@ impl<P: Clone + Debug> Target<P> {
         };
         peer.retry_at = now + self.timing.reconnect;
         for (_, kind) in s.inflight.into_values().rev() {
-            if let ReqKind::Copy { .. } = kind {
+            if let ReqKind::Copy { .. } | ReqKind::Discard { .. } = kind {
                 self.release_bulk();
+            }
+            if let ReqKind::Mapped { chunk, round } = kind {
+                // Probe failed: abort this resync round; drive_resync will try again.
+                let abort = self.chunks[chunk as usize]
+                    .resync
+                    .as_ref()
+                    .is_some_and(|r| r.round == round && r.awaiting_mapped);
+                if abort {
+                    self.abort_resync(chunk as usize);
+                }
             }
             if let ReqKind::Digest { id } = kind
                 && let Some(d) = self.digests.remove(&id)
             {
                 self.release_bulk();
-                self.queue.push_front(Work::Digest {
-                    chunk: d.chunk,
-                    ext: d.ext,
-                });
+                let work = match d.resync {
+                    Some(round) => Work::ResyncDigest {
+                        chunk: d.chunk,
+                        round,
+                        ext: d.ext,
+                    },
+                    None => Work::Digest {
+                        chunk: d.chunk,
+                        ext: d.ext,
+                    },
+                };
+                self.queue.push_front(work);
             }
             if let ReqKind::Read { id } = kind
                 && let Some(r) = self.reads.remove(&id)
@@ -1074,8 +1143,13 @@ impl<P: Clone + Debug> Target<P> {
         let c = &mut self.chunks[chunk as usize];
         let mut targets = c.required();
         if let Some(r) = c.resync.as_mut() {
-            targets.insert(r.member);
-            r.live.insert(ext);
+            if r.started {
+                targets.insert(r.member);
+                r.live.insert(ext);
+            } else {
+                // Before BeginResync Ack: Mapped (or the gap until Ack) may omit this write.
+                r.force_copy.insert(ext);
+            }
         }
         for (r, d) in c.dirty.iter_mut() {
             if !targets.contains(r) {
@@ -1110,6 +1184,43 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// Source mapped extents for a resync: copy only those, discard the rest of the plan.
+    fn on_mapped(&mut self, now: Time, chunk: ChunkIdx, round: u64, exts: &[Extent]) {
+        let Some(r) = self.resync_mut(chunk, round) else {
+            return;
+        };
+        if !r.awaiting_mapped {
+            return;
+        }
+        let mut mapped = ExtentSet::new();
+        for e in exts {
+            mapped.insert(*e);
+        }
+        let planned = r.todo.clone();
+        let force = r.force_copy.clone();
+        let mut todo = planned.intersection(&mapped);
+        todo.extend(&force);
+        let mut holes = ExtentSet::new();
+        for e in planned.iter() {
+            for h in mapped.missing_from(&e) {
+                holes.insert(h);
+            }
+        }
+        for e in force.iter() {
+            holes.remove(&e);
+        }
+        r.todo = todo;
+        r.discard = holes;
+        // Force-copies so far are in todo; clear so post-Mapped writes accumulate until Ack.
+        r.force_copy.clear();
+        r.awaiting_mapped = false;
+        let member = r.member;
+        let body = Request::BeginResync { chunk };
+        if !self.send(now, member, body, ReqKind::BeginResync { chunk, round }) {
+            self.abort_resync(chunk as usize);
+        }
+    }
+
     /// Digests from one ISR member. When every member has answered, repair only the blocks
     /// where digests disagree (or skip repair entirely when they all match).
     fn on_digest(&mut self, now: Time, from: NodeId, id: u64, sums: Vec<Option<u32>>) {
@@ -1135,12 +1246,31 @@ impl<P: Clone + Debug> Target<P> {
         }
         let d = self.digests.remove(&id).expect("digest");
         self.release_bulk();
-        let mismatch = if trust_one {
+        let mismatch = if trust_one && d.resync.is_none() {
             // Bug: treat the first reply as agreement and never repair.
             ExtentSet::new()
         } else {
             digest_mismatch(&d.ext, &d.got)
         };
+        if let Some(round) = d.resync {
+            let max_io = self.max_io;
+            let pieces = mismatch.pieces(max_io);
+            if let Some(r) = self.resync_mut(d.chunk, round) {
+                r.todo.remove(&d.ext);
+                for &ext in &pieces {
+                    r.todo.insert(ext);
+                }
+            }
+            for ext in pieces.into_iter().rev() {
+                self.queue.push_front(Work::Copy {
+                    chunk: d.chunk,
+                    round,
+                    ext,
+                });
+            }
+            let _ = now;
+            return;
+        }
         let i = d.chunk as usize;
         if let Phase::Reconciling { pending } = &mut self.chunks[i].phase {
             // Agreed blocks need no copy; remove the whole piece, then re-queue mismatches.
@@ -1336,6 +1466,7 @@ impl<P: Clone + Debug> Target<P> {
                         ext,
                         need: need.clone(),
                         got: BTreeMap::new(),
+                        resync: None,
                     },
                 );
                 let body = Request::Digest { chunk, ext };
@@ -1381,6 +1512,62 @@ impl<P: Clone + Debug> Target<P> {
                 };
                 self.bulk += 1;
                 self.start_read(now, i, ext, from, ReadFor::Copy { round }, false);
+                true
+            }
+            &Work::Discard { chunk, round, ext } => {
+                let i = chunk as usize;
+                let Some(r) = self.chunks[i].resync.as_ref().filter(|r| r.round == round) else {
+                    return true;
+                };
+                let member = r.member;
+                if self.bulk >= self.max_bulk || self.session_of(member).is_none() {
+                    return false;
+                }
+                self.bulk += 1;
+                let body = Request::Discard { chunk, ext };
+                if !self.send(now, member, body, ReqKind::Discard { chunk, round, ext }) {
+                    self.release_bulk();
+                    return false;
+                }
+                true
+            }
+            &Work::ResyncDigest { chunk, round, ext } => {
+                let i = chunk as usize;
+                let Some(r) = self.chunks[i].resync.as_ref().filter(|r| r.round == round) else {
+                    return true;
+                };
+                let member = r.member;
+                if self.bulk >= self.max_bulk || self.session_of(member).is_none() {
+                    return false;
+                }
+                let Some(from) = self.source(i, Some(member)) else {
+                    return false;
+                };
+                if self.session_of(from).is_none() {
+                    return false;
+                }
+                let id = self.next_digest;
+                self.next_digest += 1;
+                self.bulk += 1;
+                let need: BTreeSet<NodeId> = [from, member].into_iter().collect();
+                self.digests.insert(
+                    id,
+                    DigestOp {
+                        chunk,
+                        ext,
+                        need: need.clone(),
+                        got: BTreeMap::new(),
+                        resync: Some(round),
+                    },
+                );
+                let body = Request::Digest { chunk, ext };
+                for n in need {
+                    if !self.send(now, n, body.clone(), ReqKind::Digest { id }) {
+                        self.digests.remove(&id);
+                        self.release_bulk();
+                        return false;
+                    }
+                }
                 true
             }
         }
@@ -1539,7 +1726,12 @@ impl<P: Clone + Debug> Target<P> {
                 .writes
                 .values()
                 .any(|w| w.chunk as usize == i && !w.acked.contains(&member));
-            if r.started && r.todo.is_empty() && r.unacked.is_empty() && !unacked {
+            if r.started
+                && r.todo.is_empty()
+                && r.discard.is_empty()
+                && r.unacked.is_empty()
+                && !unacked
+            {
                 let c = &mut self.chunks[i];
                 c.resync = None;
                 c.joining = Some(member);
@@ -1559,6 +1751,9 @@ impl<P: Clone + Debug> Target<P> {
         else {
             return;
         };
+        let Some(from) = self.source(i, Some(member)) else {
+            return;
+        };
         let session = self.session_of(member).expect("open");
         let round = self.next_round;
         self.next_round += 1;
@@ -1570,18 +1765,25 @@ impl<P: Clone + Debug> Target<P> {
             member,
             round,
             session,
+            awaiting_mapped: true,
             started: false,
             todo,
+            force_copy: ExtentSet::new(),
+            discard: ExtentSet::new(),
             live: ExtentSet::new(),
             unacked: BTreeSet::new(),
         });
         let chunk = i as ChunkIdx;
-        self.send(
+        // Ask the source what holds data; copy only that, discard the rest (follow-ups §3).
+        let ext = Extent::new(0, self.blocks_per_chunk);
+        if !self.send(
             now,
-            member,
-            Request::BeginResync { chunk },
-            ReqKind::BeginResync { chunk, round },
-        );
+            from,
+            Request::Mapped { chunk, ext },
+            ReqKind::Mapped { chunk, round },
+        ) {
+            self.abort_resync(i);
+        }
         // Writes already in flight are not sent to the member. Every copy of their blocks
         // reads its source after them, over the same ordered session, so it carries them;
         // and the member joins only once they have completed.

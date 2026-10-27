@@ -55,6 +55,29 @@ fn every_write_path_reads_back_before_and_after_reopen() {
 }
 
 #[test]
+fn mapped_reports_data_clusters_and_skips_holes() {
+    let mut s = new_store(16);
+    s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
+    assert!(s.mapped(key(0), 0, CHUNK).unwrap().is_empty());
+    // Two full clusters with a hole between them.
+    s.write(key(0), 0, &blocks(1, 0, 16), 1, 1).unwrap();
+    s.write(key(0), 2 * CLUSTER, &blocks(2, 32, 16), 2, 1)
+        .unwrap();
+    assert_eq!(
+        s.mapped(key(0), 0, CHUNK).unwrap(),
+        vec![(0, CLUSTER), (2 * CLUSTER, CLUSTER)]
+    );
+    // A range covering only the hole reports nothing.
+    assert!(s.mapped(key(0), CLUSTER, CLUSTER).unwrap().is_empty());
+    // Discard clears the mapping.
+    s.discard(key(0), 0, CLUSTER, 1).unwrap();
+    assert_eq!(
+        s.mapped(key(0), 0, CHUNK).unwrap(),
+        vec![(2 * CLUSTER, CLUSTER)]
+    );
+}
+
+#[test]
 fn snapshot_preserves_old_layer_and_reads_through() {
     let mut s = new_store(16);
     s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();

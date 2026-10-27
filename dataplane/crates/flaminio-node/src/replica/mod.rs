@@ -391,6 +391,41 @@ impl<D: BlockDevice> ReplicaService<D> {
                         },
                     );
                 }
+                Action::Mapped { chunk, ext } => {
+                    replies[i] = Some(
+                        match self.store.mapped(key(uuid, chunk), offset(ext), len(ext)) {
+                            Ok(ranges) => {
+                                let exts = ranges
+                                    .into_iter()
+                                    .map(|(o, l)| {
+                                        Extent::new(
+                                            (o / BLOCK as u64) as u32,
+                                            (l / BLOCK as u64) as u32,
+                                        )
+                                    })
+                                    .collect();
+                                Reply::Send(Frame::Mappings { req, exts })
+                            }
+                            Err(e) => Reply::Close(e.to_string()),
+                        },
+                    );
+                }
+                Action::Discard { chunk, parts, .. } => {
+                    let mut err = None;
+                    for p in &parts {
+                        if let Err(e) =
+                            self.store
+                                .discard(key(uuid, chunk), offset(*p), len(*p), s.epoch)
+                        {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                    replies[i] = Some(match err {
+                        None => Reply::Send(Frame::Ok { req }),
+                        Some(e) => Reply::Close(e.to_string()),
+                    });
+                }
             }
         }
         if self.commit(items, &mut pending, &mut replies) {
@@ -798,6 +833,8 @@ fn req_of(f: &Frame) -> u64 {
         | Frame::Write { req, .. }
         | Frame::Read { req, .. }
         | Frame::Digest { req, .. }
+        | Frame::Mapped { req, .. }
+        | Frame::Discard { req, .. }
         | Frame::BeginResync { req, .. }
         | Frame::Settle { req, .. }
         | Frame::Copy { req, .. }
@@ -805,6 +842,7 @@ fn req_of(f: &Frame) -> u64 {
         | Frame::Ok { req }
         | Frame::Data { req, .. }
         | Frame::Digests { req, .. }
+        | Frame::Mappings { req, .. }
         | Frame::Stale { req, .. } => *req,
         Frame::Refused { .. } => 0,
     }
@@ -833,6 +871,8 @@ fn to_request(f: &Frame) -> Option<(u64, Request<()>)> {
         ),
         Frame::Read { req, chunk, ext } => (req, Request::Read { chunk, ext }),
         Frame::Digest { req, chunk, ext } => (req, Request::Digest { chunk, ext }),
+        Frame::Mapped { req, chunk, ext } => (req, Request::Mapped { chunk, ext }),
+        Frame::Discard { req, chunk, ext } => (req, Request::Discard { chunk, ext }),
         Frame::BeginResync { req, chunk } => (req, Request::BeginResync { chunk }),
         Frame::Settle { req, chunk, below } => (req, Request::Settle { chunk, below }),
         Frame::Copy {
@@ -858,6 +898,7 @@ fn response_frame(req: u64, r: Response<()>) -> Frame {
         Response::Stale { fenced } => Frame::Stale { req, fenced },
         Response::Data(()) => unreachable!("reads are carried out by the service"),
         Response::Digests(_) => unreachable!("digests are carried out by the service"),
+        Response::Mapped(_) => unreachable!("mappings are carried out by the service"),
     }
 }
 

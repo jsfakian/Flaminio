@@ -1967,6 +1967,16 @@ fn to_frame(m: &ToReplica<Payload>) -> Frame {
             chunk: *chunk,
             ext: *ext,
         },
+        Request::Mapped { chunk, ext } => Frame::Mapped {
+            req,
+            chunk: *chunk,
+            ext: *ext,
+        },
+        Request::Discard { chunk, ext } => Frame::Discard {
+            req,
+            chunk: *chunk,
+            ext: *ext,
+        },
         Request::BeginResync { chunk } => Frame::BeginResync { req, chunk: *chunk },
         Request::Settle { chunk, below } => Frame::Settle {
             req,
@@ -1988,6 +1998,7 @@ fn from_frame(f: Frame) -> Option<(u64, Response<Payload>)> {
         Frame::Ok { req } => (req, Response::Ok),
         Frame::Data { req, data } => (req, Response::Data(Payload::Bytes(Bytes::from(data)))),
         Frame::Digests { req, sums } => (req, Response::Digests(sums)),
+        Frame::Mappings { req, exts } => (req, Response::Mapped(exts)),
         Frame::Stale { req, fenced } => (req, Response::Stale { fenced }),
         _ => return None,
     })

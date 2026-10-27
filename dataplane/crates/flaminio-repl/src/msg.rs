@@ -51,6 +51,13 @@ pub enum Request<P> {
     /// Per-block digests for an extent (follow-ups §2). Reply: [`Response::Digests`].
     /// Unwritten blocks are `None` on the wire; the simulator uses each block's value.
     Digest { chunk: ChunkIdx, ext: Extent },
+    /// Sub-extents of `ext` that hold data on this replica (follow-ups §3). Reply:
+    /// [`Response::Mapped`]. Unwritten ranges are omitted so the target can skip copies and
+    /// discard stale data on the destination.
+    Mapped { chunk: ChunkIdx, ext: Extent },
+    /// Drops data in `ext` (advisory discard). Reply: [`Response::Ok`]. Used when the source
+    /// of a resync or repair has nothing mapped there.
+    Discard { chunk: ChunkIdx, ext: Extent },
 }
 
 /// A reply from a replica node.
@@ -75,6 +82,8 @@ pub enum Response<P> {
     /// One CRC-32C (or simulator block value as `u32`) per block of the requested extent.
     /// `None` means the block is unwritten on that replica.
     Digests(Vec<Option<u32>>),
+    /// Extents inside the request that hold data. Disjoint, ordered, clipped to the request.
+    Mapped(Vec<Extent>),
     /// The volume is fenced at a higher epoch: the sender has been deposed.
     Stale {
         fenced: Epoch,

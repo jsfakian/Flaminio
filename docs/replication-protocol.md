@@ -228,8 +228,11 @@ the ordered-session argument. It must send those writes to `r` as well.
 **Which blocks to copy:**
 - **If this target removed `r` itself:** the blocks of writes in flight to `r` at the removal,
   plus every block written since then.
-- **Otherwise:** every block of the chunk. In the real data plane this becomes a digest
-  comparison, as in the MVP.
+- **Otherwise:** every block of the chunk.
+- **Skipping unwritten ranges (follow-ups §3):** the target first sends `Mapped{chunk, ext}` to
+  a source ISR member. It copies only the mapped sub-extents, and sends `Discard` to `r` for
+  the holes so stale data does not survive. Writes that land while Mapped is in flight are
+  force-copied. Digests (§6) further skip blocks that already match.
 
 **Bulk work is bounded.** Repairs (§6) and resync copies share each replica's ordered session
 with client writes and heartbeats. A target therefore keeps at most a few of them in flight (4

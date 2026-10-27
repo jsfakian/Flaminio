@@ -169,6 +169,8 @@ pub fn check_request(f: &Frame) -> Result<(), &'static str> {
         | Frame::Write { .. }
         | Frame::Read { .. }
         | Frame::Digest { .. }
+        | Frame::Mapped { .. }
+        | Frame::Discard { .. }
         | Frame::BeginResync { .. }
         | Frame::Settle { .. }
         | Frame::Copy { .. } => Ok(()),

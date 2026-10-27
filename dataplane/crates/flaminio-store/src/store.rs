@@ -1246,6 +1246,59 @@ impl<D: BlockDevice> Store<D> {
         Ok(out)
     }
 
+    /// Coalesced byte ranges inside `[offset, offset+len)` that hold data on this replica
+    /// (follow-ups §3). Unmapped and zero-phys clusters are omitted; no device data is read.
+    /// `offset` and `len` must be multiples of 4 KiB. Returned ranges are cluster-aligned.
+    pub fn mapped(
+        &self,
+        key: ChunkKey,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<(u64, u64)>, StoreError> {
+        let slot = self.state.slot_of(key)?;
+        let chunk = self.state.chunk(slot);
+        let size = chunk.chunk_size;
+        if len == 0
+            || !offset.is_multiple_of(BLOCK_SIZE_U64)
+            || !len.is_multiple_of(BLOCK_SIZE_U64)
+            || offset.checked_add(len).is_none_or(|e| e > size)
+        {
+            return Err(StoreError::invalid(format!(
+                "mapped at {offset}+{len} must be 4 KiB aligned, non-empty and inside the {size}-byte chunk"
+            )));
+        }
+        let cs = self.state.cluster_size();
+        let range_end = offset + len;
+        let first = offset / cs;
+        let last = range_end.div_ceil(cs);
+        let mut out = Vec::new();
+        let mut run_start: Option<u64> = None;
+        let mut run_end = 0u64;
+        for x in first..last {
+            let mapped = matches!(chunk.resolve(self.state.epp, x), Resolved::Data { .. });
+            let from = (x * cs).max(offset);
+            let to = ((x + 1) * cs).min(range_end);
+            if mapped && from < to {
+                match run_start {
+                    Some(_) if run_end == from => run_end = to,
+                    _ => {
+                        if let Some(s) = run_start {
+                            out.push((s, run_end - s));
+                        }
+                        run_start = Some(from);
+                        run_end = to;
+                    }
+                }
+            } else if let Some(s) = run_start.take() {
+                out.push((s, run_end - s));
+            }
+        }
+        if let Some(s) = run_start {
+            out.push((s, run_end - s));
+        }
+        Ok(out)
+    }
+
     /// Raises the fenced epoch of every chunk of `volume` on this disk (ARCHITECTURE §8.4).
     /// Fails with [`StoreError::StaleEpoch`] if a chunk is already fenced at a higher epoch.
     pub fn fence(&mut self, volume: flaminio_format::Uuid, epoch: u64) -> Result<(), StoreError> {

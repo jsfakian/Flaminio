@@ -72,6 +72,16 @@ pub enum Frame {
         chunk: u32,
         ext: Extent,
     },
+    Mapped {
+        req: u64,
+        chunk: u32,
+        ext: Extent,
+    },
+    Discard {
+        req: u64,
+        chunk: u32,
+        ext: Extent,
+    },
     // Replies, replica → target.
     Fenced {
         req: u64,
@@ -88,6 +98,11 @@ pub enum Frame {
     Digests {
         req: u64,
         sums: Vec<Option<u32>>,
+    },
+    /// Sub-extents of a `Mapped` request that hold data.
+    Mappings {
+        req: u64,
+        exts: Vec<Extent>,
     },
     Stale {
         req: u64,
@@ -120,12 +135,15 @@ mod tag {
     pub const COPY: u8 = 6;
     pub const SETTLE: u8 = 7;
     pub const DIGEST: u8 = 8;
+    pub const MAPPED: u8 = 9;
+    pub const DISCARD: u8 = 10;
     pub const FENCED: u8 = 64;
     pub const OK: u8 = 65;
     pub const DATA: u8 = 66;
     pub const STALE: u8 = 67;
     pub const REFUSED: u8 = 68;
     pub const DIGESTS: u8 = 69;
+    pub const MAPPINGS: u8 = 70;
 }
 
 struct W(Vec<u8>);
@@ -251,6 +269,18 @@ impl Frame {
                 w.u32(*chunk);
                 w.ext(ext);
             }
+            Frame::Mapped { req, chunk, ext } => {
+                w.u8(tag::MAPPED);
+                w.u64(*req);
+                w.u32(*chunk);
+                w.ext(ext);
+            }
+            Frame::Discard { req, chunk, ext } => {
+                w.u8(tag::DISCARD);
+                w.u64(*req);
+                w.u32(*chunk);
+                w.ext(ext);
+            }
             Frame::Fenced { req, uncertain } => {
                 w.u8(tag::FENCED);
                 w.u64(*req);
@@ -285,6 +315,15 @@ impl Frame {
                             w.u32(*c);
                         }
                     }
+                }
+            }
+            Frame::Mappings { req, exts } => {
+                assert!(exts.len() <= MAX_UNCERTAIN, "too many mapped extents");
+                w.u8(tag::MAPPINGS);
+                w.u64(*req);
+                w.u32(exts.len() as u32);
+                for x in exts {
+                    w.ext(x);
                 }
             }
             Frame::Stale { req, fenced } => {
@@ -405,6 +444,16 @@ impl Frame {
                 chunk: r.u32()?,
                 ext: r.ext()?,
             },
+            tag::MAPPED => Frame::Mapped {
+                req: r.u64()?,
+                chunk: r.u32()?,
+                ext: r.ext()?,
+            },
+            tag::DISCARD => Frame::Discard {
+                req: r.u64()?,
+                chunk: r.u32()?,
+                ext: r.ext()?,
+            },
             tag::FENCED => {
                 let req = r.u64()?;
                 let n = r.u32()? as usize;
@@ -457,6 +506,18 @@ impl Frame {
                     }
                 }
                 Frame::Digests { req, sums }
+            }
+            tag::MAPPINGS => {
+                let req = r.u64()?;
+                let n = r.u32()? as usize;
+                if n > MAX_UNCERTAIN {
+                    return Err(DecodeError::Invalid("too many mapped extents"));
+                }
+                let mut exts = Vec::with_capacity(n.min(r.0.len() / 8));
+                for _ in 0..n {
+                    exts.push(r.any_ext()?);
+                }
+                Frame::Mappings { req, exts }
             }
             tag::STALE => Frame::Stale {
                 req: r.u64()?,
@@ -595,9 +656,23 @@ mod tests {
                 chunk: 1,
                 ext,
             },
+            Frame::Mapped {
+                req: 15,
+                chunk: 1,
+                ext,
+            },
+            Frame::Discard {
+                req: 16,
+                chunk: 1,
+                ext,
+            },
             Frame::Digests {
                 req: 14,
                 sums: vec![None, Some(0xdead_beef)],
+            },
+            Frame::Mappings {
+                req: 17,
+                exts: vec![ext, Extent { start: 4, len: 2 }],
             },
             Frame::Fenced {
                 req: 8,

@@ -65,13 +65,14 @@ new target copies them all.
 ## 3. Copying unwritten ranges
 
 **Steps:**
-1. **A store query for mapped extents:** `mapped(key, range) -> extents`.
-2. **Resync and repair copy only mapped extents.** On the receiving side, an extent that is
-   unmapped on the source becomes a discard, so stale data does not survive.
-3. **Digests for resync too:** a returning replica copies only blocks whose digests differ
-   (same `Digest` request as item 2).
-4. *Done when:* a resync of the 16 GiB lab volume with 4 GiB written moves ≤ 4.5 GiB, and the
-   replica's store uses about 4 GiB.
+1. **A store query for mapped extents:** `mapped(key, range) -> extents`. ✅
+2. **Resync and repair copy only mapped extents.** ✅ Protocol `Mapped` / `Discard`; the target
+   probes the source before `BeginResync`, copies only mapped blocks, and discards holes on the
+   joiner (with `force_copy` so writes during the probe are not lost).
+3. **Digests for resync too:** ✅ after Mapped, the target digests source vs joiner and copies
+   only disagreeing blocks (same `Digest` request as item 2).
+4. *Lab check still open:* a resync of the 16 GiB lab volume with 4 GiB written moves ≤ 4.5 GiB,
+   and the replica's store uses about 4 GiB.
 
 ## 4. Failure domains in placement
 
