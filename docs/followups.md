@@ -111,12 +111,12 @@ item 1.2.
 ## 6. Fuzzing
 
 **Steps:**
-1. **`make fuzz`:** installs the nightly toolchain and cargo-fuzz if missing, then runs every
-   target for `FUZZ_SECONDS` each.
-2. **Coverage:** the on-disk format targets and the network targets (`repl_frame`,
-   `capability_token`).
-3. *Done when:* every target runs 10 minutes clean, and a crash found is a test case in the
-   repository.
+1. **`make fuzz`:** ✅ `scripts/dev/fuzz.sh` installs the nightly toolchain and cargo-fuzz if
+   missing, then runs every target for `FUZZ_SECONDS` each (default 60).
+2. **Coverage:** ✅ on-disk format (`superblock`, `metadata_pages`, `journal`) and network
+   (`repl_frame`, `capability_token`).
+3. *Done when:* every target runs 10 minutes clean (`FUZZ_SECONDS=600 make fuzz`), and a crash
+   found is a test case in the repository. Short smoke (`FUZZ_SECONDS=5`) is clean.
 
 ## 7. Certificates
 
