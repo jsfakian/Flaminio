@@ -97,6 +97,9 @@ new target copies them all.
 Today the engine lives on the attached device's queue thread, for the zero-copy local read
 path.
 
+**Blocked on item 1** (left for later): the per-queue admission and several ublk queues of
+item 1.2.
+
 **Steps** (come with item 1.2):
 1. **The engine moves to a thread of its own.**
 2. **Each device's queue threads** do their local reads with the per-queue admission check from
