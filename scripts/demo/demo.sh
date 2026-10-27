@@ -40,25 +40,37 @@ scenario_2() {
         die "unexpected demo pod log"
 }
 
+# Map VM name → lab.sh selector (a|b).
+demo_vm_sel() {
+    case "$1" in
+        "$VM_A") echo a ;;
+        "$VM_B") echo b ;;
+        "$VM_C") echo c ;;
+        *) die "unknown VM $1" ;;
+    esac
+}
+
 scenario_3() {
-    talk "Kill Site B (replica): stop flaminio-node on fl-b; writes continue; bring it back and ISR rejoins."
-    local node_b=$VM_B
-    log "stopping flaminio-node on $node_b"
-    vssh "$node_b" "sudo systemctl stop flaminio-node" || true
+    talk "Kill the replica site: stop flaminio-node on the node that is not hosting the pod; bring it back."
+    local pod_node replica
+    pod_node=$(demo_kubectl get pod -n flaminio-demo demo-0 -o jsonpath='{.spec.nodeName}')
+    if [[ $pod_node == "$VM_A" ]]; then replica=$VM_B; else replica=$VM_A; fi
+    log "pod on $pod_node; stopping dataplane on replica $replica"
+    "$SCRIPTS/lab.sh" node down "$(demo_vm_sel "$replica")"
     sleep 5
     demo_kubectl get nodes
-    log "meta / ISR view (best effort):"
-    "$SCRIPTS/lab.sh" vol show 2>/dev/null || true
-    prompt "Point at Grafana / exporter: meta should still be up on fl-a"
-    log "restarting flaminio-node on $node_b"
-    vssh "$node_b" "sudo systemctl start flaminio-node"
-    sleep 5
-    vssh "$node_b" "systemctl is-active flaminio-node"
+    demo_kubectl get pod -n flaminio-demo demo-0 -o wide
+    [[ $(demo_kubectl get pod -n flaminio-demo demo-0 -o jsonpath='{.status.phase}') == Running ]] ||
+        die "demo pod should keep running while the replica dataplane is down"
+    prompt "Point at Grafana / exporter: meta still up; replica ISR should shrink"
+    log "restarting dataplane on $replica"
+    "$SCRIPTS/lab.sh" node up "$(demo_vm_sel "$replica")"
+    vssh "$replica" "systemctl is-active --quiet flaminio-node"
+    log "replica $replica: flaminio-node active again"
 }
 
 scenario_4() {
-    talk "Kill Site A (target): CSI failover (~2 min). We wrap make csi-failover against the demo workload."
-    # Reuse lab failover against flaminio-test naming, or power off the demo pod's node.
+    talk "Kill the target site: power off the demo pod's VM; CSI failover should land on the other site (~2 min)."
     local lost other start
     lost=$(demo_kubectl get pod -n flaminio-demo demo-0 -o jsonpath='{.spec.nodeName}')
     other=$(vms_of all | tr ' ' '\n' | grep -vx "$lost")
@@ -74,21 +86,38 @@ scenario_4() {
     log "Ready on $other after $((SECONDS - start))s: $(demo_kubectl logs -n flaminio-demo demo-0 | tail -1)"
     [[ $(demo_kubectl logs -n flaminio-demo demo-0 | tail -1) == "verified on $other" ]] ||
         warn "expected verified on $other (may still be starting)"
-    log "starting $lost again"
+    log "starting $lost again and bringing its dataplane back"
     hsh "$(vmvar "$lost" HOST)" "virsh -c qemu:///system start $lost" >/dev/null
     trap - EXIT
     wait_for "$lost SSH" 300 vssh "$lost" true
+    # k3s-agent and WireGuard come back with the guest; restart the dataplane unit.
+    "$SCRIPTS/lab.sh" node up "$(demo_vm_sel "$lost")" || warn "node up on $lost failed; check make node-up"
 }
 
 scenario_5() {
-    talk "Network partition: lease fencing — wrap make partition-test. This takes a few minutes."
-    prompt "Run partition-test now?"
+    talk "Network partition: lease fencing on lab volume vol1. CSI volumes must let go first (MaxVolumesPerNode=1)."
+    prompt "Delete the demo PVC, then run partition-test?"
+    # Partition drives ublk on vol1; a node serves one attached volume at a time.
+    # Delete only the StatefulSet/PVC — keep namespace (scoreboard, exporter).
+    demo_kubectl delete statefulset -n flaminio-demo demo --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    demo_kubectl delete pvc -n flaminio-demo --all --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    local start=$SECONDS
+    until [[ -z $(demo_kubectl get volumeattachment -o jsonpath='{.items[?(@.spec.attacher=="csi.flaminio.io")].metadata.name}' 2>/dev/null) ]]; do
+        ((SECONDS - start < 180)) || die "CSI VolumeAttachments still present after 180s"
+        sleep 3
+    done
+    "$SCRIPTS/lab.sh" vol create 2>/dev/null || true
     HOLD=${HOLD:-30} "$SCRIPTS/lab.sh" partition
 }
 
 scenario_6() {
-    talk "Optional drain (needs fl-c). Skipping unless you have run data-node-up."
+    talk "Optional drain (needs fl-c and lab vol1). Opt-in: DRAIN=1 (can take 15+ min; skip in the default talk)."
+    if [[ ${DRAIN:-0} != 1 ]]; then
+        log "skip (set DRAIN=1 to run make drain-test)"
+        return
+    fi
     if [[ -f $LOCAL_STATE_DIR/$VM_C/created ]]; then
+        "$SCRIPTS/lab.sh" vol create 2>/dev/null || true
         "$SCRIPTS/lab.sh" drain-test
     else
         log "fl-c not present; skip"
@@ -97,8 +126,9 @@ scenario_6() {
 
 scenario_7() {
     talk "Performance honesty: open the scoreboard (canned vs raw). Do not claim 1M write at 80%+."
-    demo_kubectl -n flaminio-demo get svc scoreboard 2>/dev/null || \
-        demo_kubectl apply -f "$REPO_ROOT/deploy/demo/scoreboard.yaml"
+    demo_kubectl apply -f "$REPO_ROOT/deploy/demo/status-exporter.yaml" >/dev/null 2>&1 || true
+    demo_kubectl apply -f "$REPO_ROOT/deploy/demo/scoreboard.yaml" >/dev/null
+    demo_kubectl -n flaminio-demo rollout status deploy/scoreboard --timeout=60s >/dev/null || true
     log "port-forward: kubectl -n flaminio-demo port-forward svc/scoreboard 8080:80"
     log "Grafana: kubectl -n monitoring port-forward svc/monitoring-grafana 3000:80  (admin; password in .lab/demo/grafana-admin-password)"
     cat <<'EOF'

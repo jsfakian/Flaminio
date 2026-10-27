@@ -35,11 +35,13 @@ export KUBECONFIG=$PWD/.lab/kubeconfig
 make csi-deploy                  # Flaminio CSI (builds amd64 for workers + arm64 for Lima CP)
 make demo-obs                    # Prometheus, Grafana, status exporter, scoreboard
 make demo                        # talk track
-DEMO_AUTO=1 SCENARIOS=0,1,2,7,8 make demo   # unattended smoke (skip node-kill / partition)
+DEMO_AUTO=1 SCENARIOS=0,1,2,3,4,5,7,8 make demo   # full talk minus optional drain
+# Drain is opt-in (long): DRAIN=1 DEMO_AUTO=1 SCENARIOS=6 make demo
 ```
 
 `csi-deploy` builds the CSI image twice when the demo marker is set: amd64 for fl-a/fl-b,
-arm64 for the Lima control plane (Apple Silicon).
+arm64 for the Lima control plane (Apple Silicon). Scenario 5 deletes the demo PVC first so
+lab `vol1` can attach (`MaxVolumesPerNode` is 1).
 
 Optional live Longhorn comparison:
 
