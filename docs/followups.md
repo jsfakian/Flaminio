@@ -120,6 +120,9 @@ item 1.2.
 
 ## 7. Certificates
 
+**Blocked on the operator** (phase 1 step 7+): CSR issuance after TokenReview and 24-hour
+certificates. Until that lands, `make pki-issue` remains the interim path for lab certificates.
+
 **Steps:**
 1. **The operator** (phase 1 step 7+) holds the CA and issues 24-hour certificates on CSR, after
    a TokenReview of the node's service account token.
