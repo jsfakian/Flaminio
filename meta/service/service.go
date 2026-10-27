@@ -7,6 +7,7 @@
 //	chunks/<id>/<index>      one chunk's placement and ISR (JSON), index as 8 digits
 //	nodes/<id>               registered node (JSON)
 //	alive/<id>               liveness record, expires without heartbeats
+//	tombstones/<id>          deleted volume awaiting replica cleanup (JSON)
 //
 // Every update is an optimistic transaction: read, check with the domain rules, then write
 // conditional on the revisions read. A conflict means a concurrent update; the operation is
@@ -19,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"time"
 
@@ -56,6 +58,55 @@ func chunkPrefix(id string) string        { return prefix + "chunks/" + id + "/"
 func chunkKey(id string, i uint32) string { return fmt.Sprintf("%s%08d", chunkPrefix(id), i) }
 func nodeKey(id string) string            { return prefix + "nodes/" + id }
 func aliveKey(id string) string           { return prefix + "alive/" + id }
+func tombstoneKey(id string) string       { return prefix + "tombstones/" + id }
+
+// tombstoneRecord is the etcd value for a deleted volume until every node that held its
+// chunks has confirmed local deletion (docs/followups.md §8).
+type tombstoneRecord struct {
+	Nodes     []string        `json:"nodes"`
+	Confirmed map[string]bool `json:"confirmed,omitempty"`
+}
+
+func (t tombstoneRecord) pending() []string {
+	var out []string
+	for _, n := range t.Nodes {
+		if !t.Confirmed[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func tombstonePB(id string, t tombstoneRecord) *metav1.Tombstone {
+	return &metav1.Tombstone{Volume: id, Nodes: append([]string{}, t.Nodes...), Pending: t.pending()}
+}
+
+// replicaNodes returns every node that held (or was moving) a replica of the volume's chunks.
+func replicaNodes(chunks []domain.Chunk) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(n string) {
+		if n == "" {
+			return
+		}
+		if _, ok := seen[n]; ok {
+			return
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	for _, c := range chunks {
+		for _, n := range c.Replicas {
+			add(n)
+		}
+		if c.Moving != nil {
+			add(c.Moving.From)
+			add(c.Moving.To)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // Service is the metadata service.
 type Service struct {
@@ -261,6 +312,13 @@ func (s *Service) CreateVolume(ctx context.Context, r *metav1.CreateVolumeReques
 }
 
 func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.Volume, error) {
+	// A tombstone for this id means nodes may still be deleting the previous volume's
+	// replicas; reusing the id would let that sweep wipe the new volume.
+	if _, ok, err := s.kv.Get(ctx, tombstoneKey(spec.ID)); err != nil {
+		return nil, err
+	} else if ok {
+		return nil, fmt.Errorf("%w: volume %q still has a deletion tombstone", domain.ErrExists, spec.ID)
+	}
 	nodes, err := s.nodes(ctx)
 	if err != nil {
 		return nil, err
@@ -292,10 +350,13 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	v := domain.NewVolume(spec, placement)
 
 	// Claim the id with a header marked as being created, write the chunks in batches, then
-	// clear the mark. Until then the volume does not exist for anyone else.
+	// clear the mark. Until then the volume does not exist for anyone else. The tombstone
+	// compare keeps a concurrent DeleteVolume's leftover from racing with this claim.
 	v.Creating = true
 	hb, _ := json.Marshal(v.Header)
-	ok, err := s.kv.Txn(ctx, []kv.Cmp{{Key: volumeKey(spec.ID), Rev: 0}}, []kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
+	ok, err := s.kv.Txn(ctx,
+		[]kv.Cmp{{Key: volumeKey(spec.ID), Rev: 0}, {Key: tombstoneKey(spec.ID), Rev: 0}},
+		[]kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +420,9 @@ func (s *Service) GetVolume(ctx context.Context, r *metav1.GetVolumeRequest) (*m
 	return &metav1.GetVolumeResponse{Volume: volumePB(v)}, nil
 }
 
-// DeleteVolume removes the header first, so the volume disappears at once, then its chunks.
+// DeleteVolume removes the header at once (so the volume disappears), writes a tombstone naming
+// every node that held its chunks, then drops the chunk metadata. Nodes delete their local
+// replicas and ConfirmDeletion; the tombstone goes when all have confirmed.
 func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeRequest) (*metav1.DeleteVolumeResponse, error) {
 	for attempt := range retries {
 		if attempt > 0 {
@@ -374,12 +437,116 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 		if !ok {
 			return nil, errStatus(fmt.Errorf("%w: volume %q", domain.ErrNotFound, r.GetId()))
 		}
-		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Delete: true}})
+		entries, err := s.kv.List(ctx, chunkPrefix(r.GetId()))
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		chunks := make([]domain.Chunk, 0, len(entries))
+		for _, ce := range entries {
+			var c domain.Chunk
+			if err := json.Unmarshal(ce.Value, &c); err != nil {
+				return nil, errStatus(err)
+			}
+			chunks = append(chunks, c)
+		}
+		ops := []kv.Op{{Key: e.Key, Delete: true}}
+		if nodes := replicaNodes(chunks); len(nodes) > 0 {
+			tb, _ := json.Marshal(tombstoneRecord{Nodes: nodes})
+			ops = append(ops, kv.Op{Key: tombstoneKey(r.GetId()), Value: tb})
+		}
+		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, ops)
 		if err != nil {
 			return nil, errStatus(err)
 		}
 		if ok {
 			return &metav1.DeleteVolumeResponse{}, errStatus(s.deleteChunks(ctx, r.GetId()))
+		}
+	}
+	return nil, status.Error(codes.Aborted, "too much contention")
+}
+
+func (s *Service) ListTombstones(ctx context.Context, r *metav1.ListTombstonesRequest) (*metav1.ListTombstonesResponse, error) {
+	if !domain.ValidID(r.GetNode()) {
+		return nil, errStatus(fmt.Errorf("%w: node id %q", domain.ErrInvalid, r.GetNode()))
+	}
+	entries, err := s.kv.List(ctx, prefix+"tombstones/")
+	if err != nil {
+		return nil, errStatus(err)
+	}
+	out := &metav1.ListTombstonesResponse{}
+	for _, e := range entries {
+		var t tombstoneRecord
+		if err := json.Unmarshal(e.Value, &t); err != nil {
+			return nil, errStatus(err)
+		}
+		if t.Confirmed[r.GetNode()] {
+			continue
+		}
+		pending := false
+		for _, n := range t.Nodes {
+			if n == r.GetNode() {
+				pending = true
+				break
+			}
+		}
+		if !pending {
+			continue
+		}
+		id := strings.TrimPrefix(e.Key, prefix+"tombstones/")
+		out.Tombstones = append(out.Tombstones, tombstonePB(id, t))
+	}
+	return out, nil
+}
+
+func (s *Service) ConfirmDeletion(ctx context.Context, r *metav1.ConfirmDeletionRequest) (*metav1.ConfirmDeletionResponse, error) {
+	if !domain.ValidID(r.GetVolume()) || !domain.ValidID(r.GetNode()) {
+		return nil, errStatus(fmt.Errorf("%w: volume %q, node %q", domain.ErrInvalid, r.GetVolume(), r.GetNode()))
+	}
+	for attempt := range retries {
+		if attempt > 0 {
+			if err := backoff(ctx, attempt); err != nil {
+				return nil, errStatus(err)
+			}
+		}
+		e, ok, err := s.kv.Get(ctx, tombstoneKey(r.GetVolume()))
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if !ok {
+			// Already fully confirmed and removed: idempotent success.
+			return &metav1.ConfirmDeletionResponse{}, nil
+		}
+		var t tombstoneRecord
+		if err := json.Unmarshal(e.Value, &t); err != nil {
+			return nil, errStatus(err)
+		}
+		named := false
+		for _, n := range t.Nodes {
+			if n == r.GetNode() {
+				named = true
+				break
+			}
+		}
+		if !named {
+			return nil, errStatus(fmt.Errorf("%w: node %q is not on tombstone %q", domain.ErrInvalid, r.GetNode(), r.GetVolume()))
+		}
+		if t.Confirmed == nil {
+			t.Confirmed = map[string]bool{}
+		}
+		t.Confirmed[r.GetNode()] = true
+		var op kv.Op
+		if len(t.pending()) == 0 {
+			op = kv.Op{Key: e.Key, Delete: true}
+		} else {
+			b, _ := json.Marshal(t)
+			op = kv.Op{Key: e.Key, Value: b}
+		}
+		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{op})
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if ok {
+			return &metav1.ConfirmDeletionResponse{}, nil
 		}
 	}
 	return nil, status.Error(codes.Aborted, "too much contention")

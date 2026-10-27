@@ -105,6 +105,20 @@ func (m *Meta) DeleteVolume(ctx context.Context, id string) error {
 	return err
 }
 
+func (m *Meta) ListTombstones(ctx context.Context, node string) ([]*metav1.Tombstone, error) {
+	r, err := metaCall(ctx, m, func(ctx context.Context, c metav1.MetadataServiceClient) (*metav1.ListTombstonesResponse, error) {
+		return c.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: node})
+	})
+	return r.GetTombstones(), err
+}
+
+func (m *Meta) ConfirmDeletion(ctx context.Context, volume, node string) error {
+	_, err := metaCall(ctx, m, func(ctx context.Context, c metav1.MetadataServiceClient) (*metav1.ConfirmDeletionResponse, error) {
+		return c.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: volume, Node: node})
+	})
+	return err
+}
+
 func (m *Meta) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.AttachResponse, error) {
 	return metaCall(ctx, m, func(ctx context.Context, c metav1.MetadataServiceClient) (*metav1.AttachResponse, error) {
 		return c.Attach(ctx, r)

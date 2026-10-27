@@ -745,20 +745,35 @@ impl<D: BlockDevice> ReplicaService<D> {
 
     /// Deletes every chunk replica of the volume named `volume` from the store, and forgets the
     /// volume: for a volume deleted from the metadata service. Its sessions are not valid any
-    /// more (their requests get "unknown volume"). Returns how many replicas were deleted.
+    /// more (their requests get "unknown volume"). Scans the store so chunks still survive a
+    /// process restart that forgot `vols`. Returns how many replicas were deleted.
     pub fn delete_volume(&mut self, volume: &str) -> Result<usize, String> {
         let uuid = volume_uuid(volume);
-        let Some(v) = self.vols.remove(&uuid) else {
-            return Ok(0);
-        };
-        self.core.remove_volume(v.id);
-        for &c in &v.chunks {
-            // Whatever the chunk's fence: the volume is gone.
-            self.store
-                .delete_chunk(key(uuid, c), u64::MAX)
-                .map_err(|e| format!("delete chunk {c}: {e}"))?;
+        if let Some(v) = self.vols.remove(&uuid) {
+            self.core.remove_volume(v.id);
         }
-        Ok(v.chunks.len())
+        // Epoch higher than any target's fence (docs/followups.md §8).
+        let indices: Vec<u64> = self
+            .store
+            .chunks()
+            .into_iter()
+            .filter(|c| c.key.volume == uuid)
+            .map(|c| c.key.index)
+            .collect();
+        for index in &indices {
+            match self.store.delete_chunk(
+                ChunkKey {
+                    volume: uuid,
+                    index: *index,
+                },
+                u64::MAX,
+            ) {
+                Ok(()) => {}
+                Err(StoreError::NoSuchChunk(_)) => {}
+                Err(e) => return Err(format!("delete chunk {index}: {e}")),
+            }
+        }
+        Ok(indices.len())
     }
 
     /// The epoch the volume of session `s` is fenced at now.

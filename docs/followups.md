@@ -13,7 +13,7 @@ belongs to.
 | 5 | More than one volume per node | A node serves one attached volume at a time | With item 1: same redesign |
 | 6 | Fuzzing actually running | The fuzz targets build but have never run (no nightly toolchain) | Now: small |
 | 7 | Short-lived certificates, rotated | Lab certificates last 30 days and are issued by hand | With the operator (phase 1 step 7+) |
-| 8 | Deleting a volume's replicas | `DeleteVolume` removes the metadata only; the chunk replicas stay on the nodes' disks | With the node agent (step 6) |
+| 8 | Deleting a volume's replicas | Tombstone protocol + agent sweep done; lab check (100 PVC create/delete loop, store space) still open | With the node agent (step 6) |
 | 9 | The data plane in Kubernetes | `flaminio-io node` runs as a systemd unit beside k3s; the CSI node plugin drives it through its control socket | With the node agent (step 6) |
 | 10 | A faster first attach after a restart | An attach answers once the device exists, but the kernel's partition scan and udev's probe read the device and wait for the whole-volume reconciliation (item 2) | With item 2 |
 | 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator |
@@ -134,11 +134,16 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
 
 **Steps:**
 1. **The metadata service keeps a tombstone** for each deleted volume (its id, and the nodes
-   that held its chunks) until every one of those nodes confirms the deletion.
+   that held its chunks) until every one of those nodes confirms the deletion. ✅
+   `DeleteVolume` drops the volume header and chunk metadata, writes `/flaminio/v1/tombstones/<id>`,
+   and exposes `ListTombstones` / `ConfirmDeletion`. The volume id cannot be reused while the
+   tombstone remains (so an agent sweep cannot wipe a recreated volume).
 2. **Each node's agent** lists its tombstones, deletes the chunks (`Store::delete_chunk`,
-   under a fencing epoch higher than any target's), and confirms.
-3. *Done when:* creating and deleting 100 PVCs in a loop leaves the stores' used space where
-   it started.
+   under a fencing epoch higher than any target's), and confirms. ✅ The CSI node plugin sweeps
+   via the data plane's control-socket `delete` (which calls `ReplicaService::delete_volume`).
+3. *Lab check still open:* creating and deleting 100 PVCs in a loop leaves the stores' used
+   space where it started. Protocol and unit/integration tests cover create→delete→confirm and
+   partial confirms.
 
 ## 9. The data plane in Kubernetes
 

@@ -72,6 +72,10 @@ func (s *Service) Authorize(ctx context.Context, req any, info *grpc.UnaryServer
 		allowed = admin || isNode(req.(*metav1.RegisterNodeRequest).GetNode().GetId())
 	case "NodeHeartbeat":
 		allowed = admin || isNode(req.(*metav1.NodeHeartbeatRequest).GetNode())
+	case "ListTombstones":
+		allowed = admin || (id.Component == "agent" && id.Node == req.(*metav1.ListTombstonesRequest).GetNode())
+	case "ConfirmDeletion":
+		allowed = admin || (id.Component == "agent" && id.Node == req.(*metav1.ConfirmDeletionRequest).GetNode())
 	case "GetVolume", "ListNodes", "ListVolumes":
 		allowed = true
 	case "ChangeIsr":

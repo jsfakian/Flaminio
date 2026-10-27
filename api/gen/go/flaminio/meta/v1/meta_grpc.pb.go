@@ -28,17 +28,19 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MetadataService_RegisterNode_FullMethodName  = "/flaminio.meta.v1.MetadataService/RegisterNode"
-	MetadataService_NodeHeartbeat_FullMethodName = "/flaminio.meta.v1.MetadataService/NodeHeartbeat"
-	MetadataService_ListNodes_FullMethodName     = "/flaminio.meta.v1.MetadataService/ListNodes"
-	MetadataService_DrainNode_FullMethodName     = "/flaminio.meta.v1.MetadataService/DrainNode"
-	MetadataService_CreateVolume_FullMethodName  = "/flaminio.meta.v1.MetadataService/CreateVolume"
-	MetadataService_GetVolume_FullMethodName     = "/flaminio.meta.v1.MetadataService/GetVolume"
-	MetadataService_ListVolumes_FullMethodName   = "/flaminio.meta.v1.MetadataService/ListVolumes"
-	MetadataService_DeleteVolume_FullMethodName  = "/flaminio.meta.v1.MetadataService/DeleteVolume"
-	MetadataService_Attach_FullMethodName        = "/flaminio.meta.v1.MetadataService/Attach"
-	MetadataService_ChangeIsr_FullMethodName     = "/flaminio.meta.v1.MetadataService/ChangeIsr"
-	MetadataService_MoveReplica_FullMethodName   = "/flaminio.meta.v1.MetadataService/MoveReplica"
+	MetadataService_RegisterNode_FullMethodName    = "/flaminio.meta.v1.MetadataService/RegisterNode"
+	MetadataService_NodeHeartbeat_FullMethodName   = "/flaminio.meta.v1.MetadataService/NodeHeartbeat"
+	MetadataService_ListNodes_FullMethodName       = "/flaminio.meta.v1.MetadataService/ListNodes"
+	MetadataService_DrainNode_FullMethodName       = "/flaminio.meta.v1.MetadataService/DrainNode"
+	MetadataService_CreateVolume_FullMethodName    = "/flaminio.meta.v1.MetadataService/CreateVolume"
+	MetadataService_GetVolume_FullMethodName       = "/flaminio.meta.v1.MetadataService/GetVolume"
+	MetadataService_ListVolumes_FullMethodName     = "/flaminio.meta.v1.MetadataService/ListVolumes"
+	MetadataService_DeleteVolume_FullMethodName    = "/flaminio.meta.v1.MetadataService/DeleteVolume"
+	MetadataService_ListTombstones_FullMethodName  = "/flaminio.meta.v1.MetadataService/ListTombstones"
+	MetadataService_ConfirmDeletion_FullMethodName = "/flaminio.meta.v1.MetadataService/ConfirmDeletion"
+	MetadataService_Attach_FullMethodName          = "/flaminio.meta.v1.MetadataService/Attach"
+	MetadataService_ChangeIsr_FullMethodName       = "/flaminio.meta.v1.MetadataService/ChangeIsr"
+	MetadataService_MoveReplica_FullMethodName     = "/flaminio.meta.v1.MetadataService/MoveReplica"
 )
 
 // MetadataServiceClient is the client API for MetadataService service.
@@ -63,9 +65,17 @@ type MetadataServiceClient interface {
 	GetVolume(ctx context.Context, in *GetVolumeRequest, opts ...grpc.CallOption) (*GetVolumeResponse, error)
 	// Caller: any authenticated identity.
 	ListVolumes(ctx context.Context, in *ListVolumesRequest, opts ...grpc.CallOption) (*ListVolumesResponse, error)
-	// Deletes a volume. The caller makes sure that no target serves it any more. Caller: an
-	// administrator.
+	// Deletes a volume. The caller makes sure that no target serves it any more. The volume's
+	// metadata is removed at once; a tombstone remains until every node that held its chunks
+	// confirms it has deleted them (docs/followups.md §8). Caller: an administrator.
 	DeleteVolume(ctx context.Context, in *DeleteVolumeRequest, opts ...grpc.CallOption) (*DeleteVolumeResponse, error)
+	// Tombstones for volumes this node still needs to delete replicas of. Caller: that node's
+	// agent, or an administrator.
+	ListTombstones(ctx context.Context, in *ListTombstonesRequest, opts ...grpc.CallOption) (*ListTombstonesResponse, error)
+	// Confirms that this node has deleted its local replicas of a tombstoned volume. When every
+	// listed node has confirmed, the tombstone is removed. Caller: that node's agent, or an
+	// administrator.
+	ConfirmDeletion(ctx context.Context, in *ConfirmDeletionRequest, opts ...grpc.CallOption) (*ConfirmDeletionResponse, error)
 	// Makes a node the volume's target under a new epoch, and issues its capability token.
 	// Caller: an administrator (the CSI controller, the failover controller); or, with
 	// only_if_target, the node's agent for itself.
@@ -168,6 +178,26 @@ func (c *metadataServiceClient) DeleteVolume(ctx context.Context, in *DeleteVolu
 	return out, nil
 }
 
+func (c *metadataServiceClient) ListTombstones(ctx context.Context, in *ListTombstonesRequest, opts ...grpc.CallOption) (*ListTombstonesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListTombstonesResponse)
+	err := c.cc.Invoke(ctx, MetadataService_ListTombstones_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *metadataServiceClient) ConfirmDeletion(ctx context.Context, in *ConfirmDeletionRequest, opts ...grpc.CallOption) (*ConfirmDeletionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfirmDeletionResponse)
+	err := c.cc.Invoke(ctx, MetadataService_ConfirmDeletion_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *metadataServiceClient) Attach(ctx context.Context, in *AttachRequest, opts ...grpc.CallOption) (*AttachResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(AttachResponse)
@@ -220,9 +250,17 @@ type MetadataServiceServer interface {
 	GetVolume(context.Context, *GetVolumeRequest) (*GetVolumeResponse, error)
 	// Caller: any authenticated identity.
 	ListVolumes(context.Context, *ListVolumesRequest) (*ListVolumesResponse, error)
-	// Deletes a volume. The caller makes sure that no target serves it any more. Caller: an
-	// administrator.
+	// Deletes a volume. The caller makes sure that no target serves it any more. The volume's
+	// metadata is removed at once; a tombstone remains until every node that held its chunks
+	// confirms it has deleted them (docs/followups.md §8). Caller: an administrator.
 	DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error)
+	// Tombstones for volumes this node still needs to delete replicas of. Caller: that node's
+	// agent, or an administrator.
+	ListTombstones(context.Context, *ListTombstonesRequest) (*ListTombstonesResponse, error)
+	// Confirms that this node has deleted its local replicas of a tombstoned volume. When every
+	// listed node has confirmed, the tombstone is removed. Caller: that node's agent, or an
+	// administrator.
+	ConfirmDeletion(context.Context, *ConfirmDeletionRequest) (*ConfirmDeletionResponse, error)
 	// Makes a node the volume's target under a new epoch, and issues its capability token.
 	// Caller: an administrator (the CSI controller, the failover controller); or, with
 	// only_if_target, the node's agent for itself.
@@ -268,6 +306,12 @@ func (UnimplementedMetadataServiceServer) ListVolumes(context.Context, *ListVolu
 }
 func (UnimplementedMetadataServiceServer) DeleteVolume(context.Context, *DeleteVolumeRequest) (*DeleteVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DeleteVolume not implemented")
+}
+func (UnimplementedMetadataServiceServer) ListTombstones(context.Context, *ListTombstonesRequest) (*ListTombstonesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListTombstones not implemented")
+}
+func (UnimplementedMetadataServiceServer) ConfirmDeletion(context.Context, *ConfirmDeletionRequest) (*ConfirmDeletionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfirmDeletion not implemented")
 }
 func (UnimplementedMetadataServiceServer) Attach(context.Context, *AttachRequest) (*AttachResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Attach not implemented")
@@ -443,6 +487,42 @@ func _MetadataService_DeleteVolume_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MetadataService_ListTombstones_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTombstonesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetadataServiceServer).ListTombstones(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetadataService_ListTombstones_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetadataServiceServer).ListTombstones(ctx, req.(*ListTombstonesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MetadataService_ConfirmDeletion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfirmDeletionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetadataServiceServer).ConfirmDeletion(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetadataService_ConfirmDeletion_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetadataServiceServer).ConfirmDeletion(ctx, req.(*ConfirmDeletionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _MetadataService_Attach_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(AttachRequest)
 	if err := dec(in); err != nil {
@@ -535,6 +615,14 @@ var MetadataService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteVolume",
 			Handler:    _MetadataService_DeleteVolume_Handler,
+		},
+		{
+			MethodName: "ListTombstones",
+			Handler:    _MetadataService_ListTombstones_Handler,
+		},
+		{
+			MethodName: "ConfirmDeletion",
+			Handler:    _MetadataService_ConfirmDeletion_Handler,
 		},
 		{
 			MethodName: "Attach",

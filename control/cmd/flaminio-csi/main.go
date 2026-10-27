@@ -86,12 +86,14 @@ func run(args []string) error {
 		Mounter:   csi.HostMounter{},
 	}
 	// The CSI node plugin is the node's agent for now: copy zone/rack from the Kubernetes
-	// Node into the metadata service so placement can spread across failure domains.
+	// Node into the metadata service so placement can spread across failure domains, and
+	// delete local replicas of volumes the metadata service has tombstoned.
 	if kube, err := failover.InCluster(); err == nil {
 		go csi.SyncTopologyLabels(ctx, meta, kube, *nodeID)
 	} else {
 		slog.Debug("topology labels: not in cluster", "error", err)
 	}
+	go csi.SweepTombstones(ctx, meta, node.Dataplane, *nodeID)
 	return csi.Serve(ctx, *endpoint, csi.Identity{}, nil, node)
 }
 

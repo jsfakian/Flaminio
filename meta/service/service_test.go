@@ -151,12 +151,131 @@ func TestVolumeLifecycle(t *testing.T) {
 		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"}); code(err) != codes.NotFound {
 			t.Fatalf("attach after delete: %v", err)
 		}
-		// The id can be reused, and the new volume has no leftovers.
+		// The id cannot be reused until every former replica node confirms deletion.
+		if _, err := create(s, "v", 1, 3, 2); code(err) != codes.AlreadyExists {
+			t.Fatalf("recreate with tombstone: %v", err)
+		}
+		for _, n := range []string{"a", "b", "c"} {
+			list, err := s.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: n})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(list.Tombstones) == 0 {
+				continue
+			}
+			if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: n}); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if v, err := create(s, "v", 1, 3, 2); err != nil || len(v.Chunks) != 1 {
 			t.Fatalf("recreate: %v %v", v, err)
 		}
 		if g, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); err != nil || len(g.Volume.Chunks) != 1 || g.Volume.Epoch != 0 {
 			t.Fatalf("recreated: %v %v", g, err)
+		}
+	})
+}
+
+// TestTombstones: DeleteVolume writes a tombstone; partial confirms leave it; full confirms remove it.
+func TestTombstones(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		ctx := context.Background()
+		addNodes(t, s, "a", "b", "c")
+		v, err := create(s, "v", 2, 2, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes := map[string]struct{}{}
+		for _, c := range v.Chunks {
+			for _, n := range c.Replicas {
+				nodes[n] = struct{}{}
+			}
+		}
+		if len(nodes) < 2 {
+			t.Fatalf("want replicas on ≥2 nodes, got %v", nodes)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
+			t.Fatalf("volume still visible: %v", err)
+		}
+		listed := map[string]bool{}
+		for n := range nodes {
+			r, err := s.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: n})
+			if err != nil || len(r.Tombstones) != 1 || r.Tombstones[0].Volume != "v" {
+				t.Fatalf("list for %s: %v %v", n, r, err)
+			}
+			if len(r.Tombstones[0].Pending) != len(nodes) {
+				t.Fatalf("pending before any confirm: %v", r.Tombstones[0].Pending)
+			}
+			listed[n] = true
+		}
+		// A node that never held a replica sees nothing.
+		for _, id := range []string{"a", "b", "c"} {
+			if listed[id] {
+				continue
+			}
+			r, err := s.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: id})
+			if err != nil || len(r.Tombstones) != 0 {
+				t.Fatalf("unrelated node %s: %v %v", id, r, err)
+			}
+		}
+		// Confirm one node: tombstone remains for the others.
+		var first string
+		for n := range nodes {
+			first = n
+			break
+		}
+		if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: first}); err != nil {
+			t.Fatal(err)
+		}
+		r, err := s.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: first})
+		if err != nil || len(r.Tombstones) != 0 {
+			t.Fatalf("after own confirm: %v %v", r, err)
+		}
+		remaining := 0
+		for n := range nodes {
+			if n == first {
+				continue
+			}
+			r, err := s.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: n})
+			if err != nil || len(r.Tombstones) != 1 {
+				t.Fatalf("partial confirm, %s: %v %v", n, r, err)
+			}
+			remaining++
+		}
+		if remaining == 0 {
+			t.Fatal("expected other nodes still pending")
+		}
+		// Confirm the rest: tombstone gone for everyone; confirm is idempotent.
+		for n := range nodes {
+			if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: n}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for n := range nodes {
+			r, err := s.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: n})
+			if err != nil || len(r.Tombstones) != 0 {
+				t.Fatalf("after all confirms, %s: %v %v", n, r, err)
+			}
+		}
+		if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: first}); err != nil {
+			t.Fatalf("idempotent confirm after tombstone gone: %v", err)
+		}
+		// While a tombstone exists, a node that never held a replica may not confirm.
+		if _, err := create(s, "w", 1, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "w"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "w", Node: "ghost"}); code(err) != codes.InvalidArgument {
+			t.Fatalf("unnamed node on live tombstone: %v", err)
+		}
+		// Id reuse is refused until the tombstone is gone.
+		if _, err := create(s, "w", 1, 1, 1); code(err) != codes.AlreadyExists {
+			t.Fatalf("create while tombstoned: %v", err)
 		}
 	})
 }
