@@ -638,9 +638,14 @@ type CreateVolumeRequest struct {
 	MinIsr     uint32                 `protobuf:"varint,5,opt,name=min_isr,json=minIsr,proto3" json:"min_isr,omitempty"`
 	// If set and eligible, every chunk has a replica on this node: the node the volume will
 	// first be attached to, whose reads then stay local.
-	PreferNode    string `protobuf:"bytes,6,opt,name=prefer_node,json=preferNode,proto3" json:"prefer_node,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	PreferNode string `protobuf:"bytes,6,opt,name=prefer_node,json=preferNode,proto3" json:"prefer_node,omitempty"`
+	// Failure domain level: "node" (default), "rack", or "zone". Replicas of one chunk are
+	// placed in distinct domains at this level (ARCHITECTURE §8.2, §9).
+	FailureDomain string `protobuf:"bytes,7,opt,name=failure_domain,json=failureDomain,proto3" json:"failure_domain,omitempty"`
+	// "strict" (default) refuses if the topology is short; "bestEffort" falls back a level.
+	FailureDomainPolicy string `protobuf:"bytes,8,opt,name=failure_domain_policy,json=failureDomainPolicy,proto3" json:"failure_domain_policy,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *CreateVolumeRequest) Reset() {
@@ -711,6 +716,20 @@ func (x *CreateVolumeRequest) GetMinIsr() uint32 {
 func (x *CreateVolumeRequest) GetPreferNode() string {
 	if x != nil {
 		return x.PreferNode
+	}
+	return ""
+}
+
+func (x *CreateVolumeRequest) GetFailureDomain() string {
+	if x != nil {
+		return x.FailureDomain
+	}
+	return ""
+}
+
+func (x *CreateVolumeRequest) GetFailureDomainPolicy() string {
+	if x != nil {
+		return x.FailureDomainPolicy
 	}
 	return ""
 }
@@ -1504,7 +1523,7 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\amin_isr\x18\x05 \x01(\rR\x06minIsr\x12\x14\n" +
 	"\x05epoch\x18\x06 \x01(\x04R\x05epoch\x12\x16\n" +
 	"\x06target\x18\a \x01(\tR\x06target\x123\n" +
-	"\x06chunks\x18\b \x03(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x06chunks\"\xbb\x01\n" +
+	"\x06chunks\x18\b \x03(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x06chunks\"\x96\x02\n" +
 	"\x13CreateVolumeRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -1514,7 +1533,9 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\breplicas\x18\x04 \x01(\rR\breplicas\x12\x17\n" +
 	"\amin_isr\x18\x05 \x01(\rR\x06minIsr\x12\x1f\n" +
 	"\vprefer_node\x18\x06 \x01(\tR\n" +
-	"preferNode\"H\n" +
+	"preferNode\x12%\n" +
+	"\x0efailure_domain\x18\a \x01(\tR\rfailureDomain\x122\n" +
+	"\x15failure_domain_policy\x18\b \x01(\tR\x13failureDomainPolicy\"H\n" +
 	"\x14CreateVolumeResponse\x120\n" +
 	"\x06volume\x18\x01 \x01(\v2\x18.flaminio.meta.v1.VolumeR\x06volume\"\"\n" +
 	"\x10GetVolumeRequest\x12\x0e\n" +

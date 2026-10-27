@@ -208,6 +208,55 @@ func TestWitnessHoldsNoData(t *testing.T) {
 	}
 }
 
+func TestFailureDomainPlacement(t *testing.T) {
+	s := New(kv.NewMem(nil), Options{})
+	ctx := context.Background()
+	for _, n := range []*metav1.Node{
+		{Id: "a1", Address: "a1:1", Labels: map[string]string{"topology.kubernetes.io/zone": "z1"}},
+		{Id: "a2", Address: "a2:1", Labels: map[string]string{"topology.kubernetes.io/zone": "z1"}},
+		{Id: "b1", Address: "b1:1", Labels: map[string]string{"topology.kubernetes.io/zone": "z2"}},
+		{Id: "b2", Address: "b2:1", Labels: map[string]string{"topology.kubernetes.io/zone": "z2"}},
+	} {
+		if _, err := s.RegisterNode(ctx, &metav1.RegisterNodeRequest{Node: n}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.NodeHeartbeat(ctx, &metav1.NodeHeartbeatRequest{Node: n.Id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Strict zone with only two zones refuses three replicas.
+	if _, err := s.CreateVolume(ctx, &metav1.CreateVolumeRequest{
+		Id: "v3", SizeBytes: mib, ChunkBytes: mib, Replicas: 3, MinIsr: 1, FailureDomain: "zone",
+	}); code(err) != codes.FailedPrecondition {
+		t.Fatalf("strict zone RF=3: %v", err)
+	}
+	v, err := s.CreateVolume(ctx, &metav1.CreateVolumeRequest{
+		Id: "v", SizeBytes: 4 * mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1, FailureDomain: "zone",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zoneOf := map[string]string{"a1": "z1", "a2": "z1", "b1": "z2", "b2": "z2"}
+	for _, c := range v.GetVolume().Chunks {
+		if zoneOf[c.Replicas[0]] == zoneOf[c.Replicas[1]] {
+			t.Fatalf("replicas share a zone: %v", c.Replicas)
+		}
+	}
+	// Address-only re-register keeps topology labels (data plane must not wipe them).
+	if _, err := s.RegisterNode(ctx, &metav1.RegisterNodeRequest{Node: &metav1.Node{Id: "a1", Address: "a1:2"}}); err != nil {
+		t.Fatal(err)
+	}
+	nodes, err := s.ListNodes(ctx, &metav1.ListNodesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes.Nodes {
+		if n.Id == "a1" && (n.Address != "a1:2" || n.Labels["topology.kubernetes.io/zone"] != "z1") {
+			t.Fatalf("label merge lost: %+v", n)
+		}
+	}
+}
+
 // TestConcurrentTargets races attaches and ISR changes from many goroutines, as targets of
 // different epochs would, and checks the invariants afterwards: every applied change bumped
 // its chunk's version by exactly one, every attach bumped the epoch, and no ISR ever fell

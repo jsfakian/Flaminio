@@ -309,10 +309,13 @@ The driver is one binary, `flaminio-csi` ([`control/csi`](../control/csi),
   other node. The controller removes its taint once the node is back. Fencing is what makes
   this safe for the data, whatever the lost node still does (see `make partition-test`).
 
-The StorageClass `flaminio` takes `replicas` (default 2), `minIsr` (1) and `chunkSize`
-(256Mi). Volumes are `ReadWriteOnce` or `ReadWriteOncePod`, as a filesystem or a raw block
-device. The image is built without a container engine (`crane`, on a pinned Ubuntu base) and
-imported into each node's containerd; nothing is pushed to a registry.
+The StorageClass `flaminio` takes `replicas` (default 2), `minIsr` (1), `chunkSize` (256Mi),
+`failureDomain` (`node`|`rack`|`zone`) and `failureDomainPolicy` (`strict`|`bestEffort`).
+Label storage nodes with `topology.kubernetes.io/zone` and `flaminio.io/rack` so zone/rack
+placement has distinct domains (see docs/followups.md §4). Volumes are `ReadWriteOnce` or
+`ReadWriteOncePod`, as a filesystem or a raw block device. The image is built without a
+container engine (`crane`, on a pinned Ubuntu base) and imported into each node's containerd;
+nothing is pushed to a registry.
 
 ### Phase-1 benchmark and chaos run (step 8)
 

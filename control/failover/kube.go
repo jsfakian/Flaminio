@@ -91,6 +91,7 @@ type apiNode struct {
 	Metadata struct {
 		Name            string            `json:"name"`
 		ResourceVersion string            `json:"resourceVersion"`
+		Labels          map[string]string `json:"labels"`
 		Annotations     map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
@@ -104,6 +105,18 @@ type apiNode struct {
 			LastTransitionTime time.Time `json:"lastTransitionTime"`
 		} `json:"conditions"`
 	} `json:"status"`
+}
+
+// NodeLabels returns the Kubernetes Node's labels.
+func (c *APIClient) NodeLabels(ctx context.Context, name string) (map[string]string, error) {
+	var n apiNode
+	if err := c.do(ctx, http.MethodGet, "/api/v1/nodes/"+url.PathEscape(name), "", nil, &n); err != nil {
+		return nil, err
+	}
+	if n.Metadata.Labels == nil {
+		return map[string]string{}, nil
+	}
+	return n.Metadata.Labels, nil
 }
 
 type taint struct {

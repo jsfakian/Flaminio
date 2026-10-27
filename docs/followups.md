@@ -77,15 +77,20 @@ new target copies them all.
 ## 4. Failure domains in placement
 
 **Steps:**
-1. **Labels:** nodes register `topology.kubernetes.io/zone` and `flaminio.io/rack` (the node
-   agent reads them from the Kubernetes Node object).
-2. **Placement:** `Place` takes a failure-domain level per volume (`node` | `rack` | `zone`) and
-   puts no two replicas of a chunk in one domain. `strict` refuses if the topology is short;
-   `bestEffort` falls back a level (ARCHITECTURE §8.2, §9).
-3. **Tests** in Go, with synthetic topologies (property test: no two replicas share a domain;
-   load spreads).
-4. **Lab:** label fl-a and fl-b as different zones. The lab cannot show real independence (one
-   switch, and fl-w shares a server with fl-a); that needs a third physical server.
+1. **Labels:** ✅ nodes register `topology.kubernetes.io/zone` and `flaminio.io/rack`. The CSI
+   node plugin (the node agent for now) copies them from the Kubernetes Node object; lab
+   registration via `metactl` / `lab.sh` sets them on fl-a and fl-b directly.
+2. **Placement:** ✅ `Place` takes a failure-domain level per volume (`node` | `rack` | `zone`)
+   and puts no two replicas of a chunk in one domain. `strict` refuses if the topology is short;
+   `bestEffort` falls back a level (ARCHITECTURE §8.2, §9). Threaded through Spec,
+   CreateVolume and CSI StorageClass `failureDomain` / `failureDomainPolicy`.
+3. **Tests:** ✅ Go tests in `meta/domain` with synthetic topologies (no two replicas share a
+   domain; load spreads; strict refusal; bestEffort fallback).
+4. **Lab:** label fl-a and fl-b as different zones (scripted in `lab.sh` meta smoke; for CSI,
+   `kubectl label node fl-a topology.kubernetes.io/zone=lab-a flaminio.io/rack=rack-a` and the
+   same for fl-b with `lab-b` / `rack-b`). *Lab check still open:* full verification of
+   zone-aware PVC placement. The lab cannot show real independence (one switch, and fl-w
+   shares a server with fl-a); that needs a third physical server.
 
 ## 5. More than one volume per node
 

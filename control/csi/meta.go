@@ -117,3 +117,10 @@ func (m *Meta) ListNodes(ctx context.Context) ([]*metav1.Node, error) {
 	})
 	return r.GetNodes(), err
 }
+
+func (m *Meta) RegisterNode(ctx context.Context, n *metav1.Node) error {
+	_, err := metaCall(ctx, m, func(ctx context.Context, c metav1.MetadataServiceClient) (*metav1.RegisterNodeResponse, error) {
+		return c.RegisterNode(ctx, &metav1.RegisterNodeRequest{Node: n})
+	})
+	return err
+}

@@ -141,8 +141,8 @@ func TestSpecValidate(t *testing.T) {
 }
 
 func TestPlaceSpreadsLoad(t *testing.T) {
-	nodes := []NodeLoad{{"a", 0}, {"b", 0}, {"c", 5}, {"d", 0}}
-	p, err := Place(nodes, 6, 2, "")
+	nodes := []NodeLoad{{ID: "a"}, {ID: "b"}, {ID: "c", Replicas: 5}, {ID: "d"}}
+	p, err := Place(nodes, 6, 2, "", DomainNode, PolicyStrict)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,14 +159,14 @@ func TestPlaceSpreadsLoad(t *testing.T) {
 	if count["a"] != 4 || count["b"] != 4 || count["d"] != 4 || count["c"] != 0 {
 		t.Fatalf("unbalanced: %v", count)
 	}
-	if _, err := Place(nodes[:1], 1, 2, ""); err == nil {
+	if _, err := Place(nodes[:1], 1, 2, "", DomainNode, PolicyStrict); err == nil {
 		t.Fatal("placed 2 replicas on 1 node")
 	}
 }
 
 func TestPlacePreferredNode(t *testing.T) {
 	nodes := []NodeLoad{{ID: "a", Replicas: 10}, {ID: "b"}, {ID: "c"}}
-	p, err := Place(nodes, 4, 2, "a")
+	p, err := Place(nodes, 4, 2, "a", DomainNode, PolicyStrict)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,148 @@ func TestPlacePreferredNode(t *testing.T) {
 		t.Fatalf("the other replicas do not spread: %v", p)
 	}
 	// An ineligible preference (not among the nodes) is ignored.
-	if p, err := Place(nodes, 1, 2, "w"); err != nil || p[0][0] == "w" {
+	if p, err := Place(nodes, 1, 2, "w", DomainNode, PolicyStrict); err != nil || p[0][0] == "w" {
 		t.Fatalf("%v %v", p, err)
 	}
+}
+
+func TestPlaceStrictZoneRefusesShortTopology(t *testing.T) {
+	// Two zones, three replicas: strict must refuse.
+	nodes := []NodeLoad{
+		{ID: "a1", Zone: "z1", Rack: "r1"},
+		{ID: "a2", Zone: "z1", Rack: "r2"},
+		{ID: "b1", Zone: "z2", Rack: "r3"},
+		{ID: "b2", Zone: "z2", Rack: "r4"},
+	}
+	if _, err := Place(nodes, 1, 3, "", DomainZone, PolicyStrict); err == nil {
+		t.Fatal("strict zone placement accepted a 2-zone topology for 3 replicas")
+	}
+}
+
+func TestPlaceBestEffortFallsBack(t *testing.T) {
+	// One zone, two racks: zone+bestEffort falls back to rack.
+	nodes := []NodeLoad{
+		{ID: "a", Zone: "z", Rack: "r1"},
+		{ID: "b", Zone: "z", Rack: "r2"},
+		{ID: "c", Zone: "z", Rack: "r1"},
+	}
+	p, err := Place(nodes, 4, 2, "", DomainZone, PolicyBestEffort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p {
+		ra, rb := rackOf(nodes, c[0]), rackOf(nodes, c[1])
+		if ra == rb {
+			t.Fatalf("replicas share a rack after zone→rack fallback: %v", c)
+		}
+	}
+	// One rack only: falls back further to node.
+	sameRack := []NodeLoad{
+		{ID: "a", Zone: "z", Rack: "r"},
+		{ID: "b", Zone: "z", Rack: "r"},
+	}
+	p, err = Place(sameRack, 2, 2, "", DomainZone, PolicyBestEffort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p {
+		if c[0] == c[1] {
+			t.Fatalf("replicas share a node: %v", c)
+		}
+	}
+}
+
+func TestPlaceNoSharedDomain(t *testing.T) {
+	nodes := []NodeLoad{
+		{ID: "a1", Zone: "z1", Rack: "r1"},
+		{ID: "a2", Zone: "z1", Rack: "r2"},
+		{ID: "b1", Zone: "z2", Rack: "r3"},
+		{ID: "b2", Zone: "z2", Rack: "r4"},
+		{ID: "c1", Zone: "z3", Rack: "r5"},
+		{ID: "c2", Zone: "z3", Rack: "r6"},
+	}
+	for _, level := range []FailureDomain{DomainZone, DomainRack, DomainNode} {
+		p, err := Place(nodes, 12, 3, "", level, PolicyStrict)
+		if err != nil {
+			t.Fatalf("%s: %v", level, err)
+		}
+		for _, c := range p {
+			seen := map[string]bool{}
+			for _, id := range c {
+				n := nodes[indexOf(nodes, id)]
+				d := n.domainKey(level)
+				if seen[d] {
+					t.Fatalf("%s: shared domain in %v", level, c)
+				}
+				seen[d] = true
+			}
+		}
+	}
+}
+
+func TestPlaceDomainSpreadsLoad(t *testing.T) {
+	// Three zones, two nodes each; 2 replicas at zone: load should spread across zones and
+	// within a zone across its nodes.
+	nodes := []NodeLoad{
+		{ID: "a1", Zone: "z1"}, {ID: "a2", Zone: "z1"},
+		{ID: "b1", Zone: "z2"}, {ID: "b2", Zone: "z2"},
+		{ID: "c1", Zone: "z3"}, {ID: "c2", Zone: "z3"},
+	}
+	p, err := Place(nodes, 6, 2, "", DomainZone, PolicyStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := map[string]int{}
+	zoneCount := map[string]int{}
+	for _, c := range p {
+		za, zb := zoneOf(nodes, c[0]), zoneOf(nodes, c[1])
+		if za == zb {
+			t.Fatalf("replicas share a zone: %v", c)
+		}
+		for _, id := range c {
+			count[id]++
+			zoneCount[zoneOf(nodes, id)]++
+		}
+	}
+	for _, z := range []string{"z1", "z2", "z3"} {
+		if zoneCount[z] != 4 {
+			t.Fatalf("zone load %v (want 4 each)", zoneCount)
+		}
+	}
+	for _, id := range []string{"a1", "a2", "b1", "b2", "c1", "c2"} {
+		if count[id] != 2 {
+			t.Fatalf("node load %v (want 2 each)", count)
+		}
+	}
+}
+
+func TestPlacePreferredRespectsDomain(t *testing.T) {
+	nodes := []NodeLoad{
+		{ID: "a", Zone: "z1", Replicas: 10},
+		{ID: "b", Zone: "z2"},
+		{ID: "c", Zone: "z3"},
+	}
+	p, err := Place(nodes, 3, 2, "a", DomainZone, PolicyStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range p {
+		if c[0] != "a" {
+			t.Fatalf("preferred not first: %v", c)
+		}
+		if zoneOf(nodes, c[1]) == "z1" {
+			t.Fatalf("second replica in preferred zone: %v", c)
+		}
+	}
+}
+
+func rackOf(nodes []NodeLoad, id string) string { return nodes[indexOf(nodes, id)].Rack }
+func zoneOf(nodes []NodeLoad, id string) string { return nodes[indexOf(nodes, id)].Zone }
+func indexOf(nodes []NodeLoad, id string) int {
+	for i, n := range nodes {
+		if n.ID == id {
+			return i
+		}
+	}
+	panic(id)
 }

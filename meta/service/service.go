@@ -103,7 +103,24 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 	if n == nil || !domain.ValidID(n.GetId()) || n.GetAddress() == "" {
 		return nil, errStatus(fmt.Errorf("%w: node needs a valid id and an address", domain.ErrInvalid))
 	}
-	b, _ := json.Marshal(nodeRecord{Address: n.GetAddress(), Labels: n.GetLabels()})
+	// Merge labels into any existing record so the data plane's address registration does not
+	// wipe failure-domain labels the agent set, and the agent can overlay zone/rack without
+	// clearing other labels (e.g. witness).
+	labels := map[string]string{}
+	if e, ok, err := s.kv.Get(ctx, nodeKey(n.GetId())); err != nil {
+		return nil, errStatus(err)
+	} else if ok {
+		var rec nodeRecord
+		if json.Unmarshal(e.Value, &rec) == nil {
+			for k, v := range rec.Labels {
+				labels[k] = v
+			}
+		}
+	}
+	for k, v := range n.GetLabels() {
+		labels[k] = v
+	}
+	b, _ := json.Marshal(nodeRecord{Address: n.GetAddress(), Labels: labels})
 	_, err := s.kv.Txn(ctx, nil, []kv.Op{{Key: nodeKey(n.GetId()), Value: b}})
 	return &metav1.RegisterNodeResponse{}, errStatus(err)
 }
@@ -220,9 +237,18 @@ func volumePB(v *domain.Volume) *metav1.Volume {
 }
 
 func (s *Service) CreateVolume(ctx context.Context, r *metav1.CreateVolumeRequest) (*metav1.CreateVolumeResponse, error) {
+	fd, err := domain.ParseFailureDomain(r.GetFailureDomain())
+	if err != nil {
+		return nil, errStatus(err)
+	}
+	pol, err := domain.ParsePlacementPolicy(r.GetFailureDomainPolicy())
+	if err != nil {
+		return nil, errStatus(err)
+	}
 	spec := domain.Spec{
 		ID: r.GetId(), SizeBytes: r.GetSizeBytes(), ChunkBytes: r.GetChunkBytes(),
 		Replicas: r.GetReplicas(), MinISR: r.GetMinIsr(), PreferNode: r.GetPreferNode(),
+		Domain: fd, Policy: pol,
 	}
 	if err := spec.Validate(); err != nil {
 		return nil, errStatus(err)
@@ -255,11 +281,11 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	var candidates []domain.NodeLoad
 	for _, n := range nodes {
 		if _, witness := n.GetLabels()[WitnessLabel]; n.GetAlive() && !witness && !n.GetDraining() {
-			candidates = append(candidates, domain.NodeLoad{ID: n.GetId(), Replicas: load[n.GetId()]})
+			candidates = append(candidates, domain.LoadFromLabels(n.GetId(), load[n.GetId()], n.GetLabels()))
 		}
 	}
 	h := domain.Header{ID: spec.ID, SizeBytes: spec.SizeBytes, ChunkBytes: spec.ChunkBytes}
-	placement, err := domain.Place(candidates, h.ChunkCount(), int(spec.Replicas), spec.PreferNode)
+	placement, err := domain.Place(candidates, h.ChunkCount(), int(spec.Replicas), spec.PreferNode, spec.Domain, spec.Policy)
 	if err != nil {
 		return nil, err
 	}

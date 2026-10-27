@@ -124,6 +124,11 @@ message CreateVolumeRequest {
   // If set and eligible, every chunk has a replica on this node: the node the volume will
   // first be attached to, whose reads then stay local.
   string prefer_node = 6;
+  // Failure domain level: "node" (default), "rack", or "zone". Replicas of one chunk are
+  // placed in distinct domains at this level (ARCHITECTURE §8.2, §9).
+  string failure_domain = 7;
+  // "strict" (default) refuses if the topology is short; "bestEffort" falls back a level.
+  string failure_domain_policy = 8;
 }
 
 message CreateVolumeResponse {

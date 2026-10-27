@@ -1,7 +1,7 @@
 # Flaminio CSI driver: namespace, service accounts and the permissions of the Kubernetes
-# sidecars (external-provisioner, external-attacher, node-driver-registrar). Flaminio's own
-# containers call no Kubernetes API; they talk to the metadata service with their own
-# identities (mutual TLS).
+# sidecars (external-provisioner, external-attacher, node-driver-registrar). The CSI node
+# plugin also reads its Node's zone/rack labels for failure-domain placement; other Flaminio
+# containers talk to the metadata service with their own identities (mutual TLS).
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -21,7 +21,6 @@ kind: ServiceAccount
 metadata:
   name: flaminio-csi-node
   namespace: flaminio-system
-automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -88,6 +87,29 @@ subjects:
 roleRef:
   kind: Role
   name: flaminio-csi-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+# The node plugin copies topology.kubernetes.io/zone and flaminio.io/rack from its Node.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: flaminio-csi-node
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flaminio-csi-node
+subjects:
+  - kind: ServiceAccount
+    name: flaminio-csi-node
+    namespace: flaminio-system
+roleRef:
+  kind: ClusterRole
+  name: flaminio-csi-node
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
