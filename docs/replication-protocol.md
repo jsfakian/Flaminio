@@ -106,8 +106,9 @@ replica's store itself, so a local read can fail with no reply: a device read er
 checksum mismatch. The data plane then reports the failure at once.
 - **The read is sent again** to another read source, ahead of the reads queued after it.
 - **The local replica stays a member**, and its session stays open. Only that read avoids it.
-- **If the chunk has no other ISR member**, members being removed not counted, the read ends
-  as unreadable, and the client gets an I/O error.
+- **If the chunk has no other ISR member**, members being removed not counted, the read goes
+  back to the local replica once more. If it fails there again, it ends as unreadable, and the
+  client gets an I/O error.
 - **If its other members exist but none can be used yet**, the read waits for one, like any
   queued read.
 - **Nothing else changes.** No data or membership changes, and the lease and read-source
@@ -349,7 +350,7 @@ the simulator then fails:
 
 | Broken rule | Caught by (first failing seed) |
 |---|---|
-| Acknowledge once a removal is proposed, not committed (§4) | seed 20 |
+| Acknowledge once a removal is proposed, not committed (§4) | seed 49 |
 | Accept requests from an old session (§3) | seed 16 |
 | No reconciliation after failover (§6) | seed 1 |
 | Trust digests from a single ISR member (§6) | seed 1 |
@@ -362,13 +363,14 @@ the simulator then fails:
 | Removed member's dirty set omits writes in flight (§7) | seed 7 |
 | No resync filter on the replica (§7) | seed 112 |
 | A move's destination joins the ISR without a resync (§7, moves) | seed 2 |
-| A move drops its source before the destination is in the ISR (§7, moves) | seed 3; in 400 seeds, 49 runs show lost or stale data, 60 a stall |
+| A move drops its source before the destination is in the ISR (§7, moves) | seed 3 |
 | Fast reads without the lease check (§5, fast reads) | seed 276; split-brain scenario |
 | Fast reads without the membership check (§5, fast reads) | seed 18962 |
 | Fast reads without the fencing check at completion (§5, fast reads) | seed 3626767: a slow device read must straddle a complete takeover |
 
 The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
-and 60 000 for reconciliation pruning. That bug is rare by nature: the target must die between
+and 60 000 for reconciliation pruning, early settling and fast reads without the membership
+check. That bug is rare by nature: the target must die between
 two repairs that are usually sent together.
 
 **Commands:**

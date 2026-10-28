@@ -55,7 +55,8 @@ The slot's memory is reached through a new `Staging::addr(i, at, len) -> *mut u8
 uses it. The zero fills write other ranges of the same slot: the gaps of the plan, which never
 overlap its device reads.
 
-The first staged read of each attached device logs once, from an `AtomicBool` in its `Shared`:
+The first staged read of each attached device that works logs once, from an `AtomicBool` in
+its `Shared` (read before it is swapped, as every queue thread checks it):
 "<volume>: zero copy: a read's pages are not aligned for <device> (its DMA alignment); such
 reads are copied through the staging area". A line for every read would flood the log under a
 workload that is misaligned on purpose.
@@ -118,11 +119,13 @@ pub fn on_read_failed(&mut self, now: Time, from: NodeId, epoch: Epoch, session:
 3. It queues the read again at the front, as `Work::Client`, and records `op → from` in `avoid`.
 4. It calls `self.pump(now)`.
 
-`Target` gets a field `avoid: BTreeMap<u64, NodeId>`, holding the member each re-queued client
-read must not use. In `try_start`, `Op::Read` asks `self.source(i, self.avoid.get(&op).copied())`.
-When that finds no member, a read with an `avoid` entry ends as `OpResult::Unreadable` if the
-chunk's ISR has no member other than the avoided one, members being removed not counted. Any
-other read waits, as it does today.
+`Target` gets a field `avoid: BTreeMap<u64, (NodeId, u32)>`: for each re-queued client read, the
+member that failed it, and how many times in a row. In `try_start`, `Op::Read` excludes that
+member while the chunk has another one to read from (`has_other_source`, members being removed
+not counted). Without one, the read goes back to the member that failed it once more, as a
+failure can pass: a transient error then costs no EIO, whether the other member was gone at
+the failure or its removal started while the read waited. A second failure there in a row
+ends the read as `OpResult::Unreadable`. Any other read waits, as it does today.
 
 `OpResult::Unreadable` is a new variant: "A read that no ISR member could serve: the one that
 failed it was the only member left." `OpResult::Failed` keeps its meaning, "the target was

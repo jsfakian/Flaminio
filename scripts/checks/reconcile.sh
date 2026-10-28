@@ -102,8 +102,11 @@ fi
 # With zero copy, the probe's read must have been copied through the staging area, if the
 # store's disk refuses a buffer aligned to 4 bytes: its DMA alignment is above 3 (512 for
 # virtio-blk; NVMe takes 4, and then nothing needs the copy).
+# A partition's limits are its disk's; a store that is not a block device reads as 0.
 store=$(systemctl show -p ExecStart --value flaminio-node | grep -o -- '--device [^ ]*' | cut -d' ' -f2)
-dma=$(cat "/sys/block/$(basename "$(readlink -f "$store")")/queue/dma_alignment")
+dev=/sys/class/block/$(basename "$(readlink -f "$store")")
+[[ -e $dev/partition ]] && dev=$(readlink -f "$dev/..")
+dma=$(cat "$dev/queue/dma_alignment" 2>/dev/null || echo 0)
 if grep -q 'zero copy: local reads go straight into the requests' <<<"$journal" && ((dma > 3)) &&
     ! grep -q 'copied through the staging area' <<<"$journal"; then
     echo "zero copy, but no read was copied through the staging area ($store: DMA alignment $dma)"

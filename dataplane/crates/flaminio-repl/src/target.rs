@@ -355,8 +355,9 @@ pub struct Target<P> {
     digests: BTreeMap<u64, DigestOp>,
     queue: VecDeque<Work<P>>,
     /// Client reads that failed on a member without a reply and wait to be sent again, by
-    /// operation: the member each must not go to next (docs/5).
-    avoid: BTreeMap<u64, NodeId>,
+    /// operation: the member each must not go to next, and how many times in a row it failed
+    /// there (docs/5).
+    avoid: BTreeMap<u64, (NodeId, u32)>,
     meta_inflight: Option<(u64, Time)>,
     next_heartbeat: Time,
     /// When to read the volume from the metadata service next, and the read in flight. It has
@@ -912,7 +913,11 @@ impl<P: Clone + Debug> Target<P> {
         if r.locked {
             self.chunks[r.chunk as usize].locks.remove(&r.ext);
         }
-        self.avoid.insert(op, from);
+        let failures = match self.avoid.get(&op) {
+            Some(&(n, f)) if n == from => f + 1,
+            _ => 1,
+        };
+        self.avoid.insert(op, (from, failures));
         // Ahead of what was queued after it, as when a session fails.
         self.queue.push_front(Work::Client {
             op,
@@ -1381,6 +1386,8 @@ impl<P: Clone + Debug> Target<P> {
             ReadFor::Client { op } => {
                 self.chunks[chunk as usize].locks.remove(&ext);
                 if self.lease_ok(chunk as usize, now) {
+                    // Served, possibly by the member that failed it before (docs/5).
+                    self.avoid.remove(&op);
                     self.out.push(Output::Done {
                         op,
                         result: OpResult::Read(data),
@@ -1537,11 +1544,20 @@ impl<P: Clone + Debug> Target<P> {
                         if !self.lease_ok(i, now) {
                             return false;
                         }
+                        // A read that failed on a member goes to another one. With no other
+                        // member left to serve it, it goes back to that member once more, in
+                        // case the failure passed, and ends as unreadable if it fails there
+                        // again (docs/5).
                         let avoid = self.avoid.get(&op).copied();
-                        let Some(from) = self.source(i, avoid) else {
-                            // A read that failed on the only member left ends; any other read
-                            // waits for a member it can use (docs/5).
-                            if let Some(failed) = avoid
+                        let exclude = match avoid {
+                            Some((failed, n)) if n >= 2 || self.has_other_source(i, failed) => {
+                                Some(failed)
+                            }
+                            _ => None,
+                        };
+                        let Some(from) = self.source(i, exclude) else {
+                            if let Some((failed, _)) = avoid
+                                && exclude.is_some()
                                 && !self.has_other_source(i, failed)
                             {
                                 self.avoid.remove(&op);
@@ -1555,7 +1571,9 @@ impl<P: Clone + Debug> Target<P> {
                         };
                         // Sent elsewhere, the read avoids the member that failed it no longer:
                         // if this one fails too, that member may serve it again.
-                        self.avoid.remove(&op);
+                        if avoid.is_some_and(|(failed, _)| failed != from) {
+                            self.avoid.remove(&op);
+                        }
                         self.start_read(now, i, ext, from, ReadFor::Client { op }, true);
                         true
                     }
@@ -2416,14 +2434,35 @@ mod tests {
     }
 
     #[test]
-    fn a_read_that_failed_on_the_only_member_is_unreadable() {
+    fn a_read_that_failed_twice_on_the_only_member_is_unreadable() {
         let mut b = Bench::new(&[1], 1);
         b.write(0, 42);
         b.hold = Some(is_read);
         let op = b.read(0);
         b.fail_held(0);
+        // Tried once more on the only member.
+        assert_eq!(
+            (b.reads_to.as_slice(), b.held.len()),
+            ([1, 1].as_slice(), 1)
+        );
+        assert_eq!(b.done.get(&op), None);
+        b.fail_held(0);
         assert_eq!(b.done.get(&op), Some(&OpResult::Unreadable));
+        assert_eq!(b.reads_to, [1, 1]);
         assert_eq!(b.isr(), BTreeSet::from([1]));
+        assert_eq!(b.t.avoid_len(), 0);
+    }
+
+    #[test]
+    fn a_read_that_failed_once_on_the_only_member_is_served_there() {
+        let mut b = Bench::new(&[1], 1);
+        b.write(0, 42);
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        b.hold = None;
+        b.fail_held(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to, [1, 1]);
         assert_eq!(b.t.avoid_len(), 0);
     }
 
@@ -2439,8 +2478,33 @@ mod tests {
         let op = b.read(0);
         assert_eq!(b.held.len(), 1, "the read went to the local replica");
         b.fail_held(0);
+        assert_eq!(
+            b.held.len(),
+            1,
+            "tried once more on the local replica, not on node 2"
+        );
+        b.fail_held(0);
         assert_eq!(b.done.get(&op), Some(&OpResult::Unreadable));
+        assert_eq!(b.reads_to, [1, 1]);
         assert_eq!(b.t.avoid_len(), 0);
+    }
+
+    #[test]
+    fn a_waiting_read_goes_back_once_its_other_member_is_being_removed() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.write(0, 42);
+        // Node 2 stops answering, and its removal stays proposed.
+        b.hold_meta = true;
+        b.down.insert(2);
+        b.until("node 2's session down", |b| b.t.session_of(2).is_none());
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        b.hold = None;
+        b.fail_held(0);
+        // Waits for node 2, until it is being removed: then back to the local replica.
+        b.until("read done", |b| b.done.contains_key(&op));
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to, [1, 1]);
     }
 
     #[test]

@@ -25,10 +25,11 @@ is still the one at the read's epoch. The target:
 - avoids the local replica for that read only: every other read still prefers it;
 - keeps the local replica in the ISR, and keeps its session open.
 
-If the chunk's ISR has no member other than the local replica, the read ends as unreadable, and
-the client gets EIO. Members being removed do not count. For example, on a volume with RF 2 and
-`min_isr` 1, a failed local read while the other replica's session is down gets EIO: that member
-is being removed. The ISR can also keep a member whose session is down, when `min_isr` requires
+If the chunk's ISR has no member other than the local replica, the read goes back to the local
+replica once more, in case the failure passed. If it fails there again, it ends as unreadable,
+and the client gets EIO. Members being removed do not count. For example, on a volume with RF 2
+and `min_isr` 1, a failed local read while the other replica's session is down is tried once
+more locally: that member is being removed. The ISR can also keep a member whose session is down, when `min_isr` requires
 it. A failed local read then waits for that member's session to reopen, like any queued read.
 The node logs each failed local read with its volume, as now.
 
@@ -73,8 +74,10 @@ table of the seeds that catch each injected bug matches the simulator after this
     the ISR, with its session open.
   - **Scope:** only that read avoids the local replica.
   - **Ordering:** the re-sent read starts before a later read of an overlapping extent.
-  - **No other member:** a chunk whose ISR is only the local replica ends the read as
-    unreadable. So does one whose only other member is being removed.
+  - **No other member:** in a chunk whose ISR is only the local replica, the read is tried
+    there once more: served if that works, unreadable if it fails again. The same holds when
+    the only other member is being removed, and for a read that waits for a member whose
+    removal then starts.
   - **Waiting member:** with `min_isr` equal to the ISR's size, a read waits for a member
     whose session is down. It is sent once that session reopens, within the lease.
   - **Ignored reports:** a report with a stale epoch or session, for an unknown request, for a

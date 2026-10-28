@@ -313,9 +313,12 @@ mutation!(
     catches_fast_reads_without_lease,
     target(|b| b.fast_read_no_lease = true)
 );
+// Rare too: a move must drop and re-add the local replica during one slow device read. First
+// caught at seed 18962 (2026-10-28).
 mutation!(
     catches_fast_reads_from_a_replaced_replica,
-    target(|b| b.fast_read_ignores_membership = true)
+    target(|b| b.fast_read_ignores_membership = true),
+    60_000
 );
 // Digests reshuffled the schedule: the first catch moved from seed 70955 to 3626767.
 // Try that seed first so `make sim` stays fast; the budget still searches if it drifts.

@@ -1383,14 +1383,18 @@ async fn zc_read_plan(
         if !ok {
             break;
         }
-        if !ctx.shared.staged.swap(true, Ordering::Relaxed) {
+        ok = stage_device_read(q, st, tag, ctx, to, len, device_offset).await;
+        // Once a staged read worked: a load first, as every queue thread checks the flag.
+        if ok
+            && !ctx.shared.staged.load(Ordering::Relaxed)
+            && !ctx.shared.staged.swap(true, Ordering::Relaxed)
+        {
             eprintln!(
                 "flaminio-io: {}: zero copy: a read's pages are not aligned for {} (its DMA \
                  alignment); such reads are copied through the staging area",
                 ctx.shared.volume, ctx.shared.device
             );
         }
-        ok = stage_device_read(q, st, tag, ctx, to, len, device_offset).await;
     }
     ok
 }
