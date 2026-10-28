@@ -31,7 +31,8 @@ takes these steps:
   first read can wait for a takeover: 5.5 s.
 
 So the socket answers an attach within 50 s. The request carries that deadline. The node skips
-a request it would begin after the deadline, and logs that it did. It ends the target's start
+a request it would begin with no time left for its steps (less than the 10 s before the
+deadline), logs that it did, and answers with that reason. It ends the target's start
 and the device's adding by the deadline less the 10 s for the start, waiting less than 30 s
 and 10 s if the request waited its turn. So its own answer, or the reason there is none,
 reaches the socket in time, unless starting the device itself takes more than 10 s. When the

@@ -138,7 +138,7 @@ fn attach(
 }
 
 /// A limit as the socket's errors name it: seconds, with at most one decimal.
-fn seconds(d: Duration) -> String {
+pub(crate) fn seconds(d: Duration) -> String {
     let tenths = (d.as_millis() + 50) / 100;
     match tenths % 10 {
         0 => format!("{} s", tenths / 10),

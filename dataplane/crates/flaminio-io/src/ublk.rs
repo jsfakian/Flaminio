@@ -674,6 +674,8 @@ pub(crate) const ADD_DEVICE_LIMIT: Duration = Duration::from_secs(10);
 /// character device, and a kernel that scans partitions inside the start waits for the first
 /// reads, up to a takeover (5.5 s).
 pub(crate) const START_LIMIT: Duration = Duration::from_secs(10);
+/// How long the attach given at startup (`--attach`) is tried again after it fails.
+const STARTUP_ATTACH_LIMIT: Duration = Duration::from_secs(300);
 
 /// Runs a node: the main thread drives the engine (replicas only) until an attach command
 /// arrives, then serves that volume as a ublk device until it is detached, and so on. The
@@ -707,18 +709,28 @@ pub fn serve_node(
         attached.clone(),
     )?;
     if let (Some(volume), Some(path)) = (c.attach.clone(), c.token.as_ref()) {
-        let (reply, answer) = mpsc::channel();
-        ctl_tx
-            .send(Control::Attach {
-                volume,
-                token: read_token(path)?,
-                reply,
-                deadline: Instant::now() + crate::control::ATTACH_LIMIT,
-            })
-            .expect("own channel");
+        // Nobody retries an attach at startup but this thread: after a cluster restart, the
+        // metadata service may take a while to answer (docs/6).
+        let (token, ctl) = (read_token(path)?, ctl_tx.clone());
         thread::spawn(move || {
-            if let Ok(a) = answer.recv() {
+            let until = Instant::now() + STARTUP_ATTACH_LIMIT;
+            loop {
+                let (reply, answer) = mpsc::channel();
+                let request = Control::Attach {
+                    volume: volume.clone(),
+                    token: token.clone(),
+                    reply,
+                    deadline: Instant::now() + crate::control::ATTACH_LIMIT,
+                };
+                if ctl.send(request).is_err() {
+                    return;
+                }
+                let Ok(a) = answer.recv() else { return };
                 eprintln!("flaminio-io: attach at startup: {a}");
+                if a.starts_with("ok") || Instant::now() >= until {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(5));
             }
         });
     }
@@ -733,11 +745,16 @@ pub fn serve_node(
             drive_until(parts, Duration::from_millis(50), |_| false);
         }
         match ctl_rx.try_recv() {
-            // Its caller gave up while another attach ran: nobody waits for it any more.
+            // Its time ran out while another attach ran: no step would have any left.
             Ok(Control::Attach {
-                volume, deadline, ..
-            }) if Instant::now() >= deadline => {
-                eprintln!("flaminio-io: attach {volume}: its caller gave up before it began");
+                volume,
+                reply,
+                deadline,
+                ..
+            }) if Instant::now() >= deadline.checked_sub(START_LIMIT).unwrap_or(deadline) => {
+                let e = format!("attach {volume}: its time ran out while it waited its turn");
+                eprintln!("flaminio-io: {e}");
+                let _ = reply.send(format!("error: {e}"));
             }
             Ok(Control::Attach {
                 volume,
@@ -810,8 +827,8 @@ fn attach_and_serve(
                     },
                 );
                 return Err(format!(
-                    "attach {volume}: no answer from the metadata service within {:.1} s",
-                    wait.as_secs_f64()
+                    "attach {volume}: no answer from the metadata service within {}",
+                    crate::control::seconds(wait)
                 ));
             }
         }

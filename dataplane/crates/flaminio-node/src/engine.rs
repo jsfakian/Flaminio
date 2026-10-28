@@ -1126,7 +1126,18 @@ impl<D: BlockDevice> Engine<D> {
                     return;
                 };
                 match (part, answer) {
-                    (0, Answer::GetVolume(r)) => a.volume = r.volume,
+                    (0, Answer::GetVolume(r)) => match r.volume {
+                        Some(v) => a.volume = Some(v),
+                        // An empty answer would leave the attach waiting for good.
+                        None => {
+                            self.attaching.remove(&volume);
+                            self.out.push(Output::AttachFailed {
+                                volume,
+                                why: "the metadata service has no such volume".into(),
+                            });
+                            return;
+                        }
+                    },
                     (1, Answer::ListNodes(r)) => a.nodes = Some(r.nodes),
                     (_, Answer::Failed { message, .. }) => {
                         self.attaching.remove(&volume);

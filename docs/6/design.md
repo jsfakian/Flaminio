@@ -57,8 +57,9 @@ waited, in seconds with at most one decimal: `error: no answer within 50 s`.
 
 **A deadline for each request.** `Control::Attach` carries `deadline: Instant`: when the
 control socket stops waiting, `ATTACH_LIMIT` after it sent the request.
-- **Skipping.** The main thread skips a request whose deadline has passed when it takes it, and
-  logs that. Without this, a request that timed out while the node served another volume would
+- **Skipping.** The main thread skips a request that it takes after `deadline − START_LIMIT`,
+  when no step would have any time left. It logs that, and answers with that reason, in case
+  the caller still waits. Without this, a request that timed out while the node served another volume would
   run after the next detach, with a token nobody uses any more.
 - **Bounding the steps.** `attach_and_serve` ends the target's start and the device's adding by
   `deadline − START_LIMIT`. It waits at most `min(METADATA_LIMIT, that − now)` for the metadata
@@ -68,6 +69,9 @@ control socket stops waiting, `ATTACH_LIMIT` after it sent the request.
 - **What remains.** Only starting the device can outlast the deadline, if it takes longer than
   `START_LIMIT`. The device then serves the volume with nobody told, and a retry finds it
   through `status`.
+- **The attach at startup** (`--attach`, a lab and manual option) has no caller to retry it. Its
+  thread sends it again every 5 s after a failure, for up to 5 minutes, so that a metadata
+  service still recovering after a cluster restart does not leave the node without its volume.
 
 A flag that the socket set when it gave up, checked at fixed points, would race with a device
 starting at that moment, and would leave the steps their full limits.

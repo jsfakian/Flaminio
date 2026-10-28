@@ -1245,6 +1245,39 @@ fn dropped_attach(late: Late) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An attach of a volume the metadata service does not have fails at once, rather than waiting
+/// for an answer that will not come.
+#[test]
+fn an_attach_of_an_unknown_volume_fails_at_once() {
+    let dir = std::env::temp_dir().join(format!("flaminio-unknown-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model::default()));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[12; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model, Timing::default());
+    engine.handle(
+        Instant::now(),
+        Input::Attach {
+            volume: "v".into(),
+            token: token(&signer, "v", 1, "fl-a"),
+        },
+    );
+    let t = Instant::now();
+    let mut serve =
+        |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
+    let out = drive(&mut engine, &rx, &mut [], &mut serve, &|o| {
+        matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
+    });
+    assert!(matches!(out, Output::AttachFailed { .. }), "{out:?}");
+    assert!(
+        t.elapsed() < Duration::from_secs(1),
+        "took {:?}",
+        t.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn late_answers_to_a_dropped_attach_start_no_target() {
     dropped_attach(Late::Ignored);
