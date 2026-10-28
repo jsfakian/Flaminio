@@ -71,22 +71,33 @@ jobs:
     name: Report the failed run
     needs: fuzz
     if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')
-    runs-on: [self-hosted, flaminio]
+    # GitHub-hosted, not centaur: a run that failed because centaur hung must still be reported.
+    # It only calls the API, for a minute, when a run failed.
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       issues: write
-      # To see whether the run uploaded failing inputs: a cancelled job's outputs are not reliable.
+      # To see whether the fuzz job started, and whether it uploaded failing inputs: a cancelled
+      # job's outputs are not reliable.
       actions: read
     env:
-      # The workflow's token, not the administrator login gh has on the runner; and the
-      # repository, which gh cannot read from a checkout this job does not have.
+      # The workflow's token, and the repository, which gh cannot read from a checkout this job
+      # does not have.
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Open or update the fuzz issue
         run: |
-          gh label create fuzz --color B60205 --description "Failed runs of the Fuzz workflow" --force
+          attempt="repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          # A run cancelled while still queued (by a newer one, through the concurrency group)
+          # never fuzzed and did not fail: nothing to report.
+          steps=$(gh api "$attempt/jobs" \
+              --jq '[.jobs[] | select(.name == "Fuzz every target") | .steps | length] | add // 0')
+          if [[ $steps -eq 0 ]]; then
+              echo "The fuzz job never started: nothing to report."
+              exit 0
+          fi
           # This attempt's artifact only: the list holds every attempt's.
           kept=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
               --jq "[.artifacts[] | select(.name == \"fuzz-artifacts-$GITHUB_RUN_ATTEMPT\")] | length")
@@ -94,6 +105,10 @@ jobs:
               note="The Fuzz run $RUN_URL (attempt $GITHUB_RUN_ATTEMPT) kept failing inputs: the artifact fuzz-artifacts-$GITHUB_RUN_ATTEMPT (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT on the runner host. To fix them: docs/ci.md, Fuzzing."
           else
               note="The Fuzz run $RUN_URL failed or was cancelled without keeping any failing input (a build or toolchain failure, or a hang?): the targets may not have been fuzzed. See its log."
+          fi
+          # Created only when missing, so its colour and description stay as maintainers set them.
+          if ! gh label list --search fuzz --json name --jq '.[].name' | grep -qx fuzz; then
+              gh label create fuzz --color B60205 --description "Failed runs of the Fuzz workflow"
           fi
           open=$(gh issue list --label fuzz --state open --limit 1 --json number --jq '.[0].number // empty')
           if [[ -n $open ]]; then

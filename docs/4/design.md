@@ -17,14 +17,16 @@ Each `fuzz_targets/<target>.rs` shrinks to
 `fuzz_target!(|data: &[u8]| flaminio_fuzz::<target>(data));`.
 
 **Rule:** `lib.rs` never refers to `libfuzzer_sys`. The dependency is optional, behind a
-`fuzzing` feature that every `[[bin]]` requires (`required-features`) and that `fuzz.sh` and
-`make lint` turn on. `cargo test` of the library then builds no libFuzzer and no C++ at all; only
-fuzzing and linting need the C++17 compiler of its build script (`build-essential` on the
-runners, Xcode's tools on macOS).
+`fuzzing` feature that every `[[bin]]` requires (`required-features`). It is a default feature, so
+every cargo-fuzz command (`run`, `tmin`, `cmin`, `coverage`) works as usual; the regression test
+turns it off (`--no-default-features`) and so builds no libFuzzer and no C++ at all. Only fuzzing
+and `make lint`, which compiles the binaries, need the C++17 compiler of its build script
+(`build-essential` on the runners, Xcode's tools on macOS).
 
 ## The regression test
 
-A unit test module in `src/lib.rs`, run with `cargo test --lib` in `dataplane/fuzz`
+A unit test module in `src/lib.rs`, run with `cargo test --lib --no-default-features` in
+`dataplane/fuzz`
 (`--lib` only skips doc-tests; the binaries are not built by `cargo test` either way, as they
 have `test = false` and there is no `tests/` directory):
 
@@ -55,12 +57,10 @@ have `test = false` and there is no `tests/` directory):
   step with the rest) instead of a hard-coded list, and stops if that list is empty: a failing
   `cargo fuzz list` inside `mapfile` is invisible to `set -e`;
 - reads that list with a `while read` loop, not `mapfile`, which macOS's bash 3.2 lacks;
-- runs them all with `--features fuzzing`, and exits with an error at the end listing those that
-  failed;
+- runs them all, and exits with an error at the end listing those that failed;
 - creates `corpus/<target>` itself: cargo-fuzz only creates it when it chooses the corpus, and
   libFuzzer refuses a corpus directory that does not exist;
-- runs `cargo fuzz run --features fuzzing <target> corpus/<target> regressions/<target> --
-  -max_total_time=<s>
+- runs `cargo fuzz run <target> corpus/<target> regressions/<target> -- -max_total_time=<s>
   -timeout=10`: libFuzzer's default timeout is 1 200 seconds, which would let a 10-minute hang
   pass as a slow input.
   libFuzzer writes new inputs only to the first directory and never deletes seed files, so the
@@ -79,19 +79,23 @@ The `fuzz` job, on failure, and also when it is cancelled at its time limit:
 - then uploads it as the artifact `fuzz-artifacts-<attempt>` (`retention-days: 90`). A re-run is
   a new attempt of the same run, and an artifact name can be used once per run.
 
-A second job, `report`, on `[self-hosted, flaminio]`, needs `fuzz` and runs with
+A second job, `report`, needs `fuzz` and runs with
 `if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')`: after any
 failure or cancellation, with or without inputs, so a hang stopped at the time limit is reported
 too. Without `always()`, GitHub would add `success()` to the condition and the job would never run
 after a failed `fuzz`. Whether the attempt kept inputs, it asks the API for the run's artifacts
 and looks for this attempt's `fuzz-artifacts-<attempt>` (the list holds every attempt's), not a
-job output, which a job cancelled at its time limit may not pass on.
-It has `issues: write` and `actions: read` and nothing else, checks nothing out, and sets two
-variables for `gh`: `GH_TOKEN`
-to the workflow's token, so `gh` on the runner does not fall back to the administrator login it
-is configured with, and `GH_REPO` to `github.repository`, which `gh` cannot read from a checkout
-it does not have. It:
-- creates the `fuzz` label if it is missing (`gh label create fuzz --force`);
+job output, which a job cancelled at its time limit may not pass on. It first checks, through
+the same API, that the fuzz job ran any step: a run cancelled while still queued (by a newer one,
+through the concurrency group) never fuzzed and is not reported.
+
+It runs on a GitHub-hosted runner (`ubuntu-latest`), not centaur: a run that failed because
+centaur hung or lost its runners must still be reported. It only calls the API, for about a
+minute, when a run failed, so it costs next to nothing of the Actions minutes. It has
+`issues: write` and `actions: read` and nothing else, checks nothing out, and sets two variables
+for `gh`: `GH_TOKEN` to the workflow's token, and `GH_REPO` to `github.repository`, which `gh`
+cannot read from a checkout it does not have. It:
+- creates the `fuzz` label only if it is missing, so it never resets what maintainers changed;
 - comments on the open issue labelled `fuzz` if there is one, or opens "Fuzz run failed",
   labelled `fuzz`, linking the run. The note says whether the run kept failing inputs (and where),
   or ended without any: a build or toolchain failure, or a hang, would otherwise skip the weekly
@@ -106,10 +110,10 @@ Keeping it a separate job keeps `issues: write` away from the steps that build a
   checks a dev build keeps. It is still faster than the fuzzer, which adds instrumentation, hence
   the replay's stricter limits (S4). cargo-fuzz's own builds (release) are unaffected.
 
-- `make fuzz-regressions`: `cd dataplane/fuzz && cargo test --lib`. Not `--locked`, like
-  `make test`'s other `cargo test`: the contracts job already fails on a stale fuzz lockfile, and
-  a developer adding a dependency should see the replay run, not a lockfile error. Dependabot
-  watches the fuzz crate's lockfile too (`/dataplane/fuzz`).
+- `make fuzz-regressions`: `cd dataplane/fuzz && cargo test $(LOCKED) --lib
+  --no-default-features`. CI passes `LOCKED=--locked`, so it replays exactly what the lockfile
+  pins; locally it is empty, so a developer adding a dependency sees the replay run, not a
+  lockfile error. Dependabot watches the fuzz crate's lockfile too (`/dataplane/fuzz`).
 - The set check also requires `required-features = ["fuzzing"]` on every `[[bin]]`, without which
   a plain `cargo build` of the crate fails.
 - `make test` runs it after the data plane's and the Go tests.
@@ -152,11 +156,17 @@ clean run on `main` after it is merged.
   length) that a later change to the harness could break silently, leaking one input into the
   next. A zeroed allocation is cheap: the pages it does not touch are never written.
 - **Eight selector slots, two free.** A quarter of `metadata_pages` inputs do nothing, the price
-  of a first byte whose meaning never changes as decoders are added. *Rejected:*
-  `selector % <number of decoders>`, which reroutes every committed input when one is added.
+  of a first byte whose meaning never changes as decoders are added, up to eight; a ninth would
+  need a wider table, remapping the inputs once. Moving from the old `% 6` remapped the corpus
+  kept on the runner once too; the fuzzer rebuilds it. *Rejected:* `selector % <number of
+  decoders>`, which reroutes every committed input whenever one is added.
+- **Linting compiles the binaries,** so `make lint` needs the C++ compiler that fuzzing needs
+  anyway. *Rejected:* linting the library alone, which would leave a binary that no longer builds
+  to be found by the weekly run.
 - **Memory and leak limits stay with the fuzzer** (S5). Enforcing them in the stable test would
-  need an allocator wrapper and LeakSanitizer; the weekly run replays every regression input
-  with them anyway.
+  need a counting global allocator and LeakSanitizer; the weekly run replays every regression
+  input with them anyway, so a committed `oom-` or `leak-` input whose fix regresses is caught
+  within a week, and reported.
 - **Crashes are added by hand** (S7), not by the workflow: a failing input needs a fix in the
   same pull request, which an automatic commit cannot provide. The workflow makes sure nobody
   misses one.

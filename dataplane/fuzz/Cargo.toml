@@ -13,11 +13,14 @@ flaminio-format = { path = "../crates/flaminio-format" }
 flaminio-net = { path = "../crates/flaminio-net" }
 
 # The fuzz binaries need libFuzzer; the library and its regression test do not, so `make test`
-# builds no C++. `make fuzz` passes `--features fuzzing`.
+# builds no C++.
 [features]
+# On by default, so every cargo-fuzz command (run, tmin, cmin, coverage) works as usual; the
+# regression test turns it off with --no-default-features.
+default = ["fuzzing"]
 fuzzing = ["dep:libfuzzer-sys"]
 
-# Not part of the main workspace: build with `cargo +nightly fuzz run --features fuzzing <target>`.
+# Not part of the main workspace: build with `cargo +nightly fuzz run <target>`.
 [workspace]
 members = ["."]
 

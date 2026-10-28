@@ -35,6 +35,8 @@ ACTIONLINT  := $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 # installs it); NIGHTLY=nightly for the latest.
 NIGHTLY   ?= nightly-2026-10-28
 COUNT     ?= 1
+# CI passes LOCKED=--locked to make fuzz-regressions, which builds the fuzz crate's own workspace.
+LOCKED    ?=
 # The data plane crates with threads, io_uring or unsafe code, for the sanitizers.
 SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net
 # Instrumented builds go apart from the normal ones, under CARGO_TARGET_DIR when it is set (CI).
@@ -70,7 +72,7 @@ sim: ## Replication-protocol simulation: SEEDS random runs, then every injected 
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
 
 fuzz-regressions: ## Replay every committed fuzz regression input, on the stable toolchain (docs/4)
-	cd $(DATAPLANE)/fuzz && $(CARGO) test --lib
+	cd $(DATAPLANE)/fuzz && $(CARGO) test $(LOCKED) --lib --no-default-features
 
 fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + cargo-fuzz if needed)
 	FUZZ_SECONDS=$(FUZZ_SECONDS) NIGHTLY=$(NIGHTLY) scripts/dev/fuzz.sh

@@ -1,8 +1,10 @@
 # Continuous integration
 
 Every check runs on self-hosted runners on centaur, a Linux server on the lab's network, so CI
-uses none of the private repository's GitHub Actions minutes. Every job is a `make` target, so a
-failure reproduces locally with the same command.
+uses almost none of the private repository's GitHub Actions minutes: only the Fuzz workflow's
+report job runs on GitHub's runners, for about a minute when a run failed, so that it still runs if
+centaur is down. Every job is a `make` target, so a failure reproduces locally with the same
+command.
 
 ## What runs when
 
@@ -61,8 +63,8 @@ the inputs as the artifact `fuzz-artifacts-<attempt>` (90 days) and in
 1. Copy the input into `dataplane/fuzz/regressions/<target>/`, keeping libFuzzer's name
    (`crash-<sha1>`, `timeout-…`, `oom-…`, `leak-…`).
 2. See it fail: `make fuzz-regressions`. An out-of-memory or leak input passes there; reproduce
-   it with `cargo +<nightly> fuzz run --features fuzzing <target> <file>` in `dataplane/fuzz`,
-   on Linux (LeakSanitizer does not run on macOS).
+   it with `cargo +<nightly> fuzz run <target> <file>` in `dataplane/fuzz`, on Linux
+   (LeakSanitizer does not run on macOS).
 3. Fix the bug, see it pass, and commit the input with the fix.
 
 A new target needs its harness in `lib.rs` (and its `TARGETS` table), its binary in

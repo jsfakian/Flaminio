@@ -56,8 +56,7 @@ fails, and fails at the end naming every target that did, so one run reports the
   build or toolchain failure, or a hang stopped at the time limit), so neither goes unnoticed. A
   job stopped at its time limit keeps the inputs it found. Runs never overlap.
 - To fix one: copy the file into `regressions/<target>/`, see `make fuzz-regressions` fail (or,
-  for an out-of-memory or leak input, `cargo +<nightly> fuzz run --features fuzzing <target>
-  <file>`, on Linux:
+  for an out-of-memory or leak input, `cargo +<nightly> fuzz run <target> <file>`, on Linux:
   LeakSanitizer does not run on macOS), fix the bug, see it pass, commit both. `docs/ci.md`
   describes this.
 
