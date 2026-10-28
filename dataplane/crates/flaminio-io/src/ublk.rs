@@ -1143,7 +1143,7 @@ async fn engine_io_task(
 /// Reads one piece from the local store into the tag's buffer, on this ring, as the MVP's
 /// reads did: the engine plans it, the device reads run while the event loop keeps going, and
 /// the checksums are verified at the end. A mismatch is planned and read once more before the
-/// read counts as failed (which makes the target treat the local replica as failed).
+/// read counts as failed, which makes the target read it from another ISR member (docs/5).
 async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx, lr: LocalRead) {
     let (at, n) = (lr.at, lr.len);
     for attempt in 0..2 {
@@ -1372,9 +1372,13 @@ async fn zc_read_plan(
             ok = false;
         }
     }
+    // Once a read failed, the plan fails anyway: nothing is worth staging.
     for (to, len, device_offset) in refused {
+        if !ok {
+            break;
+        }
         note_staged_read();
-        ok &= stage_device_read(q, st, tag, ctx, to, len, device_offset).await;
+        ok = stage_device_read(q, st, tag, ctx, to, len, device_offset).await;
     }
     ok
 }

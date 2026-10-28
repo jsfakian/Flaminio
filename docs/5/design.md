@@ -126,10 +126,12 @@ failed it was the only member left." `OpResult::Failed` keeps its meaning, "the 
 deposed". The simulator and the checker treat the new variant like `Failed`, as an operation
 without a result.
 
-The `avoid` entry goes once the operation ends: in `on_read`'s `Output::Done`, on
-`Unreadable`, and on `depose`, which clears the whole map. A read that `on_read` re-queues
-because the lease lapsed keeps its entry. Under `cfg(test)`, `avoid_len()` lets the unit tests
-check this.
+The `avoid` entry goes once the read is sent to another member: if that member fails it too
+(its session drops, say), the read may go back to the local replica rather than end as
+unreadable while the local replica is still a member. It also goes on `Unreadable`, and on
+`depose`, which clears the whole map. Under `cfg(test)`, `avoid_len()` lets the unit tests
+check this. The check for another member shares `source`'s rule for members being removed
+(`may_read_from`), so the two cannot disagree.
 
 The session stays open and the member stays in the ISR, so `fail_peer` and `member_failed` are
 not involved. A fast read that fails already falls back to the queue (`finish_fast_read` with

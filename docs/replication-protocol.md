@@ -349,7 +349,7 @@ the simulator then fails:
 
 | Broken rule | Caught by (first failing seed) |
 |---|---|
-| Acknowledge once a removal is proposed, not committed (§4) | seed 49 |
+| Acknowledge once a removal is proposed, not committed (§4) | seed 20 |
 | Accept requests from an old session (§3) | seed 16 |
 | No reconciliation after failover (§6) | seed 1 |
 | Trust digests from a single ISR member (§6) | seed 1 |

@@ -76,12 +76,13 @@ impl Staging {
 
     /// The address of byte `at` of slot `i`, for a read of `len` bytes into it by the kernel.
     /// The slot is not borrowed: the caller must not run [`Staging::with_slot`] on it while the
-    /// read is in flight.
+    /// read is in flight. It must not be borrowed now either.
     pub fn addr(&self, i: usize, at: usize, len: usize) -> *mut u8 {
         assert!(
             i < self.slots && at.checked_add(len).is_some_and(|end| end <= self.slot),
             "staging slot out of range"
         );
+        assert!(!self.borrowed[i].get(), "staging slot {i} is borrowed");
         self.base.wrapping_add(i * self.slot + at)
     }
 
@@ -149,6 +150,13 @@ mod tests {
     fn an_address_range_ends_inside_its_slot() {
         let s = Staging::new(2, 4096).unwrap();
         s.addr(0, 4096, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "is borrowed")]
+    fn a_borrowed_slot_has_no_address() {
+        let s = Staging::new(1, 4096).unwrap();
+        s.with_slot(0, |_| s.addr(0, 0, 4096));
     }
 
     #[test]

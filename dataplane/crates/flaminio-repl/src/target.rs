@@ -354,8 +354,8 @@ pub struct Target<P> {
     reads: BTreeMap<u64, ReadOp>,
     digests: BTreeMap<u64, DigestOp>,
     queue: VecDeque<Work<P>>,
-    /// Client reads that failed on a member without a reply, by operation: the member each must
-    /// not be sent to again (docs/5).
+    /// Client reads that failed on a member without a reply and wait to be sent again, by
+    /// operation: the member each must not go to next (docs/5).
     avoid: BTreeMap<u64, NodeId>,
     meta_inflight: Option<(u64, Time)>,
     next_heartbeat: Time,
@@ -467,8 +467,8 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
-    /// Client reads waiting to be sent again after a failed read, for the tests: each ends with
-    /// its operation.
+    /// Client reads waiting to be sent again after a failed read, for the tests: each entry goes
+    /// once its read is sent elsewhere, or ends.
     #[cfg(test)]
     pub fn avoid_len(&self) -> usize {
         self.avoid.len()
@@ -1380,7 +1380,6 @@ impl<P: Clone + Debug> Target<P> {
             ReadFor::Client { op } => {
                 self.chunks[chunk as usize].locks.remove(&ext);
                 if self.lease_ok(chunk as usize, now) {
-                    self.avoid.remove(&op);
                     self.out.push(Output::Done {
                         op,
                         result: OpResult::Read(data),
@@ -1457,19 +1456,32 @@ impl<P: Clone + Debug> Target<P> {
     /// An ISR member to read from: this node if possible, else the lowest id.
     fn source(&self, i: usize, exclude: Option<NodeId>) -> Option<NodeId> {
         let c = &self.chunks[i];
-        #[cfg(test)]
-        let removing_ok = self.bugs.read_from_removing;
-        #[cfg(not(test))]
-        let removing_ok = false;
         let usable = |n: &NodeId| {
-            (removing_ok || !c.removing.contains(n))
-                && Some(*n) != exclude
-                && self.session_of(*n).is_some()
+            self.may_read_from(i, *n) && Some(*n) != exclude && self.session_of(*n).is_some()
         };
         if c.isr.contains(&self.node) && usable(&self.node) {
             return Some(self.node);
         }
         c.isr.iter().copied().find(|n| usable(n))
+    }
+
+    /// Whether chunk `i` has an ISR member other than `failed` that reads may go to, now or
+    /// once its session opens: one whose removal is not in flight.
+    fn has_other_source(&self, i: usize, failed: NodeId) -> bool {
+        self.chunks[i]
+            .isr
+            .iter()
+            .any(|&n| n != failed && self.may_read_from(i, n))
+    }
+
+    /// Whether ISR member `n` of chunk `i` may serve reads: not while its removal is in flight
+    /// (§5, read sources).
+    fn may_read_from(&self, i: usize, n: NodeId) -> bool {
+        #[cfg(test)]
+        if self.bugs.read_from_removing {
+            return true;
+        }
+        !self.chunks[i].removing.contains(&n)
     }
 
     fn start_read(
@@ -1528,12 +1540,8 @@ impl<P: Clone + Debug> Target<P> {
                         let Some(from) = self.source(i, avoid) else {
                             // A read that failed on the only member left ends; any other read
                             // waits for a member it can use (docs/5).
-                            let c = &self.chunks[i];
                             if let Some(failed) = avoid
-                                && !c
-                                    .isr
-                                    .iter()
-                                    .any(|n| *n != failed && !c.removing.contains(n))
+                                && !self.has_other_source(i, failed)
                             {
                                 self.avoid.remove(&op);
                                 self.out.push(Output::Done {
@@ -1544,6 +1552,9 @@ impl<P: Clone + Debug> Target<P> {
                             }
                             return false;
                         };
+                        // Sent elsewhere, the read avoids the member that failed it no longer:
+                        // if this one fails too, that member may serve it again.
+                        self.avoid.remove(&op);
                         self.start_read(now, i, ext, from, ReadFor::Client { op }, true);
                         true
                     }
@@ -2274,11 +2285,11 @@ mod tests {
         }
 
         fn send(&mut self, to: NodeId, msg: ToReplica<Vec<Value>>) {
-            if self.down.contains(&to) {
-                return;
-            }
             if is_read(&msg) && self.t.client_read_of(to, msg.req).is_some() {
                 self.reads_to.push(to);
+            }
+            if self.down.contains(&to) {
+                return;
             }
             let Some(reply) = self.replicas.get_mut(&to).expect("replica").handle(&msg) else {
                 return;
@@ -2362,6 +2373,28 @@ mod tests {
         b.hold = None;
         let next = b.read(0);
         assert_eq!(b.done.get(&next), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to, [1, 2, 1]);
+    }
+
+    #[test]
+    fn a_read_sent_elsewhere_may_come_back_to_the_local_replica() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.write(0, 42);
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        // Node 2 takes the read again but never answers; its session fails and it is removed.
+        b.down.insert(2);
+        b.fail_held(0);
+        assert_eq!(b.reads_to, [1, 2]);
+        assert_eq!(
+            b.t.avoid_len(),
+            0,
+            "sent elsewhere, the read avoids nothing"
+        );
+        b.hold = None;
+        b.until("read done", |b| b.done.contains_key(&op));
+        // Not unreadable: the local replica, still a member, serves it.
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
         assert_eq!(b.reads_to, [1, 2, 1]);
     }
 
