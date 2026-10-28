@@ -14,11 +14,13 @@ use flaminio_format::meta::{
 use flaminio_format::page::{PAGE_PAYLOAD_LEN, PageType, new_page, payload_mut, seal};
 use flaminio_format::superblock::Superblock;
 use flaminio_net::frame::Frame;
-use flaminio_net::token::TokenKey;
+use flaminio_net::token::{MAX_LEN as TOKEN_MAX_LEN, TokenKey};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::sync::LazyLock;
 
 const NONCE: u64 = 1;
+/// An Ed25519 signature's length, at the end of a capability token.
+const SIGNATURE_LEN: usize = 64;
 
 // What every input shares is built once, not per input.
 static PAGES_LAYOUT: LazyLock<Layout> =
@@ -141,9 +143,12 @@ pub fn repl_frame(data: &[u8]) {
 /// targets.
 pub fn capability_token(data: &[u8]) {
     let _ = TOKEN_KEY.verify(data);
-    let mut token = data.to_vec();
-    token.extend_from_slice(TOKEN_SIGNER.sign(data).as_ref());
-    let _ = TOKEN_KEY.verify(&token);
+    // A body too long for any token is refused before its signature: not worth signing.
+    if data.len() + SIGNATURE_LEN <= TOKEN_MAX_LEN {
+        let mut token = data.to_vec();
+        token.extend_from_slice(TOKEN_SIGNER.sign(data).as_ref());
+        let _ = TOKEN_KEY.verify(&token);
+    }
 }
 
 /// Replays every committed regression input (docs/4/spec.md, S4 and S6).
@@ -227,8 +232,10 @@ mod regressions {
 
     /// Whether `name` is the name of a regression input (docs/4/spec.md, S3): `empty`,
     /// `seed-<what>`, or libFuzzer's `<kind>-<sha1>` (`minimized-from-` from `cargo fuzz tmin`).
-    /// libFuzzer loads every file of the directory, so a file named otherwise (a stray
-    /// `.DS_Store`, an editor backup) would be replayed by the fuzzer and must not be ignored here.
+    /// libFuzzer loads every file of the directory, so a file named otherwise (an editor backup, a
+    /// stray file) would be replayed by the fuzzer and must not be ignored here. The one exception
+    /// is Finder's `.DS_Store`, which is gitignored: it can never be committed, so never replayed by
+    /// CI's fuzzer, and failing local tests on it would gain nothing.
     fn is_input_name(name: &str) -> bool {
         let sha1 = |h: &str| h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit());
         name == "empty"
@@ -256,14 +263,44 @@ mod regressions {
         assert_eq!((claims.volume.as_str(), claims.epoch), ("vol1", 7));
     }
 
+    /// fuzz/deny.toml copies the data plane's cargo-deny policy (plus the NCSA exception for
+    /// libFuzzer): what it copies must not drift from the original.
+    #[test]
+    fn the_fuzz_deny_policy_follows_the_data_planes() {
+        let read = |p: PathBuf| -> toml::Table {
+            let text =
+                std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+            text.parse().expect("deny.toml is TOML")
+        };
+        let ours = read(path("deny.toml"));
+        let theirs = read(path("../deny.toml"));
+        for section in ["graph", "bans", "sources"] {
+            assert_eq!(
+                ours.get(section),
+                theirs.get(section),
+                "[{section}] differs"
+            );
+        }
+        let licenses = |t: &toml::Table, key: &str| t["licenses"].get(key).cloned();
+        for key in ["allow", "confidence-threshold", "private"] {
+            assert_eq!(
+                licenses(&ours, key),
+                licenses(&theirs, key),
+                "[licenses] {key} differs"
+            );
+        }
+    }
+
     #[test]
     fn every_target_has_a_harness_and_a_regression_directory() {
         let harnesses: BTreeSet<String> = TARGETS.iter().map(|(n, _)| n.to_string()).collect();
         let sources = names(&path("fuzz_targets"), |p| {
             (p.extension()? == "rs").then(|| p.file_stem())?
         });
+        // Hidden entries (a tool's .cache/, Finder's .DS_Store) are not targets: let them be.
         let regressions = names(&path("regressions"), |p| {
-            p.is_dir().then(|| p.file_name())?
+            let name = p.file_name()?;
+            (p.is_dir() && !name.to_string_lossy().starts_with('.')).then_some(name)
         });
         assert_eq!(
             harnesses,

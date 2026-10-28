@@ -15,8 +15,9 @@ that once made the target fail. They are committed. A file from the fuzzer keeps
 libFuzzer gave it, `<kind>-<sha1>` (`crash-`, `timeout-`, `oom-`, `leak-`, or `minimized-from-`
 after `cargo fuzz tmin`). A file made by hand is named `seed-<what it covers>`. Every directory
 starts with one file, `empty`, of zero bytes. No other file may be there: libFuzzer loads every
-file of the directory, so a stray one (a `.DS_Store`, an editor backup) would be replayed by the
-fuzzer. The regression test fails on it (S4).
+file of the directory, so a stray one (an editor backup, a misnamed input) would be replayed by
+the fuzzer. The regression test fails on it (S4). The exception is Finder's `.DS_Store`, which is
+gitignored, so it can never reach a committed directory or CI's fuzzer: it is let be.
 
 **S4. Replayed on every pull request.** `make fuzz-regressions` feeds every file of every
 `regressions/<target>/` to `flaminio_fuzz::<target>` on the stable toolchain. It fails, naming the
@@ -69,7 +70,8 @@ and rustfmt on `dataplane/fuzz`, which is outside the data plane's workspace.
 - The harness logic of the five targets, moved into the library, with two exceptions. The
   capability token harness verifies its input as it is, and then signed with a key it holds, so
   mutations reach the claims parser behind the signature check, which no unsigned input could
-  (a test checks a signed token verifies). And the
+  (a test checks a signed token verifies). It signs only bodies short enough to make a token. And
+  the
   metadata pages harness now also reaches the page-pool bitmap decoder, which its selector never
   did (it mapped six values onto five decoders). Its first byte now picks the decoder from eight
   fixed slots, `selector % 8` (0 checkpoint, 1 data bitmap, 2 chunk header, 3 page table, 4 map,

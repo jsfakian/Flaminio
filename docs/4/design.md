@@ -97,9 +97,12 @@ job output, which a job cancelled at its time limit may not pass on. It finds th
 name, through the same API, across all attempts, and takes the latest: re-running only the report
 job reuses an earlier attempt's fuzz job, whose attempt number then names the artifact and the
 runner-host directory to look for. The step fails if no job has that name, rather than report
-nothing after a rename. If the fuzz job ran no step, no runner took it, centaur's
-runners are probably down, and the note says so. That is the case running the report on GitHub's
-runners is for. A run cancelled while still queued by a newer one (the concurrency group) runs no
+nothing after a rename. If the fuzz job ran no step, no runner took it: the note says so, and
+whether the job was then cancelled (by hand, or after waiting for a runner) or failed; either way
+centaur's runners may be down. That is the case running the report on GitHub's runners is for. It
+names the runner-host copy of the inputs as there only if that copy succeeded, which it cannot
+see. It reads the label list in full before matching it: `grep -q` stopping early would kill
+`gh`, which `pipefail` reports as a failure. A run cancelled while still queued by a newer one (the concurrency group) runs no
 job at all, the report included.
 
 It runs on a GitHub-hosted runner (`ubuntu-latest`), not centaur: a run that failed because
@@ -129,7 +132,9 @@ Keeping it a separate job keeps `issues: write` away from the steps that build a
   fuzz crate's lockfile too (`/dataplane/fuzz`), and `make hygiene` runs every cargo-deny check
   on it, with its own `fuzz/deny.toml`: the data plane's policy (which it must follow), plus the
   NCSA license of the libFuzzer that libfuzzer-sys bundles, for that crate only. A policy of its
-  own keeps that exception out of the data plane's, where it would be unused.
+  own keeps that exception out of the data plane's, where it would be unused; a test parses both
+  files and fails if what the fuzz policy copies (`[graph]`, `[bans]`, `[sources]`, and the
+  license allow-list, threshold and private settings) differs from the original.
 - The set check also requires `required-features = ["fuzzing"]` on every `[[bin]]`, without which
   a plain `cargo build` of the crate fails; nothing but target directories directly under
   `regressions/`, where an input would be read by neither the replay nor the fuzzer (hidden files

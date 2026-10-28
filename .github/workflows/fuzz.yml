@@ -101,14 +101,17 @@ jobs:
               --jq '.jobs[] | select(.name == "Fuzz every target")' | jq -s 'max_by(.run_attempt)')
           [[ $job != null ]] || { echo "::error::no job named 'Fuzz every target'"; exit 1; }
           steps=$(jq '.steps | length' <<<"$job")
+          conclusion=$(jq -r '.conclusion' <<<"$job")
           fuzzed=$(jq '.run_attempt' <<<"$job")
           # That attempt's artifact only: the list holds every attempt's.
           kept=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
               --jq "[.artifacts[] | select(.name == \"fuzz-artifacts-$fuzzed\")] | length")
           # A path on centaur, for a person to read: not this runner's $HOME.
           # shellcheck disable=SC2088
-          host='~/.cache/flaminio-ci/fuzz-artifacts/'"$GITHUB_RUN_ID-$fuzzed"' on the runner host'
-          if [[ $steps -eq 0 ]]; then
+          host='~/.cache/flaminio-ci/fuzz-artifacts/'"$GITHUB_RUN_ID-$fuzzed"' on the runner host (if the copy there succeeded)'
+          if [[ $steps -eq 0 && $conclusion == cancelled ]]; then
+              note="The Fuzz run $RUN_URL was cancelled before a runner took its fuzz job (by hand, or after waiting for one: are centaur's runners up?). The targets were not fuzzed."
+          elif [[ $steps -eq 0 ]]; then
               note="The Fuzz run $RUN_URL never started: no runner took its fuzz job (are centaur's runners up?). The targets were not fuzzed."
           elif [[ $kept -gt 0 ]]; then
               note="The Fuzz run $RUN_URL (attempt $fuzzed) kept failing inputs: the artifact fuzz-artifacts-$fuzzed (90 days), and $host. To fix them: docs/ci.md, Fuzzing."
@@ -116,7 +119,9 @@ jobs:
               note="The Fuzz run $RUN_URL failed or was cancelled with no failing inputs uploaded: a build or toolchain failure, a hang, or a failed upload. See its log, and $host, where inputs are kept before the upload."
           fi
           # Created only when missing, so its colour and description stay as maintainers set them.
-          if ! gh label list --search fuzz --json name --jq '.[].name' | grep -qx fuzz; then
+          # Read in full before matching: grep -q stopping early would kill gh, which pipefail reports.
+          labels=$(gh label list --search fuzz --json name --jq '.[].name')
+          if ! grep -qx fuzz <<<"$labels"; then
               gh label create fuzz --color B60205 --description "Failed runs of the Fuzz workflow"
           fi
           open=$(gh issue list --label fuzz --state open --limit 1 --json number --jq '.[0].number // empty')
