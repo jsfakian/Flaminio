@@ -54,6 +54,7 @@ read_block() { sudo timeout 300 dd if="$1" of=/dev/null bs=4096 count=1 skip="$2
 
 # The node's log from here on: its journal cursor now.
 cursor=$(sudo journalctl -u flaminio-node -n 0 --show-cursor -o cat | sed -n 's/^-- cursor: //p')
+[[ -n $cursor ]] || { echo "no journal cursor for flaminio-node"; exit 1; }
 t0=$(now)
 tok=$(meta attach "$VOLUME" "$NODE" | jq -r .token)
 answer=$(control "attach $VOLUME $tok")
@@ -103,10 +104,16 @@ fi
 # store's disk refuses a buffer aligned to 4 bytes: its DMA alignment is above 3 (512 for
 # virtio-blk; NVMe takes 4, and then nothing needs the copy).
 # A partition's limits are its disk's; a store that is not a block device reads as 0.
-store=$(systemctl show -p ExecStart --value flaminio-node | grep -o -- '--device [^ ]*' | cut -d' ' -f2)
-dev=/sys/class/block/$(basename "$(readlink -f "$store")")
-[[ -e $dev/partition ]] && dev=$(readlink -f "$dev/..")
-dma=$(cat "$dev/queue/dma_alignment" 2>/dev/null || echo 0)
+store=$(systemctl show -p ExecStart --value flaminio-node | grep -o -- '--device[ =][^ ;]*' |
+    cut -c10- || true)
+dma=0
+if [[ -n $store ]]; then
+    dev=/sys/class/block/$(basename "$(readlink -f "$store")")
+    [[ -e $dev/partition ]] && dev=$(readlink -f "$dev/..")
+    dma=$(cat "$dev/queue/dma_alignment" 2>/dev/null || echo 0)
+else
+    echo "note: the node's --device was not found; not checking for a staged copy"
+fi
 if grep -q 'zero copy: local reads go straight into the requests' <<<"$journal" && ((dma > 3)) &&
     ! grep -q 'copied through the staging area' <<<"$journal"; then
     echo "zero copy, but no read was copied through the staging area ($store: DMA alignment $dma)"

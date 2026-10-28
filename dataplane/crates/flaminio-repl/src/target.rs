@@ -1549,17 +1549,14 @@ impl<P: Clone + Debug> Target<P> {
                         // case the failure passed, and ends as unreadable if it fails there
                         // again (docs/5).
                         let avoid = self.avoid.get(&op).copied();
+                        let other =
+                            avoid.is_some_and(|(failed, _)| self.has_other_source(i, failed));
                         let exclude = match avoid {
-                            Some((failed, n)) if n >= 2 || self.has_other_source(i, failed) => {
-                                Some(failed)
-                            }
+                            Some((failed, n)) if n >= 2 || other => Some(failed),
                             _ => None,
                         };
                         let Some(from) = self.source(i, exclude) else {
-                            if let Some((failed, _)) = avoid
-                                && exclude.is_some()
-                                && !self.has_other_source(i, failed)
-                            {
+                            if exclude.is_some() && !other {
                                 self.avoid.remove(&op);
                                 self.out.push(Output::Done {
                                     op,
