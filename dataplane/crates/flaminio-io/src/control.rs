@@ -15,7 +15,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -114,13 +113,12 @@ fn attach(
     limit: Duration,
 ) -> String {
     let (reply, answer) = mpsc::channel();
-    let withdrawn = Arc::new(AtomicBool::new(false));
     if ctl
         .send(Control::Attach {
             volume: volume.to_string(),
             token,
             reply,
-            withdrawn: withdrawn.clone(),
+            deadline: Instant::now() + limit,
         })
         .is_err()
     {
@@ -129,10 +127,8 @@ fn attach(
     wake();
     match answer.recv_timeout(limit) {
         Ok(a) => a,
+        // The request carries this deadline: not begun yet, it never will be (docs/6, S2).
         Err(mpsc::RecvTimeoutError::Timeout) => {
-            // Not begun yet, it never will be; under way, it stops at its next step (docs/6,
-            // S2).
-            withdrawn.store(true, Ordering::Relaxed);
             format!("error: no answer within {}", seconds(limit))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -198,16 +194,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_attach_without_an_answer_is_withdrawn() {
+    fn an_attach_without_an_answer_times_out_at_its_deadline() {
         let (ctl, requests) = mpsc::channel();
         let wake: Wake = Arc::new(|| {});
+        let sent = Instant::now();
         let answer = attach(&ctl, &wake, "v", vec![1], Duration::from_millis(100));
         assert_eq!(answer, "error: no answer within 0.1 s");
-        // The node still holds the request, and will skip it.
-        let Ok(Control::Attach { withdrawn, .. }) = requests.try_recv() else {
+        // The request carries the caller's deadline, passed now: the node will skip it.
+        let Ok(Control::Attach { deadline, .. }) = requests.try_recv() else {
             panic!("no request sent");
         };
-        assert!(withdrawn.load(Ordering::Relaxed));
+        assert!(deadline >= sent + Duration::from_millis(100));
+        assert!(deadline <= Instant::now());
     }
 
     #[test]
@@ -222,19 +220,30 @@ mod tests {
     }
 
     /// The CSI node plugin's limit, read from its source: the data plane's answers must come
-    /// before it gives up, or kubelet sees no cause (docs/6).
+    /// before it gives up, or kubelet sees no cause (docs/6). Takes `N * time.Second` or
+    /// `N * time.Minute`, in a const declaration or block, with or without a comment.
     fn csi_control_timeout() -> Duration {
         let go = include_str!("../../../../control/csi/dataplane.go");
-        let line = go
+        let value = go
             .lines()
-            .find(|l| l.starts_with("const DefaultControlTimeout = "))
-            .expect("DefaultControlTimeout in dataplane.go");
-        let secs = line
-            .trim_start_matches("const DefaultControlTimeout = ")
-            .trim_end_matches(" * time.Second")
-            .parse()
-            .expect("DefaultControlTimeout as N * time.Second");
-        Duration::from_secs(secs)
+            .map(|l| l.split("//").next().unwrap_or_default().trim())
+            .find_map(|l| {
+                let rest = l
+                    .trim_start_matches("const ")
+                    .strip_prefix("DefaultControlTimeout")?;
+                Some(rest.trim_start().strip_prefix('=')?.trim().to_string())
+            })
+            .expect("DefaultControlTimeout in control/csi/dataplane.go");
+        let (n, unit) = value
+            .split_once('*')
+            .map(|(n, u)| (n.trim(), u.trim()))
+            .expect("DefaultControlTimeout as N * time.Unit: update this parser");
+        let n: u64 = n.parse().expect("DefaultControlTimeout's N");
+        match unit {
+            "time.Second" => Duration::from_secs(n),
+            "time.Minute" => Duration::from_secs(60 * n),
+            other => panic!("DefaultControlTimeout in {other}: update this parser"),
+        }
     }
 
     #[test]

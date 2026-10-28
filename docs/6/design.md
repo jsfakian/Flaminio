@@ -55,14 +55,22 @@ replacing 120 s. `DELETE_LIMIT` is 50 s too (was 60 s). `detach` keeps its 30 s.
 its limit as a parameter, so a unit test can pass a short one. The error names the limit it
 waited, in seconds with at most one decimal: `error: no answer within 50 s`.
 
-**Withdrawing a request.** `Control::Attach` gets `withdrawn: Arc<AtomicBool>`. The control
-thread sets it when its limit passes. The main thread checks it when it takes the request, and
-skips a withdrawn one without answering, since nobody is waiting. Without this, a request that
-timed out while the node served another volume would run after the next detach, with a token
-nobody uses any more. An attach under way checks it again after the target's start and after
-adding the device, and stops there (dropping the device and the target), rather than serve a
-device nobody waits for while kubelet's retry takes a new epoch. Once the device has started,
-it stays, and a retry finds it through `status`.
+**A deadline for each request.** `Control::Attach` carries `deadline: Instant`: when the
+control socket stops waiting, `ATTACH_LIMIT` after it sent the request.
+- **Skipping.** The main thread skips a request whose deadline has passed when it takes it, and
+  logs that. Without this, a request that timed out while the node served another volume would
+  run after the next detach, with a token nobody uses any more.
+- **Bounding the steps.** `attach_and_serve` ends the target's start and the device's adding by
+  `deadline − START_LIMIT`. It waits at most `min(METADATA_LIMIT, that − now)` for the metadata
+  service, and `add_device` stops retrying at `min(now + ADD_DEVICE_LIMIT, that)`. A request
+  that waited its turn gets less time, not the full limits, and the node's own error arrives
+  before the socket gives up.
+- **What remains.** Only starting the device can outlast the deadline, if it takes longer than
+  `START_LIMIT`. The device then serves the volume with nobody told, and a retry finds it
+  through `status`.
+
+A flag that the socket set when it gave up, checked at fixed points, would race with a device
+starting at that moment, and would leave the steps their full limits.
 
 **CSI node plugin** (`control/csi/dataplane.go`):
 - `ControlSocket` gets a field `Timeout time.Duration`. Zero means `DefaultControlTimeout` =
@@ -124,7 +132,7 @@ could not be created at all. Issue #6 stays open for it, linked to the upstream 
 - **Rust:**
   - **Control socket:** `control.rs` gets a unit test for `attach` with a live receiver that
     never answers, and a limit of 100 ms. It checks the answer, and that the request it
-    received is marked withdrawn.
+    received carries a deadline that has passed.
   - **Limits:** a unit test asserts `ATTACH_LIMIT == METADATA_LIMIT + ADD_DEVICE_LIMIT +
     START_LIMIT`, and `ATTACH_LIMIT < 60 s`, with a comment pointing to `dataplane.go`.
 - **Engine** (`flaminio-node/tests/engine.rs`), driven by hand: the metadata answers sit in the
@@ -152,8 +160,9 @@ could not be created at all. Issue #6 stays open for it, linked to the upstream 
   field exists for tests.
 - **A generation, not only removal.** Removing the entry alone would let a late answer fill in,
   or fail, the next attach of the same volume.
-- **Withdraw a timed-out request, rather than let it run later.** It would attach the volume
-  with a stale token, for a caller that has given up.
+- **A deadline in the request, rather than a withdrawn flag.** A request that would run after
+  its caller gave up would attach the volume with a stale token. The deadline also bounds each
+  step by the time left, which a flag checked at fixed points cannot.
 - **S1 waits for upstream.** We do not carry a patched copy of libublk (about 11 000 lines), and
   do not send our own `ADD_DEV`. The user chose an upstream pull request
   (ublk-org/libublk-rs#72).

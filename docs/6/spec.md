@@ -30,10 +30,13 @@ takes these steps:
   7.0 does, starting does not wait for reads. On one that scans inside the start, the scan's
   first read can wait for a takeover: 5.5 s.
 
-So the socket answers an attach within 50 s. When that limit passes, it answers `error: no
-answer within 50 s` and withdraws the request: if the node has not begun it yet, it never
-does. An attach already under way may finish later, and a retry then finds its device through
-`status`. `delete` answers within 50 s too (was 60 s), and `detach` within 30 s, as now.
+So the socket answers an attach within 50 s. The request carries that deadline. The node skips
+a request it would begin after the deadline, and logs that it did. It ends the target's start
+and the device's adding by the deadline less the 10 s for the start, waiting less than 30 s
+and 10 s if the request waited its turn. So its own answer, or the reason there is none,
+reaches the socket in time, unless starting the device itself takes more than 10 s. When the
+deadline passes, the socket answers `error: no answer within 50 s`. An attach whose device then
+starts anyway is found by a retry through `status`. `delete` answers within 50 s too (was 60 s), and `detach` within 30 s, as now.
 
 **S3. A timed-out attach leaves nothing behind.** When the target's start runs out of time, the
 data plane drops the attach in the engine. An answer from the metadata service that comes later
@@ -67,7 +70,7 @@ afterwards. And `scripts/checks/reconcile.sh`, which passes.
 - **Rust:**
   - **Control socket** (`control.rs`): with a control channel whose receiver is kept but never
     answers, and a limit of 100 ms, `attach` answers `error: no answer within 0.1 s`. The
-    request it sent is then marked withdrawn.
+    request it sent carries a deadline that has passed by then.
   - **Limits:** a test asserts that `ATTACH_LIMIT` is `METADATA_LIMIT + ADD_DEVICE_LIMIT +
     START_LIMIT`, and is below the CSI node plugin's 60 s.
 - **Engine** (`flaminio-node/tests/engine.rs`):
