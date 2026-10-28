@@ -106,7 +106,9 @@ mod tests {
 
     #[test]
     fn aligned_zeroed_and_writable() {
-        for len in [0, 1, 4096, 4097, 1 << 20] {
+        // Miri walks every byte: a large buffer there adds minutes and no coverage.
+        let large = if cfg!(miri) { 2 * ALIGN } else { 1 << 20 };
+        for len in [0, 1, 4096, 4097, large] {
             let mut b = AlignedBuf::zeroed(len);
             assert_eq!(b.len(), len);
             assert_eq!(b.as_ptr() as usize % ALIGN, 0);
@@ -118,5 +120,25 @@ mod tests {
         assert_eq!(&c[..], &[1, 2, 3]);
         assert!(is_aligned(&AlignedBuf::zeroed(8192)));
         assert!(!is_aligned(&AlignedBuf::zeroed(8192)[1..4097]));
+    }
+
+    /// The paths the unsafe code serves, for Miri: an empty copy, shared bytes sliced and
+    /// cloned, and buffers moved to, read on and dropped by another thread.
+    #[test]
+    fn shared_and_sent_across_threads() {
+        assert!(AlignedBuf::copy_of(&[]).is_empty());
+        let data: Vec<u8> = (0..=255).cycle().take(3 * ALIGN).collect();
+        let shared = AlignedBuf::shared_copy_of(&data);
+        let piece = shared.slice(ALIGN..2 * ALIGN);
+        assert!(is_aligned(&piece));
+        let mut owned = AlignedBuf::copy_of(&data[..ALIGN]);
+        let handle = std::thread::spawn(move || {
+            owned[0] = 9;
+            (piece[..].to_vec(), owned[..2].to_vec())
+        });
+        let (read, written) = handle.join().unwrap();
+        assert_eq!(read, &data[ALIGN..2 * ALIGN]);
+        assert_eq!(written, [9, 1]);
+        drop(shared);
     }
 }

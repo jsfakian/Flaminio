@@ -25,6 +25,20 @@ IMAGE     ?= .lab/disk.img
 IMAGE_SIZE ?= 10G
 # Seconds per cargo-fuzz target for `make fuzz` (follow-ups §6).
 FUZZ_SECONDS ?= 60
+SHELL_SCRIPTS := $(wildcard scripts/*.sh scripts/*/*.sh)
+# Check tools, at pinned versions. The Go ones run through `go run`; the Rust ones are cargo
+# subcommands: cargo install --locked cargo-deny@0.20.2 cargo-machete@0.9.2
+STATICCHECK := $(GO) run honnef.co/go/tools/cmd/staticcheck@v0.8.2
+GOVULNCHECK := $(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0
+ACTIONLINT  := $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+# A dated nightly, so Miri, the sanitizers and fuzzing do not change under CI (runner-host.sh
+# installs it); NIGHTLY=nightly for the latest.
+NIGHTLY   ?= nightly-2026-10-28
+COUNT     ?= 1
+# The data plane crates with threads, io_uring or unsafe code, for the sanitizers.
+SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net
+# Instrumented builds go apart from the normal ones, under CARGO_TARGET_DIR when it is set (CI).
+SANITIZE_TARGET := $(or $(CARGO_TARGET_DIR),target)
 
 .PHONY: help
 help: ## Show this help
@@ -60,13 +74,14 @@ fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + c
 meta-interop: ## The data plane's Rust metadata client against the Go service, over mutual TLS
 	CARGO=$(CARGO) scripts/dev/meta-interop.sh
 
-lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck
+lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck, actionlint
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l api meta pkg control)" || { echo "gofmt needed:"; gofmt -l api meta pkg control; exit 1; }
 	$(BUF) lint
-	@if command -v shellcheck >/dev/null; then shellcheck -x scripts/*.sh scripts/host/*.sh scripts/guest/*.sh scripts/dev/*.sh && echo "shellcheck: ok"; \
+	@if command -v shellcheck >/dev/null; then shellcheck -x $(SHELL_SCRIPTS) && echo "shellcheck: ok"; \
 	 else echo "shellcheck not installed (brew install shellcheck); skipped"; fi
+	$(ACTIONLINT)
 
 fmt: ## Format Rust and Go code
 	cd $(DATAPLANE) && $(CARGO) fmt
@@ -78,6 +93,36 @@ proto: ## Regenerate Go code from api/proto (buf and plugins run at pinned versi
 
 meta-vectors: ## Regenerate the metadata transition vectors from the Rust model
 	cd $(DATAPLANE) && $(CARGO) run -q -p flaminio-repl --example meta_vectors > ../meta/testdata/isr-vectors.jsonl
+
+##@ Checks (CI runs these too: docs/ci.md)
+
+.PHONY: hygiene race contracts miri sanitize
+hygiene: ## Advisories and licenses (cargo-deny), unused crates, rustdoc, staticcheck, govulncheck, go.mod
+	cd $(DATAPLANE) && $(CARGO) deny check
+	cd $(DATAPLANE) && $(CARGO) machete
+	cd $(DATAPLANE) && RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps --workspace --quiet
+	$(STATICCHECK) ./...
+	$(GOVULNCHECK) ./...
+	$(GO) mod verify
+	$(GO) mod tidy -diff
+
+race: ## Go tests under the race detector, in random order, with goroutine-leak checks (COUNT=1)
+	$(GO) test -race -shuffle=on -count=$(COUNT) ./...
+
+contracts: ## Generated code and vectors match their sources; fuzz lockfile; Rust client vs Go service
+	$(MAKE) --no-print-directory proto meta-vectors
+	git diff --exit-code -- api/gen meta/testdata
+	cd $(DATAPLANE)/fuzz && $(CARGO) metadata --locked --format-version 1 >/dev/null
+	$(MAKE) --no-print-directory meta-interop
+
+miri: ## Miri (nightly) on the data plane's unsafe code that runs without system calls
+	cd $(DATAPLANE) && MIRIFLAGS=-Zmiri-strict-provenance $(CARGO) +$(NIGHTLY) miri test -p flaminio-uring --lib aligned
+
+sanitize: ## AddressSanitizer with leak detection, then ThreadSanitizer, on the data plane's tests (Linux, nightly)
+	cd $(DATAPLANE) && CARGO_TARGET_DIR=$(SANITIZE_TARGET)/asan RUSTFLAGS=-Zsanitizer=address \
+	    $(CARGO) +$(NIGHTLY) test --target x86_64-unknown-linux-gnu $(SANITIZE_CRATES) --lib --tests
+	cd $(DATAPLANE) && CARGO_TARGET_DIR=$(SANITIZE_TARGET)/tsan RUSTFLAGS=-Zsanitizer=thread \
+	    $(CARGO) +$(NIGHTLY) test -Zbuild-std --target x86_64-unknown-linux-gnu $(SANITIZE_CRATES) --lib --tests
 
 disk-demo: release ## Format and inspect a sparse disk image (IMAGE, IMAGE_SIZE)
 	@mkdir -p $(dir $(IMAGE))

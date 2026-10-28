@@ -49,7 +49,7 @@ func writeNew(path string, b []byte, mode os.FileMode) error {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: flaminio-ca init|sign|token-key ...")
+		return errors.New("usage: flaminio-ca init|sign|token-key [args]")
 	}
 	switch args[0] {
 	case "init":

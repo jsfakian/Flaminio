@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Microbenchmark that drives the Flaminio replica store directly, like fio drives a disk"
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

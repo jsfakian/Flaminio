@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Format and inspect Flaminio disks (development tool)"
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

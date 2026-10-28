@@ -1,0 +1,5 @@
+# actionlint (make lint): the labels of the self-hosted runners (docs/ci.md).
+self-hosted-runner:
+  labels:
+    - flaminio
+    - flaminio-lab
