@@ -186,6 +186,8 @@ pub enum IoError {
     Invalid,
     #[error("the target was deposed: the volume moved to another node")]
     Deposed,
+    #[error("no replica could serve the read")]
+    Unreadable,
 }
 
 pub enum Input {
@@ -1508,6 +1510,7 @@ impl<D: BlockDevice> Engine<D> {
             },
             OpResult::Read(Payload::Placed(_)) => c.failed = Some(IoError::Invalid),
             OpResult::Failed => c.failed = Some(IoError::Deposed),
+            OpResult::Unreadable => c.failed = Some(IoError::Unreadable),
         }
         c.pending -= 1;
         if c.pending == 0 {
@@ -1873,8 +1876,15 @@ impl<D: BlockDevice> Engine<D> {
             })
     }
 
-    /// Ends a local read: `ok` if its device reads completed and verified. A failed read gets
-    /// no reply, so the target treats the local replica as failed.
+    /// The target epoch, session and request of a pending local read, for the tests.
+    #[doc(hidden)]
+    pub fn local_read_ids(&self, lr: &LocalRead) -> Option<(u64, u64, u64)> {
+        let p = self.local_reads.get(&lr.token)?;
+        Some((p.sref.epoch, p.session, p.req))
+    }
+
+    /// Ends a local read: `ok` if its device reads completed and verified. A failed read is
+    /// sent again to another ISR member, and the local replica stays a member (docs/5).
     pub fn local_read_done(
         &mut self,
         now: Instant,
@@ -1890,21 +1900,34 @@ impl<D: BlockDevice> Engine<D> {
         };
         if !ok {
             eprintln!("flaminio-node: {}: local read failed", p.volume);
-            return;
         }
         let us = self.us(now);
         let Some(rt) = self.targets.get_mut(&p.volume) else {
             return;
         };
-        let local = rt.local;
-        match rt.reads.remove(&(local, p.req)) {
-            Some(n) if n == lr.len => {}
-            _ => return,
+        // Pending reads outlive a deposed target until the detach, and a new target numbers its
+        // sessions and requests from 1 again: a stale read must not touch the new one's. The
+        // read's session is the target's local session, opened at the target's epoch.
+        if p.sref.epoch != rt.sm.epoch() {
+            return;
         }
+        let local = rt.local;
+        let expected = rt.reads.remove(&(local, p.req));
         // The read was admitted before the device read: if a newer target fenced the replica
         // meanwhile, it may have written to it, and the answer is what the replica would have
-        // given at the time of the read (spec §5, fast reads).
+        // given at the time of the read (spec §5, fast reads). That holds for a failed read
+        // too, which a fence can cause (the store refuses to plan a read at an older epoch):
+        // the target learns it was deposed, instead of trying another member.
         let fenced = self.service.fenced_epoch(p.sref);
+        if !ok && fenced == p.sref.epoch {
+            rt.sm
+                .on_read_failed(us, local, p.sref.epoch, p.session, p.req);
+            self.drain(now, &p.volume);
+            return;
+        }
+        if expected != Some(lr.len) {
+            return;
+        }
         let body = if fenced == p.sref.epoch {
             Response::Data(Payload::Placed(lr.len))
         } else {
@@ -1912,7 +1935,7 @@ impl<D: BlockDevice> Engine<D> {
         };
         let m = FromReplica {
             vol: 0,
-            epoch: rt.sm.epoch(),
+            epoch: p.sref.epoch,
             session: p.session,
             req: p.req,
             body,

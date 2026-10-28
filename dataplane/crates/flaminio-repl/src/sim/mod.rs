@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::extent::Extent;
 use crate::meta::{MetaReply, MetaRequest, Metadata, VolumeMeta};
-use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, ToReplica};
+use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, Response, ToReplica};
 use crate::replica::Replica;
 use crate::target::{Op, OpResult, Output, Target};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Value, VolumeId};
@@ -118,6 +118,9 @@ pub struct Config {
     pub move_pct: u64,
     /// Client reads take the fast path when the target admits them (spec §5, fast reads).
     pub fast_reads: bool,
+    /// Percent of the target's client reads from its own replica that fail without a reply,
+    /// during chaos: the data plane's failed local reads, which fail over (docs/5).
+    pub local_read_fail_pct: u64,
 }
 
 impl Config {
@@ -158,6 +161,8 @@ impl Config {
             read_pct: r.pick(&[50, 80, 95]),
             move_pct: r.pick(&[0, 10, 30]),
             fast_reads: r.pct(50),
+            // Drawn last, so every earlier field of every seed keeps its value.
+            local_read_fail_pct: r.pick(&[0, 0, 5, 20]),
         };
         c.max_digest = c.max_io;
         c
@@ -174,6 +179,8 @@ pub struct Report {
     pub partitions: u64,
     pub final_epoch: Epoch,
     pub events: u64,
+    /// Client reads from a target's own replica that the run failed (docs/5).
+    pub failed_local_reads: u64,
 }
 
 /// Deliberate bugs to inject into every replica and target of a run.
@@ -705,10 +712,27 @@ impl Sim {
                 }
             }
             Body::FromReplica(m) => {
+                // A client read from the target's own replica may fail instead, during chaos
+                // only: the final reads after settling must all complete. Nothing is drawn at a
+                // rate of 0, so such seeds run as they did before (docs/5).
+                let pct = self.cfg.local_read_fail_pct;
+                let fail = pct > 0
+                    && self.chaos
+                    && p.from == p.to
+                    && matches!(m.body, Response::Data(_))
+                    && self.nodes[p.to as usize].target.as_ref().is_some_and(|t| {
+                        m.epoch == t.epoch() && t.client_read_of(p.from, m.req).is_some()
+                    })
+                    && self.rng.pct(pct);
                 let n = &mut self.nodes[p.to as usize];
                 let local = n.clock.local(self.now);
                 if let Some(t) = n.target.as_mut() {
-                    t.on_reply(local, p.from, &m);
+                    // A report the target ignores (a stale session) leaves the reply to it.
+                    if fail && t.on_read_failed(local, p.from, m.epoch, m.session, m.req) {
+                        self.report.failed_local_reads += 1;
+                    } else {
+                        t.on_reply(local, p.from, &m);
+                    }
                 }
                 self.after(p.to);
             }
@@ -831,7 +855,7 @@ impl Sim {
                     let h = &mut self.history[op as usize];
                     debug_assert_eq!(h.epoch, epoch);
                     match result {
-                        OpResult::Failed => {}
+                        OpResult::Failed | OpResult::Unreadable => {}
                         r => h.result = Some((self.now, r)),
                     }
                 }

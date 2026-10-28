@@ -101,6 +101,21 @@ being removed may already be out of the metadata service's ISR, so a new target 
 it (§6). Under this rule, an old target only ever reads from members of the metadata service's
 current ISR.
 
+**Failed local reads** (`Target::on_read_failed`, docs/5). The data plane reads the local
+replica's store itself, so a local read can fail with no reply: a device read error, or a
+checksum mismatch. The data plane then reports the failure at once.
+- **The read is sent again** to another read source, ahead of the reads queued after it.
+- **The local replica stays a member**, and its session stays open. Only that read avoids it.
+- **If the chunk has no other ISR member**, members being removed not counted, the read goes
+  back to the local replica once more. If it fails there again, it ends as unreadable, and the
+  client gets an I/O error.
+- **If its other members exist but none can be used yet**, the read waits for one, like any
+  queued read.
+- **Nothing else changes.** No data or membership changes, and the lease and read-source
+  rules apply to the read again, so a failed local read cannot affect linearizability. Only
+  client reads fail over this way. A remote replica whose read fails still gets no reply,
+  and the request timeout handles it.
+
 ### Fast reads
 
 Most reads are served by the target's own node from its local replica. The fast path admits
@@ -296,7 +311,9 @@ order, from a seed. A seed reproduces a run exactly. Each run has two phases:
     blocks;
   - operations of 1–3 blocks, and repairs and copies of 1–3 blocks;
   - its timing: lease 2–6 s, clock rates up to 10% apart;
-  - its client pace, and a read share of 50, 80 or 95%.
+  - its client pace, and a read share of 50, 80 or 95%;
+  - in half the runs, a share of 5 or 20% of the target's client reads from its own replica
+    that fail during chaos, as failed local reads (§5). The final reads are never failed.
 
   Faults then arrive every few seconds:
   - crashes and restarts;
@@ -333,26 +350,27 @@ the simulator then fails:
 
 | Broken rule | Caught by (first failing seed) |
 |---|---|
-| Acknowledge once a removal is proposed, not committed (§4) | seed 19 |
-| Accept requests from an old session (§3) | seed 1 |
+| Acknowledge once a removal is proposed, not committed (§4) | seed 49 |
+| Accept requests from an old session (§3) | seed 16 |
 | No reconciliation after failover (§6) | seed 1 |
 | Trust digests from a single ISR member (§6) | seed 1 |
-| Reconciliation writes prune uncertain sets (§6) | seed 71 |
-| Settling before the repairs are done (§6) | seed 109 |
-| No lease check on reads (§5) | seed 288, split-brain scenario |
-| No takeover wait (§6) | seed 161, split-brain scenario |
+| Reconciliation writes prune uncertain sets (§6) | seed 104 |
+| Settling before the repairs are done (§6) | seed 145 |
+| No lease check on reads (§5) | seed 276, split-brain scenario |
+| No takeover wait (§6) | seed 75, split-brain scenario |
 | Reads from a member being removed (§5) | removal-in-flight scenario |
-| Joiner counts for leases and writes only once committed (§5, §7) | seed 177 |
-| Removed member's dirty set omits writes in flight (§7) | seed 36 |
-| No resync filter on the replica (§7) | seed 7 |
-| A move's destination joins the ISR without a resync (§7, moves) | seed 1 |
-| A move drops its source before the destination is in the ISR (§7, moves) | seed 1; in 400 seeds, 49 runs show lost or stale data, 60 a stall |
-| Fast reads without the lease check (§5, fast reads) | seed 967; split-brain scenario |
-| Fast reads without the membership check (§5, fast reads) | seed 3206 |
+| Joiner counts for leases and writes only once committed (§5, §7) | seed 49 |
+| Removed member's dirty set omits writes in flight (§7) | seed 7 |
+| No resync filter on the replica (§7) | seed 112 |
+| A move's destination joins the ISR without a resync (§7, moves) | seed 2 |
+| A move drops its source before the destination is in the ISR (§7, moves) | seed 3 |
+| Fast reads without the lease check (§5, fast reads) | seed 276; split-brain scenario |
+| Fast reads without the membership check (§5, fast reads) | seed 18962 |
 | Fast reads without the fencing check at completion (§5, fast reads) | seed 3626767: a slow device read must straddle a complete takeover |
 
 The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
-and 60 000 for reconciliation pruning. That bug is rare by nature: the target must die between
+and 60 000 for reconciliation pruning, early settling and fast reads without the membership
+check. That bug is rare by nature: the target must die between
 two repairs that are usually sent together.
 
 **Commands:**

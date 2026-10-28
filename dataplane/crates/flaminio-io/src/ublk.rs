@@ -476,7 +476,7 @@ async fn drive(
 // --- Phase 1: a volume served by the node engine (flaminio-io node --attach) ---------------
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -507,8 +507,12 @@ struct Shared {
     engine: Mutex<flaminio_node::engine::Engine<UringDevice>>,
     inputs: Mutex<mpsc::Receiver<Input>>,
     sender: mpsc::Sender<Input>,
-    /// The store's device, for the local reads the tag tasks perform.
+    /// The store's device, for the local reads the tag tasks perform, and its path, for logs.
     fd: RawFd,
+    device: String,
+    /// A zero-copy read was copied through the staging area, and logged (docs/5): once per
+    /// device, as a line per read would flood the log under a workload misaligned on purpose.
+    staged: AtomicBool,
     /// Op id → the waiting tag task's queue and channel.
     waiters: Mutex<HashMap<u64, (u16, Waiter)>>,
     next_op: AtomicU64,
@@ -879,6 +883,8 @@ fn run_device(
     }
     let shared = Arc::new(Shared {
         fd: engine.device().as_raw_fd(),
+        device: c.device.clone(),
+        staged: AtomicBool::new(false),
         engine: Mutex::new(engine),
         inputs: Mutex::new(inputs),
         sender,
@@ -1143,7 +1149,7 @@ async fn engine_io_task(
 /// Reads one piece from the local store into the tag's buffer, on this ring, as the MVP's
 /// reads did: the engine plans it, the device reads run while the event loop keeps going, and
 /// the checksums are verified at the end. A mismatch is planned and read once more before the
-/// read counts as failed (which makes the target treat the local replica as failed).
+/// read counts as failed, which makes the target read it from another ISR member (docs/5).
 async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx, lr: LocalRead) {
     let (at, n) = (lr.at, lr.len);
     for attempt in 0..2 {
@@ -1323,7 +1329,9 @@ async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCt
 }
 
 /// Carries out a planned read with zero copy: the device reads land in the request's pages at
-/// `at`, and the plan's zero-filled ranges are copied in from the tag's staging slot.
+/// `at`, and the plan's zero-filled ranges are copied in from the tag's staging slot. A device
+/// read the disk refuses with EINVAL, because the request's pages are not aligned for direct
+/// I/O on it, is done again through the staging slot (docs/5, S1).
 async fn zc_read_plan(
     q: &UblkQueue<'_>,
     tag: u16,
@@ -1340,15 +1348,14 @@ async fn zc_read_plan(
         if r.buf_offset > pos {
             zeros.push((pos, r.buf_offset - pos));
         }
-        let sqe = opcode::ReadFixed::new(
-            types::Fd(ctx.shared.fd),
-            (at + r.buf_offset) as *mut u8,
-            r.len as u32,
-            tag,
-        )
-        .offset(r.device_offset)
-        .build();
-        pending.push((q.ublk_submit_sqe(sqe), r.len as i32));
+        // Where this read goes in the request, and in the slot if it is staged: one value for
+        // both, so neither can lose a term.
+        let to = at + r.buf_offset;
+        let sqe =
+            opcode::ReadFixed::new(types::Fd(ctx.shared.fd), to as *mut u8, r.len as u32, tag)
+                .offset(r.device_offset)
+                .build();
+        pending.push((q.ublk_submit_sqe(sqe), to, r.len, r.device_offset));
         pos = r.buf_offset + r.len;
     }
     if pos < n {
@@ -1361,14 +1368,68 @@ async fn zc_read_plan(
             ok = false;
         }
     }
-    for (completion, expected) in pending {
+    let mut refused = Vec::new();
+    for (completion, to, len, device_offset) in pending {
         let got = completion.await;
-        if got != expected {
-            eprintln!("flaminio-io: local read: device read returned {got}, not {expected}");
+        if got == -libc::EINVAL {
+            refused.push((to, len, device_offset));
+        } else if got != len as i32 {
+            eprintln!("flaminio-io: local read: device read returned {got}, not {len}");
             ok = false;
         }
     }
+    // Once a read failed, the plan fails anyway: nothing is worth staging.
+    for (to, len, device_offset) in refused {
+        if !ok {
+            break;
+        }
+        ok = stage_device_read(q, st, tag, ctx, to, len, device_offset).await;
+        // Once a staged read worked: a load first, as every queue thread checks the flag.
+        if ok
+            && !ctx.shared.staged.load(Ordering::Relaxed)
+            && !ctx.shared.staged.swap(true, Ordering::Relaxed)
+        {
+            eprintln!(
+                "flaminio-io: {}: zero copy: a read's pages are not aligned for {} (its DMA \
+                 alignment); such reads are copied through the staging area",
+                ctx.shared.volume, ctx.shared.device
+            );
+        }
+    }
     ok
+}
+
+/// A device read the disk refused into the request's pages: from the disk into the tag's
+/// staging slot, which is page-aligned, then from the slot into the request's pages at the same
+/// place. True if both completed.
+async fn stage_device_read(
+    q: &UblkQueue<'_>,
+    st: &Staging,
+    tag: u16,
+    ctx: &EngineCtx,
+    to: usize,
+    len: usize,
+    device_offset: u64,
+) -> bool {
+    // No `with_slot` runs on this tag's slot meanwhile: only this tag's task uses it, and it
+    // awaits the read here. The zero fills used other ranges of it.
+    let sqe = opcode::Read::new(
+        types::Fd(ctx.shared.fd),
+        st.addr(tag as usize, to, len),
+        len as u32,
+    )
+    .offset(device_offset)
+    .build();
+    let got = q.ublk_submit_sqe(sqe).await;
+    if got != len as i32 {
+        eprintln!("flaminio-io: local read: device read returned {got}, not {len} (staged)");
+        return false;
+    }
+    if !stage_to_request(q, st, tag, to, len).await {
+        eprintln!("flaminio-io: local read: copy of {len} staged bytes at {to} failed");
+        return false;
+    }
+    true
 }
 
 /// The fast path, with zero copy. True if the read was served; false to take the slow path.
