@@ -176,6 +176,7 @@ dependencies = [
  "flaminio-format",
  "flaminio-net",
  "libfuzzer-sys",
+ "ring",
  "toml",
 ]
 

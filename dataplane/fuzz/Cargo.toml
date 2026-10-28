@@ -11,6 +11,8 @@ cargo-fuzz = true
 libfuzzer-sys = { version = "0.4.10", optional = true }
 flaminio-format = { path = "../crates/flaminio-format" }
 flaminio-net = { path = "../crates/flaminio-net" }
+# Signs the capability_token harness's tokens, so its inputs get past the signature check.
+ring = "0.17.14"
 
 # The fuzz binaries need libFuzzer; the library and its regression test do not, so `make test`
 # builds no C++.

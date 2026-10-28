@@ -103,9 +103,8 @@ meta-vectors: ## Regenerate the metadata transition vectors from the Rust model
 
 .PHONY: hygiene race contracts miri sanitize
 hygiene: ## Advisories and licenses (cargo-deny), unused crates, rustdoc, staticcheck, govulncheck, go.mod
-	cd $(DATAPLANE) && $(CARGO) deny check -A license-exception-not-encountered
-	cd $(DATAPLANE)/fuzz && $(CARGO) deny --config ../deny.toml check \
-	    -A license-not-encountered -A advisory-not-detected advisories licenses sources
+	cd $(DATAPLANE) && $(CARGO) deny check
+	cd $(DATAPLANE)/fuzz && $(CARGO) deny check
 	cd $(DATAPLANE) && $(CARGO) machete
 	cd $(DATAPLANE) && RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps --workspace --quiet
 	$(STATICCHECK) ./...

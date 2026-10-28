@@ -12,6 +12,7 @@ ignore = [
 
 [licenses]
 # Licenses that allow distributing Flaminio under Apache-2.0. MPL-2.0 is copyleft per file only.
+# fuzz/deny.toml repeats this list for the fuzz crate: keep the two in step.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -23,11 +24,6 @@ allow = [
     "Unlicense",
 ]
 confidence-threshold = 0.9
-
-# libFuzzer, bundled by libfuzzer-sys for the fuzz crate only (never shipped): permissive.
-[[licenses.exceptions]]
-crate = "libfuzzer-sys"
-allow = ["NCSA"]
 
 [licenses.private]
 # The workspace's own crates are not published.

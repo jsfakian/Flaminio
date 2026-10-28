@@ -46,9 +46,10 @@ jobs:
         if: always()
         run: rsync -a "$CORPUS/" "$HOME/.cache/flaminio-ci/fuzz-corpus/"
       # Also when the job is cancelled at its time limit: the inputs found so far count.
+      # Independent of the upload below: either may fail without stopping the other.
       - name: Keep the failing inputs
-        id: kept
         if: failure() || cancelled()
+        continue-on-error: true
         run: |
           # Copies older than the artifacts' 90 days go.
           find "$HOME/.cache/flaminio-ci/fuzz-artifacts" -mindepth 1 -maxdepth 1 -mtime +90 \
@@ -57,10 +58,9 @@ jobs:
               keep="$HOME/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
               mkdir -p "$keep"
               rsync -a "$ARTIFACTS/" "$keep/"
-              echo "inputs=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Upload the failing inputs
-        if: (failure() || cancelled()) && steps.kept.outputs.inputs == 'true'
+        if: (failure() || cancelled()) && hashFiles('dataplane/fuzz/artifacts/**') != ''
         uses: actions/upload-artifact@v7
         with:
           # One per attempt: a re-run keeps the run, and a name may be used once in a run.
@@ -91,6 +91,8 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Open or update the fuzz issue
+        # bash -eo pipefail: a failing `gh api` in a pipeline must fail the step, not read as empty.
+        shell: bash
         run: |
           # The latest run of the fuzz job, by its name (keep in step with `name:` above), across
           # attempts: re-running only this job reuses an earlier attempt's fuzz job. None found

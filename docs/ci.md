@@ -71,7 +71,8 @@ the inputs as the artifact `fuzz-artifacts-<attempt>` (90 days) and in
 
 A new target needs its harness in `lib.rs` (and its `TARGETS` table), its binary in
 `fuzz_targets/` and `Cargo.toml` (with `required-features = ["fuzzing"]`), and
-`regressions/<target>/empty`; the regression test fails until all are there. A new decoder in
+`regressions/<target>/empty`; the regression test fails until all are there. The binary's
+`fuzz_target!` line is exactly `fuzz_target!(|data: &[u8]| flaminio_fuzz::<target>(data));`. A new decoder in
 `metadata_pages` takes a free slot of its first byte (`selector % 8`), never renumbering the
 others. A file in `regressions/` is `empty`, `seed-<what>`, or libFuzzer's name (`crash-<sha1>`,
 `timeout-…`, `oom-…`, `leak-…`, `minimized-from-…`).

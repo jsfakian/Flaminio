@@ -77,9 +77,15 @@ of 60, 300 or 600, which keeps five targets and their builds within the job's 12
 
 The `fuzz` job, on failure, and also when it is cancelled at its time limit:
 - copies `dataplane/fuzz/artifacts/` to `~/.cache/flaminio-ci/fuzz-artifacts/<run id>-<attempt>/`
-  on the runner when it holds any file, from a step that runs with `if: failure() || cancelled()`;
-- then uploads it as the artifact `fuzz-artifacts-<attempt>` (`retention-days: 90`). A re-run is
-  a new attempt of the same run, and an artifact name can be used once per run.
+  on the runner when it holds any file, from a step that runs with `if: failure() || cancelled()`
+  and `continue-on-error`: a failed copy (a full disk) must not stop the upload;
+- uploads it as the artifact `fuzz-artifacts-<attempt>` (`retention-days: 90`) when it holds any
+  file (`hashFiles`), independently of the copy. A re-run is a new attempt of the same run, and an
+  artifact name can be used once per run.
+
+The report step runs with `shell: bash` (`-eo pipefail`): a failing `gh api` inside a pipeline
+fails the step, instead of reading as an empty answer. CI job names are left as they were: they
+are the status checks branch protection names.
 
 A second job, `report`, needs `fuzz` and runs with
 `if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')`: after any
@@ -120,16 +126,18 @@ Keeping it a separate job keeps `issues: write` away from the steps that build a
 - `make fuzz-regressions`: `cd dataplane/fuzz && cargo test --lib --no-default-features`. Not
   `--locked`: the contracts job is the one place that fails on a stale fuzz lockfile, so a stale
   lockfile gives one clear failure, not three, and still blocks the merge. Dependabot watches the
-  fuzz crate's lockfile too (`/dataplane/fuzz`), and `make hygiene` runs cargo-deny on it
-  (advisories, licenses, sources) with the data plane's policy. libfuzzer-sys bundles libFuzzer
-  under the permissive NCSA license, allowed for that crate only; the data plane's own check
-  allows that exception to go unused (`-A license-exception-not-encountered`).
+  fuzz crate's lockfile too (`/dataplane/fuzz`), and `make hygiene` runs every cargo-deny check
+  on it, with its own `fuzz/deny.toml`: the data plane's policy (which it must follow), plus the
+  NCSA license of the libFuzzer that libfuzzer-sys bundles, for that crate only. A policy of its
+  own keeps that exception out of the data plane's, where it would be unused.
 - The set check also requires `required-features = ["fuzzing"]` on every `[[bin]]`, without which
   a plain `cargo build` of the crate fails; nothing but target directories directly under
   `regressions/`, where an input would be read by neither the replay nor the fuzzer (hidden files
   such as Finder's `.DS_Store` excepted: nothing reads them there); and, in each
-  `fuzz_targets/<t>.rs`, exactly one `fuzz_target!` line, calling `flaminio_fuzz::<t>` and no
-  other harness (a mention in a comment does not count).
+  `fuzz_targets/<t>.rs`, exactly one `fuzz_target!` line, and that line exactly
+  `fuzz_target!(|data: &[u8]| flaminio_fuzz::<t>(data));`, so the binary runs that harness and
+  nothing else. Within a target's directory, Finder's `.DS_Store` is let be: it is gitignored, so
+  it can never be a committed input.
 - `make test` runs it after the data plane's and the Go tests.
 - `make lint` adds `cargo clippy --all-targets --all-features -- -D warnings` and
   `cargo fmt --check` in `dataplane/fuzz`. Clippy builds the five binaries too; they build on

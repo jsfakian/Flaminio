@@ -66,7 +66,10 @@ and rustfmt on `dataplane/fuzz`, which is outside the data plane's workspace.
 
 ## Not changed
 
-- The harness logic of the five targets, moved into the library, with one exception: the
+- The harness logic of the five targets, moved into the library, with two exceptions. The
+  capability token harness verifies its input as it is, and then signed with a key it holds, so
+  mutations reach the claims parser behind the signature check, which no unsigned input could
+  (a test checks a signed token verifies). And the
   metadata pages harness now also reaches the page-pool bitmap decoder, which its selector never
   did (it mapped six values onto five decoders). Its first byte now picks the decoder from eight
   fixed slots, `selector % 8` (0 checkpoint, 1 data bitmap, 2 chunk header, 3 page table, 4 map,

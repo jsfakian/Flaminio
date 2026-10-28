@@ -15,6 +15,7 @@ use flaminio_format::page::{PAGE_PAYLOAD_LEN, PageType, new_page, payload_mut, s
 use flaminio_format::superblock::Superblock;
 use flaminio_net::frame::Frame;
 use flaminio_net::token::TokenKey;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::sync::LazyLock;
 
 const NONCE: u64 = 1;
@@ -32,7 +33,10 @@ static JOURNAL_LAYOUT: LazyLock<Layout> = LazyLock::new(|| {
     )
     .unwrap()
 });
-static TOKEN_KEY: LazyLock<TokenKey> = LazyLock::new(|| TokenKey::from_raw(&[7; 32]).expect("key"));
+static TOKEN_SIGNER: LazyLock<Ed25519KeyPair> =
+    LazyLock::new(|| Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("signing key"));
+static TOKEN_KEY: LazyLock<TokenKey> =
+    LazyLock::new(|| TokenKey::from_raw(TOKEN_SIGNER.public_key().as_ref()).expect("key"));
 
 /// Superblock decoding. The input is used as a superblock with a repaired magic and CRC, so
 /// mutations reach the field validation instead of dying at the checksum.
@@ -131,9 +135,15 @@ pub fn repl_frame(data: &[u8]) {
     }
 }
 
-/// Capability tokens come from the network: verification must never panic.
+/// Capability tokens come from the network: verification must never panic. The input is verified
+/// as it is (the length and signature checks), then signed as a token body, so mutations also
+/// reach the claims parser behind the signature check, as the CRC repairs do for the on-disk
+/// targets.
 pub fn capability_token(data: &[u8]) {
     let _ = TOKEN_KEY.verify(data);
+    let mut token = data.to_vec();
+    token.extend_from_slice(TOKEN_SIGNER.sign(data).as_ref());
+    let _ = TOKEN_KEY.verify(&token);
 }
 
 /// Replays every committed regression input (docs/4/spec.md, S4 and S6).
@@ -228,6 +238,24 @@ mod regressions {
                 .any(|kind| name.strip_prefix(kind).is_some_and(sha1))
     }
 
+    /// The token harness's signed inputs get past the signature check: a well-formed body,
+    /// signed as the harness signs, verifies, so mutations of it reach the claims parser.
+    #[test]
+    fn capability_token_signatures_verify() {
+        let mut body = b"FLCT\x01".to_vec();
+        for (field, value) in [(b"vol1".as_slice(), 7u64), (b"fl-a".as_slice(), 9)] {
+            body.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            body.extend_from_slice(field);
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+        let mut token = body.clone();
+        token.extend_from_slice(super::TOKEN_SIGNER.sign(&body).as_ref());
+        let claims = super::TOKEN_KEY
+            .verify(&token)
+            .expect("a signed token verifies");
+        assert_eq!((claims.volume.as_str(), claims.epoch), ("vol1", 7));
+    }
+
     #[test]
     fn every_target_has_a_harness_and_a_regression_directory() {
         let harnesses: BTreeSet<String> = TARGETS.iter().map(|(n, _)| n.to_string()).collect();
@@ -270,12 +298,10 @@ mod regressions {
                 .map(str::trim)
                 .filter(|l| l.starts_with("fuzz_target!"))
                 .collect();
-            let call = format!("flaminio_fuzz::{name}(");
+            let expected = format!("fuzz_target!(|data: &[u8]| flaminio_fuzz::{name}(data));");
             assert!(
-                lines.len() == 1
-                    && lines[0].contains(&call)
-                    && lines[0].matches("flaminio_fuzz::").count() == 1,
-                "{}: its fuzz_target! must call {call}..) and nothing else",
+                lines == [expected.as_str()],
+                "{}: its fuzz_target! line must be exactly `{expected}`",
                 source.display()
             );
         }
@@ -292,7 +318,11 @@ mod regressions {
             })
             .collect();
         let mut failed = Vec::new();
-        let (inputs, strays): (Vec<_>, Vec<_>) = inputs.into_iter().partition(|(_, f)| {
+        // Finder's .DS_Store is gitignored, so it can never be a committed input: let it be.
+        let inputs = inputs
+            .into_iter()
+            .filter(|(_, f)| f.file_name().is_none_or(|n| n != ".DS_Store"));
+        let (inputs, strays): (Vec<_>, Vec<_>) = inputs.partition(|(_, f)| {
             f.is_file() && is_input_name(&f.file_name().unwrap_or_default().to_string_lossy())
         });
         for (_, stray) in &strays {

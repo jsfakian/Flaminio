@@ -30,7 +30,8 @@ jobs:
       - run: make lint
 
   rust-test:
-    name: Rust tests (Linux, io_uring included; fuzz regression inputs)
+    # The name is the status check's: keep it stable for branch protection.
+    name: Rust tests (Linux, io_uring included)
     runs-on: [self-hosted, flaminio]
     timeout-minutes: 40
     steps:
