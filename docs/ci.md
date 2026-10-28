@@ -8,9 +8,9 @@ failure reproduces locally with the same command.
 
 | Workflow | When | Jobs (each one `make` target) |
 |---|---|---|
-| [CI](../.github/workflows/ci.yml) | every pull request and push to `main` | `lint`; Rust tests (`cargo test --locked`); `race`; `hygiene`; `contracts`; `sim` |
+| [CI](../.github/workflows/ci.yml) | every pull request and push to `main` | `lint`; Rust tests (`cargo test --locked`, then `fuzz-regressions`); `race`; `hygiene`; `contracts`; `sim` |
 | [Nightly](../.github/workflows/nightly.yml) | 01:00 UTC, and by hand | simulation of 200 000 seeds starting from a new one each day; `crash-test`; `race COUNT=20`; `sanitize`; `miri`; `hygiene` |
-| [Fuzz](../.github/workflows/fuzz.yml) | Saturdays 02:00 UTC, and by hand | `fuzz`, 10 minutes per target; the corpus carries over between runs; crashing inputs are uploaded as an artifact |
+| [Fuzz](../.github/workflows/fuzz.yml) | Saturdays 02:00 UTC, and by hand | `fuzz`, 10 minutes per target; the corpus carries over between runs; failing inputs are kept and reported (see [Fuzzing](#fuzzing)) |
 | [Lab](../.github/workflows/lab.yml) | by hand only | one lab check on the lab VMs, from the lab runner |
 | [Dependabot](../.github/dependabot.yml) | weekly | one pull request each for Cargo, Go modules and GitHub Actions |
 
@@ -38,6 +38,32 @@ What the targets check:
   deletes chunks round after round and requires every data cluster and metadata page back.
 
 The lab VMs are not needed: centaur builds and tests the Linux-only code (io_uring) itself.
+
+## Fuzzing
+
+Each target's harness is a function of the fuzz crate (`dataplane/fuzz/src/lib.rs`); the target
+binary only calls it. `dataplane/fuzz/regressions/<target>/` holds every input that ever made a
+target fail, committed (design: [docs/4](4/design.md)):
+
+- **On every pull request,** `make fuzz-regressions` replays them on the stable toolchain. An
+  input fails if its harness panics, aborts, or runs longer than 10 seconds; the log names it.
+- **On every Fuzz run,** they are the fuzzer's second corpus directory, so it replays them first,
+  with its memory and leak limits too, and a 10-second timeout per input.
+
+**When the Fuzz run fails** with failing inputs, it keeps them (the artifact `fuzz-artifacts`,
+90 days, and `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the runner host) and opens an
+issue labelled `fuzz`, or comments on the open one. To fix one:
+
+1. Copy the input into `dataplane/fuzz/regressions/<target>/`, keeping libFuzzer's name
+   (`crash-<sha1>`, `timeout-…`, `oom-…`, `leak-…`).
+2. See it fail: `make fuzz-regressions`. An out-of-memory or leak input passes there; reproduce
+   it with `cargo +<nightly> fuzz run <target> <file>` in `dataplane/fuzz`, on Linux
+   (LeakSanitizer does not run on macOS).
+3. Fix the bug, see it pass, and commit the input with the fix.
+
+A new target needs its harness in `lib.rs` (and its `TARGETS` table), its binary in
+`fuzz_targets/` and `Cargo.toml`, and `regressions/<target>/empty`; the regression test fails
+until all are there.
 
 ## Runners
 

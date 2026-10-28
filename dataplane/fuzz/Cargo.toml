@@ -16,6 +16,11 @@ flaminio-net = { path = "../crates/flaminio-net" }
 [workspace]
 members = ["."]
 
+# The regression test (`make fuzz-regressions`) runs optimized, as the fuzzer does, with the
+# debug assertions and overflow checks of a dev build. cargo-fuzz builds in release.
+[profile.dev]
+opt-level = 3
+
 [[bin]]
 name = "superblock"
 path = "fuzz_targets/superblock.rs"

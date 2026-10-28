@@ -1,5 +1,6 @@
-# Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md). The corpus
-# carries over between runs on the runner host; a crash is uploaded as an artifact.
+# Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md, docs/4). The
+# corpus carries over between runs on the runner host. Failing inputs are kept, as an artifact
+# and on the runner host, and reported in an issue labelled fuzz.
 name: Fuzz
 
 on:
@@ -19,8 +20,11 @@ jobs:
     name: Fuzz every target
     runs-on: [self-hosted, flaminio]
     timeout-minutes: 120
+    outputs:
+      inputs: ${{ steps.kept.outputs.inputs }}
     env:
       CORPUS: ${{ github.workspace }}/dataplane/fuzz/corpus
+      ARTIFACTS: ${{ github.workspace }}/dataplane/fuzz/artifacts
       SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
     steps:
       - uses: actions/checkout@v7
@@ -34,9 +38,48 @@ jobs:
       - name: Keep the corpus
         if: always()
         run: rsync -a "$CORPUS/" "$HOME/.cache/flaminio-ci/fuzz-corpus/"
-      - name: Upload the crashing inputs
+      - name: Keep the failing inputs
+        id: kept
         if: failure()
+        run: |
+          if [[ -d $ARTIFACTS ]] && [[ -n $(find "$ARTIFACTS" -type f -print -quit) ]]; then
+              keep="$HOME/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID"
+              mkdir -p "$keep"
+              rsync -a "$ARTIFACTS/" "$keep/"
+              echo "inputs=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload the failing inputs
+        if: failure() && steps.kept.outputs.inputs == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
           path: dataplane/fuzz/artifacts/
+          retention-days: 90
+
+  report:
+    # Only when the fuzzer kept failing inputs, not when the build failed. Without failure(),
+    # GitHub would add success() to the condition, and this job would never run.
+    name: Report the failing inputs
+    needs: fuzz
+    if: failure() && needs.fuzz.outputs.inputs == 'true'
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      # The workflow's token, not the administrator login gh has on the runner; and the
+      # repository, which gh cannot read from a checkout this job does not have.
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the fuzz issue
+        run: |
+          gh label create fuzz --color B60205 --description "Failing inputs found by the Fuzz workflow" --force
+          note="The Fuzz run $RUN_URL kept failing inputs: the artifact fuzz-artifacts (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID on the runner host. To fix them: docs/ci.md, Fuzzing."
+          open=$(gh issue list --label fuzz --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [[ -n $open ]]; then
+              gh issue comment "$open" --body "$note"
+          else
+              gh issue create --title "Fuzz found failing inputs" --label fuzz --body "$note"
+          fi

@@ -30,13 +30,14 @@ jobs:
       - run: make lint
 
   rust-test:
-    name: Rust tests (Linux, io_uring included)
+    name: Rust tests (Linux, io_uring included; fuzz regression inputs)
     runs-on: [self-hosted, flaminio]
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: cd dataplane && cargo test --locked
+      - run: make fuzz-regressions
 
   go-test:
     name: Go tests (race detector, goroutine leaks)
