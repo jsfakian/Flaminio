@@ -1116,6 +1116,150 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An attach dropped before the metadata service answered (its frontend gave up waiting) must
+/// leave nothing behind: its late answers, data or failures, neither start a target nor touch a
+/// new attach of the volume (docs/6, S3). The metadata answers wait in the engine's input
+/// channel until the test hands them over, so they can come late, or be swapped for failures.
+enum Late {
+    /// Hand the answers over after the detach, then attach again.
+    Ignored,
+    /// Attach again at a newer epoch first, then hand all the answers over.
+    BeforeNewAttach,
+    /// As `BeforeNewAttach`, with the dropped attach's answers turned into failures.
+    FailedBeforeNewAttach,
+}
+
+fn dropped_attach(late: Late) {
+    use flaminio_node::engine::IoError;
+
+    let dir = std::env::temp_dir().join(format!(
+        "flaminio-dropped-attach-{}-{}",
+        std::process::id(),
+        match late {
+            Late::Ignored => 0,
+            Late::BeforeNewAttach => 1,
+            Late::FailedBeforeNewAttach => 2,
+        }
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model::default()));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[11; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
+    let attach_input = |epoch| Input::Attach {
+        volume: "v".into(),
+        token: token(&signer, "v", epoch, "fl-a"),
+    };
+    // Hands every waiting input to the engine, after `edit`, and returns its outputs.
+    let deliver = |engine: &mut Engine<MemDevice>, edit: &dyn Fn(&mut Vec<Input>)| {
+        let mut inputs: Vec<Input> = rx.try_iter().collect();
+        edit(&mut inputs);
+        let now = Instant::now();
+        for i in inputs {
+            engine.handle(now, i);
+        }
+        engine.turn(now);
+        engine.take_output()
+    };
+    let attached = |outs: &[Output]| -> Vec<u64> {
+        outs.iter()
+            .filter_map(|o| match o {
+                Output::Attached { epoch, .. } => Some(*epoch),
+                _ => None,
+            })
+            .collect()
+    };
+    let failed = |outs: &[Output]| {
+        outs.iter()
+            .any(|o| matches!(o, Output::AttachFailed { .. }))
+    };
+
+    // The attach's metadata calls are answered into the channel at once, at epoch 1.
+    engine.handle(Instant::now(), attach_input(1));
+    engine.handle(Instant::now(), Input::Detach { volume: "v".into() });
+    match late {
+        Late::Ignored => {
+            let outs = deliver(&mut engine, &|_| {});
+            assert!(attached(&outs).is_empty() && !failed(&outs), "{outs:?}");
+            engine.handle(
+                Instant::now(),
+                Input::Io {
+                    volume: "v".into(),
+                    op: 1,
+                    io: Io::Read {
+                        offset: 0,
+                        len: 4096,
+                    },
+                },
+            );
+            let outs = engine.take_output();
+            assert!(
+                outs.iter().any(|o| matches!(
+                    o,
+                    Output::Done {
+                        op: 1,
+                        result: Err(IoError::NotAttached)
+                    }
+                )),
+                "no target: {outs:?}"
+            );
+            engine.handle(Instant::now(), attach_input(1));
+            let outs = deliver(&mut engine, &|_| {});
+            assert_eq!(attached(&outs), [1], "{outs:?}");
+        }
+        Late::BeforeNewAttach | Late::FailedBeforeNewAttach => {
+            model.lock().unwrap().volume.as_mut().unwrap().epoch = 2;
+            engine.handle(Instant::now(), attach_input(2));
+            let fail = matches!(late, Late::FailedBeforeNewAttach);
+            // The dropped attach's answers come first in the channel: the first GetVolume and
+            // the first ListNodes (the engine's own RegisterNode comes before them).
+            let outs = deliver(&mut engine, &|inputs| {
+                if !fail {
+                    return;
+                }
+                let mut seen = (false, false);
+                for i in inputs.iter_mut() {
+                    let Input::Meta { answer, .. } = i else {
+                        continue;
+                    };
+                    let first = match answer {
+                        Answer::GetVolume(_) => !std::mem::replace(&mut seen.0, true),
+                        Answer::ListNodes(_) => !std::mem::replace(&mut seen.1, true),
+                        _ => false,
+                    };
+                    if first {
+                        *answer = Answer::Failed {
+                            code: tonic::Code::Unavailable,
+                            message: "the dropped attach's call".into(),
+                        };
+                    }
+                }
+                assert_eq!(seen, (true, true));
+            });
+            assert_eq!(attached(&outs), [2], "{outs:?}");
+            assert!(!failed(&outs), "{outs:?}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn late_answers_to_a_dropped_attach_start_no_target() {
+    dropped_attach(Late::Ignored);
+}
+
+#[test]
+fn late_answers_to_a_dropped_attach_leave_a_new_attach_alone() {
+    dropped_attach(Late::BeforeNewAttach);
+}
+
+#[test]
+fn late_failures_of_a_dropped_attach_leave_a_new_attach_alone() {
+    dropped_attach(Late::FailedBeforeNewAttach);
+}
+
 /// A single-node engine whose local replica's commits stay in flight until the test lands
 /// them: writes are acknowledged only once durable, the next group waits for the commit, and
 /// reads go on meanwhile.

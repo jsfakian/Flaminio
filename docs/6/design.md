@@ -86,8 +86,8 @@ frontend gives up. A late answer then starts a target that the frontend never se
 - **Removing the entry.** `Engine::detach` removes `attaching[volume]` too, whether or not a
   target exists. `attach_and_serve` sends `Input::Detach` when the target start runs out of time.
   `AttachFailed` needs nothing, as the engine has already dropped the entry.
-- **A generation for each attach.** `Attaching` gets `gen`, from a counter in the engine, and
-  `MetaWait::Attach` carries it. `on_meta` compares `gen` with the entry that holds the volume
+- **A generation for each attach.** `Attaching` gets `attempt`, from a counter in the engine, and
+  `MetaWait::Attach` carries it. `on_meta` compares `attempt` with the entry that holds the volume
   now before it looks at the answer, and ignores an answer that does not match. Data from the
   dropped attach would otherwise fill in the next attach of the same volume with an old view,
   at an old epoch. A failure would end the next attach with the old attach's error.

@@ -27,11 +27,25 @@ type Dataplane interface {
 // connection, one line each way (dataplane/crates/flaminio-io/src/control.rs).
 type ControlSocket struct {
 	Path string
+	// Timeout bounds one command; zero means DefaultControlTimeout. A caller's earlier
+	// deadline wins.
+	Timeout time.Duration
 }
 
-// An attach waits for the target to start: fencing, possibly a takeover wait and the first
-// reconciliation. The data plane answers within 120 s.
-const controlTimeout = 150 * time.Second
+// DefaultControlTimeout bounds a control command when the caller's deadline does not come
+// first (docs/6). Kubelet's calls have a deadline of their own (2 minutes), so this is a
+// backstop for a data plane that never answers, and the limit for callers without one, such
+// as the tombstone sweep. It must stay above the data plane's own limit on a command
+// (ATTACH_LIMIT, 50 s, in control.rs), so that the data plane's answer, which names the
+// cause, comes first.
+const DefaultControlTimeout = 60 * time.Second
+
+func (s ControlSocket) timeout() time.Duration {
+	if s.Timeout == 0 {
+		return DefaultControlTimeout
+	}
+	return s.Timeout
+}
 
 func (s ControlSocket) command(ctx context.Context, line string) (string, error) {
 	var d net.Dialer
@@ -40,7 +54,7 @@ func (s ControlSocket) command(ctx context.Context, line string) (string, error)
 		return "", fmt.Errorf("data plane: %w", err)
 	}
 	defer conn.Close()
-	deadline := time.Now().Add(controlTimeout)
+	deadline := time.Now().Add(s.timeout())
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}

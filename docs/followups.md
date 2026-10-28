@@ -19,7 +19,7 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 | 7 | Short-lived certificates, rotated | Lab certificates last 30 days and are issued by hand | With the operator (phase 1 step 7+) | [#16](https://github.com/jsfakian/Flaminio/issues/16) |
 | 8 | Deleting a volume's replicas | Done: 100 PVC create/delete cycles leave the stores' used space where it started | With the node agent (step 6) | [#8](https://github.com/jsfakian/Flaminio/issues/8) |
 | 9 | The data plane in Kubernetes | `flaminio-io node` runs as a systemd unit beside k3s; the CSI node plugin drives it through its control socket | With the node agent (step 6) | [#12](https://github.com/jsfakian/Flaminio/issues/12) |
-| 10 | A faster first attach after a restart | The kernel's partition scan and udev's probe read a new device while it reconciles: about 1 s now (item 2), and workarounds sized for 160 s remain | With item 2 | [#6](https://github.com/jsfakian/Flaminio/issues/6) |
+| 10 | A faster first attach after a restart | Attach limits sized for what an attach does now (docs/6); partition scanning goes off once libublk accepts the flag (ublk-org/libublk-rs#72) | With item 2 | [#6](https://github.com/jsfakian/Flaminio/issues/6) |
 | 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator | [#17](https://github.com/jsfakian/Flaminio/issues/17) |
 | 12 | Zero-copy local reads after an attach | With `--zero-copy`, local reads that waited for reconciliation fail with EINVAL, and the target drops the local replica for 3 s each time | Before the chaos run (step 8) | [#5](https://github.com/jsfakian/Flaminio/issues/5) |
 | 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) | [#13](https://github.com/jsfakian/Flaminio/issues/13) |
@@ -193,12 +193,20 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
 ## 10. A faster first attach after a restart
 
 When an attach completes, the new target must still reconcile. Reads of chunks reported uncertain
-wait for it, including the kernel's partition scan and udev's probe of the new device.
+wait for it.
 - **Item 2 fixed the cause:** reconciling 16 GiB after both replicas restarted takes about 1 s.
-- **Meanwhile:**
-  - the device is created with partition scanning off (`UBLK_F_NO_AUTO_PART_SCAN` where the kernel has it; to be checked on 7.0);
-  - the CSI node plugin's timeouts allow for a whole-volume reconciliation (150 s on the 1 GbE lab
-    for 16 GiB).
+- **The attach no longer waits for reads** (docs/6, measured on Linux 7.0). The control socket
+  answers in under 0.1 s, even when the first read waits 5.8 s for a takeover: the kernel's
+  partition scan runs after the device has started.
+- **Done: limits sized for what an attach does now.**
+  - The data plane answers a control command within 50 s: 30 s for the metadata service, 10 s
+    to add the device, and 10 s to start it.
+  - The CSI node plugin waits 60 s, unless kubelet's deadline comes first.
+  - An attach that times out is dropped in the engine, so a late metadata answer cannot start
+    a target without a device. It is also withdrawn on the control socket if it has not begun.
+- **Pending: partition scanning off** (`UBLK_F_NO_AUTO_PART_SCAN`, which Linux 7.0 has). It
+  keeps a partition table inside a volume off the host. libublk 0.4.8 refuses the flag; it goes
+  in once a release includes ublk-org/libublk-rs#72.
 
 ## 11. Draining volumes that are not attached
 

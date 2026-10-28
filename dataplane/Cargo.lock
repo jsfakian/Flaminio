@@ -663,6 +663,7 @@ dependencies = [
  "ring",
  "smol",
  "thiserror 2.0.21",
+ "tonic",
 ]
 
 [[package]]

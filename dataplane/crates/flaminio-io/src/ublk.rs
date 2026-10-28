@@ -660,8 +660,19 @@ pub enum Control {
         volume: String,
         token: Vec<u8>,
         reply: mpsc::Sender<String>,
+        /// Set by the caller once it stops waiting: a request not begun by then is skipped.
+        withdrawn: Arc<AtomicBool>,
     },
 }
+
+/// How long an attach waits for the metadata service to answer the target's start (docs/6).
+pub(crate) const METADATA_LIMIT: Duration = Duration::from_secs(30);
+/// How long adding the ublk device is retried while a previous device with its id goes away.
+pub(crate) const ADD_DEVICE_LIMIT: Duration = Duration::from_secs(10);
+/// An allowance for starting the device, not enforced: libublk waits up to 3 s for its
+/// character device, and a kernel that scans partitions inside the start waits for the first
+/// reads, up to a takeover (5.5 s).
+pub(crate) const START_LIMIT: Duration = Duration::from_secs(10);
 
 /// Runs a node: the main thread drives the engine (replicas only) until an attach command
 /// arrives, then serves that volume as a ublk device until it is detached, and so on. The
@@ -701,6 +712,7 @@ pub fn serve_node(
                 volume,
                 token: read_token(path)?,
                 reply,
+                withdrawn: Arc::new(AtomicBool::new(false)),
             })
             .expect("own channel");
         thread::spawn(move || {
@@ -720,10 +732,13 @@ pub fn serve_node(
             drive_until(parts, Duration::from_millis(50), |_| false);
         }
         match ctl_rx.try_recv() {
+            // Its caller gave up while another attach ran: nobody waits for it any more.
+            Ok(Control::Attach { withdrawn, .. }) if withdrawn.load(Ordering::Relaxed) => {}
             Ok(Control::Attach {
                 volume,
                 token,
                 reply,
+                ..
             }) => {
                 if let Err(e) =
                     attach_and_serve(c, &slot, &attached, volume, token, efd.clone(), &reply)
@@ -760,7 +775,7 @@ fn attach_and_serve(
                 token,
             },
         );
-        match drive_until(parts, Duration::from_secs(60), |o| {
+        match drive_until(parts, METADATA_LIMIT, |o| {
             matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
         }) {
             Some(Output::Attached { size, .. }) => size,
@@ -768,8 +783,17 @@ fn attach_and_serve(
                 return Err(format!("attach {volume}: {why}"));
             }
             _ => {
+                // Drop the attach in the engine: an answer that comes later must not start a
+                // target that no device serves (docs/6, S3).
+                parts.engine.handle(
+                    Instant::now(),
+                    Input::Detach {
+                        volume: volume.clone(),
+                    },
+                );
                 return Err(format!(
-                    "attach {volume}: no answer from the metadata service"
+                    "attach {volume}: no answer from the metadata service within {} s",
+                    METADATA_LIMIT.as_secs()
                 ));
             }
         }
@@ -789,7 +813,7 @@ fn attach_and_serve(
 /// (a deposed target's device is stopped by another thread): the kernel refuses the id until
 /// it is gone, so adding is tried again for a few seconds.
 fn add_device(c: &NodeConfig) -> Result<UblkCtrl, String> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + ADD_DEVICE_LIMIT;
     // Zero copy: the kernel registers each request's pages as fixed buffer `tag` of the
     // queue's ring before handing the request over (see `engine_io_task_zc`).
     let ctrl_flags = if c.zero_copy {

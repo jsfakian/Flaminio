@@ -351,6 +351,9 @@ impl TargetRt {
 }
 
 struct Attaching {
+    /// Which attach of the volume this is: answers to an earlier one, dropped since, carry
+    /// another (docs/6).
+    attempt: u64,
     token: Vec<u8>,
     volume: Option<pb::Volume>,
     nodes: Option<Vec<pb::Node>>,
@@ -360,6 +363,7 @@ enum MetaWait {
     Attach {
         volume: String,
         part: u8,
+        attempt: u64,
     },
     Isr {
         volume: String,
@@ -393,6 +397,7 @@ pub struct Engine<D: BlockDevice> {
     conns: BTreeMap<ConnId, (SessionRef, channel::Sender<Reply>)>,
     targets: BTreeMap<String, TargetRt>,
     attaching: BTreeMap<String, Attaching>,
+    next_attempt: u64,
     keys: BTreeMap<Key, (String, NodeId, u64)>,
     next_key: Key,
     next_meta: u64,
@@ -450,6 +455,7 @@ impl<D: BlockDevice> Engine<D> {
             conns: BTreeMap::new(),
             targets: BTreeMap::new(),
             attaching: BTreeMap::new(),
+            next_attempt: 1,
             keys: BTreeMap::new(),
             next_key: 1,
             next_meta: 1,
@@ -532,9 +538,12 @@ impl<D: BlockDevice> Engine<D> {
                     });
                     return true;
                 }
+                let attempt = self.next_attempt;
+                self.next_attempt += 1;
                 self.attaching.insert(
                     volume.clone(),
                     Attaching {
+                        attempt,
                         token,
                         volume: None,
                         nodes: None,
@@ -545,11 +554,16 @@ impl<D: BlockDevice> Engine<D> {
                     MetaWait::Attach {
                         volume: volume.clone(),
                         part: 0,
+                        attempt,
                     },
                 );
                 self.meta_call(
                     Call::ListNodes(pb::ListNodesRequest {}),
-                    MetaWait::Attach { volume, part: 1 },
+                    MetaWait::Attach {
+                        volume,
+                        part: 1,
+                        attempt,
+                    },
                 );
             }
             Input::Io { volume, op, io } => self.submit(now, &volume, op, io),
@@ -1097,8 +1111,18 @@ impl<D: BlockDevice> Engine<D> {
                     eprintln!("flaminio-node: metadata call failed: {code:?}: {message}");
                 }
             }
-            MetaWait::Attach { volume, part } => {
-                let Some(a) = self.attaching.get_mut(&volume) else {
+            MetaWait::Attach {
+                volume,
+                part,
+                attempt,
+            } => {
+                // An answer to an attach dropped since, whether data or a failure, must neither
+                // fill in nor end the attach that holds the volume now (docs/6, S3).
+                let Some(a) = self
+                    .attaching
+                    .get_mut(&volume)
+                    .filter(|a| a.attempt == attempt)
+                else {
                     return;
                 };
                 match (part, answer) {
@@ -1467,6 +1491,8 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     fn detach(&mut self, volume: &str) {
+        // An attach still waiting for the metadata service ends too: its answers are ignored.
+        self.attaching.remove(volume);
         let Some(rt) = self.targets.remove(volume) else {
             return;
         };
