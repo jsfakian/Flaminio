@@ -1,0 +1,21 @@
+# Weekly dependency updates, grouped per ecosystem; CI and `make hygiene` check each one.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /dataplane
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

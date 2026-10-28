@@ -69,7 +69,7 @@ sim: ## Replication-protocol simulation: SEEDS random runs, then every injected 
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
 
 fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + cargo-fuzz if needed)
-	FUZZ_SECONDS=$(FUZZ_SECONDS) scripts/dev/fuzz.sh
+	FUZZ_SECONDS=$(FUZZ_SECONDS) NIGHTLY=$(NIGHTLY) scripts/dev/fuzz.sh
 
 meta-interop: ## The data plane's Rust metadata client against the Go service, over mutual TLS
 	CARGO=$(CARGO) scripts/dev/meta-interop.sh
