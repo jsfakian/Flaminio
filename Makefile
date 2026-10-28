@@ -116,7 +116,7 @@ contracts: ## Generated code and vectors match their sources; fuzz lockfile; Rus
 	$(MAKE) --no-print-directory meta-interop
 
 miri: ## Miri (nightly) on the data plane's unsafe code that runs without system calls
-	cd $(DATAPLANE) && MIRIFLAGS=-Zmiri-strict-provenance $(CARGO) +$(NIGHTLY) miri test -p flaminio-uring --lib aligned
+	cd $(DATAPLANE) && MIRIFLAGS=-Zmiri-strict-provenance $(CARGO) +$(NIGHTLY) miri test -p flaminio-uring --lib aligned::tests::
 
 sanitize: ## AddressSanitizer with leak detection, then ThreadSanitizer, on the data plane's tests (Linux, nightly)
 	cd $(DATAPLANE) && CARGO_TARGET_DIR=$(SANITIZE_TARGET)/asan RUSTFLAGS=-Zsanitizer=address \
