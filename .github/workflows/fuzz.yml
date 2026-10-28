@@ -29,8 +29,6 @@ jobs:
     # The builds, and up to 600 s for each target (the dispatch input is bounded to that): about
     # 60 minutes for five targets. Raise it with the number of targets.
     timeout-minutes: 120
-    outputs:
-      inputs: ${{ steps.kept.outputs.inputs }}
     env:
       CORPUS: ${{ github.workspace }}/dataplane/fuzz/corpus
       ARTIFACTS: ${{ github.workspace }}/dataplane/fuzz/artifacts
@@ -76,18 +74,21 @@ jobs:
     timeout-minutes: 5
     permissions:
       issues: write
+      # To see whether the run uploaded failing inputs: a cancelled job's outputs are not reliable.
+      actions: read
     env:
       # The workflow's token, not the administrator login gh has on the runner; and the
       # repository, which gh cannot read from a checkout this job does not have.
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-      INPUTS: ${{ needs.fuzz.outputs.inputs }}
     steps:
       - name: Open or update the fuzz issue
         run: |
           gh label create fuzz --color B60205 --description "Failed runs of the Fuzz workflow" --force
-          if [[ $INPUTS == true ]]; then
+          kept=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
+              --jq '[.artifacts[] | select(.name == "fuzz-artifacts")] | length')
+          if [[ $kept -gt 0 ]]; then
               note="The Fuzz run $RUN_URL kept failing inputs: the artifact fuzz-artifacts (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID on the runner host. To fix them: docs/ci.md, Fuzzing."
           else
               note="The Fuzz run $RUN_URL failed or was cancelled without keeping any failing input (a build or toolchain failure, or a hang?): the targets may not have been fuzzed. See its log."

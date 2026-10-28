@@ -12,8 +12,11 @@ same function is what the regression test replays, so the two cannot drift apart
 
 **S3. Regression inputs.** `dataplane/fuzz/regressions/<target>/` holds inputs, one file each,
 that once made the target fail. They are committed. A file from the fuzzer keeps the name
-libFuzzer gave it, `<kind>-<sha1>` (`crash-`, `timeout-`, `oom-`, `leak-`). A file made by hand is
-named `seed-<what it covers>`. Every directory starts with one file, `empty`, of zero bytes.
+libFuzzer gave it, `<kind>-<sha1>` (`crash-`, `timeout-`, `oom-`, `leak-`, or `minimized-from-`
+after `cargo fuzz tmin`). A file made by hand is named `seed-<what it covers>`. Every directory
+starts with one file, `empty`, of zero bytes. No other file may be there: libFuzzer loads every
+file of the directory, so a stray one (a `.DS_Store`, an editor backup) would be replayed by the
+fuzzer. The regression test fails on it (S4).
 
 **S4. Replayed on every pull request.** `make fuzz-regressions` feeds every file of every
 `regressions/<target>/` to `flaminio_fuzz::<target>` on the stable toolchain. It fails, naming the
@@ -26,11 +29,11 @@ file, if the harness:
 
 Each input runs on a thread with a 2 MiB stack, in an optimized build with debug assertions and
 overflow checks. Both limits are stricter than the fuzzer's (10 seconds, an 8 MiB stack) on
-purpose, with a margin for a busy shared runner: this build runs faster and with smaller stack frames than the fuzzer's, which carries
-sanitizer and coverage instrumentation, so equal limits would let an input that times out or
-overflows in the fuzzer pass here. Hidden files and editor backups (`.DS_Store`, `.x.swp`, `x~`) are not inputs and are skipped. CI
-runs this in the Rust test job, and `make test` includes it. It needs no nightly toolchain and no libFuzzer
-runtime.
+purpose, with a margin for a busy shared runner: this build runs faster and with smaller stack
+frames than the fuzzer's, which carries sanitizer and coverage instrumentation, so equal limits
+would let an input that times out or overflows in the fuzzer pass here. A file not named as in
+S3 fails the test too, naming it. CI runs this in the Rust test job, and `make test` includes it.
+It needs no nightly toolchain and no libFuzzer runtime.
 
 **S5. Regression inputs seed the fuzzer.** `make fuzz` gives each run `regressions/<target>/` as
 a second corpus directory, which libFuzzer reads but never writes, and a 10-second timeout per
@@ -62,8 +65,10 @@ and rustfmt on `dataplane/fuzz`, which is outside the data plane's workspace.
 
 - The harness logic of the five targets, moved into the library, with one exception: the
   metadata pages harness now also reaches the page-pool bitmap decoder, which its selector never
-  did (it mapped six values onto five decoders). Its first byte now names the decoder from a
-  fixed table (0 checkpoint, 1 data bitmap, 2 chunk header, 3 page table, 4 map, 5 pool bitmap;
-  other values do nothing), so a new decoder takes the next value and committed inputs keep
-  reaching the decoder they were saved for.
+  did (it mapped six values onto five decoders). Its first byte now picks the decoder from eight
+  fixed slots, `selector % 8` (0 checkpoint, 1 data bitmap, 2 chunk header, 3 page table, 4 map,
+  5 pool bitmap; 6 and 7 free, doing nothing): a new decoder takes a free slot, so committed
+  inputs keep reaching the decoder they were saved for, and few first bytes are wasted. The
+  journal harness reuses its device image between inputs, clearing what the previous input
+  wrote, instead of allocating it each time.
 - The weekly schedule, and the corpus kept on the runner host.

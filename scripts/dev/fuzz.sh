@@ -42,7 +42,7 @@ for t in "${targets[@]}"; do
   fi
 done
 if ((${#failed[@]})); then
-  echo "fuzz: failing inputs from ${failed[*]}, in dataplane/fuzz/artifacts/" >&2
+  echo "fuzz: failed: ${failed[*]} (a failing input, in dataplane/fuzz/artifacts/, or a build failure: see the log above)" >&2
   exit 1
 fi
 echo "fuzz: all targets finished cleanly"

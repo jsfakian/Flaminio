@@ -15,6 +15,7 @@ use flaminio_format::page::{PAGE_PAYLOAD_LEN, PageType, new_page, payload_mut, s
 use flaminio_format::superblock::Superblock;
 use flaminio_net::frame::Frame;
 use flaminio_net::token::TokenKey;
+use std::cell::RefCell;
 use std::sync::LazyLock;
 
 const NONCE: u64 = 1;
@@ -48,13 +49,14 @@ pub fn superblock(data: &[u8]) {
 }
 
 /// Every metadata page decoder, with fuzzer-controlled payloads behind a valid header and CRC.
-/// The first byte names the decoder. The values are fixed: a new decoder takes the next one, so a
-/// committed regression input keeps reaching the decoder it was saved for. Other values do nothing.
+/// The first byte picks the decoder from eight fixed slots (`selector % 8`): a new decoder takes a
+/// free slot, so a committed regression input keeps reaching the decoder it was saved for. The free
+/// slots, 6 and 7, do nothing.
 pub fn metadata_pages(data: &[u8]) {
     let Some((&selector, rest)) = data.split_first() else {
         return;
     };
-    let page_type = match selector {
+    let page_type = match selector % 8 {
         0 => PageType::Checkpoint,
         1 => PageType::DataBitmap,
         2 => PageType::ChunkHeader,
@@ -76,18 +78,39 @@ pub fn metadata_pages(data: &[u8]) {
         PageType::PoolBitmap => drop(BitmapPage::decode(b, BitmapKind::Pool, NONCE, offset, 0)),
         PageType::ChunkHeader => drop(ChunkHeader::decode(b, NONCE, offset, layout)),
         PageType::PageTable => drop(PageTable::decode(b, NONCE, offset, layout, 0, 0)),
-        _ => drop(MapPage::decode(b, NONCE, offset, layout, 0, 0)),
+        PageType::Map => drop(MapPage::decode(b, NONCE, offset, layout, 0, 0)),
+        // A slot added above without its decoder here: fail loudly rather than fuzz nothing.
+        other => unreachable!("metadata_pages: no decoder for {other:?}"),
     }
+}
+
+thread_local! {
+    /// The device image `journal` works on, reused between inputs: each input clears what the
+    /// previous one wrote, instead of allocating and zeroing the whole image.
+    static JOURNAL_DEV: RefCell<(Vec<u8>, usize)> = const { RefCell::new((Vec::new(), 0)) };
 }
 
 /// Journal replay over a fuzzer-controlled journal region. The first block is repaired into a
 /// valid batch header for sequence 1, so mutations reach payload and record parsing.
 pub fn journal(data: &[u8]) {
     let layout = &*JOURNAL_LAYOUT;
-    let mut dev = vec![0u8; (layout.journal_offset + layout.journal_size) as usize];
     let j = layout.journal_offset as usize;
     let n = data.len().min(layout.journal_size as usize);
-    dev[j..j + n].copy_from_slice(&data[..n]);
+    JOURNAL_DEV.with_borrow_mut(|(dev, written)| {
+        if dev.is_empty() {
+            *dev = vec![0u8; (layout.journal_offset + layout.journal_size) as usize];
+        }
+        // All zeros again: an input writes only inside dev[j..j + its n] (its data, and the
+        // header it repairs, which needs n >= 64).
+        dev[j..j + *written].fill(0);
+        *written = n;
+        journal_on(dev, layout, j, &data[..n]);
+    });
+}
+
+fn journal_on(dev: &mut [u8], layout: &Layout, j: usize, data: &[u8]) {
+    let n = data.len();
+    dev[j..j + n].copy_from_slice(data);
     if n >= 64 {
         let h = &mut dev[j..j + 64];
         h[0..4].copy_from_slice(&BATCH_MAGIC);
@@ -104,7 +127,7 @@ pub fn journal(data: &[u8]) {
         let crc = crc32c(&dev[j..j + 60]);
         dev[j + 60..j + 64].copy_from_slice(&crc.to_le_bytes());
     }
-    let scan = JournalScanner::new(&dev, layout, NONCE, JournalPosition { offset: 0, seq: 1 });
+    let scan = JournalScanner::new(dev, layout, NONCE, JournalPosition { offset: 0, seq: 1 });
     for batch in scan.flatten() {
         for record in batch.records() {
             let _ = record;
@@ -159,16 +182,11 @@ mod regressions {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(sub)
     }
 
-    /// The entries of `dir`, sorted, without hidden files and editor backups (`.DS_Store`,
-    /// `.input.swp`, `input~`): they are nobody's regression inputs.
+    /// The entries of `dir`, sorted.
     fn entries(dir: &Path) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
             .map(|e| e.expect("directory entry").path())
-            .filter(|p| {
-                let name = p.file_name().unwrap_or_default().to_string_lossy();
-                !name.starts_with('.') && !name.ends_with('~')
-            })
             .collect();
         paths.sort();
         paths
@@ -183,37 +201,53 @@ mod regressions {
             .collect()
     }
 
-    /// The `name` of every `[[bin]]` in the fuzz crate's Cargo.toml: what cargo-fuzz builds. The
-    /// manifest is ours and plain: `name = "<target>"` (or single quotes), an optional comment
-    /// after it. Anything else on a `name` line of a `[[bin]]` fails the test instead of being
-    /// misread.
+    /// The `name` of every `[[bin]]` in the fuzz crate's Cargo.toml: what cargo-fuzz builds.
     fn bins() -> BTreeSet<String> {
-        let manifest = std::fs::read_to_string(path("Cargo.toml")).expect("Cargo.toml");
-        let mut out = BTreeSet::new();
-        let mut in_bin = false;
-        for line in manifest.lines().map(str::trim) {
-            if line.starts_with('[') {
-                in_bin = line.split('#').next().unwrap_or("").trim() == "[[bin]]";
-                continue;
-            }
-            let Some(value) = line.strip_prefix("name").map(str::trim_start) else {
-                continue;
-            };
-            if !in_bin || !value.starts_with('=') {
-                continue;
-            }
-            let value = value[1..].trim_start();
-            let name = ['"', '\''].iter().find_map(|&q| {
-                let rest = value.strip_prefix(q)?;
-                let (name, after) = rest.split_once(q)?;
-                let after = after.trim();
-                (after.is_empty() || after.starts_with('#')).then_some(name)
-            });
-            let name = name
-                .unwrap_or_else(|| panic!("Cargo.toml: cannot read the [[bin]] name in `{line}`"));
-            out.insert(name.to_string());
-        }
-        out
+        let manifest: toml::Table = std::fs::read_to_string(path("Cargo.toml"))
+            .expect("Cargo.toml")
+            .parse()
+            .expect("Cargo.toml is TOML");
+        manifest
+            .get("bin")
+            .and_then(|b| b.as_array())
+            .into_iter()
+            .flatten()
+            .map(|b| {
+                let name = b.get("name").and_then(|n| n.as_str());
+                name.expect("every [[bin]] has a name").to_string()
+            })
+            .collect()
+    }
+
+    /// Whether `name` is the name of a regression input (docs/4/spec.md, S3): `empty`,
+    /// `seed-<what>`, or libFuzzer's `<kind>-<sha1>` (`minimized-from-` from `cargo fuzz tmin`).
+    /// libFuzzer loads every file of the directory, so a file named otherwise (a stray
+    /// `.DS_Store`, an editor backup) would be replayed by the fuzzer and must not be ignored here.
+    fn is_input_name(name: &str) -> bool {
+        let sha1 = |h: &str| h.len() == 40 && h.bytes().all(|b| b.is_ascii_hexdigit());
+        name == "empty"
+            || name.strip_prefix("seed-").is_some_and(|w| !w.is_empty())
+            || ["crash-", "timeout-", "oom-", "leak-", "minimized-from-"]
+                .iter()
+                .any(|kind| name.strip_prefix(kind).is_some_and(sha1))
+    }
+
+    /// The journal harness reuses its device image: what one input wrote must not leak into the
+    /// next one's.
+    #[test]
+    fn journal_clears_what_the_previous_input_wrote() {
+        let j = super::JOURNAL_LAYOUT.journal_offset as usize;
+        super::journal(&[0xAB; 4096]);
+        super::journal(&[0xCD; 16]);
+        super::JOURNAL_DEV.with_borrow(|(dev, written)| {
+            assert_eq!(*written, 16);
+            assert!(dev[j..j + 16].iter().all(|&b| b == 0xCD));
+            assert!(
+                dev[j + 16..].iter().all(|&b| b == 0),
+                "the first input's bytes remain"
+            );
+            assert!(dev[..j].iter().all(|&b| b == 0));
+        });
     }
 
     #[test]
@@ -241,11 +275,19 @@ mod regressions {
             .flat_map(|&(name, harness)| {
                 entries(&path("regressions").join(name))
                     .into_iter()
-                    .filter(|p| p.is_file())
                     .map(move |f| (harness, f))
             })
             .collect();
         let mut failed = Vec::new();
+        let (inputs, strays): (Vec<_>, Vec<_>) = inputs.into_iter().partition(|(_, f)| {
+            f.is_file() && is_input_name(&f.file_name().unwrap_or_default().to_string_lossy())
+        });
+        for (_, stray) in &strays {
+            failed.push(format!(
+                "{}: not a regression input's name (docs/ci.md, Fuzzing): rename or remove it",
+                stray.display()
+            ));
+        }
         for (i, (harness, file)) in inputs.iter().enumerate() {
             // Not captured by the test harness, so the log names the input even if it aborts.
             let _ =

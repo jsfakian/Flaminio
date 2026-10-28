@@ -30,11 +30,12 @@ have `test = false` and there is no `tests/` directory):
 
 - `TARGETS: &[(&str, fn(&[u8]))]` lists the five harnesses by name.
 - **The set check (S6):** the names in `TARGETS`, the `name` of every `[[bin]]` in `Cargo.toml`
-  (read line by line: the manifest is plain enough not to need a TOML parser), the file stems of
+  (parsed with the `toml` crate, a dev-dependency of the fuzz crate), the file stems of
   `fuzz_targets/*.rs` and the directory names under `regressions/` must be equal. Paths come from
   `CARGO_MANIFEST_DIR`; a name that is not UTF-8 is kept lossily, so it shows as a mismatch.
-- **The replay (S4):** for each target, the files of `regressions/<name>/` in sorted order,
-  without hidden files and editor backups. For each file:
+- **The replay (S4):** for each target, the entries of `regressions/<name>/` in sorted order.
+  An entry that is not a file named as in S3 fails the test, naming it, and is not replayed. For
+  each file:
   - the path is written with `std::io::stderr().write_all`, which libtest does not capture, so an
     abort still leaves it in the log;
   - the harness runs on a thread spawned with a 2 MiB stack, inside `catch_unwind`; the result
@@ -72,17 +73,18 @@ of 60, 300 or 600, which keeps five targets and their builds within the job's 12
 (GitHub's expressions have no arithmetic to derive the limit from the input).
 
 The `fuzz` job, on failure, and also when it is cancelled at its time limit:
-- uploads `dataplane/fuzz/artifacts/` (now with `retention-days: 90`);
-- copies them to `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the runner;
-- sets a job output, `inputs`, to `true` when `artifacts/` holds any file, from a step that runs
-  with `if: failure() || cancelled()`.
+- copies `dataplane/fuzz/artifacts/` to `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the
+  runner when it holds any file, from a step that runs with `if: failure() || cancelled()`;
+- then uploads it as the artifact `fuzz-artifacts` (now with `retention-days: 90`).
 
 A second job, `report`, on `[self-hosted, flaminio]`, needs `fuzz` and runs with
 `if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')`: after any
 failure or cancellation, with or without inputs, so a hang stopped at the time limit is reported
 too. Without `always()`, GitHub would add `success()` to the condition and the job would never run
-after a failed `fuzz`. It has
-`issues: write` and nothing else, checks nothing out, and sets two variables for `gh`: `GH_TOKEN`
+after a failed `fuzz`. Whether the run kept inputs, it asks the API for the run's artifacts
+(`fuzz-artifacts`), not a job output, which a job cancelled at its time limit may not pass on.
+It has `issues: write` and `actions: read` and nothing else, checks nothing out, and sets two
+variables for `gh`: `GH_TOKEN`
 to the workflow's token, so `gh` on the runner does not fall back to the administrator login it
 is configured with, and `GH_REPO` to `github.repository`, which `gh` cannot read from a checkout
 it does not have. It:
@@ -129,6 +131,14 @@ clean run on `main` after it is merged.
   `Cargo.toml`, in `fuzz_targets/` and in `regressions/`. The set check fails, naming the
   mismatch, when one is missing. *Rejected:* a macro or build script generating some of them,
   which would add moving parts to save one line per target, for something done rarely.
+- **The fuzzer keeps cargo-fuzz's default build: optimized, with debug assertions.** cargo-fuzz
+  adds `-Cdebug-assertions` (which also turns on overflow checks) unless `--release` (`-O`) is
+  given (`project.rs` of cargo-fuzz 0.13.2), so the fuzzer already enforces what the replay's dev
+  profile does. *Rejected:* passing `-a` explicitly, which changes nothing.
+- **The replay builds every dependency optimized** (`[profile.dev] opt-level = 3`), not only the
+  crates under test: the token harness's time is mostly its signature checks in the crypto
+  dependencies, and the runners keep their build directories, so the cost is paid once per
+  dependency change. *Rejected:* per-package profiles, which would skew the replay's timing.
 - **Memory and leak limits stay with the fuzzer** (S5). Enforcing them in the stable test would
   need an allocator wrapper and LeakSanitizer; the weekly run replays every regression input
   with them anyway.

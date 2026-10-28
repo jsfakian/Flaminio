@@ -47,8 +47,8 @@ target fail, committed (design: [docs/4](4/design.md)):
 
 - **On every pull request,** `make fuzz-regressions` replays them on the stable toolchain. An
   input fails if its harness panics, aborts, or runs longer than 5 seconds (on a 2 MiB stack:
-  stricter than the fuzzer, whose build is slower); the log names it. Hidden files and editor
-  backups are skipped.
+  stricter than the fuzzer, whose build is slower); the log names it. So does a file not named
+  like a regression input (below): the fuzzer would load it too.
 - **On every Fuzz run,** they are the fuzzer's second corpus directory, so it replays them first,
   with its memory and leak limits too, and a 10-second timeout per input.
 
@@ -67,8 +67,10 @@ the inputs as the artifact `fuzz-artifacts` (90 days) and in
 
 A new target needs its harness in `lib.rs` (and its `TARGETS` table), its binary in
 `fuzz_targets/` and `Cargo.toml` (with `required-features = ["fuzzing"]`), and
-`regressions/<target>/empty`; the regression test fails until all are there. `metadata_pages`
-gives a new decoder the next value of its first byte, never renumbering the others.
+`regressions/<target>/empty`; the regression test fails until all are there. A new decoder in
+`metadata_pages` takes a free slot of its first byte (`selector % 8`), never renumbering the
+others. A file in `regressions/` is `empty`, `seed-<what>`, or libFuzzer's name (`crash-<sha1>`,
+`timeout-…`, `oom-…`, `leak-…`, `minimized-from-…`).
 
 ## Runners
 
