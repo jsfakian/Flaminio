@@ -21,8 +21,9 @@ What the targets check:
 - **`lint`:** clippy with warnings as errors, rustfmt, `go vet`, gofmt, `buf lint`, shellcheck on
   every script, and actionlint on the workflows (runner labels in `.github/actionlint.yaml`).
 - **`hygiene`:** cargo-deny (known vulnerabilities, unmaintained crates, licenses, duplicate
-  versions, crate sources; policy in [`dataplane/deny.toml`](../dataplane/deny.toml), for the data
-  plane and for the fuzz crate's own lockfile), unused
+  versions, crate sources; policy in [`dataplane/deny.toml`](../dataplane/deny.toml) for the data
+  plane, and in [`dataplane/fuzz/deny.toml`](../dataplane/fuzz/deny.toml), a copy with the
+  libfuzzer-sys exception, for the fuzz crate's own lockfile), unused
   crates (cargo-machete), rustdoc with warnings as errors, staticcheck, govulncheck, and that
   `go.mod` and `go.sum` are tidy and verified.
 - **`race`:** every Go test under the race detector, in random order. Every Go test package checks

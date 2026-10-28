@@ -42,10 +42,8 @@ jobs:
           mkdir -p "$keep" "$CORPUS"
           rsync -a "$keep/" "$CORPUS/"
       - run: FUZZ_SECONDS="$SECONDS_PER_TARGET" make fuzz
-      - name: Keep the corpus
-        if: always()
-        run: rsync -a "$CORPUS/" "$HOME/.cache/flaminio-ci/fuzz-corpus/"
-      # Also when the job is cancelled at its time limit: the inputs found so far count.
+      # Also when the job is cancelled at its time limit: the inputs found so far count. Before the
+      # corpus copy, which can be large, so the inputs go first if the cleanup time runs out.
       # Independent of the upload below: either may fail without stopping the other.
       - name: Keep the failing inputs
         if: failure() || cancelled()
@@ -67,6 +65,9 @@ jobs:
           name: fuzz-artifacts-${{ github.run_attempt }}
           path: dataplane/fuzz/artifacts/
           retention-days: 90
+      - name: Keep the corpus
+        if: always()
+        run: rsync -a "$CORPUS/" "$HOME/.cache/flaminio-ci/fuzz-corpus/"
 
   report:
     # When the fuzz job failed or was cancelled (at its time limit, or by hand). Without always(),
