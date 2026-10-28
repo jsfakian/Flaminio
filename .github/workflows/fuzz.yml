@@ -1,5 +1,6 @@
-# Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md). The corpus
-# carries over between runs on the runner host; a crash is uploaded as an artifact.
+# Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md, docs/4). The
+# corpus carries over between runs on the runner host. Failing inputs are kept, as an artifact
+# and on the runner host; a failed run is reported in an issue labelled fuzz.
 name: Fuzz
 
 on:
@@ -9,18 +10,28 @@ on:
     inputs:
       seconds:
         description: Seconds per target
+        type: choice
+        options: ["60", "300", "600"]
         default: "600"
 
 permissions:
   contents: read
 
+# One run at a time: they share the corpus on the runner host and the fuzz issue.
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
 jobs:
   fuzz:
     name: Fuzz every target
     runs-on: [self-hosted, flaminio]
+    # The builds, and up to 600 s for each target (the dispatch input is bounded to that): about
+    # 60 minutes for five targets. Raise it with the number of targets.
     timeout-minutes: 120
     env:
       CORPUS: ${{ github.workspace }}/dataplane/fuzz/corpus
+      ARTIFACTS: ${{ github.workspace }}/dataplane/fuzz/artifacts
       SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
     steps:
       - uses: actions/checkout@v7
@@ -31,12 +42,92 @@ jobs:
           mkdir -p "$keep" "$CORPUS"
           rsync -a "$keep/" "$CORPUS/"
       - run: FUZZ_SECONDS="$SECONDS_PER_TARGET" make fuzz
+      # Also when the job is cancelled at its time limit: the inputs found so far count. Before the
+      # corpus copy, which can be large, so the inputs go first if the cleanup time runs out.
+      # Independent of the upload below: either may fail without stopping the other.
+      - name: Keep the failing inputs
+        if: failure() || cancelled()
+        continue-on-error: true
+        run: |
+          # Copies older than the artifacts' 90 days go.
+          find "$HOME/.cache/flaminio-ci/fuzz-artifacts" -mindepth 1 -maxdepth 1 -mtime +90 \
+              -exec rm -rf {} + 2>/dev/null || true
+          if [[ -d $ARTIFACTS ]] && [[ -n $(find "$ARTIFACTS" -type f -print -quit) ]]; then
+              keep="$HOME/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+              mkdir -p "$keep"
+              rsync -a "$ARTIFACTS/" "$keep/"
+          fi
+      - name: Upload the failing inputs
+        if: (failure() || cancelled()) && hashFiles('dataplane/fuzz/artifacts/**') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          # One per attempt: a re-run keeps the run, and a name may be used once in a run.
+          name: fuzz-artifacts-${{ github.run_attempt }}
+          path: dataplane/fuzz/artifacts/
+          retention-days: 90
       - name: Keep the corpus
         if: always()
         run: rsync -a "$CORPUS/" "$HOME/.cache/flaminio-ci/fuzz-corpus/"
-      - name: Upload the crashing inputs
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: fuzz-artifacts
-          path: dataplane/fuzz/artifacts/
+
+  report:
+    # When the fuzz job failed or was cancelled (at its time limit, or by hand). Without always(),
+    # GitHub would add success() to the condition, and this job would never run after a failure.
+    name: Report the failed run
+    needs: fuzz
+    if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')
+    # GitHub-hosted, not centaur: a run that failed because centaur hung must still be reported.
+    # It only calls the API, for a minute, when a run failed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      # To see whether the fuzz job started, and whether it uploaded failing inputs: a cancelled
+      # job's outputs are not reliable.
+      actions: read
+    env:
+      # The workflow's token, and the repository, which gh cannot read from a checkout this job
+      # does not have.
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the fuzz issue
+        # bash -eo pipefail: a failing `gh api` in a pipeline must fail the step, not read as empty.
+        shell: bash
+        run: |
+          # The latest run of the fuzz job, by its name (keep in step with `name:` above), across
+          # attempts: re-running only this job reuses an earlier attempt's fuzz job. None found
+          # fails this step loudly, instead of reporting the wrong thing.
+          job=$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?filter=all" \
+              --jq '.jobs[] | select(.name == "Fuzz every target")' | jq -s 'max_by(.run_attempt)')
+          [[ $job != null ]] || { echo "::error::no job named 'Fuzz every target'"; exit 1; }
+          steps=$(jq '.steps | length' <<<"$job")
+          conclusion=$(jq -r '.conclusion' <<<"$job")
+          fuzzed=$(jq '.run_attempt' <<<"$job")
+          # That attempt's artifact only: the list holds every attempt's.
+          kept=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
+              --jq "[.artifacts[] | select(.name == \"fuzz-artifacts-$fuzzed\")] | length")
+          # A path on centaur, for a person to read: not this runner's $HOME.
+          # shellcheck disable=SC2088
+          host='~/.cache/flaminio-ci/fuzz-artifacts/'"$GITHUB_RUN_ID-$fuzzed"' on the runner host (if the copy there succeeded)'
+          if [[ $steps -eq 0 && $conclusion == cancelled ]]; then
+              note="The Fuzz run $RUN_URL was cancelled before a runner took its fuzz job (by hand, or after waiting for one: are centaur's runners up?). The targets were not fuzzed."
+          elif [[ $steps -eq 0 ]]; then
+              note="The Fuzz run $RUN_URL never started: no runner took its fuzz job (are centaur's runners up?). The targets were not fuzzed."
+          elif [[ $kept -gt 0 ]]; then
+              note="The Fuzz run $RUN_URL (attempt $fuzzed) kept failing inputs: the artifact fuzz-artifacts-$fuzzed (90 days), and $host. To fix them: docs/ci.md, Fuzzing."
+          else
+              note="The Fuzz run $RUN_URL failed or was cancelled with no failing inputs uploaded: a build or toolchain failure, a hang, or a failed upload. See its log, and $host, where inputs are kept before the upload."
+          fi
+          # Created only when missing, so its colour and description stay as maintainers set them.
+          # Read in full before matching: grep -q stopping early would kill gh, which pipefail reports.
+          labels=$(gh label list --search fuzz --json name --jq '.[].name')
+          if ! grep -qx fuzz <<<"$labels"; then
+              gh label create fuzz --color B60205 --description "Failed runs of the Fuzz workflow"
+          fi
+          open=$(gh issue list --label fuzz --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [[ -n $open ]]; then
+              gh issue comment "$open" --body "$note"
+          else
+              gh issue create --title "Fuzz run failed" --label fuzz --body "$note"
+          fi

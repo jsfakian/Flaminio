@@ -1,0 +1,81 @@
+# Issue #4: run every fuzz target for 10 minutes clean — specification
+
+## Behaviour
+
+**S1. Ten minutes clean.** The Fuzz workflow (`.github/workflows/fuzz.yml`) runs every target
+in `dataplane/fuzz` for 600 seconds and passes: no crash, timeout, out-of-memory or leak report.
+A timeout is one input taking more than 10 seconds. Issue #4 closes on such a run on `main`. A failure it reports is fixed through S7 before then.
+
+**S2. One harness per target.** What a target does with its input is a function of a library in
+the fuzz crate, `flaminio_fuzz::<target>(&[u8])`. The `fuzz_target!` binary only calls it. The
+same function is what the regression test replays, so the two cannot drift apart.
+
+**S3. Regression inputs.** `dataplane/fuzz/regressions/<target>/` holds inputs, one file each,
+that once made the target fail. They are committed. A file from the fuzzer keeps the name
+libFuzzer gave it, `<kind>-<sha1>` (`crash-`, `timeout-`, `oom-`, `leak-`, or `minimized-from-`
+after `cargo fuzz tmin`). A file made by hand is named `seed-<what it covers>`. Every directory
+starts with one file, `empty`, of zero bytes. No other file may be there: libFuzzer loads every
+file of the directory, so a stray one (an editor backup, a misnamed input) would be replayed by
+the fuzzer. The regression test fails on it (S4). The exception is Finder's `.DS_Store`, which is
+gitignored, so it can never reach a committed directory or CI's fuzzer: it is let be.
+
+**S4. Replayed on every pull request.** `make fuzz-regressions` feeds every file of every
+`regressions/<target>/` to `flaminio_fuzz::<target>` on the stable toolchain. It fails, naming the
+file, if the harness:
+- panics;
+- runs longer than 5 seconds on one input (the replay then stops, and lists the inputs it did
+  not run);
+- aborts the process (a stack overflow, for example): the file being replayed is written to
+  standard error before it runs, so the log names it even then.
+
+Each input runs on a thread with a 2 MiB stack, in an optimized build with debug assertions and
+overflow checks. Both limits are stricter than the fuzzer's (10 seconds, an 8 MiB stack) on
+purpose, with a margin for a busy shared runner: this build runs faster and with smaller stack
+frames than the fuzzer's, which carries sanitizer and coverage instrumentation, so equal limits
+would let an input that times out or overflows in the fuzzer pass here. A file not named as in
+S3 fails the test too, naming it. CI runs this in the Rust test job, and `make test` includes it.
+It needs no nightly toolchain and no libFuzzer runtime.
+
+**S5. Regression inputs seed the fuzzer.** `make fuzz` gives each run `regressions/<target>/` as
+a second corpus directory, which libFuzzer reads but never writes, and a 10-second timeout per
+input (`-timeout=10`). So the fuzzer itself replays every regression input at the start of every
+run, under its memory and leak limits, which the stable test of S4 cannot enforce.
+
+**S6. Every target is covered.** The regression test fails unless the `[[bin]]` entries of the
+fuzz crate's `Cargo.toml` (what cargo-fuzz builds), the sources in `fuzz_targets/*.rs`, the
+harnesses it knows and the directories under `regressions/` are the same set, and each binary
+calls the harness of its own name, so the fuzzer and the replay run the same code. `make fuzz` takes
+its list of targets from `cargo fuzz list`, refuses an empty list, runs every target even after one
+fails, and fails at the end naming every target that did, so one run reports them all.
+
+**S7. From a failure to a fixed bug.**
+- A failing Fuzz run keeps the failing inputs: as the workflow artifact
+  `fuzz-artifacts-<attempt>` for 90 days, and on the runner host in
+  `~/.cache/flaminio-ci/fuzz-artifacts/<run id>-<attempt>/`. Per attempt, so a re-run neither
+  collides with nor is mistaken for an earlier attempt's inputs.
+- Any failed or cancelled run opens an issue, labelled `fuzz`, linking the run, or comments on
+  the one already open. The note says whether it kept failing inputs, or ended without any (a
+  build or toolchain failure, or a hang stopped at the time limit), so neither goes unnoticed. A
+  job stopped at its time limit keeps the inputs it found. Runs never overlap.
+- To fix one: copy the file into `regressions/<target>/`, see `make fuzz-regressions` fail (or,
+  for an out-of-memory or leak input, `cargo +<nightly> fuzz run <target> <file>`, on Linux:
+  LeakSanitizer does not run on macOS), fix the bug, see it pass, commit both. `docs/ci.md`
+  describes this.
+
+**S8. The fuzz crate is checked like the rest.** `make lint` runs clippy (warnings are errors)
+and rustfmt on `dataplane/fuzz`, which is outside the data plane's workspace.
+
+## Not changed
+
+- The harness logic of the five targets, moved into the library, with two exceptions. The
+  capability token harness verifies its input as it is, and then signed with a key it holds, so
+  mutations reach the claims parser behind the signature check, which no unsigned input could
+  (a test checks a signed token verifies). It signs only bodies short enough to make a token. And
+  the
+  metadata pages harness now also reaches the page-pool bitmap decoder, which its selector never
+  did (it mapped six values onto five decoders). Its first byte now picks the decoder from eight
+  fixed slots, `selector % 8` (0 checkpoint, 1 data bitmap, 2 chunk header, 3 page table, 4 map,
+  5 pool bitmap; 6 and 7 free, doing nothing): a new decoder takes a free slot, so committed
+  inputs keep reaching the decoder they were saved for, and only two slots in eight are wasted.
+  One table maps a slot to both its page type and its decoder.
+- The weekly schedule, and the corpus kept on the runner host.

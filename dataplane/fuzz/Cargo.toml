@@ -8,13 +8,28 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4.10"
+libfuzzer-sys = { version = "0.4.10", optional = true }
 flaminio-format = { path = "../crates/flaminio-format" }
 flaminio-net = { path = "../crates/flaminio-net" }
+# Signs the capability_token harness's tokens, so its inputs get past the signature check.
+ring = "0.17.14"
+
+# The fuzz binaries need libFuzzer; the library and its regression test do not, so `make test`
+# builds no C++.
+[features]
+# On by default, so every cargo-fuzz command (run, tmin, cmin, coverage) works as usual; the
+# regression test turns it off with --no-default-features.
+default = ["fuzzing"]
+fuzzing = ["dep:libfuzzer-sys"]
 
 # Not part of the main workspace: build with `cargo +nightly fuzz run <target>`.
 [workspace]
 members = ["."]
+
+# The regression test (`make fuzz-regressions`) runs optimized, as the fuzzer does, with the
+# debug assertions and overflow checks of a dev build. cargo-fuzz builds in release.
+[profile.dev]
+opt-level = 3
 
 [[bin]]
 name = "superblock"
@@ -22,6 +37,7 @@ path = "fuzz_targets/superblock.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "metadata_pages"
@@ -29,6 +45,7 @@ path = "fuzz_targets/metadata_pages.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "journal"
@@ -36,6 +53,7 @@ path = "fuzz_targets/journal.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "repl_frame"
@@ -43,6 +61,7 @@ path = "fuzz_targets/repl_frame.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "capability_token"
@@ -50,3 +69,7 @@ path = "fuzz_targets/capability_token.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
+
+[dev-dependencies]
+toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }

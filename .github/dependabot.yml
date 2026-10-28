@@ -8,6 +8,14 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+  # The fuzz crate is a workspace of its own, with its own lockfile.
+  - package-ecosystem: cargo
+    directory: /dataplane/fuzz
+    schedule:
+      interval: weekly
+    groups:
+      fuzz:
+        patterns: ["*"]
   - package-ecosystem: gomod
     directory: /
     schedule:

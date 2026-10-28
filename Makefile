@@ -49,7 +49,7 @@ help: ## Show this help
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test sim fuzz meta-interop lint fmt proto meta-vectors disk-demo clean
+.PHONY: build release test crash-test sim fuzz fuzz-regressions meta-interop lint fmt proto meta-vectors disk-demo clean
 build: ## Build the data plane (debug) and the Go services
 	cd $(DATAPLANE) && $(CARGO) build
 	$(GO) build ./...
@@ -57,9 +57,10 @@ build: ## Build the data plane (debug) and the Go services
 release: ## Build the data plane (release)
 	cd $(DATAPLANE) && $(CARGO) build --release
 
-test: ## Run all tests (Rust and Go)
+test: ## Run all tests (Rust and Go, and the fuzz regression inputs)
 	cd $(DATAPLANE) && $(CARGO) test
 	$(GO) test ./...
+	$(MAKE) --no-print-directory fuzz-regressions
 
 crash-test: ## Long crash-consistency campaign (CASES=50000)
 	cd $(DATAPLANE) && PROPTEST_CASES=$(CASES) $(CARGO) test --release -p flaminio-store --test crash_consistency
@@ -67,6 +68,9 @@ crash-test: ## Long crash-consistency campaign (CASES=50000)
 sim: ## Replication-protocol simulation: SEEDS random runs, then every injected bug must be caught
 	cd $(DATAPLANE) && $(CARGO) run --release -q -p flaminio-repl --example sim -- 0 $(SEEDS)
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
+
+fuzz-regressions: ## Replay every committed fuzz regression input, on the stable toolchain (docs/4)
+	cd $(DATAPLANE)/fuzz && $(CARGO) test --lib --no-default-features
 
 fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + cargo-fuzz if needed)
 	FUZZ_SECONDS=$(FUZZ_SECONDS) NIGHTLY=$(NIGHTLY) scripts/dev/fuzz.sh
@@ -76,6 +80,7 @@ meta-interop: ## The data plane's Rust metadata client against the Go service, o
 
 lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck, actionlint
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
+	cd $(DATAPLANE)/fuzz && $(CARGO) clippy --all-targets --all-features -- -D warnings && $(CARGO) fmt --check
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l api meta pkg control)" || { echo "gofmt needed:"; gofmt -l api meta pkg control; exit 1; }
 	$(BUF) lint
@@ -99,6 +104,7 @@ meta-vectors: ## Regenerate the metadata transition vectors from the Rust model
 .PHONY: hygiene race contracts miri sanitize
 hygiene: ## Advisories and licenses (cargo-deny), unused crates, rustdoc, staticcheck, govulncheck, go.mod
 	cd $(DATAPLANE) && $(CARGO) deny check
+	cd $(DATAPLANE)/fuzz && $(CARGO) deny check
 	cd $(DATAPLANE) && $(CARGO) machete
 	cd $(DATAPLANE) && RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps --workspace --quiet
 	$(STATICCHECK) ./...

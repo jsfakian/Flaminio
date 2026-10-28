@@ -30,6 +30,7 @@ jobs:
       - run: make lint
 
   rust-test:
+    # The name is the status check's: keep it stable for branch protection.
     name: Rust tests (Linux, io_uring included)
     runs-on: [self-hosted, flaminio]
     timeout-minutes: 40
@@ -37,6 +38,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: cd dataplane && cargo test --locked
+      - run: make fuzz-regressions
 
   go-test:
     name: Go tests (race detector, goroutine leaks)
