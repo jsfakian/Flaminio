@@ -54,11 +54,19 @@ fn campaign() {
         total.crashes += r.crashes;
         total.partitions += r.partitions;
         total.events += r.events;
+        total.failed_local_reads += r.failed_local_reads;
         runs += 1;
     }
     eprintln!(
-        "{runs} runs: {} ops ({} completed), {} failovers, {} crashes, {} partitions, {} events",
-        total.ops, total.completed, total.failovers, total.crashes, total.partitions, total.events
+        "{runs} runs: {} ops ({} completed), {} failovers, {} crashes, {} partitions, {} events, \
+         {} failed local reads",
+        total.ops,
+        total.completed,
+        total.failovers,
+        total.crashes,
+        total.partitions,
+        total.events,
+        total.failed_local_reads
     );
 }
 
@@ -94,6 +102,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         read_pct: 0,
         move_pct: 0,
         fast_reads: false,
+        local_read_fail_pct: 0,
     }
 }
 

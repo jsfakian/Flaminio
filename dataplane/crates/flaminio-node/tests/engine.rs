@@ -405,31 +405,25 @@ fn replicated_volume_through_a_replica_failure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One node, its engine driven by hand, with a single-replica volume: direct reads, as the
-/// ublk frontend performs them, planned by the engine and read from the store's device into
-/// the caller's buffer.
-#[test]
-fn direct_reads_from_the_local_replica() {
-    use flaminio_node::engine::LocalRead;
-    use flaminio_store::BlockDevice;
-
-    let dir = std::env::temp_dir().join(format!("flaminio-direct-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let ids = identities(&dir);
-    let files = &ids["fl-a"];
-    let model = Arc::new(Mutex::new(Model::default()));
+/// An engine on `name` for the tests to drive by hand, as the ublk frontend's threads do: its
+/// inputs (network events, metadata answers) arrive on the receiver.
+fn hand_driven(
+    name: &str,
+    files: &Files,
+    token_key: TokenKey,
+    model: Arc<Mutex<Model>>,
+) -> (Engine<MemDevice>, mpsc::Receiver<Input>) {
     let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<Input>();
     let sink_tx = Mutex::new(tx.clone());
-    let signer = Ed25519KeyPair::from_seed_unchecked(&[6; 32]).unwrap();
     let net = net::spawn(
         NetConfig {
             trust_domain: TD.into(),
             server: Some(ServerSide {
                 listener,
                 tls: files.server_config().unwrap(),
-                token_key: TokenKey::from_raw(signer.public_key().as_ref()).unwrap(),
+                token_key,
             }),
             client: Some(files.client_config().unwrap()),
         },
@@ -439,17 +433,127 @@ fn direct_reads_from_the_local_replica() {
     )
     .unwrap();
     let cfg = EngineConfig {
-        node: "fl-a".into(),
+        node: name.into(),
         address: addr.to_string(),
         timing: Timing::default(),
         max_io: 64,
         heartbeat: None,
     };
-    let meta = Box::new(FakeMeta {
-        model: model.clone(),
-        inbox: tx.clone(),
-    });
-    let mut engine = Engine::new(cfg, ReplicaService::new(store()), net, meta);
+    let meta = Box::new(FakeMeta { model, inbox: tx });
+    (
+        Engine::new(cfg, ReplicaService::new(store()), net, meta),
+        rx,
+    )
+}
+
+/// Reads a local read's piece from the store's device into `buf`, as the ublk frontend does,
+/// and reports it: failed if `fail`, else as its checksums say.
+fn serve_local_read(
+    engine: &mut Engine<MemDevice>,
+    buf: &mut [u8],
+    lr: &flaminio_node::engine::LocalRead,
+    fail: bool,
+) {
+    use flaminio_store::BlockDevice;
+
+    let piece = &mut buf[lr.at..lr.at + lr.len];
+    let plan = engine.plan_local_read(lr, piece).unwrap();
+    let mut reads: Vec<(u64, &mut [u8])> = Vec::new();
+    let mut rest: &mut [u8] = piece;
+    let mut base = 0;
+    for r in plan.reads() {
+        let (_, tail) = rest.split_at_mut(r.buf_offset - base);
+        let (this, tail) = tail.split_at_mut(r.len);
+        reads.push((r.device_offset, this));
+        rest = tail;
+        base = r.buf_offset + r.len;
+    }
+    engine.device().read_many(&mut reads).unwrap();
+    let ok = !fail && plan.verify(&buf[lr.at..lr.at + lr.len]).is_ok();
+    engine.local_read_done(Instant::now(), lr, Some(plan), ok);
+}
+
+/// What the tests do with a local read, as the ublk frontend would: read it into the buffer and
+/// report it.
+type Frontend<'a> =
+    dyn FnMut(&mut Engine<MemDevice>, &mut [u8], flaminio_node::engine::LocalRead) + 'a;
+
+/// One turn of `engine`, after the inputs that arrived: its outputs.
+fn pump(engine: &mut Engine<MemDevice>, rx: &mpsc::Receiver<Input>) -> Vec<Output> {
+    let now = Instant::now();
+    while let Ok(i) = rx.try_recv() {
+        engine.handle(now, i);
+    }
+    engine.turn(now);
+    engine.take_output()
+}
+
+/// Drives `engine` until `want` takes an output, for at most 20 s. Local reads go to
+/// `local`; pieces of direct reads read elsewhere are copied into `buf`.
+fn drive(
+    engine: &mut Engine<MemDevice>,
+    rx: &mpsc::Receiver<Input>,
+    buf: &mut [u8],
+    local: &mut Frontend<'_>,
+    want: &dyn Fn(&Output) -> bool,
+) -> Output {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < deadline, "timed out");
+        for o in pump(engine, rx) {
+            match o {
+                Output::LocalRead(lr) => local(engine, buf, lr),
+                Output::Piece { at, ref data, .. } if !want(&o) => {
+                    buf[at..at + data.len()].copy_from_slice(data);
+                }
+                o if want(&o) => return o,
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A volume of two chunks attached on fl-a at `epoch`, with every replica in the ISR.
+fn volume(replicas: &[&str], epoch: u64) -> pb::Volume {
+    let replicas: Vec<String> = replicas.iter().map(|s| s.to_string()).collect();
+    pb::Volume {
+        id: "v".into(),
+        size_bytes: 2 * CHUNK,
+        chunk_bytes: CHUNK,
+        replicas: replicas.len() as u32,
+        min_isr: 1,
+        epoch,
+        target: "fl-a".into(),
+        chunks: (0..2)
+            .map(|_| pb::ChunkMeta {
+                replicas: replicas.clone(),
+                isr: replicas.clone(),
+                isr_ver: 0,
+                ..Default::default()
+            })
+            .collect(),
+    }
+}
+
+/// One node, its engine driven by hand, with a single-replica volume: direct reads, as the
+/// ublk frontend performs them, planned by the engine and read from the store's device into
+/// the caller's buffer.
+#[test]
+fn direct_reads_from_the_local_replica() {
+    use flaminio_store::BlockDevice;
+
+    let dir = std::env::temp_dir().join(format!("flaminio-direct-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model::default()));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[6; 32]).unwrap();
+    let (mut engine, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        TokenKey::from_raw(signer.public_key().as_ref()).unwrap(),
+        model.clone(),
+    );
     model.lock().unwrap().volume = Some(pb::Volume {
         id: "v".into(),
         size_bytes: 2 * CHUNK,
@@ -485,22 +589,7 @@ fn direct_reads_from_the_local_replica() {
             engine.turn(now);
             for o in engine.take_output() {
                 if let Output::LocalRead(lr) = &o {
-                    let lr: LocalRead = lr.clone();
-                    let piece = &mut buf[lr.at..lr.at + lr.len];
-                    let plan = engine.plan_local_read(&lr, piece).unwrap();
-                    let mut reads: Vec<(u64, &mut [u8])> = Vec::new();
-                    let mut rest: &mut [u8] = piece;
-                    let mut base = 0;
-                    for r in plan.reads() {
-                        let (_, tail) = rest.split_at_mut(r.buf_offset - base);
-                        let (this, tail) = tail.split_at_mut(r.len);
-                        reads.push((r.device_offset, this));
-                        rest = tail;
-                        base = r.buf_offset + r.len;
-                    }
-                    engine.device().read_many(&mut reads).unwrap();
-                    let ok = plan.verify(&buf[lr.at..lr.at + lr.len]).is_ok();
-                    engine.local_read_done(Instant::now(), &lr, Some(plan), ok);
+                    serve_local_read(engine, buf, lr, false);
                     continue;
                 }
                 if want(&o) {
@@ -625,6 +714,291 @@ fn direct_reads_from_the_local_replica() {
         fast_buf == pattern(10, 2 * MIB),
         "the write's data, after it completed"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The request timeout of the hand-driven engines: a failed local read must be answered well
+/// within it, not after it (docs/5).
+fn request_timeout() -> Duration {
+    Duration::from_micros(Timing::default().request_timeout)
+}
+
+/// Writes `data` at 0 through `engine` as operation `op`, serving its local reads.
+fn write_at_0(engine: &mut Engine<MemDevice>, rx: &mpsc::Receiver<Input>, op: u64, data: Vec<u8>) {
+    engine.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op,
+            io: Io::Write {
+                offset: 0,
+                data: data.into(),
+            },
+        },
+    );
+    let mut serve =
+        |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
+    let done = drive(
+        engine,
+        rx,
+        &mut [],
+        &mut serve,
+        &|o| matches!(o, Output::Done { op: o, .. } if *o == op),
+    );
+    assert!(
+        matches!(
+            done,
+            Output::Done {
+                result: Ok(None),
+                ..
+            }
+        ),
+        "{done:?}"
+    );
+}
+
+/// Submits a direct read of `len` bytes at 0 as operation `op`.
+fn read_direct_at_0(engine: &mut Engine<MemDevice>, op: u64, len: u64) {
+    engine.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op,
+            io: Io::ReadDirect { offset: 0, len },
+        },
+    );
+}
+
+/// Attaches the volume on a hand-driven engine at `epoch`.
+fn attach(
+    engine: &mut Engine<MemDevice>,
+    rx: &mpsc::Receiver<Input>,
+    signer: &Ed25519KeyPair,
+    epoch: u64,
+) {
+    engine.handle(
+        Instant::now(),
+        Input::Attach {
+            volume: "v".into(),
+            token: token(signer, "v", epoch, "fl-a"),
+        },
+    );
+    let mut serve =
+        |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
+    drive(
+        engine,
+        rx,
+        &mut [],
+        &mut serve,
+        &|o| matches!(o, Output::Attached { epoch: e, .. } if *e == epoch),
+    );
+}
+
+/// Reports a local read as failed, as the frontend does when its device read fails.
+fn fail_local_read(
+    engine: &mut Engine<MemDevice>,
+    _: &mut [u8],
+    lr: flaminio_node::engine::LocalRead,
+) {
+    engine.local_read_done(Instant::now(), &lr, None, false);
+}
+
+/// A failed local read on a single-replica volume ends at once, with an error (docs/5), not
+/// after the request timeout, and the local replica stays in the ISR.
+#[test]
+fn a_failed_local_read_on_the_only_replica_fails_at_once() {
+    use flaminio_node::engine::IoError;
+
+    let dir = std::env::temp_dir().join(format!("flaminio-failed-only-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model::default()));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone());
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
+    attach(&mut engine, &rx, &signer, 1);
+    write_at_0(&mut engine, &rx, 1, pattern(1, 64 << 10));
+
+    let t = Instant::now();
+    read_direct_at_0(&mut engine, 2, 64 << 10);
+    let mut buf = vec![0u8; 64 << 10];
+    let done = drive(&mut engine, &rx, &mut buf, &mut fail_local_read, &|o| {
+        matches!(o, Output::Done { op: 2, .. })
+    });
+    assert!(
+        t.elapsed() < request_timeout() / 2,
+        "took {:?}",
+        t.elapsed()
+    );
+    assert!(
+        matches!(
+            done,
+            Output::Done {
+                result: Err(IoError::Unreadable),
+                ..
+            }
+        ),
+        "{done:?}"
+    );
+    assert_eq!(isr(&model), vec![vec!["fl-a".to_string()]; 2]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failed local read on a replicated volume is read from the other replica at once (docs/5),
+/// and the local replica stays in the ISR.
+#[test]
+fn a_failed_local_read_is_read_from_the_other_replica() {
+    let dir = std::env::temp_dir().join(format!("flaminio-failed-two-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model::default()));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[8; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let _b = start_node("fl-b", &ids["fl-b"], key.clone(), model.clone());
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !model.lock().unwrap().nodes.contains_key("fl-b") {
+        assert!(Instant::now() < deadline, "fl-b did not register");
+        thread::sleep(Duration::from_millis(10));
+    }
+    model.lock().unwrap().volume = Some(volume(&["fl-a", "fl-b"], 1));
+    attach(&mut engine, &rx, &signer, 1);
+    write_at_0(&mut engine, &rx, 1, pattern(2, 64 << 10));
+
+    let t = Instant::now();
+    read_direct_at_0(&mut engine, 2, 64 << 10);
+    // The failed local read leaves the buffer alone: what is there came from fl-b.
+    let mut buf = vec![0u8; 64 << 10];
+    let done = drive(&mut engine, &rx, &mut buf, &mut fail_local_read, &|o| {
+        matches!(o, Output::Done { op: 2, .. })
+    });
+    assert!(
+        t.elapsed() < request_timeout() / 2,
+        "took {:?}",
+        t.elapsed()
+    );
+    assert!(
+        matches!(
+            done,
+            Output::Done {
+                result: Ok(None),
+                ..
+            }
+        ),
+        "{done:?}"
+    );
+    assert!(buf == pattern(2, 64 << 10), "fl-b's data");
+    let both = vec!["fl-a".to_string(), "fl-b".to_string()];
+    assert_eq!(isr(&model), vec![both; 2]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failed local read reported after its target was deposed and replaced is ignored, even
+/// when the new target's read in flight has the same session and request numbers: that read
+/// completes, from one local read, well within the request timeout (docs/5). Requests are
+/// numbered from 1 by each target, so the old target sends a few more before its read, and the
+/// new one reads until its read gets the same number.
+#[test]
+fn a_stale_failed_local_read_leaves_the_new_target_alone() {
+    let dir = std::env::temp_dir().join(format!("flaminio-failed-stale-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model::default()));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone());
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
+
+    // A direct read whose local read is held back.
+    let held = |engine: &mut Engine<MemDevice>, op: u64| {
+        read_direct_at_0(engine, op, 64 << 10);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "no local read for op {op}");
+            for o in pump(engine, &rx) {
+                if let Output::LocalRead(lr) = o {
+                    assert_eq!(lr.op, op);
+                    return lr;
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+    attach(&mut engine, &rx, &signer, 1);
+    for op in 10..16 {
+        write_at_0(&mut engine, &rx, op, pattern(3, 64 << 10));
+    }
+    let stale = held(&mut engine, 2);
+    let (_, session, req) = engine.local_read_ids(&stale).unwrap();
+
+    // A newer epoch deposes the target, which the engine drops without purging its local
+    // reads; then the volume is attached again here.
+    model.lock().unwrap().volume.as_mut().unwrap().epoch = 2;
+    let mut serve =
+        |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
+    drive(&mut engine, &rx, &mut [], &mut serve, &|o| {
+        matches!(o, Output::Deposed { .. })
+    });
+    attach(&mut engine, &rx, &signer, 2);
+    write_at_0(&mut engine, &rx, 3, pattern(4, 64 << 10));
+    let mut buf = vec![0u8; 64 << 10];
+    let mut op = 100;
+    let fresh = loop {
+        let lr = held(&mut engine, op);
+        let (epoch, s, r) = engine.local_read_ids(&lr).unwrap();
+        assert_eq!((epoch, s), (2, session), "the new target's first session");
+        assert!(r <= req, "request {r} went past the stale one, {req}");
+        if r == req {
+            break lr;
+        }
+        serve_local_read(&mut engine, &mut buf, &lr, false);
+        let mut serve =
+            |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
+        drive(
+            &mut engine,
+            &rx,
+            &mut buf,
+            &mut serve,
+            &|o| matches!(o, Output::Done { op: o, .. } if *o == op),
+        );
+        op += 1;
+    };
+    let fresh_op = op;
+
+    let t = Instant::now();
+    engine.local_read_done(Instant::now(), &stale, None, false);
+    buf.fill(0);
+    serve_local_read(&mut engine, &mut buf, &fresh, false);
+    let mut again = 0;
+    let mut count = |e: &mut Engine<MemDevice>, b: &mut [u8], lr| {
+        again += 1;
+        serve_local_read(e, b, &lr, false);
+    };
+    let done = drive(
+        &mut engine,
+        &rx,
+        &mut buf,
+        &mut count,
+        &|o| matches!(o, Output::Done { op: o, .. } if *o == fresh_op),
+    );
+    assert!(
+        t.elapsed() < request_timeout() / 2,
+        "took {:?}",
+        t.elapsed()
+    );
+    assert!(
+        matches!(
+            done,
+            Output::Done {
+                result: Ok(None),
+                ..
+            }
+        ),
+        "{done:?}"
+    );
+    assert_eq!(again, 0, "the read was not sent again");
+    assert!(buf == pattern(4, 64 << 10), "the new target's data");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

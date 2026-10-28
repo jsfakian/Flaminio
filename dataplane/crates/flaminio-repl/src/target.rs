@@ -43,6 +43,9 @@ pub enum OpResult<P> {
     Read(P),
     /// The target was deposed. A write may or may not have taken effect.
     Failed,
+    /// A read that no ISR member could serve: the one that failed it was the only member left
+    /// (docs/5).
+    Unreadable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -351,6 +354,9 @@ pub struct Target<P> {
     reads: BTreeMap<u64, ReadOp>,
     digests: BTreeMap<u64, DigestOp>,
     queue: VecDeque<Work<P>>,
+    /// Client reads that failed on a member without a reply, by operation: the member each must
+    /// not be sent to again (docs/5).
+    avoid: BTreeMap<u64, NodeId>,
     meta_inflight: Option<(u64, Time)>,
     next_heartbeat: Time,
     /// When to read the volume from the metadata service next, and the read in flight. It has
@@ -428,6 +434,7 @@ impl<P: Clone + Debug> Target<P> {
             reads: BTreeMap::new(),
             digests: BTreeMap::new(),
             queue: VecDeque::new(),
+            avoid: BTreeMap::new(),
             meta_inflight: None,
             next_heartbeat: now,
             next_refresh: now + timing.refresh,
@@ -458,6 +465,13 @@ impl<P: Clone + Debug> Target<P> {
             ReadFor::Client { op } => Some(op),
             _ => None,
         }
+    }
+
+    /// Client reads waiting to be sent again after a failed read, for the tests: each ends with
+    /// its operation.
+    #[cfg(test)]
+    pub fn avoid_len(&self) -> usize {
+        self.avoid.len()
     }
 
     /// Sets how many repairs and resync copies may be in flight at once (at least one).
@@ -864,6 +878,52 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// The client read `req`, sent to `from` at `epoch` on `session`, failed there without a
+    /// reply: a local read whose device read or checksums failed (docs/5). It is sent again to
+    /// another ISR member, and `from` stays a member, its session open. A report that does not
+    /// match a client read in flight is ignored, as a stray reply is.
+    pub fn on_read_failed(
+        &mut self,
+        now: Time,
+        from: NodeId,
+        epoch: Epoch,
+        session: u64,
+        req: u64,
+    ) {
+        if self.deposed || epoch != self.epoch {
+            return;
+        }
+        let Some(op) = self.client_read_of(from, req) else {
+            return;
+        };
+        let Some(s) = self
+            .peers
+            .get_mut(&from)
+            .and_then(|p| p.session.as_mut())
+            .filter(|s| s.id == session)
+        else {
+            return;
+        };
+        let Some((_, ReqKind::Read { id })) = s.inflight.remove(&req) else {
+            unreachable!("client_read_of found a read");
+        };
+        let r = self.reads.remove(&id).expect("client_read_of found it");
+        // Client reads take their blocks' lock, and no bulk slot.
+        if r.locked {
+            self.chunks[r.chunk as usize].locks.remove(&r.ext);
+        }
+        self.avoid.insert(op, from);
+        // Ahead of what was queued after it, as when a session fails.
+        self.queue.push_front(Work::Client {
+            op,
+            kind: Op::Read {
+                chunk: r.chunk,
+                ext: r.ext,
+            },
+        });
+        self.pump(now);
+    }
+
     /// Handles the reply to metadata request `req`.
     pub fn on_meta(&mut self, now: Time, req: u64, reply: &MetaReply) {
         if self.deposed {
@@ -920,6 +980,7 @@ impl<P: Clone + Debug> Target<P> {
             });
         }
         self.queue.clear();
+        self.avoid.clear();
         self.reads.clear();
         self.writes.clear();
         self.digests.clear();
@@ -1319,6 +1380,7 @@ impl<P: Clone + Debug> Target<P> {
             ReadFor::Client { op } => {
                 self.chunks[chunk as usize].locks.remove(&ext);
                 if self.lease_ok(chunk as usize, now) {
+                    self.avoid.remove(&op);
                     self.out.push(Output::Done {
                         op,
                         result: OpResult::Read(data),
@@ -1462,7 +1524,24 @@ impl<P: Clone + Debug> Target<P> {
                         if !self.lease_ok(i, now) {
                             return false;
                         }
-                        let Some(from) = self.source(i, None) else {
+                        let avoid = self.avoid.get(&op).copied();
+                        let Some(from) = self.source(i, avoid) else {
+                            // A read that failed on the only member left ends; any other read
+                            // waits for a member it can use (docs/5).
+                            let c = &self.chunks[i];
+                            if let Some(failed) = avoid
+                                && !c
+                                    .isr
+                                    .iter()
+                                    .any(|n| *n != failed && !c.removing.contains(n))
+                            {
+                                self.avoid.remove(&op);
+                                self.out.push(Output::Done {
+                                    op,
+                                    result: OpResult::Unreadable,
+                                });
+                                return true;
+                            }
                             return false;
                         };
                         self.start_read(now, i, ext, from, ReadFor::Client { op }, true);
@@ -2087,4 +2166,326 @@ fn digest_mismatch(ext: &Extent, got: &BTreeMap<NodeId, Vec<Option<u32>>>) -> Ex
         }
     }
     bad
+}
+
+#[cfg(test)]
+mod tests {
+    //! A failed local read (docs/5), against a target on node 1 whose messages to its replicas
+    //! and to the metadata service are delivered at once, unless a test holds them back.
+    use super::*;
+    use crate::meta::{MetaRequest, Metadata};
+    use crate::msg::Request;
+    use crate::replica::Replica;
+    use crate::types::Value;
+
+    const VOL: VolumeId = 1;
+    const MS: Time = 1_000;
+    const TARGET: NodeId = 1;
+
+    type Pred = fn(&ToReplica<Vec<Value>>) -> bool;
+    /// A request to the target's own replica, and the reply held back from the target.
+    type Held = (ToReplica<Vec<Value>>, FromReplica<Vec<Value>>);
+
+    struct Bench {
+        now: Time,
+        meta: Metadata,
+        replicas: BTreeMap<NodeId, Replica>,
+        t: Target<Vec<Value>>,
+        /// Nodes whose requests are dropped.
+        down: BTreeSet<NodeId>,
+        /// Requests to the target's own replica whose replies are held back.
+        hold: Option<Pred>,
+        held: Vec<Held>,
+        /// Metadata requests are held back, unanswered.
+        hold_meta: bool,
+        /// Where each client read was sent, in order.
+        reads_to: Vec<NodeId>,
+        done: BTreeMap<u64, OpResult<Vec<Value>>>,
+        next_op: u64,
+    }
+
+    fn is_read(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Read { .. })
+    }
+
+    fn is_write(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Write { .. })
+    }
+
+    impl Bench {
+        /// A one-chunk volume of 4 blocks on `replicas`, attached on node 1, serving.
+        fn new(replicas: &[NodeId], min_isr: usize) -> Self {
+            let mut meta = Metadata::default();
+            meta.create_volume(VOL, min_isr, 4, vec![replicas.to_vec()]);
+            let MetaReply::Applied { view, .. } = meta.handle(&MetaRequest::Attach {
+                vol: VOL,
+                node: TARGET,
+            }) else {
+                panic!("attach refused");
+            };
+            let replicas = replicas
+                .iter()
+                .map(|&n| {
+                    let mut r = Replica::with_chunk_size(4);
+                    r.create_chunk(VOL, 0, 4);
+                    (n, r)
+                })
+                .collect();
+            let t = Target::new(TARGET, VOL, &view, Timing::default(), 4, 0);
+            let mut b = Self {
+                now: 0,
+                meta,
+                replicas,
+                t,
+                down: BTreeSet::new(),
+                hold: None,
+                held: Vec::new(),
+                hold_meta: false,
+                reads_to: Vec::new(),
+                done: BTreeMap::new(),
+                next_op: 1,
+            };
+            b.run();
+            b.until("serving", |b| b.t.is_settled());
+            b
+        }
+
+        /// Delivers everything the target sends, and what that causes, until it is quiet.
+        fn run(&mut self) {
+            loop {
+                let out = self.t.take_output();
+                if out.is_empty() {
+                    return;
+                }
+                for o in out {
+                    match o {
+                        Output::Send { to, msg } => self.send(to, msg),
+                        Output::Meta { req, body } if !self.hold_meta => {
+                            let reply = self.meta.handle(&body);
+                            self.t.on_meta(self.now, req, &reply);
+                        }
+                        Output::Meta { .. } => {}
+                        Output::Done { op, result } => {
+                            assert!(self.done.insert(op, result).is_none(), "op {op} done twice");
+                        }
+                    }
+                }
+            }
+        }
+
+        fn send(&mut self, to: NodeId, msg: ToReplica<Vec<Value>>) {
+            if self.down.contains(&to) {
+                return;
+            }
+            if is_read(&msg) && self.t.client_read_of(to, msg.req).is_some() {
+                self.reads_to.push(to);
+            }
+            let Some(reply) = self.replicas.get_mut(&to).expect("replica").handle(&msg) else {
+                return;
+            };
+            if to == TARGET && self.hold.is_some_and(|p| p(&msg)) {
+                self.held.push((msg, reply));
+            } else {
+                self.t.on_reply(self.now, to, &reply);
+            }
+        }
+
+        fn advance(&mut self, dt: Time) {
+            self.now += dt;
+            self.t.tick(self.now);
+            self.run();
+        }
+
+        /// Advances in steps of 10 ms until `f` holds, for at most 30 s.
+        fn until(&mut self, what: &str, f: impl Fn(&Self) -> bool) {
+            for _ in 0..3000 {
+                if f(self) {
+                    return;
+                }
+                self.advance(10 * MS);
+            }
+            panic!("not {what} after 30 s: {}", self.t.describe());
+        }
+
+        fn submit(&mut self, op: Op<Vec<Value>>) -> u64 {
+            let id = self.next_op;
+            self.next_op += 1;
+            self.t.submit(self.now, id, op);
+            self.run();
+            id
+        }
+
+        fn write(&mut self, block: Block, v: Value) {
+            let op = self.submit(Op::Write {
+                chunk: 0,
+                ext: Extent::new(block, 1),
+                data: vec![v],
+            });
+            assert_eq!(self.done.get(&op), Some(&OpResult::Written));
+        }
+
+        fn read(&mut self, block: Block) -> u64 {
+            self.submit(Op::Read {
+                chunk: 0,
+                ext: Extent::new(block, 1),
+            })
+        }
+
+        /// Reports the held reply `i` as a failed read.
+        fn fail_held(&mut self, i: usize) {
+            let (msg, _) = self.held.remove(i);
+            self.t
+                .on_read_failed(self.now, TARGET, msg.epoch, msg.session, msg.req);
+            self.run();
+        }
+
+        fn isr(&self) -> BTreeSet<NodeId> {
+            self.t.chunks[0].isr.clone()
+        }
+    }
+
+    #[test]
+    fn a_failed_local_read_is_answered_by_another_member() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.write(0, 42);
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        assert_eq!((b.held.len(), b.done.get(&op)), (1, None));
+        b.fail_held(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to, [1, 2]);
+        // The local replica stays a member, on the same session, and nothing is left to avoid.
+        assert_eq!(b.isr(), BTreeSet::from([1, 2]));
+        assert!(b.t.session_of(TARGET).is_some());
+        assert_eq!(b.t.avoid_len(), 0);
+        // Only that read avoided it: the next one goes to the local replica again.
+        b.hold = None;
+        let next = b.read(0);
+        assert_eq!(b.done.get(&next), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to, [1, 2, 1]);
+    }
+
+    #[test]
+    fn a_failed_read_goes_again_before_later_overlapping_reads() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.write(0, 42);
+        b.hold = Some(is_read);
+        let first = b.read(0);
+        // Waits for the first read's lock.
+        let second = b.read(0);
+        assert_eq!(b.reads_to, [1]);
+        b.hold = None;
+        b.fail_held(0);
+        assert_eq!(b.reads_to, [1, 2, 1]);
+        assert_eq!(b.done.get(&first), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.done.get(&second), Some(&OpResult::Read(vec![42])));
+    }
+
+    #[test]
+    fn a_read_that_failed_on_the_only_member_is_unreadable() {
+        let mut b = Bench::new(&[1], 1);
+        b.write(0, 42);
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        b.fail_held(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Unreadable));
+        assert_eq!(b.isr(), BTreeSet::from([1]));
+        assert_eq!(b.t.avoid_len(), 0);
+    }
+
+    #[test]
+    fn a_member_being_removed_does_not_count() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.write(0, 42);
+        // Node 2 stops answering; its removal is proposed but never committed.
+        b.hold_meta = true;
+        b.down.insert(2);
+        b.until("removing node 2", |b| b.t.chunks[0].removing.contains(&2));
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        assert_eq!(b.held.len(), 1, "the read went to the local replica");
+        b.fail_held(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Unreadable));
+        assert_eq!(b.t.avoid_len(), 0);
+    }
+
+    #[test]
+    fn a_failed_read_waits_for_a_member_whose_session_is_down() {
+        // With min_isr 2, node 2 stays in the ISR while its session is down.
+        let mut b = Bench::new(&[1, 2], 2);
+        b.write(0, 42);
+        b.down.insert(2);
+        b.until("node 2's session down", |b| b.t.session_of(2).is_none());
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        assert_eq!(b.held.len(), 1, "the read went to the local replica");
+        b.fail_held(0);
+        assert_eq!(b.done.get(&op), None);
+        assert_eq!(b.t.avoid_len(), 1);
+        b.down.clear();
+        b.until("read done", |b| b.done.contains_key(&op));
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to, [1, 2]);
+        assert_eq!(b.isr(), BTreeSet::from([1, 2]));
+        assert_eq!(b.t.avoid_len(), 0);
+    }
+
+    #[test]
+    fn stray_failure_reports_are_ignored() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.write(0, 42);
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        let (msg, reply) = b.held.pop().expect("held read");
+        let (e, s, r) = (msg.epoch, msg.session, msg.req);
+        for (epoch, session, req) in [(e + 1, s, r), (e, s + 1, r), (e, s, r + 1000)] {
+            b.t.on_read_failed(b.now, TARGET, epoch, session, req);
+            b.run();
+            assert_eq!(
+                b.t.client_read_of(TARGET, r),
+                Some(op),
+                "{epoch} {session} {req}"
+            );
+        }
+        assert_eq!(b.reads_to, [1]);
+        b.t.on_reply(b.now, TARGET, &reply);
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+
+        // A report for a request that is not a client read leaves it in flight.
+        b.hold = Some(is_write);
+        let w = b.submit(Op::Write {
+            chunk: 0,
+            ext: Extent::new(1, 1),
+            data: vec![7],
+        });
+        let (msg, reply) = b.held.pop().expect("held write");
+        b.t.on_read_failed(b.now, TARGET, msg.epoch, msg.session, msg.req);
+        b.run();
+        assert_eq!(b.done.get(&w), None);
+        b.t.on_reply(b.now, TARGET, &reply);
+        b.run();
+        assert_eq!(b.done.get(&w), Some(&OpResult::Written));
+    }
+
+    #[test]
+    fn deposition_ends_reads_waiting_to_go_again() {
+        let mut b = Bench::new(&[1, 2], 2);
+        b.write(0, 42);
+        b.down.insert(2);
+        b.until("node 2's session down", |b| b.t.session_of(2).is_none());
+        b.hold = Some(is_read);
+        let op = b.read(0);
+        let (msg, _) = b.held[0].clone();
+        b.fail_held(0);
+        assert_eq!(b.t.avoid_len(), 1);
+        b.t.depose();
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Failed));
+        assert_eq!(b.t.avoid_len(), 0);
+        // A report after deposition changes nothing.
+        b.t.on_read_failed(b.now, TARGET, msg.epoch, msg.session, msg.req);
+        b.run();
+        assert_eq!(b.t.avoid_len(), 0);
+    }
 }
