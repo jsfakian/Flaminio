@@ -24,7 +24,7 @@ runners, Xcode's tools on macOS).
 
 ## The regression test
 
-A unit test module in `src/lib.rs`, run with `cargo test --locked --lib` in `dataplane/fuzz`
+A unit test module in `src/lib.rs`, run with `cargo test --lib` in `dataplane/fuzz`
 (`--lib` only skips doc-tests; the binaries are not built by `cargo test` either way, as they
 have `test = false` and there is no `tests/` directory):
 
@@ -59,7 +59,8 @@ have `test = false` and there is no `tests/` directory):
   failed;
 - creates `corpus/<target>` itself: cargo-fuzz only creates it when it chooses the corpus, and
   libFuzzer refuses a corpus directory that does not exist;
-- runs `cargo fuzz run <target> corpus/<target> regressions/<target> -- -max_total_time=<s>
+- runs `cargo fuzz run --features fuzzing <target> corpus/<target> regressions/<target> --
+  -max_total_time=<s>
   -timeout=10`: libFuzzer's default timeout is 1 200 seconds, which would let a 10-minute hang
   pass as a slow input.
   libFuzzer writes new inputs only to the first directory and never deletes seed files, so the
@@ -73,16 +74,18 @@ of 60, 300 or 600, which keeps five targets and their builds within the job's 12
 (GitHub's expressions have no arithmetic to derive the limit from the input).
 
 The `fuzz` job, on failure, and also when it is cancelled at its time limit:
-- copies `dataplane/fuzz/artifacts/` to `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the
-  runner when it holds any file, from a step that runs with `if: failure() || cancelled()`;
-- then uploads it as the artifact `fuzz-artifacts` (now with `retention-days: 90`).
+- copies `dataplane/fuzz/artifacts/` to `~/.cache/flaminio-ci/fuzz-artifacts/<run id>-<attempt>/`
+  on the runner when it holds any file, from a step that runs with `if: failure() || cancelled()`;
+- then uploads it as the artifact `fuzz-artifacts-<attempt>` (`retention-days: 90`). A re-run is
+  a new attempt of the same run, and an artifact name can be used once per run.
 
 A second job, `report`, on `[self-hosted, flaminio]`, needs `fuzz` and runs with
 `if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')`: after any
 failure or cancellation, with or without inputs, so a hang stopped at the time limit is reported
 too. Without `always()`, GitHub would add `success()` to the condition and the job would never run
-after a failed `fuzz`. Whether the run kept inputs, it asks the API for the run's artifacts
-(`fuzz-artifacts`), not a job output, which a job cancelled at its time limit may not pass on.
+after a failed `fuzz`. Whether the attempt kept inputs, it asks the API for the run's artifacts
+and looks for this attempt's `fuzz-artifacts-<attempt>` (the list holds every attempt's), not a
+job output, which a job cancelled at its time limit may not pass on.
 It has `issues: write` and `actions: read` and nothing else, checks nothing out, and sets two
 variables for `gh`: `GH_TOKEN`
 to the workflow's token, so `gh` on the runner does not fall back to the administrator login it
@@ -103,7 +106,12 @@ Keeping it a separate job keeps `issues: write` away from the steps that build a
   checks a dev build keeps. It is still faster than the fuzzer, which adds instrumentation, hence
   the replay's stricter limits (S4). cargo-fuzz's own builds (release) are unaffected.
 
-- `make fuzz-regressions`: `cd dataplane/fuzz && cargo test --locked --lib`.
+- `make fuzz-regressions`: `cd dataplane/fuzz && cargo test --lib`. Not `--locked`, like
+  `make test`'s other `cargo test`: the contracts job already fails on a stale fuzz lockfile, and
+  a developer adding a dependency should see the replay run, not a lockfile error. Dependabot
+  watches the fuzz crate's lockfile too (`/dataplane/fuzz`).
+- The set check also requires `required-features = ["fuzzing"]` on every `[[bin]]`, without which
+  a plain `cargo build` of the crate fails.
 - `make test` runs it after the data plane's and the Go tests.
 - `make lint` adds `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` in
   `dataplane/fuzz`. Clippy builds the five binaries too; they build on stable.
@@ -139,6 +147,13 @@ clean run on `main` after it is merged.
   crates under test: the token harness's time is mostly its signature checks in the crypto
   dependencies, and the runners keep their build directories, so the cost is paid once per
   dependency change. *Rejected:* per-package profiles, which would skew the replay's timing.
+- **A fresh zeroed image per journal input.** Reusing one image and clearing what the previous
+  input wrote saves an allocation, but rests on an invariant (an input writes only inside its own
+  length) that a later change to the harness could break silently, leaking one input into the
+  next. A zeroed allocation is cheap: the pages it does not touch are never written.
+- **Eight selector slots, two free.** A quarter of `metadata_pages` inputs do nothing, the price
+  of a first byte whose meaning never changes as decoders are added. *Rejected:*
+  `selector % <number of decoders>`, which reroutes every committed input when one is added.
 - **Memory and leak limits stay with the fuzzer** (S5). Enforcing them in the stable test would
   need an allocator wrapper and LeakSanitizer; the weekly run replays every regression input
   with them anyway.

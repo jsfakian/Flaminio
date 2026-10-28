@@ -12,7 +12,7 @@ failure reproduces locally with the same command.
 | [Nightly](../.github/workflows/nightly.yml) | 01:00 UTC, and by hand | simulation of 200 000 seeds starting from a new one each day; `crash-test`; `race COUNT=20`; `sanitize`; `miri`; `hygiene` |
 | [Fuzz](../.github/workflows/fuzz.yml) | Saturdays 02:00 UTC, and by hand | `fuzz`, 10 minutes per target; the corpus carries over between runs; failing inputs are kept and reported (see [Fuzzing](#fuzzing)) |
 | [Lab](../.github/workflows/lab.yml) | by hand only | one lab check on the lab VMs, from the lab runner |
-| [Dependabot](../.github/dependabot.yml) | weekly | one pull request each for Cargo, Go modules and GitHub Actions |
+| [Dependabot](../.github/dependabot.yml) | weekly | one pull request each for Cargo (the data plane, and the fuzz crate's own lockfile), Go modules and GitHub Actions |
 
 What the targets check:
 
@@ -55,14 +55,14 @@ target fail, committed (design: [docs/4](4/design.md)):
 **When a Fuzz run fails or is cancelled,** it opens an issue labelled `fuzz`, or comments on the
 open one, saying whether it kept failing inputs or ended without any (a build or toolchain
 failure, or a hang). It keeps
-the inputs as the artifact `fuzz-artifacts` (90 days) and in
-`~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the runner host. To fix one:
+the inputs as the artifact `fuzz-artifacts-<attempt>` (90 days) and in
+`~/.cache/flaminio-ci/fuzz-artifacts/<run id>-<attempt>/` on the runner host. To fix one:
 
 1. Copy the input into `dataplane/fuzz/regressions/<target>/`, keeping libFuzzer's name
    (`crash-<sha1>`, `timeout-…`, `oom-…`, `leak-…`).
 2. See it fail: `make fuzz-regressions`. An out-of-memory or leak input passes there; reproduce
-   it with `cargo +<nightly> fuzz run <target> <file>` in `dataplane/fuzz`, on Linux
-   (LeakSanitizer does not run on macOS).
+   it with `cargo +<nightly> fuzz run --features fuzzing <target> <file>` in `dataplane/fuzz`,
+   on Linux (LeakSanitizer does not run on macOS).
 3. Fix the bug, see it pass, and commit the input with the fix.
 
 A new target needs its harness in `lib.rs` (and its `TARGETS` table), its binary in

@@ -47,14 +47,17 @@ its list of targets from `cargo fuzz list`, refuses an empty list, runs every ta
 fails, and fails at the end naming every target that did, so one run reports them all.
 
 **S7. From a failure to a fixed bug.**
-- A failing Fuzz run keeps the failing inputs: as a workflow artifact for 90 days, and on the
-  runner host in `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/`.
+- A failing Fuzz run keeps the failing inputs: as the workflow artifact
+  `fuzz-artifacts-<attempt>` for 90 days, and on the runner host in
+  `~/.cache/flaminio-ci/fuzz-artifacts/<run id>-<attempt>/`. Per attempt, so a re-run neither
+  collides with nor is mistaken for an earlier attempt's inputs.
 - Any failed or cancelled run opens an issue, labelled `fuzz`, linking the run, or comments on
   the one already open. The note says whether it kept failing inputs, or ended without any (a
   build or toolchain failure, or a hang stopped at the time limit), so neither goes unnoticed. A
   job stopped at its time limit keeps the inputs it found. Runs never overlap.
 - To fix one: copy the file into `regressions/<target>/`, see `make fuzz-regressions` fail (or,
-  for an out-of-memory or leak input, `cargo +<nightly> fuzz run <target> <file>`, on Linux:
+  for an out-of-memory or leak input, `cargo +<nightly> fuzz run --features fuzzing <target>
+  <file>`, on Linux:
   LeakSanitizer does not run on macOS), fix the bug, see it pass, commit both. `docs/ci.md`
   describes this.
 
@@ -68,7 +71,6 @@ and rustfmt on `dataplane/fuzz`, which is outside the data plane's workspace.
   did (it mapped six values onto five decoders). Its first byte now picks the decoder from eight
   fixed slots, `selector % 8` (0 checkpoint, 1 data bitmap, 2 chunk header, 3 page table, 4 map,
   5 pool bitmap; 6 and 7 free, doing nothing): a new decoder takes a free slot, so committed
-  inputs keep reaching the decoder they were saved for, and few first bytes are wasted. The
-  journal harness reuses its device image between inputs, clearing what the previous input
-  wrote, instead of allocating it each time.
+  inputs keep reaching the decoder they were saved for, and only two slots in eight are wasted.
+  One table maps a slot to both its page type and its decoder.
 - The weekly schedule, and the corpus kept on the runner host.

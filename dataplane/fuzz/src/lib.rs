@@ -15,7 +15,6 @@ use flaminio_format::page::{PAGE_PAYLOAD_LEN, PageType, new_page, payload_mut, s
 use flaminio_format::superblock::Superblock;
 use flaminio_net::frame::Frame;
 use flaminio_net::token::TokenKey;
-use std::cell::RefCell;
 use std::sync::LazyLock;
 
 const NONCE: u64 = 1;
@@ -53,16 +52,30 @@ pub fn superblock(data: &[u8]) {
 /// free slot, so a committed regression input keeps reaching the decoder it was saved for. The free
 /// slots, 6 and 7, do nothing.
 pub fn metadata_pages(data: &[u8]) {
+    type Decode = fn(&[u8], u64, &Layout);
     let Some((&selector, rest)) = data.split_first() else {
         return;
     };
-    let page_type = match selector % 8 {
-        0 => PageType::Checkpoint,
-        1 => PageType::DataBitmap,
-        2 => PageType::ChunkHeader,
-        3 => PageType::PageTable,
-        4 => PageType::Map,
-        5 => PageType::PoolBitmap,
+    // One table from slot to page type and decoder, so the two cannot get out of step.
+    let (page_type, decode): (PageType, Decode) = match selector % 8 {
+        0 => (PageType::Checkpoint, |b, offset, layout| {
+            drop(CheckpointHeader::decode(b, NONCE, offset, layout))
+        }),
+        1 => (PageType::DataBitmap, |b, offset, _| {
+            drop(BitmapPage::decode(b, BitmapKind::Data, NONCE, offset, 0))
+        }),
+        2 => (PageType::ChunkHeader, |b, offset, layout| {
+            drop(ChunkHeader::decode(b, NONCE, offset, layout))
+        }),
+        3 => (PageType::PageTable, |b, offset, layout| {
+            drop(PageTable::decode(b, NONCE, offset, layout, 0, 0))
+        }),
+        4 => (PageType::Map, |b, offset, layout| {
+            drop(MapPage::decode(b, NONCE, offset, layout, 0, 0))
+        }),
+        5 => (PageType::PoolBitmap, |b, offset, _| {
+            drop(BitmapPage::decode(b, BitmapKind::Pool, NONCE, offset, 0))
+        }),
         _ => return,
     };
     let layout = &*PAGES_LAYOUT;
@@ -71,46 +84,18 @@ pub fn metadata_pages(data: &[u8]) {
     let n = rest.len().min(PAGE_PAYLOAD_LEN);
     payload_mut(&mut page)[..n].copy_from_slice(&rest[..n]);
     seal(&mut page, page_type, NONCE, 1, offset);
-    let b = &page[..];
-    match page_type {
-        PageType::Checkpoint => drop(CheckpointHeader::decode(b, NONCE, offset, layout)),
-        PageType::DataBitmap => drop(BitmapPage::decode(b, BitmapKind::Data, NONCE, offset, 0)),
-        PageType::PoolBitmap => drop(BitmapPage::decode(b, BitmapKind::Pool, NONCE, offset, 0)),
-        PageType::ChunkHeader => drop(ChunkHeader::decode(b, NONCE, offset, layout)),
-        PageType::PageTable => drop(PageTable::decode(b, NONCE, offset, layout, 0, 0)),
-        PageType::Map => drop(MapPage::decode(b, NONCE, offset, layout, 0, 0)),
-        // A slot added above without its decoder here: fail loudly rather than fuzz nothing.
-        other => unreachable!("metadata_pages: no decoder for {other:?}"),
-    }
-}
-
-thread_local! {
-    /// The device image `journal` works on, reused between inputs: each input clears what the
-    /// previous one wrote, instead of allocating and zeroing the whole image.
-    static JOURNAL_DEV: RefCell<(Vec<u8>, usize)> = const { RefCell::new((Vec::new(), 0)) };
+    decode(&page[..], offset, layout);
 }
 
 /// Journal replay over a fuzzer-controlled journal region. The first block is repaired into a
 /// valid batch header for sequence 1, so mutations reach payload and record parsing.
 pub fn journal(data: &[u8]) {
     let layout = &*JOURNAL_LAYOUT;
+    // A fresh, zeroed image for every input: no input can leak into the next one.
+    let mut dev = vec![0u8; (layout.journal_offset + layout.journal_size) as usize];
     let j = layout.journal_offset as usize;
     let n = data.len().min(layout.journal_size as usize);
-    JOURNAL_DEV.with_borrow_mut(|(dev, written)| {
-        if dev.is_empty() {
-            *dev = vec![0u8; (layout.journal_offset + layout.journal_size) as usize];
-        }
-        // All zeros again: an input writes only inside dev[j..j + its n] (its data, and the
-        // header it repairs, which needs n >= 64).
-        dev[j..j + *written].fill(0);
-        *written = n;
-        journal_on(dev, layout, j, &data[..n]);
-    });
-}
-
-fn journal_on(dev: &mut [u8], layout: &Layout, j: usize, data: &[u8]) {
-    let n = data.len();
-    dev[j..j + n].copy_from_slice(data);
+    dev[j..j + n].copy_from_slice(&data[..n]);
     if n >= 64 {
         let h = &mut dev[j..j + 64];
         h[0..4].copy_from_slice(&BATCH_MAGIC);
@@ -127,7 +112,7 @@ fn journal_on(dev: &mut [u8], layout: &Layout, j: usize, data: &[u8]) {
         let crc = crc32c(&dev[j..j + 60]);
         dev[j + 60..j + 64].copy_from_slice(&crc.to_le_bytes());
     }
-    let scan = JournalScanner::new(dev, layout, NONCE, JournalPosition { offset: 0, seq: 1 });
+    let scan = JournalScanner::new(&dev, layout, NONCE, JournalPosition { offset: 0, seq: 1 });
     for batch in scan.flatten() {
         for record in batch.records() {
             let _ = record;
@@ -201,7 +186,9 @@ mod regressions {
             .collect()
     }
 
-    /// The `name` of every `[[bin]]` in the fuzz crate's Cargo.toml: what cargo-fuzz builds.
+    /// The `name` of every `[[bin]]` in the fuzz crate's Cargo.toml: what cargo-fuzz builds. Each
+    /// must require the `fuzzing` feature, without which it cannot build (libfuzzer-sys is
+    /// optional).
     fn bins() -> BTreeSet<String> {
         let manifest: toml::Table = std::fs::read_to_string(path("Cargo.toml"))
             .expect("Cargo.toml")
@@ -214,7 +201,13 @@ mod regressions {
             .flatten()
             .map(|b| {
                 let name = b.get("name").and_then(|n| n.as_str());
-                name.expect("every [[bin]] has a name").to_string()
+                let name = name.expect("every [[bin]] has a name");
+                let features = b.get("required-features").and_then(|f| f.as_array());
+                assert!(
+                    features.is_some_and(|f| f.iter().any(|v| v.as_str() == Some("fuzzing"))),
+                    "[[bin]] {name}: needs required-features = [\"fuzzing\"]"
+                );
+                name.to_string()
             })
             .collect()
     }
@@ -230,24 +223,6 @@ mod regressions {
             || ["crash-", "timeout-", "oom-", "leak-", "minimized-from-"]
                 .iter()
                 .any(|kind| name.strip_prefix(kind).is_some_and(sha1))
-    }
-
-    /// The journal harness reuses its device image: what one input wrote must not leak into the
-    /// next one's.
-    #[test]
-    fn journal_clears_what_the_previous_input_wrote() {
-        let j = super::JOURNAL_LAYOUT.journal_offset as usize;
-        super::journal(&[0xAB; 4096]);
-        super::journal(&[0xCD; 16]);
-        super::JOURNAL_DEV.with_borrow(|(dev, written)| {
-            assert_eq!(*written, 16);
-            assert!(dev[j..j + 16].iter().all(|&b| b == 0xCD));
-            assert!(
-                dev[j + 16..].iter().all(|&b| b == 0),
-                "the first input's bytes remain"
-            );
-            assert!(dev[..j].iter().all(|&b| b == 0));
-        });
     }
 
     #[test]

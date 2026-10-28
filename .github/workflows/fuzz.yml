@@ -51,7 +51,7 @@ jobs:
         if: failure() || cancelled()
         run: |
           if [[ -d $ARTIFACTS ]] && [[ -n $(find "$ARTIFACTS" -type f -print -quit) ]]; then
-              keep="$HOME/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID"
+              keep="$HOME/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
               mkdir -p "$keep"
               rsync -a "$ARTIFACTS/" "$keep/"
               echo "inputs=true" >> "$GITHUB_OUTPUT"
@@ -60,7 +60,8 @@ jobs:
         if: (failure() || cancelled()) && steps.kept.outputs.inputs == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-artifacts
+          # One per attempt: a re-run keeps the run, and a name may be used once in a run.
+          name: fuzz-artifacts-${{ github.run_attempt }}
           path: dataplane/fuzz/artifacts/
           retention-days: 90
 
@@ -86,10 +87,11 @@ jobs:
       - name: Open or update the fuzz issue
         run: |
           gh label create fuzz --color B60205 --description "Failed runs of the Fuzz workflow" --force
+          # This attempt's artifact only: the list holds every attempt's.
           kept=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
-              --jq '[.artifacts[] | select(.name == "fuzz-artifacts")] | length')
+              --jq "[.artifacts[] | select(.name == \"fuzz-artifacts-$GITHUB_RUN_ATTEMPT\")] | length")
           if [[ $kept -gt 0 ]]; then
-              note="The Fuzz run $RUN_URL kept failing inputs: the artifact fuzz-artifacts (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID on the runner host. To fix them: docs/ci.md, Fuzzing."
+              note="The Fuzz run $RUN_URL (attempt $GITHUB_RUN_ATTEMPT) kept failing inputs: the artifact fuzz-artifacts-$GITHUB_RUN_ATTEMPT (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT on the runner host. To fix them: docs/ci.md, Fuzzing."
           else
               note="The Fuzz run $RUN_URL failed or was cancelled without keeping any failing input (a build or toolchain failure, or a hang?): the targets may not have been fuzzed. See its log."
           fi
