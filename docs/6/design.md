@@ -59,7 +59,8 @@ waited, in seconds with at most one decimal: `error: no answer within 50 s`.
 control socket stops waiting, `ATTACH_LIMIT` after it sent the request, or sooner if the caller
 said so. The node plugin's `Attach` sends its time left, from `min(Timeout, ctx deadline)`, less
 `answerMargin` = 1 s, as a fourth word in milliseconds; the socket takes the smaller of that and
-`ATTACH_LIMIT`. A NodeStage that spent 30 s in `Meta.Attach` then gets an attach bounded by the
+`ATTACH_LIMIT`. A data plane older than this answers the fourth word with its usage line; the
+plugin then sends the attach again without it, so the two can be upgraded in either order. A NodeStage that spent 30 s in `Meta.Attach` then gets an attach bounded by the
 20 s it has, and an answer with its cause, rather than its own deadline.
 - **Skipping.** The main thread skips a request that it takes after `deadline − START_LIMIT`,
   when no step would have any time left. It logs that, and answers with that reason, in case
@@ -74,10 +75,10 @@ said so. The node plugin's `Attach` sends its time left, from `min(Timeout, ctx 
   `START_LIMIT`. The device then serves the volume with nobody told, and a retry finds it
   through `status`.
 - **The attach at startup** (`--attach`, a lab and manual option) has no caller to retry it. It
-  is sent before the main loop starts, so it comes first. After a failure because the metadata
-  service did not answer, a thread sends it again every 5 s for up to 5 minutes, while the node
-  has no other volume, so that a service still recovering after a cluster restart does not leave
-  the node without its volume. Other failures are not retried.
+  is sent before the control socket opens, so it comes first. After a failure, a thread sends
+  it again every 5 s for up to 5 minutes, while the node has no other volume, so that a metadata
+  service still recovering after a cluster restart, whether it times out or refuses
+  connections, does not leave the node without its volume.
 - **One attach of a volume at a time.** The engine refuses an `Attach` of a volume it is still
   attaching ("already attaching"), so every attach gets an answer.
 

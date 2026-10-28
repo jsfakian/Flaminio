@@ -701,13 +701,6 @@ pub fn serve_node(
             efd.signal();
         })
     };
-    crate::control::spawn(
-        &c.control,
-        ctl_tx.clone(),
-        engine_tx,
-        wake,
-        attached.clone(),
-    )?;
     if let (Some(volume), Some(path)) = (c.attach.clone(), c.token.as_ref()) {
         let token = read_token(path)?;
         let request = |volume: &str, token: &[u8]| {
@@ -720,27 +713,24 @@ pub fn serve_node(
             };
             (request, answer)
         };
-        // Sent here, so that it comes before any command from the control socket.
+        // Sent before the control socket opens, so that it comes before any of its commands.
         let (first, mut answer) = request(&volume, &token);
         ctl_tx.send(first).expect("own channel");
         // Nobody else retries an attach at startup: after a cluster restart, the metadata
-        // service may take a while to answer (docs/6). Only that is tried again, and only while
-        // the node has no other volume.
+        // service may take a while to answer, or refuse connections (docs/6). A failure is
+        // tried again every 5 s for up to 5 minutes, while the node has no other volume.
         let (ctl, attached) = (ctl_tx.clone(), attached.clone());
         thread::spawn(move || {
             let until = Instant::now() + STARTUP_ATTACH_LIMIT;
+            let done = || Instant::now() >= until || attached.lock().expect("attached").is_some();
             loop {
                 let Ok(a) = answer.recv() else { return };
                 eprintln!("flaminio-io: attach at startup: {a}");
-                let other = || attached.lock().expect("attached").is_some();
-                if !a.contains("no answer from the metadata service")
-                    || Instant::now() >= until
-                    || other()
-                {
+                if a.starts_with("ok") || done() {
                     return;
                 }
                 thread::sleep(Duration::from_secs(5));
-                if other() {
+                if done() {
                     return;
                 }
                 let (next, rx) = request(&volume, &token);
@@ -751,6 +741,13 @@ pub fn serve_node(
             }
         });
     }
+    crate::control::spawn(
+        &c.control,
+        ctl_tx.clone(),
+        engine_tx,
+        wake,
+        attached.clone(),
+    )?;
     eprintln!(
         "flaminio-io: serving replicas; control socket {}",
         c.control.display()

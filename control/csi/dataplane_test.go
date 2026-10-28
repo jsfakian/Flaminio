@@ -117,3 +117,43 @@ func TestControlSocketTellsTheDataPlaneItsTimeLeft(t *testing.T) {
 		t.Fatalf("time left %q, want about 2000 ms", fields[3])
 	}
 }
+
+// An older data plane takes only `attach VOLUME TOKEN`: the plugin sends that after its usage
+// line, so that the two can be upgraded in either order.
+func TestControlSocketFallsBackForAnOlderDataPlane(t *testing.T) {
+	dir, err := os.MkdirTemp("", "fl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "c.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan struct{})
+	go func() {
+		defer close(served)
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			line, _ := bufio.NewReader(conn).ReadString('\n')
+			answer := "ok /dev/ublkb3"
+			if len(strings.Fields(line)) != 3 {
+				answer = "error: usage: attach VOLUME TOKEN-BASE64 | detach VOLUME | delete VOLUME | status"
+			}
+			_, _ = conn.Write([]byte(answer + "\n"))
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = l.Close()
+		<-served
+		_ = os.RemoveAll(dir)
+	})
+	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"))
+	if err != nil || dev != "/dev/ublkb3" {
+		t.Fatalf("got %q, %v", dev, err)
+	}
+}

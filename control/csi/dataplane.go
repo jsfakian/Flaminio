@@ -101,10 +101,17 @@ func (s ControlSocket) Status(ctx context.Context) (string, string, error) {
 // Attach tells the data plane how long this caller still waits, less answerMargin, so that it
 // ends the attach in time to answer with its cause rather than leave the caller with only its
 // own deadline (docs/6).
+//
+// A data plane older than this answers the time limit with its usage line: the attach is then
+// sent again without it, so the two can be upgraded in either order.
 func (s ControlSocket) Attach(ctx context.Context, volume string, token []byte) (string, error) {
 	within := max(time.Until(s.deadline(ctx))-answerMargin, 0)
-	line := fmt.Sprintf("attach %s %s %d", volume, base64.StdEncoding.EncodeToString(token), within.Milliseconds())
-	return s.command(ctx, line)
+	line := "attach " + volume + " " + base64.StdEncoding.EncodeToString(token)
+	dev, err := s.command(ctx, fmt.Sprintf("%s %d", line, within.Milliseconds()))
+	if err != nil && strings.Contains(err.Error(), "usage: attach VOLUME TOKEN-BASE64 |") {
+		return s.command(ctx, line)
+	}
+	return dev, err
 }
 
 func (s ControlSocket) Detach(ctx context.Context, volume string) error {
