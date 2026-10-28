@@ -35,7 +35,8 @@ ACTIONLINT  := $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 # installs it); NIGHTLY=nightly for the latest.
 NIGHTLY   ?= nightly-2026-10-28
 COUNT     ?= 1
-# CI passes LOCKED=--locked to make fuzz-regressions, which builds the fuzz crate's own workspace.
+# CI passes LOCKED=--locked to make lint and make fuzz-regressions for the fuzz crate's own
+# workspace; locally, a stale lockfile is just updated.
 LOCKED    ?=
 # The data plane crates with threads, io_uring or unsafe code, for the sanitizers.
 SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net
@@ -82,7 +83,7 @@ meta-interop: ## The data plane's Rust metadata client against the Go service, o
 
 lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck, actionlint
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
-	cd $(DATAPLANE)/fuzz && $(CARGO) clippy --all-targets --all-features --locked -- -D warnings && $(CARGO) fmt --check
+	cd $(DATAPLANE)/fuzz && $(CARGO) clippy $(LOCKED) --all-targets --all-features -- -D warnings && $(CARGO) fmt --check
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l api meta pkg control)" || { echo "gofmt needed:"; gofmt -l api meta pkg control; exit 1; }
 	$(BUF) lint

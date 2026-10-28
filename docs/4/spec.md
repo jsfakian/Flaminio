@@ -42,7 +42,8 @@ run, under its memory and leak limits, which the stable test of S4 cannot enforc
 
 **S6. Every target is covered.** The regression test fails unless the `[[bin]]` entries of the
 fuzz crate's `Cargo.toml` (what cargo-fuzz builds), the sources in `fuzz_targets/*.rs`, the
-harnesses it knows and the directories under `regressions/` are the same set. `make fuzz` takes
+harnesses it knows and the directories under `regressions/` are the same set, and each binary
+calls the harness of its own name, so the fuzzer and the replay run the same code. `make fuzz` takes
 its list of targets from `cargo fuzz list`, refuses an empty list, runs every target even after one
 fails, and fails at the end naming every target that did, so one run reports them all.
 

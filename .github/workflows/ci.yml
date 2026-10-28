@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: shellcheck --version >/dev/null # make lint skips shellcheck when it is missing
-      - run: make lint
+      - run: make lint LOCKED=--locked
 
   rust-test:
     name: Rust tests (Linux, io_uring included; fuzz regression inputs)

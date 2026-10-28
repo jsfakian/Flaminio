@@ -50,6 +50,9 @@ jobs:
         id: kept
         if: failure() || cancelled()
         run: |
+          # Copies older than the artifacts' 90 days go.
+          find "$HOME/.cache/flaminio-ci/fuzz-artifacts" -mindepth 1 -maxdepth 1 -mtime +90 \
+              -exec rm -rf {} + 2>/dev/null || true
           if [[ -d $ARTIFACTS ]] && [[ -n $(find "$ARTIFACTS" -type f -print -quit) ]]; then
               keep="$HOME/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
               mkdir -p "$keep"
@@ -90,18 +93,17 @@ jobs:
       - name: Open or update the fuzz issue
         run: |
           attempt="repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
-          # A run cancelled while still queued (by a newer one, through the concurrency group)
-          # never fuzzed and did not fail: nothing to report.
-          steps=$(gh api "$attempt/jobs" \
-              --jq '[.jobs[] | select(.name == "Fuzz every target") | .steps | length] | add // 0')
-          if [[ $steps -eq 0 ]]; then
-              echo "The fuzz job never started: nothing to report."
-              exit 0
-          fi
+          # The fuzz job, by its name (keep in step with `name:` above): exactly one, or this step
+          # fails loudly instead of reporting the wrong thing.
+          jobs=$(gh api "$attempt/jobs" --jq '[.jobs[] | select(.name == "Fuzz every target")]')
+          [[ $(jq length <<<"$jobs") -eq 1 ]] || { echo "::error::no single job named 'Fuzz every target'"; exit 1; }
+          steps=$(jq '.[0].steps | length' <<<"$jobs")
           # This attempt's artifact only: the list holds every attempt's.
           kept=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
               --jq "[.artifacts[] | select(.name == \"fuzz-artifacts-$GITHUB_RUN_ATTEMPT\")] | length")
-          if [[ $kept -gt 0 ]]; then
+          if [[ $steps -eq 0 ]]; then
+              note="The Fuzz run $RUN_URL never started: no runner took its fuzz job (are centaur's runners up?). The targets were not fuzzed."
+          elif [[ $kept -gt 0 ]]; then
               note="The Fuzz run $RUN_URL (attempt $GITHUB_RUN_ATTEMPT) kept failing inputs: the artifact fuzz-artifacts-$GITHUB_RUN_ATTEMPT (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT on the runner host. To fix them: docs/ci.md, Fuzzing."
           else
               note="The Fuzz run $RUN_URL failed or was cancelled without keeping any failing input (a build or toolchain failure, or a hang?): the targets may not have been fuzzed. See its log."

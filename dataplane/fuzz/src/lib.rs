@@ -148,13 +148,16 @@ mod regressions {
 
     type Harness = fn(&[u8]);
 
-    /// Every harness, by target name.
-    const TARGETS: &[(&str, Harness)] = &[
-        ("superblock", super::superblock),
-        ("metadata_pages", super::metadata_pages),
-        ("journal", super::journal),
-        ("repl_frame", super::repl_frame),
-        ("capability_token", super::capability_token),
+    /// Every harness, by target name: the name of its function, so the two cannot be mismatched.
+    macro_rules! targets {
+        ($($f:ident),* $(,)?) => { &[$((stringify!($f), super::$f as Harness)),*] };
+    }
+    const TARGETS: &[(&str, Harness)] = targets![
+        superblock,
+        metadata_pages,
+        journal,
+        repl_frame,
+        capability_token,
     ];
     /// Time and stack for one input: stricter than the fuzzer's (10 s, `-timeout=10` in
     /// scripts/dev/fuzz.sh, and an 8 MiB main thread) on purpose. This build runs faster and with
@@ -241,6 +244,16 @@ mod regressions {
         );
         assert_eq!(harnesses, sources, "TARGETS against fuzz_targets/*.rs");
         assert_eq!(harnesses, regressions, "TARGETS against regressions/*/");
+        // And each binary runs its own harness, so the fuzzer and the replay agree (S2).
+        for name in &harnesses {
+            let source = path("fuzz_targets").join(format!("{name}.rs"));
+            let text = std::fs::read_to_string(&source).expect("fuzz target source");
+            assert!(
+                text.contains(&format!("flaminio_fuzz::{name}(")),
+                "{}: does not call flaminio_fuzz::{name}",
+                source.display()
+            );
+        }
     }
 
     #[test]

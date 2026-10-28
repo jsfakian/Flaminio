@@ -61,7 +61,8 @@ the inputs as the artifact `fuzz-artifacts-<attempt>` (90 days) and in
 `~/.cache/flaminio-ci/fuzz-artifacts/<run id>-<attempt>/` on the runner host. To fix one:
 
 1. Copy the input into `dataplane/fuzz/regressions/<target>/`, keeping libFuzzer's name
-   (`crash-<sha1>`, `timeout-…`, `oom-…`, `leak-…`).
+   (`crash-<sha1>`, `timeout-…`, `oom-…`, `leak-…`). A `slow-unit-…` file is not a failure:
+   leave it out.
 2. See it fail: `make fuzz-regressions`. An out-of-memory or leak input passes there; reproduce
    it with `cargo +<nightly> fuzz run <target> <file>` in `dataplane/fuzz`, on Linux
    (LeakSanitizer does not run on macOS).
@@ -73,6 +74,10 @@ A new target needs its harness in `lib.rs` (and its `TARGETS` table), its binary
 `metadata_pages` takes a free slot of its first byte (`selector % 8`), never renumbering the
 others. A file in `regressions/` is `empty`, `seed-<what>`, or libFuzzer's name (`crash-<sha1>`,
 `timeout-…`, `oom-…`, `leak-…`, `minimized-from-…`).
+
+**A Dependabot pull request for `/dataplane`** that changes a dependency the fuzz crate shares
+leaves `dataplane/fuzz/Cargo.lock` stale, and the contracts and Rust test jobs fail. Update it on
+that branch: `cd dataplane/fuzz && cargo update --workspace`, then commit and push.
 
 ## Runners
 
