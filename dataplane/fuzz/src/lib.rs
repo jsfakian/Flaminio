@@ -15,8 +15,24 @@ use flaminio_format::page::{PAGE_PAYLOAD_LEN, PageType, new_page, payload_mut, s
 use flaminio_format::superblock::Superblock;
 use flaminio_net::frame::Frame;
 use flaminio_net::token::TokenKey;
+use std::sync::LazyLock;
 
 const NONCE: u64 = 1;
+
+// What every input shares is built once, not per input.
+static PAGES_LAYOUT: LazyLock<Layout> =
+    LazyLock::new(|| Layout::compute(4 * GIB, LayoutParams::default()).unwrap());
+static JOURNAL_LAYOUT: LazyLock<Layout> = LazyLock::new(|| {
+    Layout::compute(
+        GIB,
+        LayoutParams {
+            journal_size: Some(4 * MIB),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+});
+static TOKEN_KEY: LazyLock<TokenKey> = LazyLock::new(|| TokenKey::from_raw(&[7; 32]).expect("key"));
 
 /// Superblock decoding. The input is used as a superblock with a repaired magic and CRC, so
 /// mutations reach the field validation instead of dying at the checksum.
@@ -36,7 +52,7 @@ pub fn metadata_pages(data: &[u8]) {
     let Some((&selector, rest)) = data.split_first() else {
         return;
     };
-    let layout = Layout::compute(4 * GIB, LayoutParams::default()).unwrap();
+    let layout = &*PAGES_LAYOUT;
     let offset = layout.pool_pair_offset(0);
     let mut page = new_page();
     let n = rest.len().min(PAGE_PAYLOAD_LEN);
@@ -44,32 +60,27 @@ pub fn metadata_pages(data: &[u8]) {
     let page_type = match selector % 6 {
         0 => PageType::Checkpoint,
         1 => PageType::DataBitmap,
-        2 => PageType::ChunkHeader,
-        3 => PageType::PageTable,
+        2 => PageType::PoolBitmap,
+        3 => PageType::ChunkHeader,
+        4 => PageType::PageTable,
         _ => PageType::Map,
     };
     seal(&mut page, page_type, NONCE, 1, offset);
     let b = &page[..];
     match page_type {
-        PageType::Checkpoint => drop(CheckpointHeader::decode(b, NONCE, offset, &layout)),
+        PageType::Checkpoint => drop(CheckpointHeader::decode(b, NONCE, offset, layout)),
         PageType::DataBitmap => drop(BitmapPage::decode(b, BitmapKind::Data, NONCE, offset, 0)),
-        PageType::ChunkHeader => drop(ChunkHeader::decode(b, NONCE, offset, &layout)),
-        PageType::PageTable => drop(PageTable::decode(b, NONCE, offset, &layout, 0, 0)),
-        _ => drop(MapPage::decode(b, NONCE, offset, &layout, 0, 0)),
+        PageType::PoolBitmap => drop(BitmapPage::decode(b, BitmapKind::Pool, NONCE, offset, 0)),
+        PageType::ChunkHeader => drop(ChunkHeader::decode(b, NONCE, offset, layout)),
+        PageType::PageTable => drop(PageTable::decode(b, NONCE, offset, layout, 0, 0)),
+        _ => drop(MapPage::decode(b, NONCE, offset, layout, 0, 0)),
     }
 }
 
 /// Journal replay over a fuzzer-controlled journal region. The first block is repaired into a
 /// valid batch header for sequence 1, so mutations reach payload and record parsing.
 pub fn journal(data: &[u8]) {
-    let layout = Layout::compute(
-        GIB,
-        LayoutParams {
-            journal_size: Some(4 * MIB),
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let layout = &*JOURNAL_LAYOUT;
     let mut dev = vec![0u8; (layout.journal_offset + layout.journal_size) as usize];
     let j = layout.journal_offset as usize;
     let n = data.len().min(layout.journal_size as usize);
@@ -90,7 +101,7 @@ pub fn journal(data: &[u8]) {
         let crc = crc32c(&dev[j..j + 60]);
         dev[j + 60..j + 64].copy_from_slice(&crc.to_le_bytes());
     }
-    let scan = JournalScanner::new(&dev, &layout, NONCE, JournalPosition { offset: 0, seq: 1 });
+    let scan = JournalScanner::new(&dev, layout, NONCE, JournalPosition { offset: 0, seq: 1 });
     for batch in scan.flatten() {
         for record in batch.records() {
             let _ = record;
@@ -111,14 +122,14 @@ pub fn repl_frame(data: &[u8]) {
 
 /// Capability tokens come from the network: verification must never panic.
 pub fn capability_token(data: &[u8]) {
-    let key = TokenKey::from_raw(&[7; 32]).expect("key");
-    let _ = key.verify(data);
+    let _ = TOKEN_KEY.verify(data);
 }
 
 /// Replays every committed regression input (docs/4/spec.md, S4 and S6).
 #[cfg(test)]
 mod regressions {
     use std::collections::BTreeSet;
+    use std::ffi::OsStr;
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::{self, RecvTimeoutError};
@@ -134,35 +145,67 @@ mod regressions {
         ("repl_frame", super::repl_frame),
         ("capability_token", super::capability_token),
     ];
-    /// The fuzzer's timeout for one input (`-timeout=10` in scripts/dev/fuzz.sh).
-    const LIMIT: Duration = Duration::from_secs(10);
-    /// The stack of libFuzzer's main thread, where the fuzzer runs a harness.
-    const STACK: usize = 8 << 20;
+    /// Time and stack for one input: stricter than the fuzzer's (10 s, `-timeout=10` in
+    /// scripts/dev/fuzz.sh, and an 8 MiB main thread) on purpose. This build runs faster and with
+    /// smaller frames than the fuzzer's instrumented one, so equal limits would let an input that
+    /// times out or overflows there pass here.
+    const LIMIT: Duration = Duration::from_secs(2);
+    const STACK: usize = 2 << 20;
 
     fn path(sub: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(sub)
     }
 
-    /// The names in `dir` that `keep` maps to a target name.
-    fn names(dir: &Path, keep: impl Fn(&Path) -> Option<String>) -> BTreeSet<String> {
-        std::fs::read_dir(dir)
+    /// The entries of `dir`, sorted.
+    fn entries(dir: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
             .map(|e| e.expect("directory entry").path())
-            .filter_map(|p| keep(&p))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// The target names that `keep` finds among the entries of `dir`. A name that is not UTF-8 is
+    /// kept, lossily, so that it shows up as a mismatch instead of vanishing.
+    fn names(dir: &Path, keep: impl Fn(&Path) -> Option<&OsStr>) -> BTreeSet<String> {
+        entries(dir)
+            .iter()
+            .filter_map(|p| keep(p).map(|n| n.to_string_lossy().into_owned()))
             .collect()
+    }
+
+    /// The `name` of every `[[bin]]` in the fuzz crate's Cargo.toml: what cargo-fuzz builds.
+    fn bins() -> BTreeSet<String> {
+        let manifest = std::fs::read_to_string(path("Cargo.toml")).expect("Cargo.toml");
+        let mut out = BTreeSet::new();
+        let mut in_bin = false;
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_bin = line == "[[bin]]";
+            } else if in_bin && let Some(v) = line.strip_prefix("name") {
+                let v = v.trim_start().trim_start_matches('=').trim();
+                out.insert(v.trim_matches('"').to_string());
+            }
+        }
+        out
     }
 
     #[test]
     fn every_target_has_a_harness_and_a_regression_directory() {
         let harnesses: BTreeSet<String> = TARGETS.iter().map(|(n, _)| n.to_string()).collect();
-        let targets = names(&path("fuzz_targets"), |p| {
-            (p.extension()? == "rs").then(|| p.file_stem()?.to_str().map(String::from))?
+        let sources = names(&path("fuzz_targets"), |p| {
+            (p.extension()? == "rs").then(|| p.file_stem())?
         });
         let regressions = names(&path("regressions"), |p| {
-            p.is_dir()
-                .then(|| p.file_name()?.to_str().map(String::from))?
+            p.is_dir().then(|| p.file_name())?
         });
-        assert_eq!(harnesses, targets, "TARGETS against fuzz_targets/*.rs");
+        assert_eq!(
+            harnesses,
+            bins(),
+            "TARGETS against the [[bin]] entries of Cargo.toml"
+        );
+        assert_eq!(harnesses, sources, "TARGETS against fuzz_targets/*.rs");
         assert_eq!(harnesses, regressions, "TARGETS against regressions/*/");
     }
 
@@ -171,14 +214,10 @@ mod regressions {
         let inputs: Vec<(Harness, PathBuf)> = TARGETS
             .iter()
             .flat_map(|&(name, harness)| {
-                let mut files: Vec<PathBuf> = names(&path("regressions").join(name), |p| {
-                    p.is_file().then(|| p.to_str().map(String::from))?
-                })
-                .into_iter()
-                .map(PathBuf::from)
-                .collect();
-                files.sort();
-                files.into_iter().map(move |f| (harness, f))
+                entries(&path("regressions").join(name))
+                    .into_iter()
+                    .filter(|p| p.is_file())
+                    .map(move |f| (harness, f))
             })
             .collect();
         let mut failed = Vec::new();

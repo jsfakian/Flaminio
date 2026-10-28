@@ -10,8 +10,6 @@ cd "$root/dataplane/fuzz"
 
 seconds="${FUZZ_SECONDS:-60}"
 nightly="${NIGHTLY:-nightly}"
-targets=()
-for f in fuzz_targets/*.rs; do targets+=("$(basename "$f" .rs)"); done
 
 if ! command -v rustup >/dev/null; then
   echo "rustup is required to install the nightly toolchain for cargo-fuzz" >&2
@@ -22,6 +20,11 @@ if ! cargo "+$nightly" fuzz --help >/dev/null 2>&1; then
   echo "installing cargo-fuzz..."
   cargo "+$nightly" install cargo-fuzz --locked
 fi
+# The targets cargo-fuzz builds: the [[bin]] entries, which the regression test keeps in step with
+# fuzz_targets/ and regressions/.
+mapfile -t targets < <(cargo "+$nightly" fuzz list)
+# A failing `cargo fuzz list` is invisible to set -e here: refuse to fuzz nothing and pass.
+((${#targets[@]})) || { echo "fuzz: cargo fuzz list found no targets" >&2; exit 1; }
 
 echo "fuzzing ${#targets[@]} targets for ${seconds}s each"
 failed=()
@@ -29,7 +32,7 @@ for t in "${targets[@]}"; do
   echo "==> $t"
   # cargo-fuzz creates the working corpus only when it picks the corpus itself.
   mkdir -p "corpus/$t"
-  # A 10-second timeout per input, as the regression test's (libFuzzer's default is 1200 s).
+  # A 10-second timeout per input (libFuzzer's default is 1200 s); the regression test is stricter.
   if ! cargo "+$nightly" fuzz run "$t" "corpus/$t" "regressions/$t" -- \
       -max_total_time="$seconds" -timeout=10; then
     failed+=("$t")
