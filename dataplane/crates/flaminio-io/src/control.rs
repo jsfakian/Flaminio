@@ -2,7 +2,7 @@
 //! connection, one line each way:
 //!
 //! ```text
-//! attach VOLUME TOKEN-BASE64   ->  ok /dev/ublkbN      (or: error ...)
+//! attach VOLUME TOKEN-BASE64 [MS] ->  ok /dev/ublkbN   (or: error ...)
 //! detach VOLUME                ->  ok
 //! status                       ->  ok VOLUME /dev/ublkbN | ok none
 //! ```
@@ -81,15 +81,22 @@ fn serve(
     }
     let words: Vec<&str> = line.split_whitespace().collect();
     let answer = match words.as_slice() {
-        ["attach", volume, token] => {
+        ["attach", volume, token, within @ ..] if within.len() <= 1 => {
             // Not in the match below: a guard there would be held through the attach, and the
             // device's ready callback takes this lock.
             let current = attached.lock().expect("attached").clone();
-            match (base64_decode(token), current) {
+            match (
+                base64_decode(token),
+                attach_limit(within.first().copied()),
+                current,
+            ) {
                 // The main thread takes commands only while no volume is attached.
-                (_, Some((v, _))) => format!("error: {v} is attached here; one volume at a time"),
-                (Some(token), None) => attach(ctl, wake, volume, token, ATTACH_LIMIT),
-                (None, None) => "error: the token is not base64".into(),
+                (_, _, Some((v, _))) => {
+                    format!("error: {v} is attached here; one volume at a time")
+                }
+                (None, _, None) => "error: the token is not base64".into(),
+                (_, Err(e), None) => format!("error: {e}"),
+                (Some(token), Ok(limit), None) => attach(ctl, wake, volume, token, limit),
             }
         }
         ["detach", volume] => detach(engine, wake, attached, volume),
@@ -98,8 +105,10 @@ fn serve(
             Some((v, id)) => format!("ok {v} /dev/ublkb{id}"),
             None => "ok none".into(),
         },
-        _ => "error: usage: attach VOLUME TOKEN-BASE64 | detach VOLUME | delete VOLUME | status"
-            .into(),
+        _ => {
+            "error: usage: attach VOLUME TOKEN-BASE64 [MS] | detach VOLUME | delete VOLUME | status"
+                .into()
+        }
     };
     let mut conn = conn;
     let _ = writeln!(conn, "{answer}");
@@ -127,13 +136,27 @@ fn attach(
     wake();
     match answer.recv_timeout(limit) {
         Ok(a) => a,
-        // The request carries this deadline: not begun yet, it never will be (docs/6, S2).
+        // The request carries this deadline. Not begun yet, it never will be; begun, its steps
+        // have ended by now, but starting the device, which is not bounded, may still bring
+        // the device up (docs/6, S2).
         Err(mpsc::RecvTimeoutError::Timeout) => {
             format!("error: no answer within {}", seconds(limit))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             "error: the node dropped the attach without an answer (see its log)".into()
         }
+    }
+}
+
+/// The limit on an attach: `ATTACH_LIMIT`, or less if the caller says it waits less (its
+/// time left, in milliseconds), so that its answer reaches the caller (docs/6).
+fn attach_limit(within: Option<&str>) -> Result<Duration, String> {
+    match within {
+        None => Ok(ATTACH_LIMIT),
+        Some(ms) => ms
+            .parse()
+            .map(|ms| Duration::from_millis(ms).min(ATTACH_LIMIT))
+            .map_err(|_| format!("the time limit {ms:?} is not a number of milliseconds")),
     }
 }
 
@@ -206,6 +229,14 @@ mod tests {
         };
         assert!(deadline >= sent + Duration::from_millis(100));
         assert!(deadline <= Instant::now());
+    }
+
+    #[test]
+    fn an_attach_takes_the_callers_shorter_limit() {
+        assert_eq!(attach_limit(None), Ok(ATTACH_LIMIT));
+        assert_eq!(attach_limit(Some("20000")), Ok(Duration::from_secs(20)));
+        assert_eq!(attach_limit(Some("999999")), Ok(ATTACH_LIMIT));
+        assert!(attach_limit(Some("soon")).is_err());
     }
 
     #[test]

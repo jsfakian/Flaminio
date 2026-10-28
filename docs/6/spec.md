@@ -30,7 +30,9 @@ takes these steps:
   7.0 does, starting does not wait for reads. On one that scans inside the start, the scan's
   first read can wait for a takeover: 5.5 s.
 
-So the socket answers an attach within 50 s. The request carries that deadline. The node skips
+So the socket answers an attach within 50 s, or within the time its caller says it still waits,
+if that is shorter: the node plugin adds it to the command, in milliseconds, less 1 s for the
+answer to come back (`attach <volume> <token> <ms>`). The request carries that deadline. The node skips
 a request it would begin with no time left for its steps (less than the 10 s before the
 deadline), logs that it did, and answers with that reason. It ends the target's start
 and the device's adding by the deadline less the 10 s for the start, waiting less than 30 s

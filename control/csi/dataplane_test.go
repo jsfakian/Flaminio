@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +14,9 @@ import (
 
 // controlServer listens on a Unix socket and, for each connection, reads the command, waits
 // `delay`, then answers `answer`; with no answer it holds the connection until the test ends.
-// The socket lives in a short directory: macOS allows socket paths of only 104 bytes.
-func controlServer(t *testing.T, delay time.Duration, answer string) string {
+// The commands it read go to `lines`, if not nil. The socket lives in a short directory: macOS
+// allows socket paths of only 104 bytes.
+func controlServer(t *testing.T, delay time.Duration, answer string, lines chan<- string) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "fl")
 	if err != nil {
@@ -34,7 +36,10 @@ func controlServer(t *testing.T, delay time.Duration, answer string) string {
 			if err != nil {
 				return
 			}
-			_, _ = bufio.NewReader(conn).ReadString('\n')
+			line, _ := bufio.NewReader(conn).ReadString('\n')
+			if lines != nil {
+				lines <- strings.TrimSpace(line)
+			}
 			if answer == "" {
 				<-done
 			} else {
@@ -54,7 +59,7 @@ func controlServer(t *testing.T, delay time.Duration, answer string) string {
 }
 
 func TestControlSocketGivesUpOnASilentDataPlane(t *testing.T) {
-	path := controlServer(t, 0, "")
+	path := controlServer(t, 0, "", nil)
 	start := time.Now()
 	_, err := ControlSocket{Path: path, Timeout: 50 * time.Millisecond}.Attach(context.Background(), "v", []byte("t"))
 	if err == nil || !strings.Contains(err.Error(), "no answer") {
@@ -66,7 +71,7 @@ func TestControlSocketGivesUpOnASilentDataPlane(t *testing.T) {
 }
 
 func TestControlSocketKeepsTheCallersEarlierDeadline(t *testing.T) {
-	path := controlServer(t, 0, "")
+	path := controlServer(t, 0, "", nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
@@ -87,9 +92,28 @@ func TestControlSocketDefaultWaitsForTheDataPlane(t *testing.T) {
 			t.Fatalf("timeout() with %v = %v, want %v", s.Timeout, got, DefaultControlTimeout)
 		}
 	}
-	path := controlServer(t, 200*time.Millisecond, "ok /dev/ublkb3")
+	path := controlServer(t, 200*time.Millisecond, "ok /dev/ublkb3", nil)
 	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"))
 	if err != nil || dev != "/dev/ublkb3" {
 		t.Fatalf("got %q, %v", dev, err)
+	}
+}
+
+func TestControlSocketTellsTheDataPlaneItsTimeLeft(t *testing.T) {
+	lines := make(chan string, 1)
+	path := controlServer(t, 0, "ok /dev/ublkb3", lines)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := (ControlSocket{Path: path}).Attach(ctx, "v", []byte("t")); err != nil {
+		t.Fatal(err)
+	}
+	// "attach v dA== MS": the caller's 3 s, less the answer's margin.
+	fields := strings.Fields(<-lines)
+	if len(fields) != 4 {
+		t.Fatalf("command %q", fields)
+	}
+	ms, err := strconv.Atoi(fields[3])
+	if err != nil || ms > 2000 || ms < 1500 {
+		t.Fatalf("time left %q, want about 2000 ms", fields[3])
 	}
 }

@@ -538,6 +538,14 @@ impl<D: BlockDevice> Engine<D> {
                     });
                     return true;
                 }
+                // Each attach gets an answer: a second one would silently replace the first.
+                if self.attaching.contains_key(&volume) {
+                    self.out.push(Output::AttachFailed {
+                        volume,
+                        why: "already attaching".into(),
+                    });
+                    return true;
+                }
                 let attempt = self.next_attempt;
                 self.next_attempt += 1;
                 self.attaching.insert(

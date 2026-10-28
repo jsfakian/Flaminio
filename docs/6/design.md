@@ -56,7 +56,11 @@ its limit as a parameter, so a unit test can pass a short one. The error names t
 waited, in seconds with at most one decimal: `error: no answer within 50 s`.
 
 **A deadline for each request.** `Control::Attach` carries `deadline: Instant`: when the
-control socket stops waiting, `ATTACH_LIMIT` after it sent the request.
+control socket stops waiting, `ATTACH_LIMIT` after it sent the request, or sooner if the caller
+said so. The node plugin's `Attach` sends its time left, from `min(Timeout, ctx deadline)`, less
+`answerMargin` = 1 s, as a fourth word in milliseconds; the socket takes the smaller of that and
+`ATTACH_LIMIT`. A NodeStage that spent 30 s in `Meta.Attach` then gets an attach bounded by the
+20 s it has, and an answer with its cause, rather than its own deadline.
 - **Skipping.** The main thread skips a request that it takes after `deadline − START_LIMIT`,
   when no step would have any time left. It logs that, and answers with that reason, in case
   the caller still waits. Without this, a request that timed out while the node served another volume would
@@ -69,9 +73,13 @@ control socket stops waiting, `ATTACH_LIMIT` after it sent the request.
 - **What remains.** Only starting the device can outlast the deadline, if it takes longer than
   `START_LIMIT`. The device then serves the volume with nobody told, and a retry finds it
   through `status`.
-- **The attach at startup** (`--attach`, a lab and manual option) has no caller to retry it. Its
-  thread sends it again every 5 s after a failure, for up to 5 minutes, so that a metadata
-  service still recovering after a cluster restart does not leave the node without its volume.
+- **The attach at startup** (`--attach`, a lab and manual option) has no caller to retry it. It
+  is sent before the main loop starts, so it comes first. After a failure because the metadata
+  service did not answer, a thread sends it again every 5 s for up to 5 minutes, while the node
+  has no other volume, so that a service still recovering after a cluster restart does not leave
+  the node without its volume. Other failures are not retried.
+- **One attach of a volume at a time.** The engine refuses an `Attach` of a volume it is still
+  attaching ("already attaching"), so every attach gets an answer.
 
 A flag that the socket set when it gave up, checked at fixed points, would race with a device
 starting at that moment, and would leave the steps their full limits.

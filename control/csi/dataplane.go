@@ -47,6 +47,20 @@ func (s ControlSocket) timeout() time.Duration {
 	return s.Timeout
 }
 
+// answerMargin is how much sooner than this caller the data plane must end an attach, for its
+// answer to come back in time.
+const answerMargin = time.Second
+
+// deadline is when a command gives up: after its timeout, or at the caller's deadline if that
+// comes first.
+func (s ControlSocket) deadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(s.timeout())
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	return deadline
+}
+
 func (s ControlSocket) command(ctx context.Context, line string) (string, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", s.Path)
@@ -54,11 +68,7 @@ func (s ControlSocket) command(ctx context.Context, line string) (string, error)
 		return "", fmt.Errorf("data plane: %w", err)
 	}
 	defer conn.Close()
-	deadline := time.Now().Add(s.timeout())
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
-	}
-	_ = conn.SetDeadline(deadline)
+	_ = conn.SetDeadline(s.deadline(ctx))
 	if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
 		return "", fmt.Errorf("data plane: %w", err)
 	}
@@ -88,8 +98,13 @@ func (s ControlSocket) Status(ctx context.Context) (string, string, error) {
 	return volume, device, nil
 }
 
+// Attach tells the data plane how long this caller still waits, less answerMargin, so that it
+// ends the attach in time to answer with its cause rather than leave the caller with only its
+// own deadline (docs/6).
 func (s ControlSocket) Attach(ctx context.Context, volume string, token []byte) (string, error) {
-	return s.command(ctx, "attach "+volume+" "+base64.StdEncoding.EncodeToString(token))
+	within := max(time.Until(s.deadline(ctx))-answerMargin, 0)
+	line := fmt.Sprintf("attach %s %s %d", volume, base64.StdEncoding.EncodeToString(token), within.Milliseconds())
+	return s.command(ctx, line)
 }
 
 func (s ControlSocket) Detach(ctx context.Context, volume string) error {
