@@ -231,7 +231,8 @@ the ordered-session argument. It must send those writes to `r` as well.
   plus every block written since then.
 - **Otherwise:** every block of the chunk.
 - **Skipping unwritten ranges (follow-ups §3):** the target first sends `Mapped{chunk, ext}` to
-  a source ISR member. It copies only the mapped sub-extents, and sends `Discard` to `r` for
+  a source ISR member, in pieces of at most 65 536 blocks so that each reply fits a frame. It
+  waits for every piece, copies only the mapped sub-extents, and sends `Discard` to `r` for
   the holes so stale data does not survive. Writes that land while Mapped is in flight are
   force-copied. Digests (§6) further skip blocks that already match.
 

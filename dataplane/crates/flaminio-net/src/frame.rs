@@ -5,6 +5,7 @@
 
 use bytes::Bytes;
 use flaminio_repl::extent::Extent;
+use flaminio_repl::msg::MAX_MAPPED_BLOCKS;
 use flaminio_repl::types::Version;
 
 use crate::BLOCK;
@@ -444,11 +445,15 @@ impl Frame {
                 chunk: r.u32()?,
                 ext: r.ext()?,
             },
-            tag::MAPPED => Frame::Mapped {
-                req: r.u64()?,
-                chunk: r.u32()?,
-                ext: r.ext()?,
-            },
+            tag::MAPPED => {
+                let (req, chunk) = (r.u64()?, r.u32()?);
+                // A probe carries no data: it may cover a whole chunk, up to its own limit.
+                let ext = r.any_ext()?;
+                if ext.len > MAX_MAPPED_BLOCKS {
+                    return Err(DecodeError::Invalid("mapped extent too long"));
+                }
+                Frame::Mapped { req, chunk, ext }
+            }
             tag::DISCARD => Frame::Discard {
                 req: r.u64()?,
                 chunk: r.u32()?,
@@ -656,10 +661,14 @@ mod tests {
                 chunk: 1,
                 ext,
             },
+            // A whole 256 MiB chunk: longer than an I/O, as resync probes are.
             Frame::Mapped {
                 req: 15,
                 chunk: 1,
-                ext,
+                ext: Extent {
+                    start: 0,
+                    len: MAX_MAPPED_BLOCKS,
+                },
             },
             Frame::Discard {
                 req: 16,
@@ -761,6 +770,23 @@ mod tests {
             // An extent longer than an I/O may be.
             [
                 vec![tag::READ],
+                1u64.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                (MAX_BLOCKS + 1).to_le_bytes().to_vec(),
+            ]
+            .concat(),
+            // A probe longer than its limit, and digests asked for more than an I/O.
+            [
+                vec![tag::MAPPED],
+                1u64.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                (MAX_MAPPED_BLOCKS + 1).to_le_bytes().to_vec(),
+            ]
+            .concat(),
+            [
+                vec![tag::DIGEST],
                 1u64.to_le_bytes().to_vec(),
                 0u32.to_le_bytes().to_vec(),
                 0u32.to_le_bytes().to_vec(),

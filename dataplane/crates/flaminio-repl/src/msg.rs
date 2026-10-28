@@ -4,7 +4,11 @@
 //! plane uses handles to buffers.
 
 use crate::extent::Extent;
-use crate::types::{ChunkIdx, Epoch, Version, VolumeId};
+use crate::types::{Block, ChunkIdx, Epoch, Version, VolumeId};
+
+/// Most blocks one [`Request::Mapped`] covers: its reply then holds at most half as many
+/// extents, which fits a frame. A target probes a larger chunk in pieces.
+pub const MAX_MAPPED_BLOCKS: Block = 1 << 16;
 
 /// A request from a target to a replica node. Every request gets at most one reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +57,7 @@ pub enum Request<P> {
     Digest { chunk: ChunkIdx, ext: Extent },
     /// Sub-extents of `ext` that hold data on this replica (follow-ups §3). Reply:
     /// [`Response::Mapped`]. Unwritten ranges are omitted so the target can skip copies and
-    /// discard stale data on the destination.
+    /// discard stale data on the destination. At most [`MAX_MAPPED_BLOCKS`] long.
     Mapped { chunk: ChunkIdx, ext: Extent },
     /// Drops data in `ext` (advisory discard). Reply: [`Response::Ok`]. Used when the source
     /// of a resync or repair has nothing mapped there.

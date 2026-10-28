@@ -16,6 +16,19 @@ fn seeds() -> std::ops::Range<u64> {
     first..first + var("FLAMINIO_SIM_SEEDS", 200)
 }
 
+/// The campaign with resync probes of one block each, as the data plane splits a chunk larger
+/// than [`MAX_MAPPED_BLOCKS`]: a resync starts only once every probe has answered.
+#[test]
+fn campaign_with_split_mapped_probes() {
+    for seed in seeds() {
+        let mut cfg = Config::random(seed);
+        cfg.max_mapped = 1;
+        if let Err(e) = Sim::new(seed, cfg).run() {
+            panic!("seed {seed}: {e}");
+        }
+    }
+}
+
 #[test]
 fn campaign() {
     let mut total = Report::default();
@@ -46,6 +59,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         max_op: 1,
         max_io: 1,
         max_bulk: 4,
+        max_mapped: MAX_MAPPED_BLOCKS,
         timing: Timing {
             lease: 5 * SEC,
             drift_ppm: 0,

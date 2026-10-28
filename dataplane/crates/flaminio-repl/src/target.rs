@@ -12,7 +12,7 @@ use std::fmt::Debug;
 
 use crate::extent::{Extent, ExtentSet};
 use crate::meta::{IsrChange, MetaReply, MetaRequest, VolumeMeta};
-use crate::msg::{FromReplica, Request, Response, ToReplica};
+use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, Request, Response, ToReplica};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Version, VolumeId};
 
 /// A client operation on one extent of one chunk.
@@ -133,8 +133,10 @@ struct Resync {
     round: u64,
     /// The member's session that carried `BeginResync`.
     session: u64,
-    /// Waiting for the source's mapped extents before `BeginResync` (follow-ups §3).
-    awaiting_mapped: bool,
+    /// `Mapped` replies still awaited from the source before `BeginResync` (follow-ups §3).
+    awaiting_mapped: usize,
+    /// What the source's `Mapped` replies so far report as holding data.
+    mapped: ExtentSet,
     started: bool,
     /// Blocks not yet copied and acknowledged.
     todo: ExtentSet,
@@ -327,6 +329,8 @@ pub struct Target<P> {
     blocks_per_chunk: Block,
     /// Largest extent of one repair or copy.
     max_io: Block,
+    /// Largest extent of one `Mapped` probe.
+    max_mapped: Block,
     timing: Timing,
     chunks: Vec<Chunk>,
     peers: BTreeMap<NodeId, Peer>,
@@ -405,6 +409,7 @@ impl<P: Clone + Debug> Target<P> {
             min_isr: view.min_isr,
             blocks_per_chunk: view.blocks_per_chunk,
             max_io: max_io.max(1),
+            max_mapped: MAX_MAPPED_BLOCKS,
             timing,
             chunks,
             peers,
@@ -455,6 +460,12 @@ impl<P: Clone + Debug> Target<P> {
     /// Sets how many repairs and resync copies may be in flight at once (at least one).
     pub fn set_max_bulk(&mut self, n: usize) {
         self.max_bulk = n.max(1);
+    }
+
+    /// Sets the largest extent one `Mapped` probe covers, from one block to
+    /// [`MAX_MAPPED_BLOCKS`] (the default).
+    pub fn set_max_mapped(&mut self, n: Block) {
+        self.max_mapped = n.clamp(1, MAX_MAPPED_BLOCKS);
     }
 
     fn release_bulk(&mut self) {
@@ -972,7 +983,7 @@ impl<P: Clone + Debug> Target<P> {
                 let abort = self.chunks[chunk as usize]
                     .resync
                     .as_ref()
-                    .is_some_and(|r| r.round == round && r.awaiting_mapped);
+                    .is_some_and(|r| r.round == round && r.awaiting_mapped > 0);
                 if abort {
                     self.abort_resync(chunk as usize);
                 }
@@ -1184,18 +1195,23 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
-    /// Source mapped extents for a resync: copy only those, discard the rest of the plan.
+    /// Source mapped extents for a resync: once every probe has answered, copy only those and
+    /// discard the rest of the plan.
     fn on_mapped(&mut self, now: Time, chunk: ChunkIdx, round: u64, exts: &[Extent]) {
         let Some(r) = self.resync_mut(chunk, round) else {
             return;
         };
-        if !r.awaiting_mapped {
+        if r.awaiting_mapped == 0 {
             return;
         }
-        let mut mapped = ExtentSet::new();
         for e in exts {
-            mapped.insert(*e);
+            r.mapped.insert(*e);
         }
+        r.awaiting_mapped -= 1;
+        if r.awaiting_mapped > 0 {
+            return;
+        }
+        let mapped = std::mem::take(&mut r.mapped);
         let planned = r.todo.clone();
         let force = r.force_copy.clone();
         let mut todo = planned.intersection(&mapped);
@@ -1213,7 +1229,6 @@ impl<P: Clone + Debug> Target<P> {
         r.discard = holes;
         // Force-copies so far are in todo; clear so post-Mapped writes accumulate until Ack.
         r.force_copy.clear();
-        r.awaiting_mapped = false;
         let member = r.member;
         let body = Request::BeginResync { chunk };
         if !self.send(now, member, body, ReqKind::BeginResync { chunk, round }) {
@@ -1761,11 +1776,15 @@ impl<P: Clone + Debug> Target<P> {
             Some(d) => d.clone(),
             None => ExtentSet::of(Extent::new(0, self.blocks_per_chunk)),
         };
+        // Ask the source what holds data; copy only that, discard the rest (follow-ups §3).
+        // A chunk larger than one probe is asked in pieces.
+        let probes = ExtentSet::of(Extent::new(0, self.blocks_per_chunk)).pieces(self.max_mapped);
         self.chunks[i].resync = Some(Resync {
             member,
             round,
             session,
-            awaiting_mapped: true,
+            awaiting_mapped: probes.len(),
+            mapped: ExtentSet::new(),
             started: false,
             todo,
             force_copy: ExtentSet::new(),
@@ -1774,15 +1793,16 @@ impl<P: Clone + Debug> Target<P> {
             unacked: BTreeSet::new(),
         });
         let chunk = i as ChunkIdx;
-        // Ask the source what holds data; copy only that, discard the rest (follow-ups §3).
-        let ext = Extent::new(0, self.blocks_per_chunk);
-        if !self.send(
-            now,
-            from,
-            Request::Mapped { chunk, ext },
-            ReqKind::Mapped { chunk, round },
-        ) {
-            self.abort_resync(i);
+        for ext in probes {
+            if !self.send(
+                now,
+                from,
+                Request::Mapped { chunk, ext },
+                ReqKind::Mapped { chunk, round },
+            ) {
+                self.abort_resync(i);
+                return;
+            }
         }
         // Writes already in flight are not sent to the member. Every copy of their blocks
         // reads its source after them, over the same ordered session, so it carries them;
