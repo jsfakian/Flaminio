@@ -1,0 +1,42 @@
+# Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md). The corpus
+# carries over between runs on the runner host; a crash is uploaded as an artifact.
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "0 2 * * 6"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "600"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz every target
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 120
+    env:
+      CORPUS: ${{ github.workspace }}/dataplane/fuzz/corpus
+      SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Restore the corpus
+        run: |
+          keep="$HOME/.cache/flaminio-ci/fuzz-corpus"
+          mkdir -p "$keep" "$CORPUS"
+          rsync -a "$keep/" "$CORPUS/"
+      - run: FUZZ_SECONDS="$SECONDS_PER_TARGET" make fuzz
+      - name: Keep the corpus
+        if: always()
+        run: rsync -a "$CORPUS/" "$HOME/.cache/flaminio-ci/fuzz-corpus/"
+      - name: Upload the crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-artifacts
+          path: dataplane/fuzz/artifacts/

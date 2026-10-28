@@ -1,0 +1,56 @@
+# Lab checks on the lab VMs, by hand only, from the lab runner on centaur, which reaches the lab
+# servers directly (docs/ci.md). Every check but status takes the lab over: it restarts nodes,
+# attaches and moves volumes. One at a time.
+name: Lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      check:
+        description: Check to run
+        type: choice
+        options:
+          - status
+          - reconcile
+          - resync
+          - pvc-loop
+          - node-fault
+          - partition-test
+          - csi-test
+          - chaos
+      take-over:
+        description: The check may take the lab over (needed for everything but status)
+        type: boolean
+        default: false
+
+concurrency:
+  group: lab
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    name: Lab ${{ inputs.check }}
+    runs-on: [self-hosted, flaminio-lab]
+    timeout-minutes: 300
+    env:
+      CHECK: ${{ inputs.check }}
+      TAKE_OVER: ${{ inputs.take-over }}
+      # The VMs authorize only the key that created them (SSH_IDENTITY in scripts/lab.conf).
+      LAB_SSH_IDENTITY: ${{ vars.LAB_SSH_IDENTITY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Run
+        run: |
+          [[ $CHECK == status || $TAKE_OVER == true ]] ||
+              { echo "::error::$CHECK takes the lab over: run it again with take-over checked"; exit 1; }
+          export SSH_IDENTITY=${LAB_SSH_IDENTITY:-$HOME/.ssh/id_rsa_mac}
+          case $CHECK in
+              status) scripts/lab.sh status all && scripts/lab.sh node status && scripts/lab.sh vol show ;;
+              reconcile | resync | pvc-loop) "scripts/checks/$CHECK.sh" ;;
+              node-fault | partition-test | chaos) make "$CHECK" ;;
+              csi-test) scripts/lab.sh csi test ;;
+          esac

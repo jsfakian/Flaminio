@@ -193,6 +193,7 @@ flaminio/
 ├── test/               # e2e, chaos (fault injection), performance benchmarks
 ├── scripts/            # test-lab automation (VMs on the test servers), driven by the Makefile
 ├── Makefile            # `make help`: build, test, lint, lab VMs, benchmarks
+├── .github/            # CI workflows, on self-hosted runners (docs/ci.md)
 └── docs/               # architecture, ADRs, format spec, lab guide, benchmarks
 ```
 
@@ -200,6 +201,9 @@ flaminio/
 
 The project is at the design stage. The most useful thing you can do right now is review
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), especially its **Open questions** section.
+
+Before a pull request: `make lint test race hygiene contracts`. CI runs the same targets on every
+pull request ([docs/ci.md](docs/ci.md)).
 
 ## License
 

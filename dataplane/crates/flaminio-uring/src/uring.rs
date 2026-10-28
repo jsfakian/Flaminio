@@ -388,9 +388,12 @@ impl UringDevice {
             return;
         };
         // An earlier commit still in flight must finish first.
-        if st.current.iter().take(start).any(|(_, f)| {
-            matches!(f, Flush::Waiting | Flush::Submitted | Flush::Covered)
-        }) {
+        if st
+            .current
+            .iter()
+            .take(start)
+            .any(|(_, f)| matches!(f, Flush::Waiting | Flush::Submitted | Flush::Covered))
+        {
             return;
         }
         let mut n = 0usize;

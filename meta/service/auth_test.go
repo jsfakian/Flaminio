@@ -122,7 +122,7 @@ func TestAuthorization(t *testing.T) {
 	expect("admin creates a volume", err, codes.OK)
 	_, err = nodeA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("node attaches itself", err, codes.PermissionDenied)
-	att, err := admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
+	_, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("admin attaches", err, codes.OK)
 	// A node's agent restarts its own target, and nothing else.
 	_, err = agentB.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-b", OnlyIfTarget: true})
@@ -138,7 +138,7 @@ func TestAuthorization(t *testing.T) {
 	if restart.Volume.GetEpoch() != 2 {
 		t.Fatalf("restart epoch %d, want 2", restart.Volume.GetEpoch())
 	}
-	att, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
+	att, err := admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("admin attaches again", err, codes.OK)
 
 	// The token names the volume, the epoch and the node.

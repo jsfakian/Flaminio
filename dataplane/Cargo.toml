@@ -17,6 +17,8 @@ exclude = ["fuzz"]
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+# Nothing here is published to crates.io.
+publish = false
 rust-version = "1.88"
 repository = "https://github.com/flaminio/flaminio"
 

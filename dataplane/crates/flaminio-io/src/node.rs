@@ -176,8 +176,11 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
                 c.gather_us = Some(value()?.parse().map_err(|_| "invalid --gather-us")?)
             }
             "--commit-target-mib" => {
-                c.commit_target_mib =
-                    Some(value()?.parse().map_err(|_| "invalid --commit-target-mib")?)
+                c.commit_target_mib = Some(
+                    value()?
+                        .parse()
+                        .map_err(|_| "invalid --commit-target-mib")?,
+                )
             }
             "--flush-coalesce" => {
                 c.flush_coalesce = value()?.parse().map_err(|_| "invalid --flush-coalesce")?;

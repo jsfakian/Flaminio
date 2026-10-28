@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "io_uring + O_DIRECT block device for the Flaminio replica store, and aligned buffers"
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 

@@ -4,22 +4,26 @@ What phase 1 left unfinished, with a plan for each: what to build, how to know i
 which order. Each item names the step of [phase1-plan.md](phase1-plan.md) or the later phase it
 belongs to.
 
-| # | Item | Why it matters | Order |
-|---|---|---|---|
-| 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads at 67–69% of raw at QD32 and 51–61% for 1M; writes never measured from a controlled state | Next |
-| 2 | Reconciliation after a replica restart | Done: the first read after both replicas of a 16 GiB volume restarted waits 0.2 s (was 160 s) | Before the chaos run (step 8) |
-| 3 | Copying unwritten ranges | Done: a resync of 4 GiB written moves 4.3 GiB and stores 4.0 GiB (was 16 GiB) | With item 2: same tools |
-| 4 | Failure domains in placement | Done: zone and rack placement, from `metactl` and the StorageClass; the lab cannot show physical independence | Before the edge profile |
-| 5 | More than one volume per node | A node serves one attached volume at a time | With item 1: same redesign |
-| 6 | Fuzzing actually running | The fuzz targets build but have never run (no nightly toolchain) | Now: small |
-| 7 | Short-lived certificates, rotated | Lab certificates last 30 days and are issued by hand | With the operator (phase 1 step 7+) |
-| 8 | Deleting a volume's replicas | Done: 100 PVC create/delete cycles leave the stores' used space where it started | With the node agent (step 6) |
-| 9 | The data plane in Kubernetes | `flaminio-io node` runs as a systemd unit beside k3s; the CSI node plugin drives it through its control socket | With the node agent (step 6) |
-| 10 | A faster first attach after a restart | An attach answers once the device exists, but the kernel's partition scan and udev's probe read the device and wait for the whole-volume reconciliation (item 2) | With item 2 |
-| 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator |
-| 12 | Zero-copy local reads after an attach | With `--zero-copy`, local reads that waited for reconciliation fail with EINVAL, and the target drops the local replica for 3 s each time | Before the chaos run (step 8) |
-| 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) |
-| 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; a data node without one (fl-c) keeps the replicas, and the volume id stays taken | With the node agent (step 6) |
+The open work is tracked as
+[issues labelled follow-up](https://github.com/jsfakian/Flaminio/issues?q=label%3Afollow-up),
+in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what they depend on.
+
+| # | Item | Why it matters | Order | Issues |
+|---|---|---|---|---|
+| 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads meet 90% of raw at QD32 (95%) and 1M (≈ 100%); 4K QD1 reads (84%) and 1M writes (about 70%) do not | Next | [#9](https://github.com/jsfakian/Flaminio/issues/9), [#10](https://github.com/jsfakian/Flaminio/issues/10) |
+| 2 | Reconciliation after a replica restart | Done: the first read after both replicas of a 16 GiB volume restarted waits 0.2 s (was 160 s) | Before the chaos run (step 8) | [#11](https://github.com/jsfakian/Flaminio/issues/11) |
+| 3 | Copying unwritten ranges | Done: a resync of 4 GiB written moves 4.3 GiB and stores 4.0 GiB (was 16 GiB) | With item 2: same tools | – |
+| 4 | Failure domains in placement | Done: zone and rack placement, from `metactl` and the StorageClass; the lab cannot show physical independence | Before the edge profile | [#7](https://github.com/jsfakian/Flaminio/issues/7), [#18](https://github.com/jsfakian/Flaminio/issues/18) |
+| 5 | More than one volume per node | A node serves one attached volume at a time | With item 1: same redesign | [#15](https://github.com/jsfakian/Flaminio/issues/15) |
+| 6 | Fuzzing actually running | `make fuzz` runs every target; the 10-minute run each is open (weekly in CI) | Now: small | [#4](https://github.com/jsfakian/Flaminio/issues/4) |
+| 7 | Short-lived certificates, rotated | Lab certificates last 30 days and are issued by hand | With the operator (phase 1 step 7+) | [#16](https://github.com/jsfakian/Flaminio/issues/16) |
+| 8 | Deleting a volume's replicas | Done: 100 PVC create/delete cycles leave the stores' used space where it started | With the node agent (step 6) | [#8](https://github.com/jsfakian/Flaminio/issues/8) |
+| 9 | The data plane in Kubernetes | `flaminio-io node` runs as a systemd unit beside k3s; the CSI node plugin drives it through its control socket | With the node agent (step 6) | [#12](https://github.com/jsfakian/Flaminio/issues/12) |
+| 10 | A faster first attach after a restart | The kernel's partition scan and udev's probe read a new device while it reconciles: about 1 s now (item 2), and workarounds sized for 160 s remain | With item 2 | [#6](https://github.com/jsfakian/Flaminio/issues/6) |
+| 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator | [#17](https://github.com/jsfakian/Flaminio/issues/17) |
+| 12 | Zero-copy local reads after an attach | With `--zero-copy`, local reads that waited for reconciliation fail with EINVAL, and the target drops the local replica for 3 s each time | Before the chaos run (step 8) | [#5](https://github.com/jsfakian/Flaminio/issues/5) |
+| 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) | [#13](https://github.com/jsfakian/Flaminio/issues/13) |
+| 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; a data node without one (fl-c) keeps the replicas, and the volume id stays taken | With the node agent (step 6) | [#14](https://github.com/jsfakian/Flaminio/issues/14) |
 
 ## 1. Read performance
 

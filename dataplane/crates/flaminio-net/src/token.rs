@@ -166,8 +166,7 @@ mod tests {
         ];
         der.extend_from_slice(raw);
         fn b64_std(data: &[u8]) -> String {
-            const T: &[u8] =
-                b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
             let mut s = String::new();
             for chunk in data.chunks(3) {
                 let a = u32::from(chunk[0]);

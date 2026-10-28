@@ -184,6 +184,45 @@ fn deleted_space_is_reused_only_after_a_checkpoint() {
     s.fsck(false).unwrap();
 }
 
+/// Leak check: chunks created, written in several ways and deleted, round after round, leave no
+/// data cluster or metadata page behind once a checkpoint has freed them, before and after a
+/// reopen.
+#[test]
+fn chunk_churn_leaves_no_space_behind() {
+    let used = |s: &Store<MemDevice>| {
+        let st = s.stats();
+        (st.data_used, st.pool_used, st.chunks)
+    };
+    // A small journal, so the churn also wraps it; and a chunk that stays.
+    let mut s = new_store(4);
+    s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
+    s.write(key(0), 0, &blocks(1, 0, 32), 1, 1).unwrap();
+    s.checkpoint().unwrap();
+    let before = used(&s);
+    let block = BLOCK as u64;
+    for round in 0..40u32 {
+        let k = key(1 + u64::from(round % 3));
+        s.create_chunk(k, CHUNK, CHUNK, 1).unwrap();
+        // A whole cluster, a partial one, an overwrite and the chunk's last block.
+        s.write(k, 0, &blocks(round, 0, 16), 1, 1).unwrap();
+        s.write(k, 3 * CLUSTER + block, &blocks(round, 0, 1), 2, 1)
+            .unwrap();
+        s.write(k, 0, &blocks(round + 1000, 0, 4), 3, 1).unwrap();
+        s.write(k, CHUNK - block, &blocks(round, 0, 1), 4, 1)
+            .unwrap();
+        s.delete_chunk(k, 1).unwrap();
+        if round % 7 == 0 {
+            s.checkpoint().unwrap();
+        }
+    }
+    s.checkpoint().unwrap();
+    assert_eq!(used(&s), before, "(data clusters, page pairs, chunks)");
+    s.fsck(true).unwrap();
+    let s = reopen(s);
+    assert_eq!(used(&s), before, "after a reopen");
+    s.fsck(true).unwrap();
+}
+
 #[test]
 fn small_journal_wraps_and_checkpoints_automatically() {
     let mut s = new_store(4);
