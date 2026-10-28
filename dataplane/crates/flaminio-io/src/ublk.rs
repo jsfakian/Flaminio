@@ -507,8 +507,9 @@ struct Shared {
     engine: Mutex<flaminio_node::engine::Engine<UringDevice>>,
     inputs: Mutex<mpsc::Receiver<Input>>,
     sender: mpsc::Sender<Input>,
-    /// The store's device, for the local reads the tag tasks perform.
+    /// The store's device, for the local reads the tag tasks perform, and its path, for logs.
     fd: RawFd,
+    device: String,
     /// Op id → the waiting tag task's queue and channel.
     waiters: Mutex<HashMap<u64, (u16, Waiter)>>,
     next_op: AtomicU64,
@@ -879,6 +880,7 @@ fn run_device(
     }
     let shared = Arc::new(Shared {
         fd: engine.device().as_raw_fd(),
+        device: c.device.clone(),
         engine: Mutex::new(engine),
         inputs: Mutex::new(inputs),
         sender,
@@ -1377,7 +1379,7 @@ async fn zc_read_plan(
         if !ok {
             break;
         }
-        note_staged_read();
+        note_staged_read(&ctx.shared.device);
         ok = stage_device_read(q, st, tag, ctx, to, len, device_offset).await;
     }
     ok
@@ -1385,12 +1387,12 @@ async fn zc_read_plan(
 
 /// Logs, once per process, that zero-copy reads are being copied through the staging area: a
 /// line per read would flood the log under a workload that is misaligned on purpose.
-fn note_staged_read() {
+fn note_staged_read(device: &str) {
     static NOTED: AtomicBool = AtomicBool::new(false);
     if !NOTED.swap(true, Ordering::Relaxed) {
         eprintln!(
-            "flaminio-io: zero copy: a read's pages are not aligned for the store's device (its \
-             DMA alignment); such reads are copied through the staging area"
+            "flaminio-io: zero copy: a read's pages are not aligned for {device} (its DMA \
+             alignment); such reads are copied through the staging area"
         );
     }
 }

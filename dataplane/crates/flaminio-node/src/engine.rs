@@ -275,8 +275,6 @@ struct PendingLocal {
     sref: SessionRef,
     session: u64,
     req: u64,
-    /// The epoch of the target's request; `epoch` is the store's, from `admit_read`.
-    target_epoch: u64,
     key: flaminio_store::ChunkKey,
     offset: u64,
     epoch: u64,
@@ -1653,7 +1651,6 @@ impl<D: BlockDevice> Engine<D> {
                             sref,
                             session: msg.session,
                             req: msg.req,
-                            target_epoch: msg.epoch,
                             key,
                             offset,
                             epoch,
@@ -1883,7 +1880,7 @@ impl<D: BlockDevice> Engine<D> {
     #[doc(hidden)]
     pub fn local_read_ids(&self, lr: &LocalRead) -> Option<(u64, u64, u64)> {
         let p = self.local_reads.get(&lr.token)?;
-        Some((p.target_epoch, p.session, p.req))
+        Some((p.sref.epoch, p.session, p.req))
     }
 
     /// Ends a local read: `ok` if its device reads completed and verified. A failed read is
@@ -1909,25 +1906,28 @@ impl<D: BlockDevice> Engine<D> {
             return;
         };
         // Pending reads outlive a deposed target until the detach, and a new target numbers its
-        // sessions and requests from 1 again: a stale read must not touch the new one's.
-        if p.target_epoch != rt.sm.epoch() {
+        // sessions and requests from 1 again: a stale read must not touch the new one's. The
+        // read's session is the target's local session, opened at the target's epoch.
+        if p.sref.epoch != rt.sm.epoch() {
             return;
         }
         let local = rt.local;
         let expected = rt.reads.remove(&(local, p.req));
-        if !ok {
+        // The read was admitted before the device read: if a newer target fenced the replica
+        // meanwhile, it may have written to it, and the answer is what the replica would have
+        // given at the time of the read (spec §5, fast reads). That holds for a failed read
+        // too, which a fence can cause (the store refuses to plan a read at an older epoch):
+        // the target learns it was deposed, instead of trying another member.
+        let fenced = self.service.fenced_epoch(p.sref);
+        if !ok && fenced == p.sref.epoch {
             rt.sm
-                .on_read_failed(us, local, p.target_epoch, p.session, p.req);
+                .on_read_failed(us, local, p.sref.epoch, p.session, p.req);
             self.drain(now, &p.volume);
             return;
         }
         if expected != Some(lr.len) {
             return;
         }
-        // The read was admitted before the device read: if a newer target fenced the replica
-        // meanwhile, it may have written to it, and the answer is what the replica would have
-        // given at the time of the read (spec §5, fast reads).
-        let fenced = self.service.fenced_epoch(p.sref);
         let body = if fenced == p.sref.epoch {
             Response::Data(Payload::Placed(lr.len))
         } else {
@@ -1935,7 +1935,7 @@ impl<D: BlockDevice> Engine<D> {
         };
         let m = FromReplica {
             vol: 0,
-            epoch: p.target_epoch,
+            epoch: p.sref.epoch,
             session: p.session,
             req: p.req,
             body,

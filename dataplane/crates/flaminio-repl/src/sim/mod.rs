@@ -727,9 +727,9 @@ impl Sim {
                 let n = &mut self.nodes[p.to as usize];
                 let local = n.clock.local(self.now);
                 if let Some(t) = n.target.as_mut() {
-                    if fail {
+                    // A report the target ignores (a stale session) leaves the reply to it.
+                    if fail && t.on_read_failed(local, p.from, m.epoch, m.session, m.req) {
                         self.report.failed_local_reads += 1;
-                        t.on_read_failed(local, p.from, m.epoch, m.session, m.req);
                     } else {
                         t.on_reply(local, p.from, &m);
                     }

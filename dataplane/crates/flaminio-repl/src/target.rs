@@ -881,7 +881,7 @@ impl<P: Clone + Debug> Target<P> {
     /// The client read `req`, sent to `from` at `epoch` on `session`, failed there without a
     /// reply: a local read whose device read or checksums failed (docs/5). It is sent again to
     /// another ISR member, and `from` stays a member, its session open. A report that does not
-    /// match a client read in flight is ignored, as a stray reply is.
+    /// match a client read in flight is ignored, as a stray reply is: then it returns false.
     pub fn on_read_failed(
         &mut self,
         now: Time,
@@ -889,12 +889,12 @@ impl<P: Clone + Debug> Target<P> {
         epoch: Epoch,
         session: u64,
         req: u64,
-    ) {
+    ) -> bool {
         if self.deposed || epoch != self.epoch {
-            return;
+            return false;
         }
         let Some(op) = self.client_read_of(from, req) else {
-            return;
+            return false;
         };
         let Some(s) = self
             .peers
@@ -902,7 +902,7 @@ impl<P: Clone + Debug> Target<P> {
             .and_then(|p| p.session.as_mut())
             .filter(|s| s.id == session)
         else {
-            return;
+            return false;
         };
         let Some((_, ReqKind::Read { id })) = s.inflight.remove(&req) else {
             unreachable!("client_read_of found a read");
@@ -922,6 +922,7 @@ impl<P: Clone + Debug> Target<P> {
             },
         });
         self.pump(now);
+        true
     }
 
     /// Handles the reply to metadata request `req`.

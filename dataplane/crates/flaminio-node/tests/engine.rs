@@ -412,6 +412,7 @@ fn hand_driven(
     files: &Files,
     token_key: TokenKey,
     model: Arc<Mutex<Model>>,
+    timing: Timing,
 ) -> (Engine<MemDevice>, mpsc::Receiver<Input>) {
     let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -435,7 +436,7 @@ fn hand_driven(
     let cfg = EngineConfig {
         node: name.into(),
         address: addr.to_string(),
-        timing: Timing::default(),
+        timing,
         max_io: 64,
         heartbeat: None,
     };
@@ -553,6 +554,7 @@ fn direct_reads_from_the_local_replica() {
         &ids["fl-a"],
         TokenKey::from_raw(signer.public_key().as_ref()).unwrap(),
         model.clone(),
+        Timing::default(),
     );
     model.lock().unwrap().volume = Some(pb::Volume {
         id: "v".into(),
@@ -815,7 +817,7 @@ fn a_failed_local_read_on_the_only_replica_fails_at_once() {
     let model = Arc::new(Mutex::new(Model::default()));
     let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone());
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
     model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
     attach(&mut engine, &rx, &signer, 1);
     write_at_0(&mut engine, &rx, 1, pattern(1, 64 << 10));
@@ -856,7 +858,7 @@ fn a_failed_local_read_is_read_from_the_other_replica() {
     let signer = Ed25519KeyPair::from_seed_unchecked(&[8; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
     let _b = start_node("fl-b", &ids["fl-b"], key.clone(), model.clone());
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone());
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
     let deadline = Instant::now() + Duration::from_secs(10);
     while !model.lock().unwrap().nodes.contains_key("fl-b") {
         assert!(Instant::now() < deadline, "fl-b did not register");
@@ -907,7 +909,7 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
     let model = Arc::new(Mutex::new(Model::default()));
     let signer = Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone());
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
     model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
 
     // A direct read whose local read is held back.
@@ -999,6 +1001,118 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
     );
     assert_eq!(again, 0, "the read was not sent again");
     assert!(buf == pattern(4, 64 << 10), "the new target's data");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A local read that fails because a newer target fenced the replica meanwhile is answered
+/// `Stale`, which deposes the target, rather than sent to another member or ended as
+/// unreadable (docs/5). fl-b becomes the volume's target at epoch 2 and fences fl-a's replica
+/// while fl-a's target, at epoch 1, has a local read in flight. fl-a's target neither
+/// heartbeats nor refreshes during the test, so the failed read is what tells it.
+#[test]
+fn a_local_read_failed_by_a_fence_deposes_the_target() {
+    use flaminio_node::engine::IoError;
+
+    let dir = std::env::temp_dir().join(format!("flaminio-failed-fenced-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model::default()));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[10; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let quiet = Timing {
+        lease: 600_000_000,
+        heartbeat: 300_000_000,
+        refresh: 300_000_000,
+        ..Timing::default()
+    };
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key.clone(), model.clone(), quiet);
+    let b = start_node("fl-b", &ids["fl-b"], key, model.clone());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while model.lock().unwrap().nodes.len() < 2 {
+        assert!(Instant::now() < deadline, "nodes did not register");
+        pump(&mut engine, &rx);
+        thread::sleep(Duration::from_millis(10));
+    }
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
+    attach(&mut engine, &rx, &signer, 1);
+    write_at_0(&mut engine, &rx, 1, pattern(5, 64 << 10));
+    read_direct_at_0(&mut engine, 2, 64 << 10);
+    let held = loop {
+        let o = pump(&mut engine, &rx);
+        if let Some(lr) = o.into_iter().find_map(|o| match o {
+            Output::LocalRead(lr) => Some(lr),
+            _ => None,
+        }) {
+            break lr;
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+
+    // fl-b attaches at epoch 2 and fences fl-a's replica, which fl-a's engine serves.
+    {
+        let mut m = model.lock().unwrap();
+        let v = m.volume.as_mut().unwrap();
+        v.epoch = 2;
+        v.target = "fl-b".into();
+    }
+    b.inputs
+        .send(Input::Attach {
+            volume: "v".into(),
+            token: token(&signer, "v", 2, "fl-b"),
+        })
+        .unwrap();
+    // Attached comes as fl-b's target starts; a read through it completes only once its Hello
+    // has fenced fl-a's replica.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut attached = false;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "fl-b did not read from fl-a's replica"
+        );
+        pump(&mut engine, &rx);
+        match b.outputs.try_recv() {
+            Ok(Output::Attached { epoch: 2, .. }) => {
+                attached = true;
+                b.inputs
+                    .send(Input::Io {
+                        volume: "v".into(),
+                        op: 50,
+                        io: Io::Read {
+                            offset: 0,
+                            len: 4096,
+                        },
+                    })
+                    .unwrap();
+            }
+            Ok(Output::Done { op: 50, result }) => {
+                assert!(attached);
+                assert_eq!(result.unwrap(), Some(pattern(5, 4096)));
+                break;
+            }
+            _ => thread::sleep(Duration::from_millis(1)),
+        }
+    }
+
+    // The store refuses to plan a read at epoch 1 now, so the frontend reports it failed.
+    engine.local_read_done(Instant::now(), &held, None, false);
+    let (mut done, mut deposed) = (None, false);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while done.is_none() || !deposed {
+        assert!(
+            Instant::now() < deadline,
+            "done {done:?}, deposed {deposed}"
+        );
+        for o in pump(&mut engine, &rx) {
+            match o {
+                Output::Done { op: 2, result } => done = Some(result),
+                Output::Deposed { .. } => deposed = true,
+                _ => {}
+            }
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(matches!(done, Some(Err(IoError::Deposed))), "{done:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

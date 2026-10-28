@@ -32,6 +32,10 @@ is being removed. The ISR can also keep a member whose session is down, when `mi
 it. A failed local read then waits for that member's session to reopen, like any queued read.
 The node logs each failed local read with its volume, as now.
 
+A read that fails because a newer target fenced the local replica is not a failure of the
+replica: the local replica answers it `Stale`, as it answers a read that succeeded after the
+fence, and the target is deposed (§5 of the protocol, fast reads).
+
 Only client reads from the frontend fail over this way. The target ignores a failure report
 for any other request, which stays in flight as before.
 
@@ -48,9 +52,10 @@ for any other request, which stays in flight as before.
   logged the one-time "copied through the staging area" line.
 - **Checks for failed reads:** it fails if, from the attach to the end of the check, `NODE`'s node
   logged a failure line, any line matching
-  `local read(:| failed)|on a local read|timed out`. These are a failed device read, a failed
-  local read, a checksum mismatch, or a request timeout. The node's startup lines, which also
-  mention local reads, do not match.
+  `local read(:| failed)|on a local read|a request timed out`. These are a failed device read,
+  a failed local read, a checksum mismatch, or a request timeout. The node's startup lines,
+  which also mention local reads, do not match, and neither do connection timeouts while a
+  restarted peer comes up.
 
 **S4. Done when.** Run with `ZERO_COPY=1`, the check passes. One block of every chunk of
 `vol1` is readable within the time it takes with `ZERO_COPY=0` (0.83 to 0.92 s on 2026-10-28),

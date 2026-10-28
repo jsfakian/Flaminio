@@ -65,21 +65,24 @@ own buffers there.
 
 ## Engine: report the failure (S2)
 
-`dataplane/crates/flaminio-node/src/engine.rs`. `PendingLocal` gets `target_epoch`, the epoch of
-the `Request::Read` that admitted it (`msg.epoch`). Its `epoch` field is the store's epoch from
-`admit_read`, which is something else.
+`dataplane/crates/flaminio-node/src/engine.rs`. A pending local read was admitted on the
+target's current local session (`*session == msg.session`), so its `sref.epoch` is the epoch of
+the target that sent it.
 
 `local_read_done` releases the plan and removes the pending read, as now. Then, on both paths,
-it returns early if `p.target_epoch` is not `rt.sm.epoch()`, before it touches `rt.reads`. The
+it returns early if `p.sref.epoch` is not `rt.sm.epoch()`, before it touches `rt.reads`. The
 engine purges `local_reads` only on detach, so a report can outlive the target that made the
 request. A new target numbers its sessions and requests from 1 again, so without this check, a
 stale report could remove the new target's entry from `rt.reads` and drop its read. The
-success path then builds its `FromReplica` with `epoch: p.target_epoch`, instead of the current
-target's epoch.
+success path then builds its `FromReplica` with `epoch: p.sref.epoch`.
 
-With `ok = false`, after its log line, it:
-- removes the read from `rt.reads`, keyed `(local, req)`, as a reply would;
-- calls `rt.sm.on_read_failed(us, local, p.target_epoch, p.session, p.req)`, then
+With `ok = false`, after its log line, it removes the read from `rt.reads`, keyed
+`(local, req)`, as a reply would. Then:
+- if a newer target fenced the local replica (`fenced_epoch(p.sref)` above `p.sref.epoch`),
+  it answers `Stale`, as the success path does. The store refuses to plan a read at an epoch it
+  was fenced past, so a fence makes reads fail: that must depose the target, not send the read
+  to another member;
+- otherwise it calls `rt.sm.on_read_failed(us, local, p.sref.epoch, p.session, p.req)`, then
   `self.drain(now, &volume)` so the retried read's output goes out.
 
 The target checks the epoch again, as `on_reply` does, so neither check depends on the other.
@@ -87,7 +90,7 @@ The target checks the epoch again, as `on_reply` does, so neither check depends 
 The engine test for a stale report has to see these numbers, and it is an integration test, a
 separate crate. The engine therefore gets
 `#[doc(hidden)] pub fn local_read_ids(&self, lr: &LocalRead) -> Option<(u64, u64, u64)>`, which
-returns a pending read's target epoch, session and request.
+returns a pending read's session epoch, session and request.
 
 `OpResult::Unreadable`, the new result, becomes `IoError::Unreadable` ("no replica could serve
 the read"). The frontends answer it with EIO, as they answer every error except `Invalid`.

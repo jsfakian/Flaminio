@@ -92,7 +92,7 @@ echo "one block of every chunk: $(since "$t0") s"
 # What the node logged since the attach (journald's --since takes whole seconds).
 sleep 1
 journal=$(sudo journalctl -u flaminio-node --since "@${t0%.*}" -o cat)
-if failed=$(grep -E 'local read(:| failed)|on a local read|timed out' <<<"$journal"); then
+if failed=$(grep -E 'local read(:| failed)|on a local read|a request timed out' <<<"$journal"); then
     echo "failed reads logged since the attach:"
     echo "$failed"
     exit 1
