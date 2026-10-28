@@ -46,13 +46,15 @@ binary only calls it. `dataplane/fuzz/regressions/<target>/` holds every input t
 target fail, committed (design: [docs/4](4/design.md)):
 
 - **On every pull request,** `make fuzz-regressions` replays them on the stable toolchain. An
-  input fails if its harness panics, aborts, or runs longer than 10 seconds; the log names it.
+  input fails if its harness panics, aborts, or runs longer than 2 seconds (on a 2 MiB stack:
+  stricter than the fuzzer, whose build is slower); the log names it.
 - **On every Fuzz run,** they are the fuzzer's second corpus directory, so it replays them first,
   with its memory and leak limits too, and a 10-second timeout per input.
 
-**When the Fuzz run fails** with failing inputs, it keeps them (the artifact `fuzz-artifacts`,
-90 days, and `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the runner host) and opens an
-issue labelled `fuzz`, or comments on the open one. To fix one:
+**When a Fuzz run fails,** it opens an issue labelled `fuzz`, or comments on the open one, saying
+whether it kept failing inputs or failed before fuzzing (a build or toolchain failure). It keeps
+the inputs as the artifact `fuzz-artifacts` (90 days) and in
+`~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the runner host. To fix one:
 
 1. Copy the input into `dataplane/fuzz/regressions/<target>/`, keeping libFuzzer's name
    (`crash-<sha1>`, `timeout-…`, `oom-…`, `leak-…`).

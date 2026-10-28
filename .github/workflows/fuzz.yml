@@ -1,6 +1,6 @@
 # Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md, docs/4). The
 # corpus carries over between runs on the runner host. Failing inputs are kept, as an artifact
-# and on the runner host, and reported in an issue labelled fuzz.
+# and on the runner host; a failed run is reported in an issue labelled fuzz.
 name: Fuzz
 
 on:
@@ -10,15 +10,24 @@ on:
     inputs:
       seconds:
         description: Seconds per target
+        type: choice
+        options: ["60", "300", "600"]
         default: "600"
 
 permissions:
   contents: read
 
+# One run at a time: they share the corpus on the runner host and the fuzz issue.
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
 jobs:
   fuzz:
     name: Fuzz every target
     runs-on: [self-hosted, flaminio]
+    # The builds, and up to 600 s for each target (the dispatch input is bounded to that): about
+    # 60 minutes for five targets. Raise it with the number of targets.
     timeout-minutes: 120
     outputs:
       inputs: ${{ steps.kept.outputs.inputs }}
@@ -38,9 +47,10 @@ jobs:
       - name: Keep the corpus
         if: always()
         run: rsync -a "$CORPUS/" "$HOME/.cache/flaminio-ci/fuzz-corpus/"
+      # Also when the job is cancelled at its time limit: the inputs found so far count.
       - name: Keep the failing inputs
         id: kept
-        if: failure()
+        if: failure() || cancelled()
         run: |
           if [[ -d $ARTIFACTS ]] && [[ -n $(find "$ARTIFACTS" -type f -print -quit) ]]; then
               keep="$HOME/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID"
@@ -49,7 +59,7 @@ jobs:
               echo "inputs=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Upload the failing inputs
-        if: failure() && steps.kept.outputs.inputs == 'true'
+        if: (failure() || cancelled()) && steps.kept.outputs.inputs == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
@@ -57,11 +67,11 @@ jobs:
           retention-days: 90
 
   report:
-    # Only when the fuzzer kept failing inputs, not when the build failed. Without failure(),
-    # GitHub would add success() to the condition, and this job would never run.
-    name: Report the failing inputs
+    # When the fuzz job failed, or kept failing inputs before it was cancelled. Without always(),
+    # GitHub would add success() to the condition, and this job would never run after a failure.
+    name: Report the failed run
     needs: fuzz
-    if: failure() && needs.fuzz.outputs.inputs == 'true'
+    if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.outputs.inputs == 'true')
     runs-on: [self-hosted, flaminio]
     timeout-minutes: 5
     permissions:
@@ -72,14 +82,19 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      INPUTS: ${{ needs.fuzz.outputs.inputs }}
     steps:
       - name: Open or update the fuzz issue
         run: |
-          gh label create fuzz --color B60205 --description "Failing inputs found by the Fuzz workflow" --force
-          note="The Fuzz run $RUN_URL kept failing inputs: the artifact fuzz-artifacts (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID on the runner host. To fix them: docs/ci.md, Fuzzing."
+          gh label create fuzz --color B60205 --description "Failed runs of the Fuzz workflow" --force
+          if [[ $INPUTS == true ]]; then
+              note="The Fuzz run $RUN_URL kept failing inputs: the artifact fuzz-artifacts (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID on the runner host. To fix them: docs/ci.md, Fuzzing."
+          else
+              note="The Fuzz run $RUN_URL failed before it kept any failing input (a build or toolchain failure?): the targets were not fuzzed. See its log."
+          fi
           open=$(gh issue list --label fuzz --state open --limit 1 --json number --jq '.[0].number // empty')
           if [[ -n $open ]]; then
               gh issue comment "$open" --body "$note"
           else
-              gh issue create --title "Fuzz found failing inputs" --label fuzz --body "$note"
+              gh issue create --title "Fuzz run failed" --label fuzz --body "$note"
           fi
