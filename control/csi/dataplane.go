@@ -27,11 +27,39 @@ type Dataplane interface {
 // connection, one line each way (dataplane/crates/flaminio-io/src/control.rs).
 type ControlSocket struct {
 	Path string
+	// Timeout bounds one command; zero or less means DefaultControlTimeout. A caller's earlier
+	// deadline wins.
+	Timeout time.Duration
 }
 
-// An attach waits for the target to start: fencing, possibly a takeover wait and the first
-// reconciliation. The data plane answers within 120 s.
-const controlTimeout = 150 * time.Second
+// DefaultControlTimeout bounds a control command when the caller's deadline does not come
+// first (docs/6). Kubelet's calls have a deadline of their own (2 minutes), so this is a
+// backstop for a data plane that never answers, and the limit for callers without one, such
+// as the tombstone sweep. It must stay above the data plane's own limits on a command
+// (ATTACH_LIMIT and DELETE_LIMIT, 50 s, in control.rs, whose tests read this line), so that
+// the data plane's answer, which names the cause, comes first.
+const DefaultControlTimeout = 60 * time.Second
+
+func (s ControlSocket) timeout() time.Duration {
+	if s.Timeout <= 0 {
+		return DefaultControlTimeout
+	}
+	return s.Timeout
+}
+
+// answerMargin is how much sooner than this caller the data plane must end an attach, for its
+// answer to come back in time.
+const answerMargin = time.Second
+
+// deadline is when a command gives up: after its timeout, or at the caller's deadline if that
+// comes first.
+func (s ControlSocket) deadline(ctx context.Context) time.Time {
+	deadline := time.Now().Add(s.timeout())
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	return deadline
+}
 
 func (s ControlSocket) command(ctx context.Context, line string) (string, error) {
 	var d net.Dialer
@@ -40,11 +68,7 @@ func (s ControlSocket) command(ctx context.Context, line string) (string, error)
 		return "", fmt.Errorf("data plane: %w", err)
 	}
 	defer conn.Close()
-	deadline := time.Now().Add(controlTimeout)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-		deadline = dl
-	}
-	_ = conn.SetDeadline(deadline)
+	_ = conn.SetDeadline(s.deadline(ctx))
 	if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
 		return "", fmt.Errorf("data plane: %w", err)
 	}
@@ -74,8 +98,20 @@ func (s ControlSocket) Status(ctx context.Context) (string, string, error) {
 	return volume, device, nil
 }
 
+// Attach tells the data plane how long this caller still waits, less answerMargin, so that it
+// ends the attach in time to answer with its cause rather than leave the caller with only its
+// own deadline (docs/6).
+//
+// A data plane older than this answers the time limit with its usage line: the attach is then
+// sent again without it, so the two can be upgraded in either order.
 func (s ControlSocket) Attach(ctx context.Context, volume string, token []byte) (string, error) {
-	return s.command(ctx, "attach "+volume+" "+base64.StdEncoding.EncodeToString(token))
+	within := max(time.Until(s.deadline(ctx))-answerMargin, 0)
+	line := "attach " + volume + " " + base64.StdEncoding.EncodeToString(token)
+	dev, err := s.command(ctx, fmt.Sprintf("%s %d", line, within.Milliseconds()))
+	if err != nil && strings.Contains(err.Error(), "usage: attach VOLUME TOKEN-BASE64 |") {
+		return s.command(ctx, line)
+	}
+	return dev, err
 }
 
 func (s ControlSocket) Detach(ctx context.Context, volume string) error {

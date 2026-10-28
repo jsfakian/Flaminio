@@ -8,6 +8,9 @@
 
 pub mod pb;
 
+/// The status code of a failed call, for callers that build or match [`Answer::Failed`].
+pub use tonic::Code;
+
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;

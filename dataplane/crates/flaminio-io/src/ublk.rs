@@ -660,8 +660,22 @@ pub enum Control {
         volume: String,
         token: Vec<u8>,
         reply: mpsc::Sender<String>,
+        /// When the caller stops waiting. The node skips a request that it would begin after
+        /// it, and bounds the attach's steps by it (docs/6, S2).
+        deadline: Instant,
     },
 }
+
+/// How long an attach waits for the metadata service to answer the target's start (docs/6).
+pub(crate) const METADATA_LIMIT: Duration = Duration::from_secs(30);
+/// How long adding the ublk device is retried while a previous device with its id goes away.
+pub(crate) const ADD_DEVICE_LIMIT: Duration = Duration::from_secs(10);
+/// An allowance for starting the device, not enforced: libublk waits up to 3 s for its
+/// character device, and a kernel that scans partitions inside the start waits for the first
+/// reads, up to a takeover (5.5 s).
+pub(crate) const START_LIMIT: Duration = Duration::from_secs(10);
+/// How long the attach given at startup (`--attach`) is tried again after it fails.
+const STARTUP_ATTACH_LIMIT: Duration = Duration::from_secs(300);
 
 /// Runs a node: the main thread drives the engine (replicas only) until an attach command
 /// arrives, then serves that volume as a ublk device until it is detached, and so on. The
@@ -687,6 +701,46 @@ pub fn serve_node(
             efd.signal();
         })
     };
+    if let (Some(volume), Some(path)) = (c.attach.clone(), c.token.as_ref()) {
+        let token = read_token(path)?;
+        let request = |volume: &str, token: &[u8]| {
+            let (reply, answer) = mpsc::channel();
+            let request = Control::Attach {
+                volume: volume.to_string(),
+                token: token.to_vec(),
+                reply,
+                deadline: Instant::now() + crate::control::ATTACH_LIMIT,
+            };
+            (request, answer)
+        };
+        // Sent before the control socket opens, so that it comes before any of its commands.
+        let (first, mut answer) = request(&volume, &token);
+        ctl_tx.send(first).expect("own channel");
+        // Nobody else retries an attach at startup: after a cluster restart, the metadata
+        // service may take a while to answer, or refuse connections (docs/6). A failure is
+        // tried again every 5 s for up to 5 minutes, while the node has no other volume.
+        let (ctl, attached) = (ctl_tx.clone(), attached.clone());
+        thread::spawn(move || {
+            let until = Instant::now() + STARTUP_ATTACH_LIMIT;
+            let done = || Instant::now() >= until || attached.lock().expect("attached").is_some();
+            loop {
+                let Ok(a) = answer.recv() else { return };
+                eprintln!("flaminio-io: attach at startup: {a}");
+                if a.starts_with("ok") || done() {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(5));
+                if done() {
+                    return;
+                }
+                let (next, rx) = request(&volume, &token);
+                if ctl.send(next).is_err() {
+                    return;
+                }
+                answer = rx;
+            }
+        });
+    }
     crate::control::spawn(
         &c.control,
         ctl_tx.clone(),
@@ -694,21 +748,6 @@ pub fn serve_node(
         wake,
         attached.clone(),
     )?;
-    if let (Some(volume), Some(path)) = (c.attach.clone(), c.token.as_ref()) {
-        let (reply, answer) = mpsc::channel();
-        ctl_tx
-            .send(Control::Attach {
-                volume,
-                token: read_token(path)?,
-                reply,
-            })
-            .expect("own channel");
-        thread::spawn(move || {
-            if let Ok(a) = answer.recv() {
-                eprintln!("flaminio-io: attach at startup: {a}");
-            }
-        });
-    }
     eprintln!(
         "flaminio-io: serving replicas; control socket {}",
         c.control.display()
@@ -724,10 +763,25 @@ pub fn serve_node(
                 volume,
                 token,
                 reply,
+                deadline,
             }) => {
-                if let Err(e) =
-                    attach_and_serve(c, &slot, &attached, volume, token, efd.clone(), &reply)
-                {
+                let request = AttachRequest {
+                    volume,
+                    token,
+                    // The target's start and adding the device end by then: the rest is left
+                    // for starting the device (docs/6).
+                    steps_by: deadline.checked_sub(START_LIMIT).unwrap_or(deadline),
+                };
+                let result = if Instant::now() >= request.steps_by {
+                    // No step would have any time left.
+                    Err(format!(
+                        "attach {}: its caller's time ran out before it could begin",
+                        request.volume
+                    ))
+                } else {
+                    attach_and_serve(c, &slot, &attached, efd.clone(), &reply, request)
+                };
+                if let Err(e) = result {
                     // The caller may have given up waiting: the log keeps the reason.
                     eprintln!("flaminio-io: {e}");
                     let _ = reply.send(format!("error: {e}"));
@@ -739,17 +793,31 @@ pub fn serve_node(
     }
 }
 
-/// Attaches `volume`, then serves it as a ublk device until the device stops (on detach).
-/// Replies "ok /dev/ublkbN" once the device is up.
+/// An attach taken from the control socket.
+struct AttachRequest {
+    volume: String,
+    token: Vec<u8>,
+    /// When the target's start and adding the device must have ended: the caller's deadline
+    /// less `START_LIMIT`, which is left for starting the device.
+    steps_by: Instant,
+}
+
+/// Attaches the request's volume, then serves it as a ublk device until the device stops (on
+/// detach). Replies "ok /dev/ublkbN" once the device is up. Its steps end by `steps_by`, so
+/// that the answer, or the reason there is none, reaches the caller before it stops waiting.
 fn attach_and_serve(
     c: &NodeConfig,
     slot: &Slot,
     attached: &Attached,
-    volume: String,
-    token: Vec<u8>,
     efd: Arc<EventFd>,
     reply: &mpsc::Sender<String>,
+    request: AttachRequest,
 ) -> Result<(), String> {
+    let AttachRequest {
+        volume,
+        token,
+        steps_by,
+    } = request;
     let size = {
         let mut guard = slot.lock().expect("slot");
         let parts = guard.as_mut().expect("the main thread holds the engine");
@@ -760,7 +828,8 @@ fn attach_and_serve(
                 token,
             },
         );
-        match drive_until(parts, Duration::from_secs(60), |o| {
+        let wait = METADATA_LIMIT.min(steps_by.saturating_duration_since(Instant::now()));
+        match drive_until(parts, wait, |o| {
             matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
         }) {
             Some(Output::Attached { size, .. }) => size,
@@ -768,13 +837,28 @@ fn attach_and_serve(
                 return Err(format!("attach {volume}: {why}"));
             }
             _ => {
+                // Drop the attach in the engine: an answer that comes later must not start a
+                // target that no device serves (docs/6, S3).
+                parts.engine.handle(
+                    Instant::now(),
+                    Input::Detach {
+                        volume: volume.clone(),
+                    },
+                );
+                // Say so when the wait was cut short: then the caller's time ran out too.
+                let cut = if wait < METADATA_LIMIT {
+                    ", all the time its caller had left"
+                } else {
+                    ""
+                };
                 return Err(format!(
-                    "attach {volume}: no answer from the metadata service"
+                    "attach {volume}: no answer from the metadata service within {}{cut}",
+                    crate::control::seconds(wait)
                 ));
             }
         }
     };
-    let result = run_device(c, slot, attached, &volume, size, efd, reply);
+    let result = run_device(c, slot, attached, (&volume, size), efd, reply, steps_by);
     *attached.lock().expect("attached") = None;
     // Whatever stopped the device, the target ends with it.
     if let Some(parts) = slot.lock().expect("slot").as_mut() {
@@ -787,9 +871,9 @@ fn attach_and_serve(
 
 /// Adds the node's ublk device. The previous device with the same id may still be going away
 /// (a deposed target's device is stopped by another thread): the kernel refuses the id until
-/// it is gone, so adding is tried again for a few seconds.
-fn add_device(c: &NodeConfig) -> Result<UblkCtrl, String> {
-    let deadline = Instant::now() + Duration::from_secs(10);
+/// it is gone, so adding is tried again for a few seconds, and not past `by`.
+fn add_device(c: &NodeConfig, by: Instant) -> Result<UblkCtrl, String> {
+    let deadline = (Instant::now() + ADD_DEVICE_LIMIT).min(by);
     // Zero copy: the kernel registers each request's pages as fixed buffer `tag` of the
     // queue's ring before handing the request over (see `engine_io_task_zc`).
     let ctrl_flags = if c.zero_copy {
@@ -826,12 +910,12 @@ fn run_device(
     c: &NodeConfig,
     slot: &Slot,
     attached: &Attached,
-    volume: &str,
-    size: u64,
+    (volume, size): (&str, u64),
     efd: Arc<EventFd>,
     reply: &mpsc::Sender<String>,
+    add_by: Instant,
 ) -> Result<(), String> {
-    let ctrl = add_device(c)?;
+    let ctrl = add_device(c, add_by)?;
     let tgt_init = move |dev: &mut UblkDev| {
         let max = dev.dev_info.max_io_buf_bytes;
         dev.tgt.dev_size = size;
