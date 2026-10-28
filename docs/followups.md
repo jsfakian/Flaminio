@@ -7,16 +7,19 @@ belongs to.
 | # | Item | Why it matters | Order |
 |---|---|---|---|
 | 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads at 67–69% of raw at QD32 and 51–61% for 1M; writes never measured from a controlled state | Next |
-| 2 | Reconciliation after a replica restart | 160 s before the first read for 16 GiB after both replicas restarted | Before the chaos run (step 8) |
-| 3 | Copying unwritten ranges | Resync and repair turn thin volumes thick (16 GiB used for 4 GiB written) and waste the network | With item 2: same tools |
-| 4 | Failure domains in placement | Today placement only spreads chunks over nodes | Before the edge profile; tested now with node labels |
+| 2 | Reconciliation after a replica restart | Done: the first read after both replicas of a 16 GiB volume restarted waits 0.2 s (was 160 s) | Before the chaos run (step 8) |
+| 3 | Copying unwritten ranges | Done: a resync of 4 GiB written moves 4.3 GiB and stores 4.0 GiB (was 16 GiB) | With item 2: same tools |
+| 4 | Failure domains in placement | Done: zone and rack placement, from `metactl` and the StorageClass; the lab cannot show physical independence | Before the edge profile |
 | 5 | More than one volume per node | A node serves one attached volume at a time | With item 1: same redesign |
 | 6 | Fuzzing actually running | The fuzz targets build but have never run (no nightly toolchain) | Now: small |
 | 7 | Short-lived certificates, rotated | Lab certificates last 30 days and are issued by hand | With the operator (phase 1 step 7+) |
-| 8 | Deleting a volume's replicas | Tombstone protocol + agent sweep done; lab check (100 PVC create/delete loop, store space) still open | With the node agent (step 6) |
+| 8 | Deleting a volume's replicas | Done: 100 PVC create/delete cycles leave the stores' used space where it started | With the node agent (step 6) |
 | 9 | The data plane in Kubernetes | `flaminio-io node` runs as a systemd unit beside k3s; the CSI node plugin drives it through its control socket | With the node agent (step 6) |
 | 10 | A faster first attach after a restart | An attach answers once the device exists, but the kernel's partition scan and udev's probe read the device and wait for the whole-volume reconciliation (item 2) | With item 2 |
 | 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator |
+| 12 | Zero-copy local reads after an attach | With `--zero-copy`, local reads that waited for reconciliation fail with EINVAL, and the target drops the local replica for 3 s each time | Before the chaos run (step 8) |
+| 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) |
+| 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; a data node without one (fl-c) keeps the replicas, and the volume id stays taken | With the node agent (step 6) |
 
 ## 1. Read performance
 
@@ -53,12 +56,21 @@ new target copies them all.
 **Steps:**
 1. **Digest-first reconciliation.** ✅ (protocol, simulator, store, data plane)
    - A new request, `Digest{chunk, ext}`, returns per-block CRC-32C values taken from the
-     store's metadata. Unwritten blocks have none, so no data is read.
+     store's metadata, so no data is read. They are digests of what a read returns: an
+     unwritten block gets the zero block's CRC, so replicas compare by content whatever their
+     layout. One request covers up to a default chunk (65 536 blocks).
    - The target repairs only the blocks whose digests differ between ISR members.
    - In the simulator, a replica's digest is its block values. A new mutation, trusting
      digests from a single member, must be caught (`catches_trust_single_digest`).
-   - *Lab check still open:* after restarting both replicas of a 16 GiB volume, the first read
-     waits under 5 s.
+   - *Lab, 2026-10-28:* after restarting both replicas of `vol1` (16 GiB), the first read
+     waited 0.21–0.25 s, and one block of every chunk was read within 0.9–1.0 s (was 152–160
+     s). Without zero copy; with it, see item 12.
+   - The lab found two bugs on the way: unwritten blocks without a digest counted as differing
+     from written zeros (a restart rewrote about 12 GiB of zeros onto fl-c), and repair-sized
+     digest requests (256 blocks) kept the first read at 5–8 s.
+   - Left: reconciliation queues a volume's chunks last to first, so chunk 0 is reconciled
+     last. At about 1 s for 16 GiB this matters only for much larger volumes; fixing it
+     reorders the simulator's runs, so the mutation seeds need searching again.
 2. **Persisting the uncertain set at checkpoints** (a format v1 compat feature), so a restart
    reports only what was really uncertain. Optional once item 1 is in.
 
@@ -71,8 +83,14 @@ new target copies them all.
    joiner (with `force_copy` so writes during the probe are not lost).
 3. **Digests for resync too:** ✅ after Mapped, the target digests source vs joiner and copies
    only disagreeing blocks (same `Digest` request as item 2).
-4. *Lab check still open:* a resync of the 16 GiB lab volume with 4 GiB written moves ≤ 4.5 GiB,
-   and the replica's store uses about 4 GiB.
+4. *Lab, 2026-10-28:* a 16 GiB RF1 volume with 64 MiB written at the start of each chunk (4
+   GiB) moved, chunk by chunk, from fl-a to fl-b, where it had no replica. fl-b received
+   4 356 MiB over the overlay, WireGuard overhead included, and stored 65 536 clusters
+   (4.0 GiB); every written range read back, and unwritten ranges read zeros. Resyncing `vol1`
+   back onto fl-a, which already held its data, moved 46 MiB for 16 GiB.
+   - The lab found that a whole-chunk `Mapped` probe was longer than the frame decoder allowed
+     for a request: the replica closed the session on every attempt. Probes now have their own
+     limit (65 536 blocks), and a larger chunk is probed in pieces.
 
 ## 4. Failure domains in placement
 
@@ -88,9 +106,17 @@ new target copies them all.
    domain; load spreads; strict refusal; bestEffort fallback).
 4. **Lab:** label fl-a and fl-b as different zones (scripted in `lab.sh` meta smoke; for CSI,
    `kubectl label node fl-a topology.kubernetes.io/zone=lab-a flaminio.io/rack=rack-a` and the
-   same for fl-b with `lab-b` / `rack-b`). *Lab check still open:* full verification of
-   zone-aware PVC placement. The lab cannot show real independence (one switch, and fl-w
-   shares a server with fl-a); that needs a third physical server.
+   same for fl-b with `lab-b` / `rack-b`). The lab cannot show real independence (one switch,
+   and fl-w shares a server with fl-a); that needs a third physical server.
+   - *Lab, 2026-10-28, through `metactl`:* zones lab-a and lab-b put every chunk on fl-a and
+     fl-b; with both nodes in one zone, zone/strict was refused ("1 distinct zone domains, 2
+     replicas") and zone/bestEffort fell back to racks; re-registering a node's zone kept its
+     rack.
+   - *Through Kubernetes:* the CSI node plugins copied `zone-a` and `zone-b` from the Nodes,
+     and a PVC on a zone-strict StorageClass got a replica in each. With both Nodes in one
+     zone, the PVC stayed Pending: `ProvisioningFailed ... 1 distinct zone domains, 2
+     replicas`.
+   - Left: a volume does not record its failure domain, so moves and drains ignore it.
 
 ## 5. More than one volume per node
 
@@ -141,9 +167,13 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
 2. **Each node's agent** lists its tombstones, deletes the chunks (`Store::delete_chunk`,
    under a fencing epoch higher than any target's), and confirms. ✅ The CSI node plugin sweeps
    via the data plane's control-socket `delete` (which calls `ReplicaService::delete_volume`).
-3. *Lab check still open:* creating and deleting 100 PVCs in a loop leaves the stores' used
-   space where it started. Protocol and unit/integration tests cover create→delete→confirm and
-   partial confirms.
+3. *Lab, 2026-10-28:* 100 cycles of a PVC (RF 2, 1 GiB) and a pod writing 16 MiB through
+   its filesystem, alternating fl-a and fl-b, then both deleted: about 20 s a cycle. Afterwards
+   fl-a and fl-b had the same chunk replicas and clusters in use as before (168 / 431 167 and
+   144 / 393 216), and no tombstone was left.
+   - Left: data nodes outside Kubernetes (item 14), and `DeleteVolume` reads the chunks
+     outside the transaction that writes the tombstone. A replica moved in between would be
+     missed; today a deleted volume is never attached, and only attached volumes move.
 
 ## 9. The data plane in Kubernetes
 
@@ -160,7 +190,7 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
 
 When an attach completes, the new target must still reconcile. Reads of chunks reported uncertain
 wait for it, including the kernel's partition scan and udev's probe of the new device.
-- **Item 2 fixes the cause.**
+- **Item 2 fixed the cause:** reconciling 16 GiB after both replicas restarted takes about 1 s.
 - **Meanwhile:**
   - the device is created with partition scanning off (`UBLK_F_NO_AUTO_PART_SCAN` where the kernel has it; to be checked on 7.0);
   - the CSI node plugin's timeouts allow for a whole-volume reconciliation (150 s on the 1 GbE lab
@@ -177,3 +207,43 @@ draining node until it is next attached. The drain lists such volumes.
    That needs targets without devices, which come with item 5 (several volumes per node).
 2. *Done when:* draining a node that holds replicas of unattached volumes completes, and
    attaching those volumes afterwards finds their data on the new nodes.
+
+## 12. Zero-copy local reads after an attach
+
+Found in the item 2 lab check. With `--zero-copy`, a local read that waited for reconciliation
+right after an attach fails: io_uring's `ReadFixed` into the request's auto-registered buffer
+returns EINVAL. A failed local read gets no reply, so the target drops the local replica from
+the ISR after its request timeout (3 s), then resyncs it. On `vol1` this happened 4–5 times per
+attach: the first read still came in 0.2 s, but every chunk was readable only after 7.2 s
+instead of 1 s.
+
+**Steps:**
+1. **Find why the buffer is not valid:** the device and the kernel's partition scan read first
+   and wait; the frontend now logs which step of a zero-copy read failed.
+2. **A failed local read should fail over to another ISR member** for that request, not drop
+   the local replica.
+3. *Done when:* restarting both replicas of `vol1` with zero copy logs no failed local read,
+   and every chunk is readable within the time measured without zero copy.
+
+## 13. Replicas left behind by moves
+
+A move ends with the source dropped from the chunk's replicas in the metadata service, but the
+source keeps its copy on disk. After the item 3 check moved all 64 chunks of a volume from fl-a
+to fl-b, fl-a still held them (4 GiB) until they were deleted by hand through the control
+socket (`node.sh delete`).
+
+**Steps:**
+1. **The node agent deletes replicas the metadata service no longer places on it**, under a
+   fencing epoch higher than any target's, as for tombstones (item 8). A replica of a chunk in
+   a move is kept until the move ends.
+2. *Done when:* draining a node leaves no chunk replicas of the drained volumes on its disk.
+
+## 14. Tombstones on nodes outside Kubernetes
+
+Only the CSI node plugin sweeps tombstones (item 8). A data node without one, such as fl-c in
+the lab, never confirms: its replicas of deleted volumes stay, and the volume ids stay taken.
+
+**Steps:**
+1. **The sweep moves into the node agent** (step 6), which runs on every data node.
+2. Until then, an administrator can confirm a deletion for a node that is gone for good
+   (`ConfirmDeletion` accepts administrators); `metactl` needs a command for it.
