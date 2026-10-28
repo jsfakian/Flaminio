@@ -1,0 +1,6 @@
+# The Rust toolchain for the data plane, here and in CI, so rustfmt and clippy agree everywhere.
+# The fuzz targets use nightly explicitly (`cargo +nightly fuzz`).
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

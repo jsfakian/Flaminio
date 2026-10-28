@@ -130,7 +130,10 @@ run_on_host() {
     local args=""
     (($#)) && args=$(printf ' %q' "$@")
     if on_host "$host"; then
-        env ${ENV_VARS:-} bash -c "$REMOTE_RUNNER" _$args <"$script"
+        # ENV_VARS holds VAR=value words: split on purpose. The arguments go as they are; $args
+        # is quoted for the remote shell, which no local shell would undo.
+        # shellcheck disable=SC2086
+        env ${ENV_VARS:-} bash -c "$REMOTE_RUNNER" _ "$@" <"$script"
         return
     fi
     local jump

@@ -352,7 +352,7 @@ cmd_repl_fault() {
 # overlay port of every VM (UDP), each open to the other server only. When DEMO_CP_SRC_IP is set
 # (Mac control-plane demo), the same UDP forwards also accept that source.
 forward_rules() {
-    local host=$1 vm other rules=() src
+    local host=$1 vm other rules=()
     if [[ $host == "$HOST_B" ]]; then
         rules+=("tcp/$REPL_PORT/$VM_B_IP/$REPL_PORT/$HOST_A_IP")
     fi
