@@ -34,8 +34,8 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 pub(crate) const ATTACH_LIMIT: Duration = METADATA_LIMIT
     .saturating_add(ADD_DEVICE_LIMIT)
     .saturating_add(START_LIMIT);
-/// How long a delete may take: as long as an attach, below the CSI node plugin's limit.
-const DELETE_LIMIT: Duration = ATTACH_LIMIT;
+/// How long a delete may take: below the CSI node plugin's limit, like an attach.
+const DELETE_LIMIT: Duration = Duration::from_secs(50);
 
 pub fn spawn(
     path: &Path,
@@ -127,11 +127,18 @@ fn attach(
         return "error: the node is shutting down".into();
     }
     wake();
-    answer.recv_timeout(limit).unwrap_or_else(|_| {
-        // Not begun yet, it never will be; under way, it may still finish (docs/6, S2).
-        withdrawn.store(true, Ordering::Relaxed);
-        format!("error: no answer within {}", seconds(limit))
-    })
+    match answer.recv_timeout(limit) {
+        Ok(a) => a,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Not begun yet, it never will be; under way, it stops at its next step (docs/6,
+            // S2).
+            withdrawn.store(true, Ordering::Relaxed);
+            format!("error: no answer within {}", seconds(limit))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            "error: the node dropped the attach without an answer (see its log)".into()
+        }
+    }
 }
 
 /// A limit as the socket's errors name it: seconds, with at most one decimal.
@@ -204,14 +211,47 @@ mod tests {
     }
 
     #[test]
-    fn the_attach_limit_is_its_steps_and_below_the_csi_limit() {
+    fn an_attach_dropped_without_an_answer_says_so() {
+        let (ctl, requests) = mpsc::channel();
+        let wake: Wake = Arc::new(|| {});
+        // The node takes the request and drops its reply channel, as a panicking attach does.
+        let node = thread::spawn(move || drop(requests.recv()));
+        let answer = attach(&ctl, &wake, "v", vec![1], Duration::from_secs(5));
+        node.join().unwrap();
+        assert!(answer.contains("dropped the attach"), "{answer}");
+    }
+
+    /// The CSI node plugin's limit, read from its source: the data plane's answers must come
+    /// before it gives up, or kubelet sees no cause (docs/6).
+    fn csi_control_timeout() -> Duration {
+        let go = include_str!("../../../../control/csi/dataplane.go");
+        let line = go
+            .lines()
+            .find(|l| l.starts_with("const DefaultControlTimeout = "))
+            .expect("DefaultControlTimeout in dataplane.go");
+        let secs = line
+            .trim_start_matches("const DefaultControlTimeout = ")
+            .trim_end_matches(" * time.Second")
+            .parse()
+            .expect("DefaultControlTimeout as N * time.Second");
+        Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn the_limits_are_their_steps_and_below_the_csi_limit() {
         assert_eq!(
             ATTACH_LIMIT,
             METADATA_LIMIT + ADD_DEVICE_LIMIT + START_LIMIT
         );
-        // `DefaultControlTimeout` in control/csi/dataplane.go: this answer must come first.
-        assert!(ATTACH_LIMIT < Duration::from_secs(60));
-        assert!(DELETE_LIMIT < Duration::from_secs(60));
+        let csi = csi_control_timeout();
+        assert!(
+            ATTACH_LIMIT < csi,
+            "{ATTACH_LIMIT:?} against the CSI's {csi:?}"
+        );
+        assert!(
+            DELETE_LIMIT < csi,
+            "{DELETE_LIMIT:?} against the CSI's {csi:?}"
+        );
         assert_eq!(seconds(ATTACH_LIMIT), "50 s");
     }
 }

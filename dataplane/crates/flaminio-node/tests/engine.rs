@@ -1231,7 +1231,7 @@ fn dropped_attach(late: Late) {
                     };
                     if first {
                         *answer = Answer::Failed {
-                            code: tonic::Code::Unavailable,
+                            code: flaminio_metaclient::Code::Unavailable,
                             message: "the dropped attach's call".into(),
                         };
                     }

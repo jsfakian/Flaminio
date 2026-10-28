@@ -738,10 +738,14 @@ pub fn serve_node(
                 volume,
                 token,
                 reply,
-                ..
+                withdrawn,
             }) => {
+                let caller = Caller {
+                    reply: &reply,
+                    withdrawn: &withdrawn,
+                };
                 if let Err(e) =
-                    attach_and_serve(c, &slot, &attached, volume, token, efd.clone(), &reply)
+                    attach_and_serve(c, &slot, &attached, volume, token, efd.clone(), caller)
                 {
                     // The caller may have given up waiting: the log keeps the reason.
                     eprintln!("flaminio-io: {e}");
@@ -754,6 +758,26 @@ pub fn serve_node(
     }
 }
 
+/// The caller of an attach: where its answer goes, and whether it still waits for one.
+#[derive(Clone, Copy)]
+struct Caller<'a> {
+    reply: &'a mpsc::Sender<String>,
+    withdrawn: &'a AtomicBool,
+}
+
+impl Caller<'_> {
+    /// The caller gave up (the control socket's limit passed): the attach stops at its next
+    /// step instead of serving a device nobody waits for (docs/6, S2).
+    fn check(&self, volume: &str) -> Result<(), String> {
+        if self.withdrawn.load(Ordering::Relaxed) {
+            return Err(format!(
+                "attach {volume}: withdrawn by its caller, who gave up"
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Attaches `volume`, then serves it as a ublk device until the device stops (on detach).
 /// Replies "ok /dev/ublkbN" once the device is up.
 fn attach_and_serve(
@@ -763,7 +787,7 @@ fn attach_and_serve(
     volume: String,
     token: Vec<u8>,
     efd: Arc<EventFd>,
-    reply: &mpsc::Sender<String>,
+    caller: Caller<'_>,
 ) -> Result<(), String> {
     let size = {
         let mut guard = slot.lock().expect("slot");
@@ -798,7 +822,10 @@ fn attach_and_serve(
             }
         }
     };
-    let result = run_device(c, slot, attached, &volume, size, efd, reply);
+    // The target ends below whatever stops the device, a withdrawal included.
+    let result = caller
+        .check(&volume)
+        .and_then(|()| run_device(c, slot, attached, &volume, size, efd, caller));
     *attached.lock().expect("attached") = None;
     // Whatever stopped the device, the target ends with it.
     if let Some(parts) = slot.lock().expect("slot").as_mut() {
@@ -853,9 +880,12 @@ fn run_device(
     volume: &str,
     size: u64,
     efd: Arc<EventFd>,
-    reply: &mpsc::Sender<String>,
+    caller: Caller<'_>,
 ) -> Result<(), String> {
     let ctrl = add_device(c)?;
+    // Adding can take seconds: dropping `ctrl` deletes the device again.
+    caller.check(volume)?;
+    let reply = caller.reply;
     let tgt_init = move |dev: &mut UblkDev| {
         let max = dev.dev_info.max_io_buf_bytes;
         dev.tgt.dev_size = size;

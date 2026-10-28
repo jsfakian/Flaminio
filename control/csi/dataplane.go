@@ -27,7 +27,7 @@ type Dataplane interface {
 // connection, one line each way (dataplane/crates/flaminio-io/src/control.rs).
 type ControlSocket struct {
 	Path string
-	// Timeout bounds one command; zero means DefaultControlTimeout. A caller's earlier
+	// Timeout bounds one command; zero or less means DefaultControlTimeout. A caller's earlier
 	// deadline wins.
 	Timeout time.Duration
 }
@@ -35,13 +35,13 @@ type ControlSocket struct {
 // DefaultControlTimeout bounds a control command when the caller's deadline does not come
 // first (docs/6). Kubelet's calls have a deadline of their own (2 minutes), so this is a
 // backstop for a data plane that never answers, and the limit for callers without one, such
-// as the tombstone sweep. It must stay above the data plane's own limit on a command
-// (ATTACH_LIMIT, 50 s, in control.rs), so that the data plane's answer, which names the
-// cause, comes first.
+// as the tombstone sweep. It must stay above the data plane's own limits on a command
+// (ATTACH_LIMIT and DELETE_LIMIT, 50 s, in control.rs, whose tests read this line), so that
+// the data plane's answer, which names the cause, comes first.
 const DefaultControlTimeout = 60 * time.Second
 
 func (s ControlSocket) timeout() time.Duration {
-	if s.Timeout == 0 {
+	if s.Timeout <= 0 {
 		return DefaultControlTimeout
 	}
 	return s.Timeout

@@ -80,14 +80,12 @@ func TestControlSocketKeepsTheCallersEarlierDeadline(t *testing.T) {
 }
 
 func TestControlSocketDefaultWaitsForTheDataPlane(t *testing.T) {
-	// main.go sets no Timeout.
-	if got := (ControlSocket{}).timeout(); got != DefaultControlTimeout {
-		t.Fatalf("timeout() = %v, want %v", got, DefaultControlTimeout)
-	}
-	// Above the data plane's own limit on a command (ATTACH_LIMIT in control.rs), so its
-	// answer comes first.
-	if DefaultControlTimeout <= 50*time.Second {
-		t.Fatalf("DefaultControlTimeout = %v, must be above the data plane's 50 s", DefaultControlTimeout)
+	// main.go sets no Timeout; a negative one falls back too. That the default is above the
+	// data plane's own limits is checked on the Rust side, which reads it (control.rs).
+	for _, s := range []ControlSocket{{}, {Timeout: -time.Second}} {
+		if got := s.timeout(); got != DefaultControlTimeout {
+			t.Fatalf("timeout() with %v = %v, want %v", s.Timeout, got, DefaultControlTimeout)
+		}
 	}
 	path := controlServer(t, 200*time.Millisecond, "ok /dev/ublkb3")
 	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"))

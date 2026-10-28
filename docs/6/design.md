@@ -59,7 +59,10 @@ waited, in seconds with at most one decimal: `error: no answer within 50 s`.
 thread sets it when its limit passes. The main thread checks it when it takes the request, and
 skips a withdrawn one without answering, since nobody is waiting. Without this, a request that
 timed out while the node served another volume would run after the next detach, with a token
-nobody uses any more. An attach already under way is not stopped.
+nobody uses any more. An attach under way checks it again after the target's start and after
+adding the device, and stops there (dropping the device and the target), rather than serve a
+device nobody waits for while kubelet's retry takes a new epoch. Once the device has started,
+it stays, and a retry finds it through `status`.
 
 **CSI node plugin** (`control/csi/dataplane.go`):
 - `ControlSocket` gets a field `Timeout time.Duration`. Zero means `DefaultControlTimeout` =
