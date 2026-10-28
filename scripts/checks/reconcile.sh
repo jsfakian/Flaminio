@@ -52,6 +52,8 @@ now() { date +%s.%N; }
 since() { awk -v a="$1" -v b="$(now)" 'BEGIN { printf "%.3f", b - a }'; }
 read_block() { sudo timeout 300 dd if="$1" of=/dev/null bs=4096 count=1 skip="$2" iflag=direct status=none; }
 
+# The node's log from here on: its journal cursor now.
+cursor=$(sudo journalctl -u flaminio-node -n 0 --show-cursor -o cat | sed -n 's/^-- cursor: //p')
 t0=$(now)
 tok=$(meta attach "$VOLUME" "$NODE" | jq -r .token)
 answer=$(control "attach $VOLUME $tok")
@@ -89,17 +91,22 @@ print(f"misaligned read across chunks {c - 1} and {c}: the same data")
 PY
 for ((c = 1; c < CHUNKS; c++)); do read_block "$path" $((c * CHUNK_BYTES / 4096)); done
 echo "one block of every chunk: $(since "$t0") s"
-# What the node logged since the attach (journald's --since takes whole seconds).
-sleep 1
-journal=$(sudo journalctl -u flaminio-node --since "@${t0%.*}" -o cat)
+# What the node logged since the attach, once journald has taken in everything logged so far.
+sudo journalctl --sync
+journal=$(sudo journalctl -u flaminio-node --after-cursor "$cursor" -o cat)
 if failed=$(grep -E 'local read(:| failed)|on a local read|a request timed out' <<<"$journal"); then
     echo "failed reads logged since the attach:"
     echo "$failed"
     exit 1
 fi
-if grep -q 'zero copy: local reads go straight into the requests' <<<"$journal" &&
+# With zero copy, the probe's read must have been copied through the staging area, if the
+# store's disk refuses a buffer aligned to 4 bytes: its DMA alignment is above 3 (512 for
+# virtio-blk; NVMe takes 4, and then nothing needs the copy).
+store=$(systemctl show -p ExecStart --value flaminio-node | grep -o -- '--device [^ ]*' | cut -d' ' -f2)
+dma=$(cat "/sys/block/$(basename "$(readlink -f "$store")")/queue/dma_alignment")
+if grep -q 'zero copy: local reads go straight into the requests' <<<"$journal" && ((dma > 3)) &&
     ! grep -q 'copied through the staging area' <<<"$journal"; then
-    echo "zero copy, but no read was copied through the staging area"
+    echo "zero copy, but no read was copied through the staging area ($store: DMA alignment $dma)"
     exit 1
 fi
 echo "no failed local read logged"

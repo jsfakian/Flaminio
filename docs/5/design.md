@@ -55,10 +55,10 @@ The slot's memory is reached through a new `Staging::addr(i, at, len) -> *mut u8
 uses it. The zero fills write other ranges of the same slot: the gaps of the plan, which never
 overlap its device reads.
 
-The first staged read in a process logs once, from a `static AtomicBool`: "zero copy: a read's
-pages are not aligned for <device> (its DMA alignment); such reads are copied through the
-staging area". A line for every read would flood the log under a workload that is misaligned
-on purpose.
+The first staged read of each attached device logs once, from an `AtomicBool` in its `Shared`:
+"<volume>: zero copy: a read's pages are not aligned for <device> (its DMA alignment); such
+reads are copied through the staging area". A line for every read would flood the log under a
+workload that is misaligned on purpose.
 
 The copy-mode frontend (`local_read`, `fast_read_copy`) is unchanged. The disk reads into its
 own buffers there.
@@ -182,15 +182,19 @@ allows.
 
   The range crosses a chunk boundary, so the read has two pieces, the second at `at = 4096`.
   The block holds data, so the plan has a device read, not only a zero fill.
-- **Times:** the check takes the time before the attach as `t0` (`date +%s.%N`). At the end,
-  it reads `sudo journalctl -u flaminio-node --since "@$t0" -o cat` on `NODE`.
+- **Log window:** before the attach, the check notes the node's journal cursor
+  (`journalctl -n 0 --show-cursor`). At the end it runs `journalctl --sync`, so journald has
+  taken in everything logged so far, then reads
+  `sudo journalctl -u flaminio-node --after-cursor <cursor> -o cat` on `NODE`.
   - It fails, printing the lines, if any matches
     `grep -E 'local read(:| failed)|on a local read|timed out'`. These are the failure lines
     from `zc_read_plan`, `local_read_done`, the copy-mode checksum mismatch and the target's
     request timeout. The startup lines, `zero copy: local reads go straight into the requests`
     and `EXPERIMENT: local reads are not checked`, do not match.
-  - If the log has the zero-copy startup line, it also fails unless one line contains
-    `copied through the staging area`. The mode comes from the node itself, so the check
+  - If the log has the zero-copy startup line, and the store's disk (the node's `--device`)
+    has a DMA alignment above 3, it also fails unless one line contains
+    `copied through the staging area`. A disk with an alignment of 3 or less, such as NVMe,
+    takes the probe's buffer, and nothing is copied. The mode comes from the node itself, so the check
     cannot skip this by mistake. The check restarts `NODE`'s node, since `NODE` holds a
     replica, so the one-time line is new.
 

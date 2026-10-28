@@ -13,8 +13,8 @@ Only EINVAL leads to the copy, because that is how the kernel refuses a buffer i
 direct I/O. Any other error, or a failed staged read, fails the local read (S2). Data copied
 through the slot is not verified, like everything else read with zero copy.
 
-Logging: a process logs its first staged read once, naming the reason ("copied through the
-staging area"). The existing per-read line (`local read: device read returned …`) is logged only
+Logging: each attached device logs its first staged read once, naming the volume, the store's
+disk and the reason ("copied through the staging area"). The existing per-read line (`local read: device read returned …`) is logged only
 for the errors that fail the read: any error other than EINVAL, and a failed staged read.
 
 **S2. A failed local read fails over.** A local read fails when its plan cannot be made, a device
@@ -49,7 +49,8 @@ for any other request, which stays in flight as before.
 - **Checks the staged copy when zero copy is on.** The check tells the mode from the node's own
   log, not from its caller: zero copy is on if, since the attach, the node logged
   `zero copy: local reads go straight into the requests`. It then fails unless the node also
-  logged the one-time "copied through the staging area" line.
+  logged the one-time "copied through the staging area" line, if the store's disk needs the
+  copy: its DMA alignment is above 3. NVMe takes 4-byte-aligned buffers, and needs no copy.
 - **Checks for failed reads:** it fails if, from the attach to the end of the check, `NODE`'s node
   logged a failure line, any line matching
   `local read(:| failed)|on a local read|a request timed out`. These are a failed device read,
