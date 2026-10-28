@@ -67,11 +67,11 @@ jobs:
           retention-days: 90
 
   report:
-    # When the fuzz job failed, or kept failing inputs before it was cancelled. Without always(),
+    # When the fuzz job failed or was cancelled (at its time limit, or by hand). Without always(),
     # GitHub would add success() to the condition, and this job would never run after a failure.
     name: Report the failed run
     needs: fuzz
-    if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.outputs.inputs == 'true')
+    if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')
     runs-on: [self-hosted, flaminio]
     timeout-minutes: 5
     permissions:
@@ -90,7 +90,7 @@ jobs:
           if [[ $INPUTS == true ]]; then
               note="The Fuzz run $RUN_URL kept failing inputs: the artifact fuzz-artifacts (90 days), and ~/.cache/flaminio-ci/fuzz-artifacts/$GITHUB_RUN_ID on the runner host. To fix them: docs/ci.md, Fuzzing."
           else
-              note="The Fuzz run $RUN_URL failed before it kept any failing input (a build or toolchain failure?): the targets were not fuzzed. See its log."
+              note="The Fuzz run $RUN_URL failed or was cancelled without keeping any failing input (a build or toolchain failure, or a hang?): the targets may not have been fuzzed. See its log."
           fi
           open=$(gh issue list --label fuzz --state open --limit 1 --json number --jq '.[0].number // empty')
           if [[ -n $open ]]; then

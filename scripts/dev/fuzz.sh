@@ -22,7 +22,9 @@ if ! cargo "+$nightly" fuzz --help >/dev/null 2>&1; then
 fi
 # The targets cargo-fuzz builds: the [[bin]] entries, which the regression test keeps in step with
 # fuzz_targets/ and regressions/.
-mapfile -t targets < <(cargo "+$nightly" fuzz list)
+# (A read loop rather than mapfile, which macOS's bash 3.2 lacks.)
+targets=()
+while IFS= read -r t; do targets+=("$t"); done < <(cargo "+$nightly" fuzz list)
 # A failing `cargo fuzz list` is invisible to set -e here: refuse to fuzz nothing and pass.
 ((${#targets[@]})) || { echo "fuzz: cargo fuzz list found no targets" >&2; exit 1; }
 
@@ -33,7 +35,8 @@ for t in "${targets[@]}"; do
   # cargo-fuzz creates the working corpus only when it picks the corpus itself.
   mkdir -p "corpus/$t"
   # A 10-second timeout per input (libFuzzer's default is 1200 s); the regression test is stricter.
-  if ! cargo "+$nightly" fuzz run "$t" "corpus/$t" "regressions/$t" -- \
+  # The binaries need libFuzzer, behind the crate's `fuzzing` feature.
+  if ! cargo "+$nightly" fuzz run --features fuzzing "$t" "corpus/$t" "regressions/$t" -- \
       -max_total_time="$seconds" -timeout=10; then
     failed+=("$t")
   fi

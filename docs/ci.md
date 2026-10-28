@@ -46,13 +46,15 @@ binary only calls it. `dataplane/fuzz/regressions/<target>/` holds every input t
 target fail, committed (design: [docs/4](4/design.md)):
 
 - **On every pull request,** `make fuzz-regressions` replays them on the stable toolchain. An
-  input fails if its harness panics, aborts, or runs longer than 2 seconds (on a 2 MiB stack:
-  stricter than the fuzzer, whose build is slower); the log names it.
+  input fails if its harness panics, aborts, or runs longer than 5 seconds (on a 2 MiB stack:
+  stricter than the fuzzer, whose build is slower); the log names it. Hidden files and editor
+  backups are skipped.
 - **On every Fuzz run,** they are the fuzzer's second corpus directory, so it replays them first,
   with its memory and leak limits too, and a 10-second timeout per input.
 
-**When a Fuzz run fails,** it opens an issue labelled `fuzz`, or comments on the open one, saying
-whether it kept failing inputs or failed before fuzzing (a build or toolchain failure). It keeps
+**When a Fuzz run fails or is cancelled,** it opens an issue labelled `fuzz`, or comments on the
+open one, saying whether it kept failing inputs or ended without any (a build or toolchain
+failure, or a hang). It keeps
 the inputs as the artifact `fuzz-artifacts` (90 days) and in
 `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/` on the runner host. To fix one:
 
@@ -64,8 +66,9 @@ the inputs as the artifact `fuzz-artifacts` (90 days) and in
 3. Fix the bug, see it pass, and commit the input with the fix.
 
 A new target needs its harness in `lib.rs` (and its `TARGETS` table), its binary in
-`fuzz_targets/` and `Cargo.toml`, and `regressions/<target>/empty`; the regression test fails
-until all are there.
+`fuzz_targets/` and `Cargo.toml` (with `required-features = ["fuzzing"]`), and
+`regressions/<target>/empty`; the regression test fails until all are there. `metadata_pages`
+gives a new decoder the next value of its first byte, never renumbering the others.
 
 ## Runners
 

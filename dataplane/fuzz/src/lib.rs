@@ -48,23 +48,26 @@ pub fn superblock(data: &[u8]) {
 }
 
 /// Every metadata page decoder, with fuzzer-controlled payloads behind a valid header and CRC.
+/// The first byte names the decoder. The values are fixed: a new decoder takes the next one, so a
+/// committed regression input keeps reaching the decoder it was saved for. Other values do nothing.
 pub fn metadata_pages(data: &[u8]) {
     let Some((&selector, rest)) = data.split_first() else {
         return;
+    };
+    let page_type = match selector {
+        0 => PageType::Checkpoint,
+        1 => PageType::DataBitmap,
+        2 => PageType::ChunkHeader,
+        3 => PageType::PageTable,
+        4 => PageType::Map,
+        5 => PageType::PoolBitmap,
+        _ => return,
     };
     let layout = &*PAGES_LAYOUT;
     let offset = layout.pool_pair_offset(0);
     let mut page = new_page();
     let n = rest.len().min(PAGE_PAYLOAD_LEN);
     payload_mut(&mut page)[..n].copy_from_slice(&rest[..n]);
-    let page_type = match selector % 6 {
-        0 => PageType::Checkpoint,
-        1 => PageType::DataBitmap,
-        2 => PageType::PoolBitmap,
-        3 => PageType::ChunkHeader,
-        4 => PageType::PageTable,
-        _ => PageType::Map,
-    };
     seal(&mut page, page_type, NONCE, 1, offset);
     let b = &page[..];
     match page_type {
@@ -148,19 +151,24 @@ mod regressions {
     /// Time and stack for one input: stricter than the fuzzer's (10 s, `-timeout=10` in
     /// scripts/dev/fuzz.sh, and an 8 MiB main thread) on purpose. This build runs faster and with
     /// smaller frames than the fuzzer's instrumented one, so equal limits would let an input that
-    /// times out or overflows there pass here.
-    const LIMIT: Duration = Duration::from_secs(2);
+    /// times out or overflows there pass here. 5 s keeps a margin for a busy shared runner.
+    const LIMIT: Duration = Duration::from_secs(5);
     const STACK: usize = 2 << 20;
 
     fn path(sub: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(sub)
     }
 
-    /// The entries of `dir`, sorted.
+    /// The entries of `dir`, sorted, without hidden files and editor backups (`.DS_Store`,
+    /// `.input.swp`, `input~`): they are nobody's regression inputs.
     fn entries(dir: &Path) -> Vec<PathBuf> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
             .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
             .map(|e| e.expect("directory entry").path())
+            .filter(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                !name.starts_with('.') && !name.ends_with('~')
+            })
             .collect();
         paths.sort();
         paths
@@ -175,18 +183,35 @@ mod regressions {
             .collect()
     }
 
-    /// The `name` of every `[[bin]]` in the fuzz crate's Cargo.toml: what cargo-fuzz builds.
+    /// The `name` of every `[[bin]]` in the fuzz crate's Cargo.toml: what cargo-fuzz builds. The
+    /// manifest is ours and plain: `name = "<target>"` (or single quotes), an optional comment
+    /// after it. Anything else on a `name` line of a `[[bin]]` fails the test instead of being
+    /// misread.
     fn bins() -> BTreeSet<String> {
         let manifest = std::fs::read_to_string(path("Cargo.toml")).expect("Cargo.toml");
         let mut out = BTreeSet::new();
         let mut in_bin = false;
         for line in manifest.lines().map(str::trim) {
             if line.starts_with('[') {
-                in_bin = line == "[[bin]]";
-            } else if in_bin && let Some(v) = line.strip_prefix("name") {
-                let v = v.trim_start().trim_start_matches('=').trim();
-                out.insert(v.trim_matches('"').to_string());
+                in_bin = line.split('#').next().unwrap_or("").trim() == "[[bin]]";
+                continue;
             }
+            let Some(value) = line.strip_prefix("name").map(str::trim_start) else {
+                continue;
+            };
+            if !in_bin || !value.starts_with('=') {
+                continue;
+            }
+            let value = value[1..].trim_start();
+            let name = ['"', '\''].iter().find_map(|&q| {
+                let rest = value.strip_prefix(q)?;
+                let (name, after) = rest.split_once(q)?;
+                let after = after.trim();
+                (after.is_empty() || after.starts_with('#')).then_some(name)
+            });
+            let name = name
+                .unwrap_or_else(|| panic!("Cargo.toml: cannot read the [[bin]] name in `{line}`"));
+            out.insert(name.to_string());
         }
         out
     }

@@ -8,11 +8,16 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-libfuzzer-sys = "0.4.10"
+libfuzzer-sys = { version = "0.4.10", optional = true }
 flaminio-format = { path = "../crates/flaminio-format" }
 flaminio-net = { path = "../crates/flaminio-net" }
 
-# Not part of the main workspace: build with `cargo +nightly fuzz run <target>`.
+# The fuzz binaries need libFuzzer; the library and its regression test do not, so `make test`
+# builds no C++. `make fuzz` passes `--features fuzzing`.
+[features]
+fuzzing = ["dep:libfuzzer-sys"]
+
+# Not part of the main workspace: build with `cargo +nightly fuzz run --features fuzzing <target>`.
 [workspace]
 members = ["."]
 
@@ -27,6 +32,7 @@ path = "fuzz_targets/superblock.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "metadata_pages"
@@ -34,6 +40,7 @@ path = "fuzz_targets/metadata_pages.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "journal"
@@ -41,6 +48,7 @@ path = "fuzz_targets/journal.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "repl_frame"
@@ -48,6 +56,7 @@ path = "fuzz_targets/repl_frame.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]
 
 [[bin]]
 name = "capability_token"
@@ -55,3 +64,4 @@ path = "fuzz_targets/capability_token.rs"
 test = false
 doc = false
 bench = false
+required-features = ["fuzzing"]

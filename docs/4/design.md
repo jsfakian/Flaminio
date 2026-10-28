@@ -16,10 +16,11 @@ pub fn capability_token(data: &[u8]) { ... }
 Each `fuzz_targets/<target>.rs` shrinks to
 `fuzz_target!(|data: &[u8]| flaminio_fuzz::<target>(data));`.
 
-**Rule:** `lib.rs` never refers to `libfuzzer_sys`. The crate still depends on it, for the
-binaries, so `cargo test` compiles it (its build script needs a C++17 compiler: `build-essential`
-on the runners, Xcode's tools on macOS), but nothing in the test binary references libFuzzer, so
-the linker leaves it out and the test harness keeps its own `main`.
+**Rule:** `lib.rs` never refers to `libfuzzer_sys`. The dependency is optional, behind a
+`fuzzing` feature that every `[[bin]]` requires (`required-features`) and that `fuzz.sh` and
+`make lint` turn on. `cargo test` of the library then builds no libFuzzer and no C++ at all; only
+fuzzing and linting need the C++17 compiler of its build script (`build-essential` on the
+runners, Xcode's tools on macOS).
 
 ## The regression test
 
@@ -32,13 +33,13 @@ have `test = false` and there is no `tests/` directory):
   (read line by line: the manifest is plain enough not to need a TOML parser), the file stems of
   `fuzz_targets/*.rs` and the directory names under `regressions/` must be equal. Paths come from
   `CARGO_MANIFEST_DIR`; a name that is not UTF-8 is kept lossily, so it shows as a mismatch.
-- **The replay (S4):** for each target, the files of `regressions/<name>/` in sorted order. For
-  each file:
+- **The replay (S4):** for each target, the files of `regressions/<name>/` in sorted order,
+  without hidden files and editor backups. For each file:
   - the path is written with `std::io::stderr().write_all`, which libtest does not capture, so an
     abort still leaves it in the log;
   - the harness runs on a thread spawned with a 2 MiB stack, inside `catch_unwind`; the result
     comes back through a channel;
-  - waiting longer than 2 seconds records a timeout and ends the replay: the remaining
+  - waiting longer than 5 seconds records a timeout and ends the replay: the remaining
     inputs are listed as not run. The stuck thread is left behind until the test process exits,
     so at most one is ever spinning;
   - a panic records the file.
@@ -52,7 +53,9 @@ have `test = false` and there is no `tests/` directory):
 - takes its targets from `cargo fuzz list` (the `[[bin]]` entries, which the set check keeps in
   step with the rest) instead of a hard-coded list, and stops if that list is empty: a failing
   `cargo fuzz list` inside `mapfile` is invisible to `set -e`;
-- runs them all, and exits with an error at the end listing those that failed;
+- reads that list with a `while read` loop, not `mapfile`, which macOS's bash 3.2 lacks;
+- runs them all with `--features fuzzing`, and exits with an error at the end listing those that
+  failed;
 - creates `corpus/<target>` itself: cargo-fuzz only creates it when it chooses the corpus, and
   libFuzzer refuses a corpus directory that does not exist;
 - runs `cargo fuzz run <target> corpus/<target> regressions/<target> -- -max_total_time=<s>
@@ -75,9 +78,10 @@ The `fuzz` job, on failure, and also when it is cancelled at its time limit:
   with `if: failure() || cancelled()`.
 
 A second job, `report`, on `[self-hosted, flaminio]`, needs `fuzz` and runs with
-`if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.outputs.inputs == 'true')`: after
-any failure, and after a cancellation that kept inputs. Without `always()`, GitHub would add
-`success()` to the condition and the job would never run after a failed `fuzz`. It has
+`if: always() && (needs.fuzz.result == 'failure' || needs.fuzz.result == 'cancelled')`: after any
+failure or cancellation, with or without inputs, so a hang stopped at the time limit is reported
+too. Without `always()`, GitHub would add `success()` to the condition and the job would never run
+after a failed `fuzz`. It has
 `issues: write` and nothing else, checks nothing out, and sets two variables for `gh`: `GH_TOKEN`
 to the workflow's token, so `gh` on the runner does not fall back to the administrator login it
 is configured with, and `GH_REPO` to `github.repository`, which `gh` cannot read from a checkout
@@ -85,8 +89,8 @@ it does not have. It:
 - creates the `fuzz` label if it is missing (`gh label create fuzz --force`);
 - comments on the open issue labelled `fuzz` if there is one, or opens "Fuzz run failed",
   labelled `fuzz`, linking the run. The note says whether the run kept failing inputs (and where),
-  or failed before fuzzing: a build or toolchain failure would otherwise skip the weekly fuzzing
-  without anyone noticing.
+  or ended without any: a build or toolchain failure, or a hang, would otherwise skip the weekly
+  fuzzing without anyone noticing.
 
 Keeping it a separate job keeps `issues: write` away from the steps that build and run code.
 
@@ -121,6 +125,10 @@ clean run on `main` after it is merged.
   harness.
 - **A unit test in the library, not an integration test.** An integration test would make
   `cargo test` build and link the five binaries every time, for nothing.
+- **Four registrations per target, checked, not generated.** A target is listed in `TARGETS`, in
+  `Cargo.toml`, in `fuzz_targets/` and in `regressions/`. The set check fails, naming the
+  mismatch, when one is missing. *Rejected:* a macro or build script generating some of them,
+  which would add moving parts to save one line per target, for something done rarely.
 - **Memory and leak limits stay with the fuzzer** (S5). Enforcing them in the stable test would
   need an allocator wrapper and LeakSanitizer; the weekly run replays every regression input
   with them anyway.

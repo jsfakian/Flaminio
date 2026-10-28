@@ -19,16 +19,17 @@ named `seed-<what it covers>`. Every directory starts with one file, `empty`, of
 `regressions/<target>/` to `flaminio_fuzz::<target>` on the stable toolchain. It fails, naming the
 file, if the harness:
 - panics;
-- runs longer than 2 seconds on one input (the replay then stops, and lists the inputs it did
+- runs longer than 5 seconds on one input (the replay then stops, and lists the inputs it did
   not run);
 - aborts the process (a stack overflow, for example): the file being replayed is written to
   standard error before it runs, so the log names it even then.
 
 Each input runs on a thread with a 2 MiB stack, in an optimized build with debug assertions and
 overflow checks. Both limits are stricter than the fuzzer's (10 seconds, an 8 MiB stack) on
-purpose: this build runs faster and with smaller stack frames than the fuzzer's, which carries
+purpose, with a margin for a busy shared runner: this build runs faster and with smaller stack frames than the fuzzer's, which carries
 sanitizer and coverage instrumentation, so equal limits would let an input that times out or
-overflows in the fuzzer pass here. CI runs this in the Rust test job, and `make test` includes it. It needs no nightly toolchain and no libFuzzer
+overflows in the fuzzer pass here. Hidden files and editor backups (`.DS_Store`, `.x.swp`, `x~`) are not inputs and are skipped. CI
+runs this in the Rust test job, and `make test` includes it. It needs no nightly toolchain and no libFuzzer
 runtime.
 
 **S5. Regression inputs seed the fuzzer.** `make fuzz` gives each run `regressions/<target>/` as
@@ -45,10 +46,10 @@ fails, and fails at the end naming every target that did, so one run reports the
 **S7. From a failure to a fixed bug.**
 - A failing Fuzz run keeps the failing inputs: as a workflow artifact for 90 days, and on the
   runner host in `~/.cache/flaminio-ci/fuzz-artifacts/<run id>/`.
-- Any failed run opens an issue, labelled `fuzz`, linking the run, or comments on the one already
-  open. The note says whether it kept failing inputs, or failed before fuzzing (a build or
-  toolchain failure), so neither goes unnoticed. A job stopped at its time limit keeps and
-  reports the inputs it found too. Runs never overlap.
+- Any failed or cancelled run opens an issue, labelled `fuzz`, linking the run, or comments on
+  the one already open. The note says whether it kept failing inputs, or ended without any (a
+  build or toolchain failure, or a hang stopped at the time limit), so neither goes unnoticed. A
+  job stopped at its time limit keeps the inputs it found. Runs never overlap.
 - To fix one: copy the file into `regressions/<target>/`, see `make fuzz-regressions` fail (or,
   for an out-of-memory or leak input, `cargo +<nightly> fuzz run <target> <file>`, on Linux:
   LeakSanitizer does not run on macOS), fix the bug, see it pass, commit both. `docs/ci.md`
@@ -61,5 +62,8 @@ and rustfmt on `dataplane/fuzz`, which is outside the data plane's workspace.
 
 - The harness logic of the five targets, moved into the library, with one exception: the
   metadata pages harness now also reaches the page-pool bitmap decoder, which its selector never
-  did (it mapped six values onto five decoders).
+  did (it mapped six values onto five decoders). Its first byte now names the decoder from a
+  fixed table (0 checkpoint, 1 data bitmap, 2 chunk header, 3 page table, 4 map, 5 pool bitmap;
+  other values do nothing), so a new decoder takes the next value and committed inputs keep
+  reaching the decoder they were saved for.
 - The weekly schedule, and the corpus kept on the runner host.

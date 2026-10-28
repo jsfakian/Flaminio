@@ -80,7 +80,7 @@ meta-interop: ## The data plane's Rust metadata client against the Go service, o
 
 lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck, actionlint
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
-	cd $(DATAPLANE)/fuzz && $(CARGO) clippy --all-targets --locked -- -D warnings && $(CARGO) fmt --check
+	cd $(DATAPLANE)/fuzz && $(CARGO) clippy --all-targets --all-features --locked -- -D warnings && $(CARGO) fmt --check
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l api meta pkg control)" || { echo "gofmt needed:"; gofmt -l api meta pkg control; exit 1; }
 	$(BUF) lint
