@@ -1201,9 +1201,11 @@ impl<D: BlockDevice> Store<D> {
         })
     }
 
-    /// Per-block CRC-32C digests for `[offset, offset+len)` from map metadata only: no data is
-    /// read from the device. Unwritten / unmapped / zero-phys blocks are `None`. `offset` and
-    /// `len` must be multiples of 4 KiB. Used by digest-first reconciliation (follow-ups §2).
+    /// Per-block CRC-32C of what a read of `[offset, offset+len)` returns, from map metadata
+    /// only: no data is read from the device. Unwritten and zero blocks read as zeros, so they
+    /// get the zero block's CRC, and replicas compare by content whatever their layout.
+    /// `offset` and `len` must be multiples of 4 KiB. Used by digest-first reconciliation
+    /// (follow-ups §2).
     pub fn digests(
         &self,
         key: ChunkKey,
@@ -1224,6 +1226,7 @@ impl<D: BlockDevice> Store<D> {
         }
         let cs = self.state.cluster_size();
         let n_blocks = (len / BLOCK_SIZE_U64) as usize;
+        let zero = crc32c(&[0u8; BLOCK_SIZE]);
         let mut out = Vec::with_capacity(n_blocks);
         let mut pos = 0u64;
         while pos < len {
@@ -1232,7 +1235,7 @@ impl<D: BlockDevice> Store<D> {
             let n = ((cs - within).min(len - pos)) as usize;
             let n_blk = n / BLOCK_SIZE;
             match chunk.resolve(self.state.epp, x) {
-                Resolved::Zeros => out.extend(std::iter::repeat_n(None, n_blk)),
+                Resolved::Zeros => out.extend(std::iter::repeat_n(Some(zero), n_blk)),
                 Resolved::Data { csums, .. } => {
                     let first = (within / BLOCK_SIZE_U64) as usize;
                     for s in &csums[first..first + n_blk] {

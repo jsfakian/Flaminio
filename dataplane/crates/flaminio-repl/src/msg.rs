@@ -79,8 +79,9 @@ pub enum Response<P> {
     },
     Ok,
     Data(P),
-    /// One CRC-32C (or simulator block value as `u32`) per block of the requested extent.
-    /// `None` means the block is unwritten on that replica.
+    /// One CRC-32C per block of the requested extent, of what a read returns: an unwritten
+    /// block reads as zeros, so replicas compare by content whatever their layout. The
+    /// simulator uses each block's value. `None` means no digest, which counts as differing.
     Digests(Vec<Option<u32>>),
     /// Extents inside the request that hold data. Disjoint, ordered, clipped to the request.
     Mapped(Vec<Extent>),

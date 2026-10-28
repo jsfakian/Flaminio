@@ -78,6 +78,27 @@ fn mapped_reports_data_clusters_and_skips_holes() {
 }
 
 #[test]
+fn digests_compare_content_whatever_the_layout() {
+    let crc = flaminio_format::checksum::crc32c;
+    let mut s = new_store(16);
+    s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();
+    s.create_chunk(key(1), CHUNK, CHUNK, 1).unwrap();
+    // The first cluster: data on chunk 0, zeros written as data on chunk 1.
+    let data = blocks(1, 0, 16);
+    s.write(key(0), 0, &data, 1, 1).unwrap();
+    s.write(key(1), 0, &vec![0; CLUSTER as usize], 1, 1)
+        .unwrap();
+    let d0 = s.digests(key(0), 0, 2 * CLUSTER).unwrap();
+    let d1 = s.digests(key(1), 0, 2 * CLUSTER).unwrap();
+    for (b, d) in data.chunks_exact(BLOCK).zip(&d0) {
+        assert_eq!(*d, Some(crc(b)), "a written block carries its data's CRC");
+    }
+    // Written zeros and the unwritten second cluster both read as zeros: one digest.
+    assert_eq!(d1, vec![Some(crc(&[0; BLOCK])); 32]);
+    assert_eq!(d0[16..], d1[16..]);
+}
+
+#[test]
 fn snapshot_preserves_old_layer_and_reads_through() {
     let mut s = new_store(16);
     s.create_chunk(key(0), CHUNK, CHUNK, 1).unwrap();

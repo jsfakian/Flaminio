@@ -1820,7 +1820,10 @@ impl<D: BlockDevice> Engine<D> {
         }
         self.service
             .plan_read(p.key, p.offset, buf, p.epoch)
-            .map_err(|_| IoError::Invalid)
+            .map_err(|e| {
+                eprintln!("flaminio-node: fast read plan: {e}");
+                IoError::Invalid
+            })
     }
 
     /// Ends a fast read: `ok` if every piece was read (and verified). True if its data
@@ -1864,7 +1867,10 @@ impl<D: BlockDevice> Engine<D> {
         }
         self.service
             .plan_read(p.key, p.offset, buf, p.epoch)
-            .map_err(|_| IoError::Invalid)
+            .map_err(|e| {
+                eprintln!("flaminio-node: {}: read plan: {e}", p.volume);
+                IoError::Invalid
+            })
     }
 
     /// Ends a local read: `ok` if its device reads completed and verified. A failed read gets
