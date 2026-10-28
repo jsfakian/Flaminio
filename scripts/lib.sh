@@ -30,6 +30,7 @@ SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ConnectionAttempts=3 -o Serve
 # Lab VMs get fresh host keys whenever they are recreated, so they use their own known_hosts,
 # from which vm-destroy removes them.
 VM_SSH_OPTS=("${SSH_OPTS[@]}" -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new)
+[[ -z $SSH_IDENTITY ]] || VM_SSH_OPTS+=(-i "$SSH_IDENTITY")
 
 # Expands a VM selector into VM names: a, b, w, c, all (the data VMs a and b), cluster (a, b and
 # the witness w: the etcd and metadata members) or overlay (every VM on the mesh: the cluster,

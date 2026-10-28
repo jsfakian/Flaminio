@@ -180,7 +180,7 @@ vssh_tty() {
     local jump
     jump=$(vm_jump "$1")
     ssh -t -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new \
-        ${jump:+-J "$jump"} "$VM_USER@$(vmvar "$1" IP)"
+        ${SSH_IDENTITY:+-i "$SSH_IDENTITY"} ${jump:+-J "$jump"} "$VM_USER@$(vmvar "$1" IP)"
 }
 
 cmd_console() {
