@@ -10,6 +10,10 @@ use crate::types::{Block, ChunkIdx, Epoch, Version, VolumeId};
 /// extents, which fits a frame. A target probes a larger chunk in pieces.
 pub const MAX_MAPPED_BLOCKS: Block = 1 << 16;
 
+/// Most blocks one [`Request::Digest`] covers. Digests carry no data (5 bytes a block on the
+/// wire), so they go in much larger pieces than repairs: one per default 256 MiB chunk.
+pub const MAX_DIGEST_BLOCKS: Block = 1 << 16;
+
 /// A request from a target to a replica node. Every request gets at most one reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToReplica<P> {
@@ -52,7 +56,8 @@ pub enum Request<P> {
         ext: Extent,
         data: P,
     },
-    /// Per-block digests for an extent (follow-ups §2). Reply: [`Response::Digests`].
+    /// Per-block digests for an extent of at most [`MAX_DIGEST_BLOCKS`] (follow-ups §2).
+    /// Reply: [`Response::Digests`].
     /// Unwritten blocks are `None` on the wire; the simulator uses each block's value.
     Digest { chunk: ChunkIdx, ext: Extent },
     /// Sub-extents of `ext` that hold data on this replica (follow-ups §3). Reply:

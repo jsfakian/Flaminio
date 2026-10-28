@@ -12,7 +12,7 @@ use std::fmt::Debug;
 
 use crate::extent::{Extent, ExtentSet};
 use crate::meta::{IsrChange, MetaReply, MetaRequest, VolumeMeta};
-use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, Request, Response, ToReplica};
+use crate::msg::{FromReplica, MAX_DIGEST_BLOCKS, MAX_MAPPED_BLOCKS, Request, Response, ToReplica};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Version, VolumeId};
 
 /// A client operation on one extent of one chunk.
@@ -331,6 +331,8 @@ pub struct Target<P> {
     max_io: Block,
     /// Largest extent of one `Mapped` probe.
     max_mapped: Block,
+    /// Largest extent of one `Digest` request.
+    max_digest: Block,
     timing: Timing,
     chunks: Vec<Chunk>,
     peers: BTreeMap<NodeId, Peer>,
@@ -410,6 +412,7 @@ impl<P: Clone + Debug> Target<P> {
             blocks_per_chunk: view.blocks_per_chunk,
             max_io: max_io.max(1),
             max_mapped: MAX_MAPPED_BLOCKS,
+            max_digest: MAX_DIGEST_BLOCKS,
             timing,
             chunks,
             peers,
@@ -466,6 +469,12 @@ impl<P: Clone + Debug> Target<P> {
     /// [`MAX_MAPPED_BLOCKS`] (the default).
     pub fn set_max_mapped(&mut self, n: Block) {
         self.max_mapped = n.clamp(1, MAX_MAPPED_BLOCKS);
+    }
+
+    /// Sets the largest extent one `Digest` request covers, from one block to
+    /// [`MAX_DIGEST_BLOCKS`] (the default).
+    pub fn set_max_digest(&mut self, n: Block) {
+        self.max_digest = n.clamp(1, MAX_DIGEST_BLOCKS);
     }
 
     fn release_bulk(&mut self) {
@@ -800,7 +809,7 @@ impl<P: Clone + Debug> Target<P> {
                 self.on_mapped(now, chunk, round, exts);
             }
             (ReqKind::BeginResync { chunk, round }, Response::Ok) => {
-                let max_io = self.max_io;
+                let (max_io, max_digest) = (self.max_io, self.max_digest);
                 if let Some(r) = self.resync_mut(chunk, round) {
                     // Writes that landed after Mapped was applied, before this Ack.
                     let force = std::mem::take(&mut r.force_copy);
@@ -810,7 +819,7 @@ impl<P: Clone + Debug> Target<P> {
                     }
                     r.started = true;
                     let discards = r.discard.pieces(max_io);
-                    let digests = r.todo.pieces(max_io);
+                    let digests = r.todo.pieces(max_digest);
                     for ext in discards {
                         self.queue.push_back(Work::Discard { chunk, round, ext });
                     }
@@ -1659,7 +1668,7 @@ impl<P: Clone + Debug> Target<P> {
                             pending
                         };
                         // Digests first, then repairs only where ISR members disagree.
-                        for ext in pending.pieces(self.max_io).into_iter().rev() {
+                        for ext in pending.pieces(self.max_digest).into_iter().rev() {
                             self.queue.push_front(Work::Digest {
                                 chunk: i as ChunkIdx,
                                 ext,

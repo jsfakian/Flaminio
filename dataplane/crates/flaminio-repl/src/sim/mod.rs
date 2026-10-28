@@ -92,6 +92,8 @@ pub struct Config {
     pub max_bulk: usize,
     /// Largest `Mapped` probe, in blocks: the data plane's limit unless a test lowers it.
     pub max_mapped: Block,
+    /// Largest `Digest` request, in blocks: `max_io` unless a test raises it.
+    pub max_digest: Block,
     pub timing: Timing,
     /// Real time spent injecting faults.
     pub chaos: u64,
@@ -125,7 +127,7 @@ impl Config {
         let nodes = r.range(3, 4) as u32;
         let rf = r.range(2, 3) as usize;
         let min_isr = r.range(1, rf as u64) as usize;
-        Self {
+        let mut c = Self {
             nodes,
             rf,
             min_isr,
@@ -135,6 +137,7 @@ impl Config {
             max_io: r.range(1, 3) as Block,
             max_bulk: r.range(1, 4) as usize,
             max_mapped: MAX_MAPPED_BLOCKS,
+            max_digest: 0,
             timing: Timing {
                 lease: r.range(2, 6) * SEC,
                 drift_ppm: r.pick(&[0, 10_000, 100_000]),
@@ -155,7 +158,9 @@ impl Config {
             read_pct: r.pick(&[50, 80, 95]),
             move_pct: r.pick(&[0, 10, 30]),
             fast_reads: r.pct(50),
-        }
+        };
+        c.max_digest = c.max_io;
+        c
     }
 }
 
@@ -766,6 +771,7 @@ impl Sim {
         let mut t = Target::new(node, VOL, &view, timing, self.cfg.max_io, local);
         t.set_max_bulk(self.cfg.max_bulk);
         t.set_max_mapped(self.cfg.max_mapped);
+        t.set_max_digest(self.cfg.max_digest);
         #[cfg(test)]
         {
             t.bugs = self.bugs.target;

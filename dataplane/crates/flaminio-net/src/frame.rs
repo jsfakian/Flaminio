@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use flaminio_repl::extent::Extent;
-use flaminio_repl::msg::MAX_MAPPED_BLOCKS;
+use flaminio_repl::msg::{MAX_DIGEST_BLOCKS, MAX_MAPPED_BLOCKS};
 use flaminio_repl::types::Version;
 
 use crate::BLOCK;
@@ -304,7 +304,7 @@ impl Frame {
                 w.0.extend_from_slice(data);
             }
             Frame::Digests { req, sums } => {
-                assert!(sums.len() <= MAX_BLOCKS as usize, "too many digests");
+                assert!(sums.len() <= MAX_DIGEST_BLOCKS as usize, "too many digests");
                 w.u8(tag::DIGESTS);
                 w.u64(*req);
                 w.u32(sums.len() as u32);
@@ -440,11 +440,14 @@ impl Frame {
                     data,
                 }
             }
-            tag::DIGEST => Frame::Digest {
-                req: r.u64()?,
-                chunk: r.u32()?,
-                ext: r.ext()?,
-            },
+            tag::DIGEST => {
+                let (req, chunk) = (r.u64()?, r.u32()?);
+                let ext = r.any_ext()?;
+                if ext.len > MAX_DIGEST_BLOCKS {
+                    return Err(DecodeError::Invalid("digest extent too long"));
+                }
+                Frame::Digest { req, chunk, ext }
+            }
             tag::MAPPED => {
                 let (req, chunk) = (r.u64()?, r.u32()?);
                 // A probe carries no data: it may cover a whole chunk, up to its own limit.
@@ -499,7 +502,7 @@ impl Frame {
             tag::DIGESTS => {
                 let req = r.u64()?;
                 let n = r.u32()? as usize;
-                if n == 0 || n > MAX_BLOCKS as usize {
+                if n == 0 || n > MAX_DIGEST_BLOCKS as usize {
                     return Err(DecodeError::Invalid("digest count"));
                 }
                 let mut sums = Vec::with_capacity(n);
@@ -659,7 +662,10 @@ mod tests {
             Frame::Digest {
                 req: 13,
                 chunk: 1,
-                ext,
+                ext: Extent {
+                    start: 0,
+                    len: MAX_DIGEST_BLOCKS,
+                },
             },
             // A whole 256 MiB chunk: longer than an I/O, as resync probes are.
             Frame::Mapped {
@@ -776,7 +782,7 @@ mod tests {
                 (MAX_BLOCKS + 1).to_le_bytes().to_vec(),
             ]
             .concat(),
-            // A probe longer than its limit, and digests asked for more than an I/O.
+            // A probe and a digest request longer than their limits.
             [
                 vec![tag::MAPPED],
                 1u64.to_le_bytes().to_vec(),
@@ -790,7 +796,7 @@ mod tests {
                 1u64.to_le_bytes().to_vec(),
                 0u32.to_le_bytes().to_vec(),
                 0u32.to_le_bytes().to_vec(),
-                (MAX_BLOCKS + 1).to_le_bytes().to_vec(),
+                (MAX_DIGEST_BLOCKS + 1).to_le_bytes().to_vec(),
             ]
             .concat(),
             // A bad prune flag.

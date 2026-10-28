@@ -4,6 +4,7 @@
 //! `FLAMINIO_SIM_FIRST` the first one. A failing seed reproduces with `run_seed(seed)`.
 
 use super::*;
+use crate::msg::MAX_DIGEST_BLOCKS;
 
 fn seeds() -> std::ops::Range<u64> {
     let var = |name, default| {
@@ -23,6 +24,18 @@ fn campaign_with_split_mapped_probes() {
     for seed in seeds() {
         let mut cfg = Config::random(seed);
         cfg.max_mapped = 1;
+        if let Err(e) = Sim::new(seed, cfg).run() {
+            panic!("seed {seed}: {e}");
+        }
+    }
+}
+
+/// The campaign with whole-chunk digest requests, as the data plane sends them.
+#[test]
+fn campaign_with_whole_chunk_digests() {
+    for seed in seeds() {
+        let mut cfg = Config::random(seed);
+        cfg.max_digest = MAX_DIGEST_BLOCKS;
         if let Err(e) = Sim::new(seed, cfg).run() {
             panic!("seed {seed}: {e}");
         }
@@ -60,6 +73,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         max_io: 1,
         max_bulk: 4,
         max_mapped: MAX_MAPPED_BLOCKS,
+        max_digest: 1,
         timing: Timing {
             lease: 5 * SEC,
             drift_ppm: 0,

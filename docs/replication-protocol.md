@@ -158,7 +158,8 @@ A new target starts from `Attach`, which bumps the epoch. For each chunk:
    - After the wait, the old lease has expired, because it needed the fenced member's
      confirmation.
 3. **Reconcile.** For every extent in the union of the ISR members' uncertain sets, send
-   `Digest{chunk, ext}` to every ISR member. Each reply is one CRC-32C per block, of what a
+   `Digest{chunk, ext}` to every ISR member, in pieces of up to 65 536 blocks (digests carry
+   no data, so one covers a default chunk). Each reply is one CRC-32C per block, of what a
    read returns: an unwritten block reads as zeros, so replicas compare by content whatever
    their layout (the simulator uses the block's value). Repair only the blocks
    whose digests disagree: pick one ISR member as the **authority**, read its value and write
