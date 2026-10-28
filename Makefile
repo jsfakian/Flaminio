@@ -23,6 +23,8 @@ JOBS      ?= read
 JOURNAL   ?=
 IMAGE     ?= .lab/disk.img
 IMAGE_SIZE ?= 10G
+# Seconds per cargo-fuzz target for `make fuzz` (follow-ups §6).
+FUZZ_SECONDS ?= 60
 
 .PHONY: help
 help: ## Show this help
@@ -33,7 +35,7 @@ help: ## Show this help
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test sim meta-interop lint fmt proto meta-vectors disk-demo clean
+.PHONY: build release test crash-test sim fuzz meta-interop lint fmt proto meta-vectors disk-demo clean
 build: ## Build the data plane (debug) and the Go services
 	cd $(DATAPLANE) && $(CARGO) build
 	$(GO) build ./...
@@ -51,6 +53,9 @@ crash-test: ## Long crash-consistency campaign (CASES=50000)
 sim: ## Replication-protocol simulation: SEEDS random runs, then every injected bug must be caught
 	cd $(DATAPLANE) && $(CARGO) run --release -q -p flaminio-repl --example sim -- 0 $(SEEDS)
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
+
+fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + cargo-fuzz if needed)
+	FUZZ_SECONDS=$(FUZZ_SECONDS) scripts/dev/fuzz.sh
 
 meta-interop: ## The data plane's Rust metadata client against the Go service, over mutual TLS
 	CARGO=$(CARGO) scripts/dev/meta-interop.sh

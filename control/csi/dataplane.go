@@ -18,6 +18,9 @@ type Dataplane interface {
 	Attach(ctx context.Context, volume string, token []byte) (device string, err error)
 	// Detach stops the volume's target and device. Not attached is not an error.
 	Detach(ctx context.Context, volume string) error
+	// Delete removes this node's chunk replicas of a volume deleted from the metadata service.
+	// Nothing to delete is not an error.
+	Delete(ctx context.Context, volume string) error
 }
 
 // ControlSocket talks to flaminio-io node over its control socket: one command per
@@ -80,5 +83,10 @@ func (s ControlSocket) Detach(ctx context.Context, volume string) error {
 	if err != nil && strings.Contains(err.Error(), "is not attached here") {
 		return nil
 	}
+	return err
+}
+
+func (s ControlSocket) Delete(ctx context.Context, volume string) error {
+	_, err := s.command(ctx, "delete "+volume)
 	return err
 }

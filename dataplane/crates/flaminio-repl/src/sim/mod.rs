@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::extent::Extent;
 use crate::meta::{MetaReply, MetaRequest, Metadata, VolumeMeta};
-use crate::msg::{FromReplica, ToReplica};
+use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, ToReplica};
 use crate::replica::Replica;
 use crate::target::{Op, OpResult, Output, Target};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Value, VolumeId};
@@ -90,6 +90,10 @@ pub struct Config {
     pub max_io: Block,
     /// Repairs and copies in flight per target.
     pub max_bulk: usize,
+    /// Largest `Mapped` probe, in blocks: the data plane's limit unless a test lowers it.
+    pub max_mapped: Block,
+    /// Largest `Digest` request, in blocks: `max_io` unless a test raises it.
+    pub max_digest: Block,
     pub timing: Timing,
     /// Real time spent injecting faults.
     pub chaos: u64,
@@ -123,7 +127,7 @@ impl Config {
         let nodes = r.range(3, 4) as u32;
         let rf = r.range(2, 3) as usize;
         let min_isr = r.range(1, rf as u64) as usize;
-        Self {
+        let mut c = Self {
             nodes,
             rf,
             min_isr,
@@ -132,6 +136,8 @@ impl Config {
             max_op: r.range(1, 3) as Block,
             max_io: r.range(1, 3) as Block,
             max_bulk: r.range(1, 4) as usize,
+            max_mapped: MAX_MAPPED_BLOCKS,
+            max_digest: 0,
             timing: Timing {
                 lease: r.range(2, 6) * SEC,
                 drift_ppm: r.pick(&[0, 10_000, 100_000]),
@@ -152,7 +158,9 @@ impl Config {
             read_pct: r.pick(&[50, 80, 95]),
             move_pct: r.pick(&[0, 10, 30]),
             fast_reads: r.pct(50),
-        }
+        };
+        c.max_digest = c.max_io;
+        c
     }
 }
 
@@ -664,7 +672,10 @@ impl Sim {
                     let watched = match m.body {
                         R::Write { chunk, ext, .. }
                         | R::Copy { chunk, ext, .. }
-                        | R::Read { chunk, ext } => chunk == tc && ext.contains(tb),
+                        | R::Read { chunk, ext }
+                        | R::Digest { chunk, ext }
+                        | R::Mapped { chunk, ext }
+                        | R::Discard { chunk, ext } => chunk == tc && ext.contains(tb),
                         R::BeginResync { chunk } | R::Settle { chunk, .. } => chunk == tc,
                         R::Hello => true,
                         R::Heartbeat => false,
@@ -759,6 +770,8 @@ impl Sim {
         #[allow(unused_mut)]
         let mut t = Target::new(node, VOL, &view, timing, self.cfg.max_io, local);
         t.set_max_bulk(self.cfg.max_bulk);
+        t.set_max_mapped(self.cfg.max_mapped);
+        t.set_max_digest(self.cfg.max_digest);
         #[cfg(test)]
         {
             t.bugs = self.bugs.target;

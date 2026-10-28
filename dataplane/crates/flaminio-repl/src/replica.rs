@@ -44,6 +44,17 @@ pub enum Action<P> {
         data: P,
         parts: Vec<Extent>,
     },
+    /// Return digests for the extent (store metadata or simulator block values).
+    Digest { chunk: ChunkIdx, ext: Extent },
+    /// Return the sub-extents of `ext` that hold data.
+    Mapped { chunk: ChunkIdx, ext: Extent },
+    /// Discard `parts` of the extent (blocks without live writes since `BeginResync`), then
+    /// reply `Ok`.
+    Discard {
+        chunk: ChunkIdx,
+        ext: Extent,
+        parts: Vec<Extent>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +200,27 @@ impl ReplicaCore {
                 chunk: *chunk,
                 ext: *ext,
             },
+            Request::Digest { chunk, ext } if in_range(chunk, ext) => Action::Digest {
+                chunk: *chunk,
+                ext: *ext,
+            },
+            Request::Mapped { chunk, ext } if in_range(chunk, ext) => Action::Mapped {
+                chunk: *chunk,
+                ext: *ext,
+            },
+            Request::Discard { chunk, ext } if in_range(chunk, ext) => {
+                // Same filter as Copy: live writes since BeginResync win over a discard of a
+                // hole observed before those writes.
+                let parts = match v.filters.get(chunk) {
+                    Some(f) => f.missing_from(ext),
+                    None => vec![*ext],
+                };
+                Action::Discard {
+                    chunk: *chunk,
+                    ext: *ext,
+                    parts,
+                }
+            }
             Request::Write {
                 chunk,
                 ext,
@@ -319,6 +351,40 @@ impl Replica {
                         .map(|b| c.get(&b).copied().unwrap_or(0))
                         .collect(),
                 )
+            }
+            Action::Digest { chunk, ext } => {
+                // Simulator digests are the block values (follow-ups §2). Never-written = 0.
+                let c = self.data.get(&(m.vol, chunk));
+                Response::Digests(
+                    ext.blocks()
+                        .map(|b| {
+                            let v = c.and_then(|m| m.get(&b).copied()).unwrap_or(0);
+                            Some(v as u32)
+                        })
+                        .collect(),
+                )
+            }
+            Action::Mapped { chunk, ext } => {
+                // Written blocks only (follow-ups §3). Never-written keys are absent.
+                let mut mapped = ExtentSet::new();
+                if let Some(c) = self.data.get(&(m.vol, chunk)) {
+                    for b in ext.blocks() {
+                        if c.contains_key(&b) {
+                            mapped.insert(Extent::new(b, 1));
+                        }
+                    }
+                }
+                Response::Mapped(mapped.iter().collect())
+            }
+            Action::Discard { chunk, parts, .. } => {
+                if let Some(c) = self.data.get_mut(&(m.vol, chunk)) {
+                    for p in parts {
+                        for b in p.blocks() {
+                            c.remove(&b);
+                        }
+                    }
+                }
+                Response::Ok
             }
             Action::Copy {
                 chunk,

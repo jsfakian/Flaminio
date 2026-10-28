@@ -1356,10 +1356,17 @@ async fn zc_read_plan(
     }
     let mut ok = true;
     for (start, len) in zeros {
-        ok &= stage_to_request(q, st, tag, at + start, len).await;
+        if !stage_to_request(q, st, tag, at + start, len).await {
+            eprintln!("flaminio-io: local read: zero fill of {len} bytes at {start} failed");
+            ok = false;
+        }
     }
     for (completion, expected) in pending {
-        ok &= completion.await == expected;
+        let got = completion.await;
+        if got != expected {
+            eprintln!("flaminio-io: local read: device read returned {got}, not {expected}");
+            ok = false;
+        }
     }
     ok
 }

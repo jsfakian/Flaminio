@@ -342,6 +342,21 @@ fn a_deleted_volume_can_be_created_again_from_epoch_one() {
 }
 
 #[test]
+fn delete_volume_after_restart_clears_store_chunks() {
+    let mut s = service();
+    s.hello(&accepted(1, 1, &[0, 1])).unwrap();
+    assert_eq!(s.store().chunks().len(), 2);
+    let mut s = restart(s);
+    assert_eq!(
+        s.store().chunks().len(),
+        2,
+        "chunks survive a process restart"
+    );
+    assert_eq!(s.delete_volume("pvc-1"), Ok(2));
+    assert!(s.store().chunks().is_empty());
+}
+
+#[test]
 fn staged_writes_are_answered_after_their_own_commit() {
     let mut s = deferred_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();

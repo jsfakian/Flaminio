@@ -638,9 +638,14 @@ type CreateVolumeRequest struct {
 	MinIsr     uint32                 `protobuf:"varint,5,opt,name=min_isr,json=minIsr,proto3" json:"min_isr,omitempty"`
 	// If set and eligible, every chunk has a replica on this node: the node the volume will
 	// first be attached to, whose reads then stay local.
-	PreferNode    string `protobuf:"bytes,6,opt,name=prefer_node,json=preferNode,proto3" json:"prefer_node,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	PreferNode string `protobuf:"bytes,6,opt,name=prefer_node,json=preferNode,proto3" json:"prefer_node,omitempty"`
+	// Failure domain level: "node" (default), "rack", or "zone". Replicas of one chunk are
+	// placed in distinct domains at this level (ARCHITECTURE §8.2, §9).
+	FailureDomain string `protobuf:"bytes,7,opt,name=failure_domain,json=failureDomain,proto3" json:"failure_domain,omitempty"`
+	// "strict" (default) refuses if the topology is short; "bestEffort" falls back a level.
+	FailureDomainPolicy string `protobuf:"bytes,8,opt,name=failure_domain_policy,json=failureDomainPolicy,proto3" json:"failure_domain_policy,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *CreateVolumeRequest) Reset() {
@@ -711,6 +716,20 @@ func (x *CreateVolumeRequest) GetMinIsr() uint32 {
 func (x *CreateVolumeRequest) GetPreferNode() string {
 	if x != nil {
 		return x.PreferNode
+	}
+	return ""
+}
+
+func (x *CreateVolumeRequest) GetFailureDomain() string {
+	if x != nil {
+		return x.FailureDomain
+	}
+	return ""
+}
+
+func (x *CreateVolumeRequest) GetFailureDomainPolicy() string {
+	if x != nil {
+		return x.FailureDomainPolicy
 	}
 	return ""
 }
@@ -1007,6 +1026,246 @@ func (*DeleteVolumeResponse) Descriptor() ([]byte, []int) {
 	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{18}
 }
 
+type Tombstone struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The deleted volume's id.
+	Volume string `protobuf:"bytes,1,opt,name=volume,proto3" json:"volume,omitempty"`
+	// Nodes that held at least one chunk replica at deletion.
+	Nodes []string `protobuf:"bytes,2,rep,name=nodes,proto3" json:"nodes,omitempty"`
+	// Subset of nodes that have not yet confirmed.
+	Pending       []string `protobuf:"bytes,3,rep,name=pending,proto3" json:"pending,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Tombstone) Reset() {
+	*x = Tombstone{}
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Tombstone) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Tombstone) ProtoMessage() {}
+
+func (x *Tombstone) ProtoReflect() protoreflect.Message {
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Tombstone.ProtoReflect.Descriptor instead.
+func (*Tombstone) Descriptor() ([]byte, []int) {
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *Tombstone) GetVolume() string {
+	if x != nil {
+		return x.Volume
+	}
+	return ""
+}
+
+func (x *Tombstone) GetNodes() []string {
+	if x != nil {
+		return x.Nodes
+	}
+	return nil
+}
+
+func (x *Tombstone) GetPending() []string {
+	if x != nil {
+		return x.Pending
+	}
+	return nil
+}
+
+type ListTombstonesRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Node          string                 `protobuf:"bytes,1,opt,name=node,proto3" json:"node,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTombstonesRequest) Reset() {
+	*x = ListTombstonesRequest{}
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTombstonesRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTombstonesRequest) ProtoMessage() {}
+
+func (x *ListTombstonesRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTombstonesRequest.ProtoReflect.Descriptor instead.
+func (*ListTombstonesRequest) Descriptor() ([]byte, []int) {
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ListTombstonesRequest) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+type ListTombstonesResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Tombstones that still name this node as pending.
+	Tombstones    []*Tombstone `protobuf:"bytes,1,rep,name=tombstones,proto3" json:"tombstones,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTombstonesResponse) Reset() {
+	*x = ListTombstonesResponse{}
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTombstonesResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTombstonesResponse) ProtoMessage() {}
+
+func (x *ListTombstonesResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTombstonesResponse.ProtoReflect.Descriptor instead.
+func (*ListTombstonesResponse) Descriptor() ([]byte, []int) {
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ListTombstonesResponse) GetTombstones() []*Tombstone {
+	if x != nil {
+		return x.Tombstones
+	}
+	return nil
+}
+
+type ConfirmDeletionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Volume        string                 `protobuf:"bytes,1,opt,name=volume,proto3" json:"volume,omitempty"`
+	Node          string                 `protobuf:"bytes,2,opt,name=node,proto3" json:"node,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmDeletionRequest) Reset() {
+	*x = ConfirmDeletionRequest{}
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmDeletionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmDeletionRequest) ProtoMessage() {}
+
+func (x *ConfirmDeletionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmDeletionRequest.ProtoReflect.Descriptor instead.
+func (*ConfirmDeletionRequest) Descriptor() ([]byte, []int) {
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *ConfirmDeletionRequest) GetVolume() string {
+	if x != nil {
+		return x.Volume
+	}
+	return ""
+}
+
+func (x *ConfirmDeletionRequest) GetNode() string {
+	if x != nil {
+		return x.Node
+	}
+	return ""
+}
+
+type ConfirmDeletionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ConfirmDeletionResponse) Reset() {
+	*x = ConfirmDeletionResponse{}
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ConfirmDeletionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ConfirmDeletionResponse) ProtoMessage() {}
+
+func (x *ConfirmDeletionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ConfirmDeletionResponse.ProtoReflect.Descriptor instead.
+func (*ConfirmDeletionResponse) Descriptor() ([]byte, []int) {
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{23}
+}
+
 type AttachRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Volume string                 `protobuf:"bytes,1,opt,name=volume,proto3" json:"volume,omitempty"`
@@ -1025,7 +1284,7 @@ type AttachRequest struct {
 
 func (x *AttachRequest) Reset() {
 	*x = AttachRequest{}
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[19]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1037,7 +1296,7 @@ func (x *AttachRequest) String() string {
 func (*AttachRequest) ProtoMessage() {}
 
 func (x *AttachRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[19]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1050,7 +1309,7 @@ func (x *AttachRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachRequest.ProtoReflect.Descriptor instead.
 func (*AttachRequest) Descriptor() ([]byte, []int) {
-	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{19}
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *AttachRequest) GetVolume() string {
@@ -1093,7 +1352,7 @@ type AttachResponse struct {
 
 func (x *AttachResponse) Reset() {
 	*x = AttachResponse{}
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[20]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1105,7 +1364,7 @@ func (x *AttachResponse) String() string {
 func (*AttachResponse) ProtoMessage() {}
 
 func (x *AttachResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[20]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1118,7 +1377,7 @@ func (x *AttachResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachResponse.ProtoReflect.Descriptor instead.
 func (*AttachResponse) Descriptor() ([]byte, []int) {
-	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{20}
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *AttachResponse) GetVolume() *Volume {
@@ -1151,7 +1410,7 @@ type IsrChange struct {
 
 func (x *IsrChange) Reset() {
 	*x = IsrChange{}
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[21]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1163,7 +1422,7 @@ func (x *IsrChange) String() string {
 func (*IsrChange) ProtoMessage() {}
 
 func (x *IsrChange) ProtoReflect() protoreflect.Message {
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[21]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1176,7 +1435,7 @@ func (x *IsrChange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IsrChange.ProtoReflect.Descriptor instead.
 func (*IsrChange) Descriptor() ([]byte, []int) {
-	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{21}
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *IsrChange) GetChunk() uint32 {
@@ -1225,7 +1484,7 @@ type ChangeIsrRequest struct {
 
 func (x *ChangeIsrRequest) Reset() {
 	*x = ChangeIsrRequest{}
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[22]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1237,7 +1496,7 @@ func (x *ChangeIsrRequest) String() string {
 func (*ChangeIsrRequest) ProtoMessage() {}
 
 func (x *ChangeIsrRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[22]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1250,7 +1509,7 @@ func (x *ChangeIsrRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChangeIsrRequest.ProtoReflect.Descriptor instead.
 func (*ChangeIsrRequest) Descriptor() ([]byte, []int) {
-	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{22}
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ChangeIsrRequest) GetVolume() string {
@@ -1288,7 +1547,7 @@ type ChangeIsrResponse struct {
 
 func (x *ChangeIsrResponse) Reset() {
 	*x = ChangeIsrResponse{}
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[23]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1300,7 +1559,7 @@ func (x *ChangeIsrResponse) String() string {
 func (*ChangeIsrResponse) ProtoMessage() {}
 
 func (x *ChangeIsrResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[23]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1313,7 +1572,7 @@ func (x *ChangeIsrResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChangeIsrResponse.ProtoReflect.Descriptor instead.
 func (*ChangeIsrResponse) Descriptor() ([]byte, []int) {
-	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{23}
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ChangeIsrResponse) GetApplied() bool {
@@ -1349,7 +1608,7 @@ type MoveReplicaRequest struct {
 
 func (x *MoveReplicaRequest) Reset() {
 	*x = MoveReplicaRequest{}
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[24]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1361,7 +1620,7 @@ func (x *MoveReplicaRequest) String() string {
 func (*MoveReplicaRequest) ProtoMessage() {}
 
 func (x *MoveReplicaRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[24]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1374,7 +1633,7 @@ func (x *MoveReplicaRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MoveReplicaRequest.ProtoReflect.Descriptor instead.
 func (*MoveReplicaRequest) Descriptor() ([]byte, []int) {
-	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{24}
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *MoveReplicaRequest) GetVolume() string {
@@ -1416,7 +1675,7 @@ type MoveReplicaResponse struct {
 
 func (x *MoveReplicaResponse) Reset() {
 	*x = MoveReplicaResponse{}
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[25]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1428,7 +1687,7 @@ func (x *MoveReplicaResponse) String() string {
 func (*MoveReplicaResponse) ProtoMessage() {}
 
 func (x *MoveReplicaResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[25]
+	mi := &file_flaminio_meta_v1_meta_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1441,7 +1700,7 @@ func (x *MoveReplicaResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MoveReplicaResponse.ProtoReflect.Descriptor instead.
 func (*MoveReplicaResponse) Descriptor() ([]byte, []int) {
-	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{25}
+	return file_flaminio_meta_v1_meta_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *MoveReplicaResponse) GetApplied() bool {
@@ -1504,7 +1763,7 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\amin_isr\x18\x05 \x01(\rR\x06minIsr\x12\x14\n" +
 	"\x05epoch\x18\x06 \x01(\x04R\x05epoch\x12\x16\n" +
 	"\x06target\x18\a \x01(\tR\x06target\x123\n" +
-	"\x06chunks\x18\b \x03(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x06chunks\"\xbb\x01\n" +
+	"\x06chunks\x18\b \x03(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x06chunks\"\x96\x02\n" +
 	"\x13CreateVolumeRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -1514,7 +1773,9 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\breplicas\x18\x04 \x01(\rR\breplicas\x12\x17\n" +
 	"\amin_isr\x18\x05 \x01(\rR\x06minIsr\x12\x1f\n" +
 	"\vprefer_node\x18\x06 \x01(\tR\n" +
-	"preferNode\"H\n" +
+	"preferNode\x12%\n" +
+	"\x0efailure_domain\x18\a \x01(\tR\rfailureDomain\x122\n" +
+	"\x15failure_domain_policy\x18\b \x01(\tR\x13failureDomainPolicy\"H\n" +
 	"\x14CreateVolumeResponse\x120\n" +
 	"\x06volume\x18\x01 \x01(\v2\x18.flaminio.meta.v1.VolumeR\x06volume\"\"\n" +
 	"\x10GetVolumeRequest\x12\x0e\n" +
@@ -1526,7 +1787,21 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\x03ids\x18\x01 \x03(\tR\x03ids\"%\n" +
 	"\x13DeleteVolumeRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"\x16\n" +
-	"\x14DeleteVolumeResponse\"\x86\x01\n" +
+	"\x14DeleteVolumeResponse\"S\n" +
+	"\tTombstone\x12\x16\n" +
+	"\x06volume\x18\x01 \x01(\tR\x06volume\x12\x14\n" +
+	"\x05nodes\x18\x02 \x03(\tR\x05nodes\x12\x18\n" +
+	"\apending\x18\x03 \x03(\tR\apending\"+\n" +
+	"\x15ListTombstonesRequest\x12\x12\n" +
+	"\x04node\x18\x01 \x01(\tR\x04node\"U\n" +
+	"\x16ListTombstonesResponse\x12;\n" +
+	"\n" +
+	"tombstones\x18\x01 \x03(\v2\x1b.flaminio.meta.v1.TombstoneR\n" +
+	"tombstones\"D\n" +
+	"\x16ConfirmDeletionRequest\x12\x16\n" +
+	"\x06volume\x18\x01 \x01(\tR\x06volume\x12\x12\n" +
+	"\x04node\x18\x02 \x01(\tR\x04node\"\x19\n" +
+	"\x17ConfirmDeletionResponse\"\x86\x01\n" +
 	"\rAttachRequest\x12\x16\n" +
 	"\x06volume\x18\x01 \x01(\tR\x06volume\x12\x12\n" +
 	"\x04node\x18\x02 \x01(\tR\x04node\x12#\n" +
@@ -1556,7 +1831,7 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\x02to\x18\x04 \x01(\tR\x02to\"b\n" +
 	"\x13MoveReplicaResponse\x12\x18\n" +
 	"\aapplied\x18\x01 \x01(\bR\aapplied\x121\n" +
-	"\x05chunk\x18\x02 \x01(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x05chunk2\xed\a\n" +
+	"\x05chunk\x18\x02 \x01(\v2\x1b.flaminio.meta.v1.ChunkMetaR\x05chunk2\xba\t\n" +
 	"\x0fMetadataService\x12]\n" +
 	"\fRegisterNode\x12%.flaminio.meta.v1.RegisterNodeRequest\x1a&.flaminio.meta.v1.RegisterNodeResponse\x12`\n" +
 	"\rNodeHeartbeat\x12&.flaminio.meta.v1.NodeHeartbeatRequest\x1a'.flaminio.meta.v1.NodeHeartbeatResponse\x12T\n" +
@@ -1565,7 +1840,9 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\fCreateVolume\x12%.flaminio.meta.v1.CreateVolumeRequest\x1a&.flaminio.meta.v1.CreateVolumeResponse\x12T\n" +
 	"\tGetVolume\x12\".flaminio.meta.v1.GetVolumeRequest\x1a#.flaminio.meta.v1.GetVolumeResponse\x12Z\n" +
 	"\vListVolumes\x12$.flaminio.meta.v1.ListVolumesRequest\x1a%.flaminio.meta.v1.ListVolumesResponse\x12]\n" +
-	"\fDeleteVolume\x12%.flaminio.meta.v1.DeleteVolumeRequest\x1a&.flaminio.meta.v1.DeleteVolumeResponse\x12K\n" +
+	"\fDeleteVolume\x12%.flaminio.meta.v1.DeleteVolumeRequest\x1a&.flaminio.meta.v1.DeleteVolumeResponse\x12c\n" +
+	"\x0eListTombstones\x12'.flaminio.meta.v1.ListTombstonesRequest\x1a(.flaminio.meta.v1.ListTombstonesResponse\x12f\n" +
+	"\x0fConfirmDeletion\x12(.flaminio.meta.v1.ConfirmDeletionRequest\x1a).flaminio.meta.v1.ConfirmDeletionResponse\x12K\n" +
 	"\x06Attach\x12\x1f.flaminio.meta.v1.AttachRequest\x1a .flaminio.meta.v1.AttachResponse\x12T\n" +
 	"\tChangeIsr\x12\".flaminio.meta.v1.ChangeIsrRequest\x1a#.flaminio.meta.v1.ChangeIsrResponse\x12Z\n" +
 	"\vMoveReplica\x12$.flaminio.meta.v1.MoveReplicaRequest\x1a%.flaminio.meta.v1.MoveReplicaResponseBAZ?github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1;metav1b\x06proto3"
@@ -1582,74 +1859,84 @@ func file_flaminio_meta_v1_meta_proto_rawDescGZIP() []byte {
 	return file_flaminio_meta_v1_meta_proto_rawDescData
 }
 
-var file_flaminio_meta_v1_meta_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_flaminio_meta_v1_meta_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_flaminio_meta_v1_meta_proto_goTypes = []any{
-	(*Node)(nil),                  // 0: flaminio.meta.v1.Node
-	(*DrainNodeRequest)(nil),      // 1: flaminio.meta.v1.DrainNodeRequest
-	(*DrainNodeResponse)(nil),     // 2: flaminio.meta.v1.DrainNodeResponse
-	(*RegisterNodeRequest)(nil),   // 3: flaminio.meta.v1.RegisterNodeRequest
-	(*RegisterNodeResponse)(nil),  // 4: flaminio.meta.v1.RegisterNodeResponse
-	(*NodeHeartbeatRequest)(nil),  // 5: flaminio.meta.v1.NodeHeartbeatRequest
-	(*NodeHeartbeatResponse)(nil), // 6: flaminio.meta.v1.NodeHeartbeatResponse
-	(*ListNodesRequest)(nil),      // 7: flaminio.meta.v1.ListNodesRequest
-	(*ListNodesResponse)(nil),     // 8: flaminio.meta.v1.ListNodesResponse
-	(*ChunkMeta)(nil),             // 9: flaminio.meta.v1.ChunkMeta
-	(*Volume)(nil),                // 10: flaminio.meta.v1.Volume
-	(*CreateVolumeRequest)(nil),   // 11: flaminio.meta.v1.CreateVolumeRequest
-	(*CreateVolumeResponse)(nil),  // 12: flaminio.meta.v1.CreateVolumeResponse
-	(*GetVolumeRequest)(nil),      // 13: flaminio.meta.v1.GetVolumeRequest
-	(*GetVolumeResponse)(nil),     // 14: flaminio.meta.v1.GetVolumeResponse
-	(*ListVolumesRequest)(nil),    // 15: flaminio.meta.v1.ListVolumesRequest
-	(*ListVolumesResponse)(nil),   // 16: flaminio.meta.v1.ListVolumesResponse
-	(*DeleteVolumeRequest)(nil),   // 17: flaminio.meta.v1.DeleteVolumeRequest
-	(*DeleteVolumeResponse)(nil),  // 18: flaminio.meta.v1.DeleteVolumeResponse
-	(*AttachRequest)(nil),         // 19: flaminio.meta.v1.AttachRequest
-	(*AttachResponse)(nil),        // 20: flaminio.meta.v1.AttachResponse
-	(*IsrChange)(nil),             // 21: flaminio.meta.v1.IsrChange
-	(*ChangeIsrRequest)(nil),      // 22: flaminio.meta.v1.ChangeIsrRequest
-	(*ChangeIsrResponse)(nil),     // 23: flaminio.meta.v1.ChangeIsrResponse
-	(*MoveReplicaRequest)(nil),    // 24: flaminio.meta.v1.MoveReplicaRequest
-	(*MoveReplicaResponse)(nil),   // 25: flaminio.meta.v1.MoveReplicaResponse
-	nil,                           // 26: flaminio.meta.v1.Node.LabelsEntry
+	(*Node)(nil),                    // 0: flaminio.meta.v1.Node
+	(*DrainNodeRequest)(nil),        // 1: flaminio.meta.v1.DrainNodeRequest
+	(*DrainNodeResponse)(nil),       // 2: flaminio.meta.v1.DrainNodeResponse
+	(*RegisterNodeRequest)(nil),     // 3: flaminio.meta.v1.RegisterNodeRequest
+	(*RegisterNodeResponse)(nil),    // 4: flaminio.meta.v1.RegisterNodeResponse
+	(*NodeHeartbeatRequest)(nil),    // 5: flaminio.meta.v1.NodeHeartbeatRequest
+	(*NodeHeartbeatResponse)(nil),   // 6: flaminio.meta.v1.NodeHeartbeatResponse
+	(*ListNodesRequest)(nil),        // 7: flaminio.meta.v1.ListNodesRequest
+	(*ListNodesResponse)(nil),       // 8: flaminio.meta.v1.ListNodesResponse
+	(*ChunkMeta)(nil),               // 9: flaminio.meta.v1.ChunkMeta
+	(*Volume)(nil),                  // 10: flaminio.meta.v1.Volume
+	(*CreateVolumeRequest)(nil),     // 11: flaminio.meta.v1.CreateVolumeRequest
+	(*CreateVolumeResponse)(nil),    // 12: flaminio.meta.v1.CreateVolumeResponse
+	(*GetVolumeRequest)(nil),        // 13: flaminio.meta.v1.GetVolumeRequest
+	(*GetVolumeResponse)(nil),       // 14: flaminio.meta.v1.GetVolumeResponse
+	(*ListVolumesRequest)(nil),      // 15: flaminio.meta.v1.ListVolumesRequest
+	(*ListVolumesResponse)(nil),     // 16: flaminio.meta.v1.ListVolumesResponse
+	(*DeleteVolumeRequest)(nil),     // 17: flaminio.meta.v1.DeleteVolumeRequest
+	(*DeleteVolumeResponse)(nil),    // 18: flaminio.meta.v1.DeleteVolumeResponse
+	(*Tombstone)(nil),               // 19: flaminio.meta.v1.Tombstone
+	(*ListTombstonesRequest)(nil),   // 20: flaminio.meta.v1.ListTombstonesRequest
+	(*ListTombstonesResponse)(nil),  // 21: flaminio.meta.v1.ListTombstonesResponse
+	(*ConfirmDeletionRequest)(nil),  // 22: flaminio.meta.v1.ConfirmDeletionRequest
+	(*ConfirmDeletionResponse)(nil), // 23: flaminio.meta.v1.ConfirmDeletionResponse
+	(*AttachRequest)(nil),           // 24: flaminio.meta.v1.AttachRequest
+	(*AttachResponse)(nil),          // 25: flaminio.meta.v1.AttachResponse
+	(*IsrChange)(nil),               // 26: flaminio.meta.v1.IsrChange
+	(*ChangeIsrRequest)(nil),        // 27: flaminio.meta.v1.ChangeIsrRequest
+	(*ChangeIsrResponse)(nil),       // 28: flaminio.meta.v1.ChangeIsrResponse
+	(*MoveReplicaRequest)(nil),      // 29: flaminio.meta.v1.MoveReplicaRequest
+	(*MoveReplicaResponse)(nil),     // 30: flaminio.meta.v1.MoveReplicaResponse
+	nil,                             // 31: flaminio.meta.v1.Node.LabelsEntry
 }
 var file_flaminio_meta_v1_meta_proto_depIdxs = []int32{
-	26, // 0: flaminio.meta.v1.Node.labels:type_name -> flaminio.meta.v1.Node.LabelsEntry
+	31, // 0: flaminio.meta.v1.Node.labels:type_name -> flaminio.meta.v1.Node.LabelsEntry
 	0,  // 1: flaminio.meta.v1.RegisterNodeRequest.node:type_name -> flaminio.meta.v1.Node
 	0,  // 2: flaminio.meta.v1.ListNodesResponse.nodes:type_name -> flaminio.meta.v1.Node
 	9,  // 3: flaminio.meta.v1.Volume.chunks:type_name -> flaminio.meta.v1.ChunkMeta
 	10, // 4: flaminio.meta.v1.CreateVolumeResponse.volume:type_name -> flaminio.meta.v1.Volume
 	10, // 5: flaminio.meta.v1.GetVolumeResponse.volume:type_name -> flaminio.meta.v1.Volume
-	10, // 6: flaminio.meta.v1.AttachResponse.volume:type_name -> flaminio.meta.v1.Volume
-	21, // 7: flaminio.meta.v1.ChangeIsrRequest.changes:type_name -> flaminio.meta.v1.IsrChange
-	9,  // 8: flaminio.meta.v1.ChangeIsrResponse.chunks:type_name -> flaminio.meta.v1.ChunkMeta
-	9,  // 9: flaminio.meta.v1.MoveReplicaResponse.chunk:type_name -> flaminio.meta.v1.ChunkMeta
-	3,  // 10: flaminio.meta.v1.MetadataService.RegisterNode:input_type -> flaminio.meta.v1.RegisterNodeRequest
-	5,  // 11: flaminio.meta.v1.MetadataService.NodeHeartbeat:input_type -> flaminio.meta.v1.NodeHeartbeatRequest
-	7,  // 12: flaminio.meta.v1.MetadataService.ListNodes:input_type -> flaminio.meta.v1.ListNodesRequest
-	1,  // 13: flaminio.meta.v1.MetadataService.DrainNode:input_type -> flaminio.meta.v1.DrainNodeRequest
-	11, // 14: flaminio.meta.v1.MetadataService.CreateVolume:input_type -> flaminio.meta.v1.CreateVolumeRequest
-	13, // 15: flaminio.meta.v1.MetadataService.GetVolume:input_type -> flaminio.meta.v1.GetVolumeRequest
-	15, // 16: flaminio.meta.v1.MetadataService.ListVolumes:input_type -> flaminio.meta.v1.ListVolumesRequest
-	17, // 17: flaminio.meta.v1.MetadataService.DeleteVolume:input_type -> flaminio.meta.v1.DeleteVolumeRequest
-	19, // 18: flaminio.meta.v1.MetadataService.Attach:input_type -> flaminio.meta.v1.AttachRequest
-	22, // 19: flaminio.meta.v1.MetadataService.ChangeIsr:input_type -> flaminio.meta.v1.ChangeIsrRequest
-	24, // 20: flaminio.meta.v1.MetadataService.MoveReplica:input_type -> flaminio.meta.v1.MoveReplicaRequest
-	4,  // 21: flaminio.meta.v1.MetadataService.RegisterNode:output_type -> flaminio.meta.v1.RegisterNodeResponse
-	6,  // 22: flaminio.meta.v1.MetadataService.NodeHeartbeat:output_type -> flaminio.meta.v1.NodeHeartbeatResponse
-	8,  // 23: flaminio.meta.v1.MetadataService.ListNodes:output_type -> flaminio.meta.v1.ListNodesResponse
-	2,  // 24: flaminio.meta.v1.MetadataService.DrainNode:output_type -> flaminio.meta.v1.DrainNodeResponse
-	12, // 25: flaminio.meta.v1.MetadataService.CreateVolume:output_type -> flaminio.meta.v1.CreateVolumeResponse
-	14, // 26: flaminio.meta.v1.MetadataService.GetVolume:output_type -> flaminio.meta.v1.GetVolumeResponse
-	16, // 27: flaminio.meta.v1.MetadataService.ListVolumes:output_type -> flaminio.meta.v1.ListVolumesResponse
-	18, // 28: flaminio.meta.v1.MetadataService.DeleteVolume:output_type -> flaminio.meta.v1.DeleteVolumeResponse
-	20, // 29: flaminio.meta.v1.MetadataService.Attach:output_type -> flaminio.meta.v1.AttachResponse
-	23, // 30: flaminio.meta.v1.MetadataService.ChangeIsr:output_type -> flaminio.meta.v1.ChangeIsrResponse
-	25, // 31: flaminio.meta.v1.MetadataService.MoveReplica:output_type -> flaminio.meta.v1.MoveReplicaResponse
-	21, // [21:32] is the sub-list for method output_type
-	10, // [10:21] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	19, // 6: flaminio.meta.v1.ListTombstonesResponse.tombstones:type_name -> flaminio.meta.v1.Tombstone
+	10, // 7: flaminio.meta.v1.AttachResponse.volume:type_name -> flaminio.meta.v1.Volume
+	26, // 8: flaminio.meta.v1.ChangeIsrRequest.changes:type_name -> flaminio.meta.v1.IsrChange
+	9,  // 9: flaminio.meta.v1.ChangeIsrResponse.chunks:type_name -> flaminio.meta.v1.ChunkMeta
+	9,  // 10: flaminio.meta.v1.MoveReplicaResponse.chunk:type_name -> flaminio.meta.v1.ChunkMeta
+	3,  // 11: flaminio.meta.v1.MetadataService.RegisterNode:input_type -> flaminio.meta.v1.RegisterNodeRequest
+	5,  // 12: flaminio.meta.v1.MetadataService.NodeHeartbeat:input_type -> flaminio.meta.v1.NodeHeartbeatRequest
+	7,  // 13: flaminio.meta.v1.MetadataService.ListNodes:input_type -> flaminio.meta.v1.ListNodesRequest
+	1,  // 14: flaminio.meta.v1.MetadataService.DrainNode:input_type -> flaminio.meta.v1.DrainNodeRequest
+	11, // 15: flaminio.meta.v1.MetadataService.CreateVolume:input_type -> flaminio.meta.v1.CreateVolumeRequest
+	13, // 16: flaminio.meta.v1.MetadataService.GetVolume:input_type -> flaminio.meta.v1.GetVolumeRequest
+	15, // 17: flaminio.meta.v1.MetadataService.ListVolumes:input_type -> flaminio.meta.v1.ListVolumesRequest
+	17, // 18: flaminio.meta.v1.MetadataService.DeleteVolume:input_type -> flaminio.meta.v1.DeleteVolumeRequest
+	20, // 19: flaminio.meta.v1.MetadataService.ListTombstones:input_type -> flaminio.meta.v1.ListTombstonesRequest
+	22, // 20: flaminio.meta.v1.MetadataService.ConfirmDeletion:input_type -> flaminio.meta.v1.ConfirmDeletionRequest
+	24, // 21: flaminio.meta.v1.MetadataService.Attach:input_type -> flaminio.meta.v1.AttachRequest
+	27, // 22: flaminio.meta.v1.MetadataService.ChangeIsr:input_type -> flaminio.meta.v1.ChangeIsrRequest
+	29, // 23: flaminio.meta.v1.MetadataService.MoveReplica:input_type -> flaminio.meta.v1.MoveReplicaRequest
+	4,  // 24: flaminio.meta.v1.MetadataService.RegisterNode:output_type -> flaminio.meta.v1.RegisterNodeResponse
+	6,  // 25: flaminio.meta.v1.MetadataService.NodeHeartbeat:output_type -> flaminio.meta.v1.NodeHeartbeatResponse
+	8,  // 26: flaminio.meta.v1.MetadataService.ListNodes:output_type -> flaminio.meta.v1.ListNodesResponse
+	2,  // 27: flaminio.meta.v1.MetadataService.DrainNode:output_type -> flaminio.meta.v1.DrainNodeResponse
+	12, // 28: flaminio.meta.v1.MetadataService.CreateVolume:output_type -> flaminio.meta.v1.CreateVolumeResponse
+	14, // 29: flaminio.meta.v1.MetadataService.GetVolume:output_type -> flaminio.meta.v1.GetVolumeResponse
+	16, // 30: flaminio.meta.v1.MetadataService.ListVolumes:output_type -> flaminio.meta.v1.ListVolumesResponse
+	18, // 31: flaminio.meta.v1.MetadataService.DeleteVolume:output_type -> flaminio.meta.v1.DeleteVolumeResponse
+	21, // 32: flaminio.meta.v1.MetadataService.ListTombstones:output_type -> flaminio.meta.v1.ListTombstonesResponse
+	23, // 33: flaminio.meta.v1.MetadataService.ConfirmDeletion:output_type -> flaminio.meta.v1.ConfirmDeletionResponse
+	25, // 34: flaminio.meta.v1.MetadataService.Attach:output_type -> flaminio.meta.v1.AttachResponse
+	28, // 35: flaminio.meta.v1.MetadataService.ChangeIsr:output_type -> flaminio.meta.v1.ChangeIsrResponse
+	30, // 36: flaminio.meta.v1.MetadataService.MoveReplica:output_type -> flaminio.meta.v1.MoveReplicaResponse
+	24, // [24:37] is the sub-list for method output_type
+	11, // [11:24] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_flaminio_meta_v1_meta_proto_init() }
@@ -1663,7 +1950,7 @@ func file_flaminio_meta_v1_meta_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_flaminio_meta_v1_meta_proto_rawDesc), len(file_flaminio_meta_v1_meta_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   27,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

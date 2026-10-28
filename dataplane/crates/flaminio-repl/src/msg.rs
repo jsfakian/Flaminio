@@ -4,7 +4,15 @@
 //! plane uses handles to buffers.
 
 use crate::extent::Extent;
-use crate::types::{ChunkIdx, Epoch, Version, VolumeId};
+use crate::types::{Block, ChunkIdx, Epoch, Version, VolumeId};
+
+/// Most blocks one [`Request::Mapped`] covers: its reply then holds at most half as many
+/// extents, which fits a frame. A target probes a larger chunk in pieces.
+pub const MAX_MAPPED_BLOCKS: Block = 1 << 16;
+
+/// Most blocks one [`Request::Digest`] covers. Digests carry no data (5 bytes a block on the
+/// wire), so they go in much larger pieces than repairs: one per default 256 MiB chunk.
+pub const MAX_DIGEST_BLOCKS: Block = 1 << 16;
 
 /// A request from a target to a replica node. Every request gets at most one reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +56,17 @@ pub enum Request<P> {
         ext: Extent,
         data: P,
     },
+    /// Per-block digests for an extent of at most [`MAX_DIGEST_BLOCKS`] (follow-ups §2).
+    /// Reply: [`Response::Digests`].
+    /// Unwritten blocks are `None` on the wire; the simulator uses each block's value.
+    Digest { chunk: ChunkIdx, ext: Extent },
+    /// Sub-extents of `ext` that hold data on this replica (follow-ups §3). Reply:
+    /// [`Response::Mapped`]. Unwritten ranges are omitted so the target can skip copies and
+    /// discard stale data on the destination. At most [`MAX_MAPPED_BLOCKS`] long.
+    Mapped { chunk: ChunkIdx, ext: Extent },
+    /// Drops data in `ext` (advisory discard). Reply: [`Response::Ok`]. Used when the source
+    /// of a resync or repair has nothing mapped there.
+    Discard { chunk: ChunkIdx, ext: Extent },
 }
 
 /// A reply from a replica node.
@@ -69,6 +88,12 @@ pub enum Response<P> {
     },
     Ok,
     Data(P),
+    /// One CRC-32C per block of the requested extent, of what a read returns: an unwritten
+    /// block reads as zeros, so replicas compare by content whatever their layout. The
+    /// simulator uses each block's value. `None` means no digest, which counts as differing.
+    Digests(Vec<Option<u32>>),
+    /// Extents inside the request that hold data. Disjoint, ordered, clipped to the request.
+    Mapped(Vec<Extent>),
     /// The volume is fenced at a higher epoch: the sender has been deposed.
     Stale {
         fenced: Epoch,

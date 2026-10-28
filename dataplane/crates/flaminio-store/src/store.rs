@@ -648,9 +648,7 @@ impl<D: BlockDevice> Store<D> {
         if store.config.pipelined_commits && !pipelined {
             store.set_pipelined_commits()?;
         }
-        store
-            .dev
-            .set_flush_coalesce(store.config.flush_coalesce);
+        store.dev.set_flush_coalesce(store.config.flush_coalesce);
         Ok(store)
     }
 
@@ -1201,6 +1199,107 @@ impl<D: BlockDevice> Store<D> {
             s.check_epoch(slot, epoch)?;
             s.run(|_| Ok(Plan::records(vec![Record::ChunkDelete { slot }])))
         })
+    }
+
+    /// Per-block CRC-32C of what a read of `[offset, offset+len)` returns, from map metadata
+    /// only: no data is read from the device. Unwritten and zero blocks read as zeros, so they
+    /// get the zero block's CRC, and replicas compare by content whatever their layout.
+    /// `offset` and `len` must be multiples of 4 KiB. Used by digest-first reconciliation
+    /// (follow-ups §2).
+    pub fn digests(
+        &self,
+        key: ChunkKey,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<Option<u32>>, StoreError> {
+        let slot = self.state.slot_of(key)?;
+        let chunk = self.state.chunk(slot);
+        let size = chunk.chunk_size;
+        if len == 0
+            || !offset.is_multiple_of(BLOCK_SIZE_U64)
+            || !len.is_multiple_of(BLOCK_SIZE_U64)
+            || offset.checked_add(len).is_none_or(|e| e > size)
+        {
+            return Err(StoreError::invalid(format!(
+                "digests at {offset}+{len} must be 4 KiB aligned, non-empty and inside the {size}-byte chunk"
+            )));
+        }
+        let cs = self.state.cluster_size();
+        let n_blocks = (len / BLOCK_SIZE_U64) as usize;
+        let zero = crc32c(&[0u8; BLOCK_SIZE]);
+        let mut out = Vec::with_capacity(n_blocks);
+        let mut pos = 0u64;
+        while pos < len {
+            let o = offset + pos;
+            let (x, within) = (o / cs, o % cs);
+            let n = ((cs - within).min(len - pos)) as usize;
+            let n_blk = n / BLOCK_SIZE;
+            match chunk.resolve(self.state.epp, x) {
+                Resolved::Zeros => out.extend(std::iter::repeat_n(Some(zero), n_blk)),
+                Resolved::Data { csums, .. } => {
+                    let first = (within / BLOCK_SIZE_U64) as usize;
+                    for s in &csums[first..first + n_blk] {
+                        out.push(Some(*s));
+                    }
+                }
+            }
+            pos += n as u64;
+        }
+        debug_assert_eq!(out.len(), n_blocks);
+        Ok(out)
+    }
+
+    /// Coalesced byte ranges inside `[offset, offset+len)` that hold data on this replica
+    /// (follow-ups §3). Unmapped and zero-phys clusters are omitted; no device data is read.
+    /// `offset` and `len` must be multiples of 4 KiB. Returned ranges are cluster-aligned.
+    pub fn mapped(
+        &self,
+        key: ChunkKey,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<(u64, u64)>, StoreError> {
+        let slot = self.state.slot_of(key)?;
+        let chunk = self.state.chunk(slot);
+        let size = chunk.chunk_size;
+        if len == 0
+            || !offset.is_multiple_of(BLOCK_SIZE_U64)
+            || !len.is_multiple_of(BLOCK_SIZE_U64)
+            || offset.checked_add(len).is_none_or(|e| e > size)
+        {
+            return Err(StoreError::invalid(format!(
+                "mapped at {offset}+{len} must be 4 KiB aligned, non-empty and inside the {size}-byte chunk"
+            )));
+        }
+        let cs = self.state.cluster_size();
+        let range_end = offset + len;
+        let first = offset / cs;
+        let last = range_end.div_ceil(cs);
+        let mut out = Vec::new();
+        let mut run_start: Option<u64> = None;
+        let mut run_end = 0u64;
+        for x in first..last {
+            let mapped = matches!(chunk.resolve(self.state.epp, x), Resolved::Data { .. });
+            let from = (x * cs).max(offset);
+            let to = ((x + 1) * cs).min(range_end);
+            if mapped && from < to {
+                match run_start {
+                    Some(_) if run_end == from => run_end = to,
+                    _ => {
+                        if let Some(s) = run_start {
+                            out.push((s, run_end - s));
+                        }
+                        run_start = Some(from);
+                        run_end = to;
+                    }
+                }
+            } else if let Some(s) = run_start.take() {
+                out.push((s, run_end - s));
+            }
+        }
+        if let Some(s) = run_start {
+            out.push((s, run_end - s));
+        }
+        Ok(out)
     }
 
     /// Raises the fenced epoch of every chunk of `volume` on this disk (ARCHITECTURE §8.4).

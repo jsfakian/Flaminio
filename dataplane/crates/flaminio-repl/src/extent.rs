@@ -132,6 +132,21 @@ impl ExtentSet {
         }
     }
 
+    /// Blocks present in both sets.
+    pub fn intersection(&self, other: &ExtentSet) -> ExtentSet {
+        let mut out = ExtentSet::new();
+        for x in self.iter() {
+            for y in other.iter() {
+                let start = x.start.max(y.start);
+                let end = x.end().min(y.end());
+                if start < end {
+                    out.insert(Extent::new(start, end - start));
+                }
+            }
+        }
+        out
+    }
+
     /// The parts of `x` that are not in the set, in order.
     pub fn missing_from(&self, x: &Extent) -> Vec<Extent> {
         let mut out = Vec::new();

@@ -185,6 +185,8 @@ func (f *fakeDataplane) Detach(_ context.Context, volume string) error {
 	return nil
 }
 
+func (f *fakeDataplane) Delete(context.Context, string) error { return nil }
+
 type fakeMounter struct {
 	fs      map[string]string // device -> signature
 	mounts  map[string]string // target -> source

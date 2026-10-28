@@ -66,9 +66,11 @@ func preferredNode(t *csi.TopologyRequirement) string {
 
 // StorageClass parameters, and their defaults.
 const (
-	ParamReplicas  = "replicas"  // default 2
-	ParamMinISR    = "minIsr"    // default 1
-	ParamChunkSize = "chunkSize" // default 256Mi; a power of two of at least 1Mi
+	ParamReplicas            = "replicas"            // default 2
+	ParamMinISR              = "minIsr"              // default 1
+	ParamChunkSize           = "chunkSize"           // default 256Mi; a power of two of at least 1Mi
+	ParamFailureDomain       = "failureDomain"       // default node
+	ParamFailureDomainPolicy = "failureDomainPolicy" // default strict
 )
 
 const (
@@ -128,6 +130,7 @@ func checkCapabilities(caps []*csi.VolumeCapability) error {
 type volumeParams struct {
 	replicas, minISR uint32
 	chunk            uint64
+	domain, policy   string
 }
 
 func parseParams(p map[string]string) (volumeParams, error) {
@@ -141,6 +144,16 @@ func parseParams(p map[string]string) (volumeParams, error) {
 			out.minISR, err = parseUint32(v)
 		case ParamChunkSize:
 			out.chunk, err = parseQuantity(v)
+		case ParamFailureDomain:
+			_, err = parseFailureDomain(v)
+			if err == nil {
+				out.domain = v
+			}
+		case ParamFailureDomainPolicy:
+			_, err = parseFailureDomainPolicy(v)
+			if err == nil {
+				out.policy = v
+			}
 		default:
 			// The provisioner's own keys are its business; anything else is a typo.
 			if strings.HasPrefix(k, "csi.storage.k8s.io/") {
@@ -153,6 +166,24 @@ func parseParams(p map[string]string) (volumeParams, error) {
 		}
 	}
 	return out, nil
+}
+
+func parseFailureDomain(s string) (string, error) {
+	switch s {
+	case "node", "rack", "zone":
+		return s, nil
+	default:
+		return "", fmt.Errorf("want node, rack or zone")
+	}
+}
+
+func parseFailureDomainPolicy(s string) (string, error) {
+	switch s {
+	case "strict", "bestEffort":
+		return s, nil
+	default:
+		return "", fmt.Errorf("want strict or bestEffort")
+	}
 }
 
 func parseUint32(s string) (uint32, error) {
@@ -199,7 +230,9 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	}
 	_, err = c.Meta.CreateVolume(ctx, &metav1.CreateVolumeRequest{
 		Id: req.GetName(), SizeBytes: size, ChunkBytes: p.chunk, Replicas: p.replicas, MinIsr: p.minISR,
-		PreferNode: preferredNode(req.GetAccessibilityRequirements()),
+		PreferNode:          preferredNode(req.GetAccessibilityRequirements()),
+		FailureDomain:       p.domain,
+		FailureDomainPolicy: p.policy,
 	})
 	switch status.Code(err) {
 	case codes.OK:

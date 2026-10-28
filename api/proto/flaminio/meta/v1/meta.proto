@@ -32,9 +32,17 @@ service MetadataService {
   rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
   // Caller: any authenticated identity.
   rpc ListVolumes(ListVolumesRequest) returns (ListVolumesResponse);
-  // Deletes a volume. The caller makes sure that no target serves it any more. Caller: an
-  // administrator.
+  // Deletes a volume. The caller makes sure that no target serves it any more. The volume's
+  // metadata is removed at once; a tombstone remains until every node that held its chunks
+  // confirms it has deleted them (docs/followups.md §8). Caller: an administrator.
   rpc DeleteVolume(DeleteVolumeRequest) returns (DeleteVolumeResponse);
+  // Tombstones for volumes this node still needs to delete replicas of. Caller: that node's
+  // agent, or an administrator.
+  rpc ListTombstones(ListTombstonesRequest) returns (ListTombstonesResponse);
+  // Confirms that this node has deleted its local replicas of a tombstoned volume. When every
+  // listed node has confirmed, the tombstone is removed. Caller: that node's agent, or an
+  // administrator.
+  rpc ConfirmDeletion(ConfirmDeletionRequest) returns (ConfirmDeletionResponse);
 
   // Makes a node the volume's target under a new epoch, and issues its capability token.
   // Caller: an administrator (the CSI controller, the failover controller); or, with
@@ -124,6 +132,11 @@ message CreateVolumeRequest {
   // If set and eligible, every chunk has a replica on this node: the node the volume will
   // first be attached to, whose reads then stay local.
   string prefer_node = 6;
+  // Failure domain level: "node" (default), "rack", or "zone". Replicas of one chunk are
+  // placed in distinct domains at this level (ARCHITECTURE §8.2, §9).
+  string failure_domain = 7;
+  // "strict" (default) refuses if the topology is short; "bestEffort" falls back a level.
+  string failure_domain_policy = 8;
 }
 
 message CreateVolumeResponse {
@@ -149,6 +162,31 @@ message DeleteVolumeRequest {
 }
 
 message DeleteVolumeResponse {}
+
+message Tombstone {
+  // The deleted volume's id.
+  string volume = 1;
+  // Nodes that held at least one chunk replica at deletion.
+  repeated string nodes = 2;
+  // Subset of nodes that have not yet confirmed.
+  repeated string pending = 3;
+}
+
+message ListTombstonesRequest {
+  string node = 1;
+}
+
+message ListTombstonesResponse {
+  // Tombstones that still name this node as pending.
+  repeated Tombstone tombstones = 1;
+}
+
+message ConfirmDeletionRequest {
+  string volume = 1;
+  string node = 2;
+}
+
+message ConfirmDeletionResponse {}
 
 message AttachRequest {
   string volume = 1;

@@ -161,9 +161,31 @@ func TestAuthorization(t *testing.T) {
 	_, err = nodeB.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
 	expect("node reads", err, codes.OK)
 
+	// Tombstones: only that node's agent (or admin) lists and confirms for itself.
+	_, err = admin.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"})
+	expect("admin deletes", err, codes.OK)
+	_, err = agentB.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: "fl-a"})
+	expect("agent lists another node's tombstones", err, codes.PermissionDenied)
+	_, err = nodeA.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: "fl-a"})
+	expect("data plane lists tombstones", err, codes.PermissionDenied)
+	_, err = agentA.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: "fl-a"})
+	expect("agent lists its tombstones", err, codes.OK)
+	_, err = agentB.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
+	expect("agent confirms for another node", err, codes.PermissionDenied)
+	_, err = agentA.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
+	expect("agent confirms its deletion", err, codes.OK)
+	_, err = agentB.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-b"})
+	expect("agent confirms the other replica", err, codes.OK)
+
+	// Recreate for the ISR checks below.
+	_, err = admin.CreateVolume(ctx, req)
+	expect("admin recreates", err, codes.OK)
+	att, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
+	expect("admin attaches after recreate", err, codes.OK)
+
 	// Only the target's data plane changes the ISR, even with the right epoch and version.
 	c0 := att.Volume.Chunks[0]
-	change := &metav1.ChangeIsrRequest{Volume: "v", Epoch: 3, Changes: []*metav1.IsrChange{{Chunk: 0, ExpectedVer: c0.IsrVer, NewIsr: c0.Replicas[:1]}}}
+	change := &metav1.ChangeIsrRequest{Volume: "v", Epoch: att.Volume.Epoch, Changes: []*metav1.IsrChange{{Chunk: 0, ExpectedVer: c0.IsrVer, NewIsr: c0.Replicas[:1]}}}
 	r, err := nodeB.ChangeIsr(ctx, change)
 	if err != nil || r.Applied {
 		t.Fatalf("non-target changed the ISR: %v %v", r, err)

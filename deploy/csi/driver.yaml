@@ -228,6 +228,8 @@ parameters:
   replicas: "2"
   minIsr: "1"
   chunkSize: 256Mi
+  failureDomain: node
+  failureDomainPolicy: bestEffort
 reclaimPolicy: Delete
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false

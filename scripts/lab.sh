@@ -599,10 +599,14 @@ cmd_meta_smoke() {
     for vm in $(vms_of cluster); do
         local labels=()
         [[ $vm == "$VM_W" ]] && labels=(flaminio.io/witness=)
+        # Distinct zones/racks so failure-domain placement can be exercised (docs/followups.md §4).
+        # The lab is not physically independent (one switch; fl-w shares a server with fl-a).
+        [[ $vm == "$VM_A" ]] && labels+=(topology.kubernetes.io/zone=lab-a "flaminio.io/rack=rack-a")
+        [[ $vm == "$VM_B" ]] && labels+=(topology.kubernetes.io/zone=lab-b "flaminio.io/rack=rack-b")
         metactl "$VM_A" "$vm" register "$vm" "$(vmvar "$vm" WG):$REPL_PORT" "${labels[@]}" >/dev/null
         metactl "$VM_A" "$vm" heartbeat "$vm" >/dev/null
     done
-    log "nodes: $(metactl "$VM_A" "$VM_A" nodes | jq -c '[.nodes[] | {id, alive, witness: (.labels // {} | has("flaminio.io/witness"))}]')"
+    log "nodes: $(metactl "$VM_A" "$VM_A" nodes | jq -c '[.nodes[] | {id, alive, witness: (.labels // {} | has("flaminio.io/witness")), zone: .labels["topology.kubernetes.io/zone"]}]')"
     out=$(metactl "$VM_A" "$VM_A" create "$vol" 1G 2 1 256M)
     log "created $vol: $(jq -c '[.volume.chunks[].replicas]' <<<"$out")"
     if jq -e --arg w "$VM_W" '[.volume.chunks[].replicas[]] | index($w)' <<<"$out" >/dev/null; then

@@ -383,6 +383,49 @@ impl<D: BlockDevice> ReplicaService<D> {
                         Err(e) => Reply::Close(e.to_string()),
                     });
                 }
+                Action::Digest { chunk, ext } => {
+                    replies[i] = Some(
+                        match self.store.digests(key(uuid, chunk), offset(ext), len(ext)) {
+                            Ok(sums) => Reply::Send(Frame::Digests { req, sums }),
+                            Err(e) => Reply::Close(e.to_string()),
+                        },
+                    );
+                }
+                Action::Mapped { chunk, ext } => {
+                    replies[i] = Some(
+                        match self.store.mapped(key(uuid, chunk), offset(ext), len(ext)) {
+                            Ok(ranges) => {
+                                let exts = ranges
+                                    .into_iter()
+                                    .map(|(o, l)| {
+                                        Extent::new(
+                                            (o / BLOCK as u64) as u32,
+                                            (l / BLOCK as u64) as u32,
+                                        )
+                                    })
+                                    .collect();
+                                Reply::Send(Frame::Mappings { req, exts })
+                            }
+                            Err(e) => Reply::Close(e.to_string()),
+                        },
+                    );
+                }
+                Action::Discard { chunk, parts, .. } => {
+                    let mut err = None;
+                    for p in &parts {
+                        if let Err(e) =
+                            self.store
+                                .discard(key(uuid, chunk), offset(*p), len(*p), s.epoch)
+                        {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                    replies[i] = Some(match err {
+                        None => Reply::Send(Frame::Ok { req }),
+                        Some(e) => Reply::Close(e.to_string()),
+                    });
+                }
             }
         }
         if self.commit(items, &mut pending, &mut replies) {
@@ -702,20 +745,35 @@ impl<D: BlockDevice> ReplicaService<D> {
 
     /// Deletes every chunk replica of the volume named `volume` from the store, and forgets the
     /// volume: for a volume deleted from the metadata service. Its sessions are not valid any
-    /// more (their requests get "unknown volume"). Returns how many replicas were deleted.
+    /// more (their requests get "unknown volume"). Scans the store so chunks still survive a
+    /// process restart that forgot `vols`. Returns how many replicas were deleted.
     pub fn delete_volume(&mut self, volume: &str) -> Result<usize, String> {
         let uuid = volume_uuid(volume);
-        let Some(v) = self.vols.remove(&uuid) else {
-            return Ok(0);
-        };
-        self.core.remove_volume(v.id);
-        for &c in &v.chunks {
-            // Whatever the chunk's fence: the volume is gone.
-            self.store
-                .delete_chunk(key(uuid, c), u64::MAX)
-                .map_err(|e| format!("delete chunk {c}: {e}"))?;
+        if let Some(v) = self.vols.remove(&uuid) {
+            self.core.remove_volume(v.id);
         }
-        Ok(v.chunks.len())
+        // Epoch higher than any target's fence (docs/followups.md §8).
+        let indices: Vec<u64> = self
+            .store
+            .chunks()
+            .into_iter()
+            .filter(|c| c.key.volume == uuid)
+            .map(|c| c.key.index)
+            .collect();
+        for index in &indices {
+            match self.store.delete_chunk(
+                ChunkKey {
+                    volume: uuid,
+                    index: *index,
+                },
+                u64::MAX,
+            ) {
+                Ok(()) => {}
+                Err(StoreError::NoSuchChunk(_)) => {}
+                Err(e) => return Err(format!("delete chunk {index}: {e}")),
+            }
+        }
+        Ok(indices.len())
     }
 
     /// The epoch the volume of session `s` is fenced at now.
@@ -764,6 +822,10 @@ fn offset(ext: Extent) -> u64 {
     u64::from(ext.start) * BLOCK as u64
 }
 
+fn len(ext: Extent) -> u64 {
+    u64::from(ext.len) * BLOCK as u64
+}
+
 /// The shared payload of a write or a copy.
 fn shared_payload(f: &Frame) -> &bytes::Bytes {
     match f {
@@ -785,12 +847,17 @@ fn req_of(f: &Frame) -> u64 {
         | Frame::Heartbeat { req }
         | Frame::Write { req, .. }
         | Frame::Read { req, .. }
+        | Frame::Digest { req, .. }
+        | Frame::Mapped { req, .. }
+        | Frame::Discard { req, .. }
         | Frame::BeginResync { req, .. }
         | Frame::Settle { req, .. }
         | Frame::Copy { req, .. }
         | Frame::Fenced { req, .. }
         | Frame::Ok { req }
         | Frame::Data { req, .. }
+        | Frame::Digests { req, .. }
+        | Frame::Mappings { req, .. }
         | Frame::Stale { req, .. } => *req,
         Frame::Refused { .. } => 0,
     }
@@ -818,6 +885,9 @@ fn to_request(f: &Frame) -> Option<(u64, Request<()>)> {
             },
         ),
         Frame::Read { req, chunk, ext } => (req, Request::Read { chunk, ext }),
+        Frame::Digest { req, chunk, ext } => (req, Request::Digest { chunk, ext }),
+        Frame::Mapped { req, chunk, ext } => (req, Request::Mapped { chunk, ext }),
+        Frame::Discard { req, chunk, ext } => (req, Request::Discard { chunk, ext }),
         Frame::BeginResync { req, chunk } => (req, Request::BeginResync { chunk }),
         Frame::Settle { req, chunk, below } => (req, Request::Settle { chunk, below }),
         Frame::Copy {
@@ -842,6 +912,8 @@ fn response_frame(req: u64, r: Response<()>) -> Frame {
         Response::Ok => Frame::Ok { req },
         Response::Stale { fenced } => Frame::Stale { req, fenced },
         Response::Data(()) => unreachable!("reads are carried out by the service"),
+        Response::Digests(_) => unreachable!("digests are carried out by the service"),
+        Response::Mapped(_) => unreachable!("mappings are carried out by the service"),
     }
 }
 

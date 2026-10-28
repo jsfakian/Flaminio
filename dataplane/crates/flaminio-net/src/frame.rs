@@ -5,6 +5,7 @@
 
 use bytes::Bytes;
 use flaminio_repl::extent::Extent;
+use flaminio_repl::msg::{MAX_DIGEST_BLOCKS, MAX_MAPPED_BLOCKS};
 use flaminio_repl::types::Version;
 
 use crate::BLOCK;
@@ -67,6 +68,21 @@ pub enum Frame {
         ext: Extent,
         data: Bytes,
     },
+    Digest {
+        req: u64,
+        chunk: u32,
+        ext: Extent,
+    },
+    Mapped {
+        req: u64,
+        chunk: u32,
+        ext: Extent,
+    },
+    Discard {
+        req: u64,
+        chunk: u32,
+        ext: Extent,
+    },
     // Replies, replica → target.
     Fenced {
         req: u64,
@@ -78,6 +94,16 @@ pub enum Frame {
     Data {
         req: u64,
         data: Vec<u8>,
+    },
+    /// One optional CRC-32C per block of the digest request's extent.
+    Digests {
+        req: u64,
+        sums: Vec<Option<u32>>,
+    },
+    /// Sub-extents of a `Mapped` request that hold data.
+    Mappings {
+        req: u64,
+        exts: Vec<Extent>,
     },
     Stale {
         req: u64,
@@ -109,11 +135,16 @@ mod tag {
     pub const BEGIN_RESYNC: u8 = 5;
     pub const COPY: u8 = 6;
     pub const SETTLE: u8 = 7;
+    pub const DIGEST: u8 = 8;
+    pub const MAPPED: u8 = 9;
+    pub const DISCARD: u8 = 10;
     pub const FENCED: u8 = 64;
     pub const OK: u8 = 65;
     pub const DATA: u8 = 66;
     pub const STALE: u8 = 67;
     pub const REFUSED: u8 = 68;
+    pub const DIGESTS: u8 = 69;
+    pub const MAPPINGS: u8 = 70;
 }
 
 struct W(Vec<u8>);
@@ -233,6 +264,24 @@ impl Frame {
                 w.ext(ext);
                 w.0.extend_from_slice(data);
             }
+            Frame::Digest { req, chunk, ext } => {
+                w.u8(tag::DIGEST);
+                w.u64(*req);
+                w.u32(*chunk);
+                w.ext(ext);
+            }
+            Frame::Mapped { req, chunk, ext } => {
+                w.u8(tag::MAPPED);
+                w.u64(*req);
+                w.u32(*chunk);
+                w.ext(ext);
+            }
+            Frame::Discard { req, chunk, ext } => {
+                w.u8(tag::DISCARD);
+                w.u64(*req);
+                w.u32(*chunk);
+                w.ext(ext);
+            }
             Frame::Fenced { req, uncertain } => {
                 w.u8(tag::FENCED);
                 w.u64(*req);
@@ -253,6 +302,30 @@ impl Frame {
                 w.u8(tag::DATA);
                 w.u64(*req);
                 w.0.extend_from_slice(data);
+            }
+            Frame::Digests { req, sums } => {
+                assert!(sums.len() <= MAX_DIGEST_BLOCKS as usize, "too many digests");
+                w.u8(tag::DIGESTS);
+                w.u64(*req);
+                w.u32(sums.len() as u32);
+                for s in sums {
+                    match s {
+                        None => w.u8(0),
+                        Some(c) => {
+                            w.u8(1);
+                            w.u32(*c);
+                        }
+                    }
+                }
+            }
+            Frame::Mappings { req, exts } => {
+                assert!(exts.len() <= MAX_UNCERTAIN, "too many mapped extents");
+                w.u8(tag::MAPPINGS);
+                w.u64(*req);
+                w.u32(exts.len() as u32);
+                for x in exts {
+                    w.ext(x);
+                }
             }
             Frame::Stale { req, fenced } => {
                 w.u8(tag::STALE);
@@ -367,6 +440,28 @@ impl Frame {
                     data,
                 }
             }
+            tag::DIGEST => {
+                let (req, chunk) = (r.u64()?, r.u32()?);
+                let ext = r.any_ext()?;
+                if ext.len > MAX_DIGEST_BLOCKS {
+                    return Err(DecodeError::Invalid("digest extent too long"));
+                }
+                Frame::Digest { req, chunk, ext }
+            }
+            tag::MAPPED => {
+                let (req, chunk) = (r.u64()?, r.u32()?);
+                // A probe carries no data: it may cover a whole chunk, up to its own limit.
+                let ext = r.any_ext()?;
+                if ext.len > MAX_MAPPED_BLOCKS {
+                    return Err(DecodeError::Invalid("mapped extent too long"));
+                }
+                Frame::Mapped { req, chunk, ext }
+            }
+            tag::DISCARD => Frame::Discard {
+                req: r.u64()?,
+                chunk: r.u32()?,
+                ext: r.ext()?,
+            },
             tag::FENCED => {
                 let req = r.u64()?;
                 let n = r.u32()? as usize;
@@ -403,6 +498,34 @@ impl Frame {
                     req,
                     data: data.to_vec(),
                 }
+            }
+            tag::DIGESTS => {
+                let req = r.u64()?;
+                let n = r.u32()? as usize;
+                if n == 0 || n > MAX_DIGEST_BLOCKS as usize {
+                    return Err(DecodeError::Invalid("digest count"));
+                }
+                let mut sums = Vec::with_capacity(n);
+                for _ in 0..n {
+                    match r.u8()? {
+                        0 => sums.push(None),
+                        1 => sums.push(Some(r.u32()?)),
+                        _ => return Err(DecodeError::Invalid("digest flag")),
+                    }
+                }
+                Frame::Digests { req, sums }
+            }
+            tag::MAPPINGS => {
+                let req = r.u64()?;
+                let n = r.u32()? as usize;
+                if n > MAX_UNCERTAIN {
+                    return Err(DecodeError::Invalid("too many mapped extents"));
+                }
+                let mut exts = Vec::with_capacity(n.min(r.0.len() / 8));
+                for _ in 0..n {
+                    exts.push(r.any_ext()?);
+                }
+                Frame::Mappings { req, exts }
             }
             tag::STALE => Frame::Stale {
                 req: r.u64()?,
@@ -536,6 +659,36 @@ mod tests {
                 ext,
                 data: vec![2; 2 * BLOCK].into(),
             },
+            Frame::Digest {
+                req: 13,
+                chunk: 1,
+                ext: Extent {
+                    start: 0,
+                    len: MAX_DIGEST_BLOCKS,
+                },
+            },
+            // A whole 256 MiB chunk: longer than an I/O, as resync probes are.
+            Frame::Mapped {
+                req: 15,
+                chunk: 1,
+                ext: Extent {
+                    start: 0,
+                    len: MAX_MAPPED_BLOCKS,
+                },
+            },
+            Frame::Discard {
+                req: 16,
+                chunk: 1,
+                ext,
+            },
+            Frame::Digests {
+                req: 14,
+                sums: vec![None, Some(0xdead_beef)],
+            },
+            Frame::Mappings {
+                req: 17,
+                exts: vec![ext, Extent { start: 4, len: 2 }],
+            },
             Frame::Fenced {
                 req: 8,
                 uncertain: vec![
@@ -627,6 +780,23 @@ mod tests {
                 0u32.to_le_bytes().to_vec(),
                 0u32.to_le_bytes().to_vec(),
                 (MAX_BLOCKS + 1).to_le_bytes().to_vec(),
+            ]
+            .concat(),
+            // A probe and a digest request longer than their limits.
+            [
+                vec![tag::MAPPED],
+                1u64.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                (MAX_MAPPED_BLOCKS + 1).to_le_bytes().to_vec(),
+            ]
+            .concat(),
+            [
+                vec![tag::DIGEST],
+                1u64.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                0u32.to_le_bytes().to_vec(),
+                (MAX_DIGEST_BLOCKS + 1).to_le_bytes().to_vec(),
             ]
             .concat(),
             // A bad prune flag.
