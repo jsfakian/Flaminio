@@ -92,22 +92,24 @@ jobs:
     steps:
       - name: Open or update the fuzz issue
         run: |
-          attempt="repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
-          # The fuzz job, by its name (keep in step with `name:` above): exactly one, or this step
-          # fails loudly instead of reporting the wrong thing.
-          jobs=$(gh api "$attempt/jobs" --jq '[.jobs[] | select(.name == "Fuzz every target")]')
-          [[ $(jq length <<<"$jobs") -eq 1 ]] || { echo "::error::no single job named 'Fuzz every target'"; exit 1; }
-          steps=$(jq '.[0].steps | length' <<<"$jobs")
-          # This attempt's artifact only: the list holds every attempt's.
+          # The latest run of the fuzz job, by its name (keep in step with `name:` above), across
+          # attempts: re-running only this job reuses an earlier attempt's fuzz job. None found
+          # fails this step loudly, instead of reporting the wrong thing.
+          job=$(gh api --paginate "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/jobs?filter=all" \
+              --jq '.jobs[] | select(.name == "Fuzz every target")' | jq -s 'max_by(.run_attempt)')
+          [[ $job != null ]] || { echo "::error::no job named 'Fuzz every target'"; exit 1; }
+          steps=$(jq '.steps | length' <<<"$job")
+          fuzzed=$(jq '.run_attempt' <<<"$job")
+          # That attempt's artifact only: the list holds every attempt's.
           kept=$(gh api "repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
-              --jq "[.artifacts[] | select(.name == \"fuzz-artifacts-$GITHUB_RUN_ATTEMPT\")] | length")
+              --jq "[.artifacts[] | select(.name == \"fuzz-artifacts-$fuzzed\")] | length")
           # A path on centaur, for a person to read: not this runner's $HOME.
           # shellcheck disable=SC2088
-          host='~/.cache/flaminio-ci/fuzz-artifacts/'"$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"' on the runner host'
+          host='~/.cache/flaminio-ci/fuzz-artifacts/'"$GITHUB_RUN_ID-$fuzzed"' on the runner host'
           if [[ $steps -eq 0 ]]; then
               note="The Fuzz run $RUN_URL never started: no runner took its fuzz job (are centaur's runners up?). The targets were not fuzzed."
           elif [[ $kept -gt 0 ]]; then
-              note="The Fuzz run $RUN_URL (attempt $GITHUB_RUN_ATTEMPT) kept failing inputs: the artifact fuzz-artifacts-$GITHUB_RUN_ATTEMPT (90 days), and $host. To fix them: docs/ci.md, Fuzzing."
+              note="The Fuzz run $RUN_URL (attempt $fuzzed) kept failing inputs: the artifact fuzz-artifacts-$fuzzed (90 days), and $host. To fix them: docs/ci.md, Fuzzing."
           else
               note="The Fuzz run $RUN_URL failed or was cancelled with no failing inputs uploaded: a build or toolchain failure, a hang, or a failed upload. See its log, and $host, where inputs are kept before the upload."
           fi

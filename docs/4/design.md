@@ -87,9 +87,11 @@ failure or cancellation, with or without inputs, so a hang stopped at the time l
 too. Without `always()`, GitHub would add `success()` to the condition and the job would never run
 after a failed `fuzz`. Whether the attempt kept inputs, it asks the API for the run's artifacts
 and looks for this attempt's `fuzz-artifacts-<attempt>` (the list holds every attempt's), not a
-job output, which a job cancelled at its time limit may not pass on. It also finds the fuzz job
-of this attempt, by name, through the same API (the step fails unless exactly one job has that
-name, rather than report nothing after a rename): if it ran no step, no runner took it, centaur's
+job output, which a job cancelled at its time limit may not pass on. It finds the fuzz job by
+name, through the same API, across all attempts, and takes the latest: re-running only the report
+job reuses an earlier attempt's fuzz job, whose attempt number then names the artifact and the
+runner-host directory to look for. The step fails if no job has that name, rather than report
+nothing after a rename. If the fuzz job ran no step, no runner took it, centaur's
 runners are probably down, and the note says so. That is the case running the report on GitHub's
 runners is for. A run cancelled while still queued by a newer one (the concurrency group) runs no
 job at all, the report included.
@@ -120,10 +122,12 @@ Keeping it a separate job keeps `issues: write` away from the steps that build a
   lockfile gives one clear failure, not three, and still blocks the merge. Dependabot watches the
   fuzz crate's lockfile too (`/dataplane/fuzz`), and `make hygiene` runs cargo-deny on it
   (advisories, licenses, sources) with the data plane's policy. libfuzzer-sys bundles libFuzzer
-  under the permissive NCSA license, allowed for that crate only.
+  under the permissive NCSA license, allowed for that crate only; the data plane's own check
+  allows that exception to go unused (`-A license-exception-not-encountered`).
 - The set check also requires `required-features = ["fuzzing"]` on every `[[bin]]`, without which
   a plain `cargo build` of the crate fails; nothing but target directories directly under
-  `regressions/`, where an input would be read by neither the replay nor the fuzzer; and, in each
+  `regressions/`, where an input would be read by neither the replay nor the fuzzer (hidden files
+  such as Finder's `.DS_Store` excepted: nothing reads them there); and, in each
   `fuzz_targets/<t>.rs`, exactly one `fuzz_target!` line, calling `flaminio_fuzz::<t>` and no
   other harness (a mention in a comment does not count).
 - `make test` runs it after the data plane's and the Go tests.

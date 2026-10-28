@@ -245,8 +245,15 @@ mod regressions {
         assert_eq!(harnesses, sources, "TARGETS against fuzz_targets/*.rs");
         assert_eq!(harnesses, regressions, "TARGETS against regressions/*/");
         // Nothing but target directories in regressions/: an input left there directly would be
-        // read by neither the replay nor the fuzzer.
+        // read by neither the replay nor the fuzzer. Hidden files (a Finder .DS_Store) are read
+        // by nothing at this level and are let be.
         for entry in entries(&path("regressions")) {
+            if entry
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+            {
+                continue;
+            }
             assert!(
                 entry.is_dir(),
                 "{}: not in a target's directory, so never replayed",
