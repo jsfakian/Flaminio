@@ -35,6 +35,8 @@ for t in "${targets[@]}"; do
   # cargo-fuzz creates the working corpus only when it picks the corpus itself.
   mkdir -p "corpus/$t"
   # A 10-second timeout per input (libFuzzer's default is 1200 s); the regression test is stricter.
+  # cargo-fuzz builds optimized with debug assertions and overflow checks unless given -O, so the
+  # fuzzer checks what the replay's dev profile does.
   if ! cargo "+$nightly" fuzz run "$t" "corpus/$t" "regressions/$t" -- \
       -max_total_time="$seconds" -timeout=10; then
     failed+=("$t")

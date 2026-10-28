@@ -244,13 +244,31 @@ mod regressions {
         );
         assert_eq!(harnesses, sources, "TARGETS against fuzz_targets/*.rs");
         assert_eq!(harnesses, regressions, "TARGETS against regressions/*/");
-        // And each binary runs its own harness, so the fuzzer and the replay agree (S2).
+        // Nothing but target directories in regressions/: an input left there directly would be
+        // read by neither the replay nor the fuzzer.
+        for entry in entries(&path("regressions")) {
+            assert!(
+                entry.is_dir(),
+                "{}: not in a target's directory, so never replayed",
+                entry.display()
+            );
+        }
+        // And each binary runs its own harness, so the fuzzer and the replay agree (S2): its one
+        // `fuzz_target!` line calls `flaminio_fuzz::<name>` and nothing else.
         for name in &harnesses {
             let source = path("fuzz_targets").join(format!("{name}.rs"));
             let text = std::fs::read_to_string(&source).expect("fuzz target source");
+            let lines: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with("fuzz_target!"))
+                .collect();
+            let call = format!("flaminio_fuzz::{name}(");
             assert!(
-                text.contains(&format!("flaminio_fuzz::{name}(")),
-                "{}: does not call flaminio_fuzz::{name}",
+                lines.len() == 1
+                    && lines[0].contains(&call)
+                    && lines[0].matches("flaminio_fuzz::").count() == 1,
+                "{}: its fuzz_target! must call {call}..) and nothing else",
                 source.display()
             );
         }

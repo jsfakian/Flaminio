@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: shellcheck --version >/dev/null # make lint skips shellcheck when it is missing
-      - run: make lint LOCKED=--locked
+      - run: make lint
 
   rust-test:
     name: Rust tests (Linux, io_uring included; fuzz regression inputs)
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - run: cd dataplane && cargo test --locked
-      - run: make fuzz-regressions LOCKED=--locked
+      - run: make fuzz-regressions
 
   go-test:
     name: Go tests (race detector, goroutine leaks)

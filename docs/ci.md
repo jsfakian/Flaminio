@@ -21,7 +21,8 @@ What the targets check:
 - **`lint`:** clippy with warnings as errors, rustfmt, `go vet`, gofmt, `buf lint`, shellcheck on
   every script, and actionlint on the workflows (runner labels in `.github/actionlint.yaml`).
 - **`hygiene`:** cargo-deny (known vulnerabilities, unmaintained crates, licenses, duplicate
-  versions, crate sources; policy in [`dataplane/deny.toml`](../dataplane/deny.toml)), unused
+  versions, crate sources; policy in [`dataplane/deny.toml`](../dataplane/deny.toml), for the data
+  plane and for the fuzz crate's own lockfile), unused
   crates (cargo-machete), rustdoc with warnings as errors, staticcheck, govulncheck, and that
   `go.mod` and `go.sum` are tidy and verified.
 - **`race`:** every Go test under the race detector, in random order. Every Go test package checks
@@ -76,7 +77,7 @@ others. A file in `regressions/` is `empty`, `seed-<what>`, or libFuzzer's name 
 `timeout-…`, `oom-…`, `leak-…`, `minimized-from-…`).
 
 **A Dependabot pull request for `/dataplane`** that changes a dependency the fuzz crate shares
-leaves `dataplane/fuzz/Cargo.lock` stale, and the contracts and Rust test jobs fail. Update it on
+leaves `dataplane/fuzz/Cargo.lock` stale, and the contracts job fails. Update it on
 that branch: `cd dataplane/fuzz && cargo update --workspace`, then commit and push.
 
 ## Runners

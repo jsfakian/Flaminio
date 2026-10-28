@@ -115,21 +115,26 @@ Keeping it a separate job keeps `issues: write` away from the steps that build a
   checks a dev build keeps. It is still faster than the fuzzer, which adds instrumentation, hence
   the replay's stricter limits (S4). cargo-fuzz's own builds (release) are unaffected.
 
-- `make fuzz-regressions`: `cd dataplane/fuzz && cargo test $(LOCKED) --lib
-  --no-default-features`. CI passes `LOCKED=--locked`, so it replays exactly what the lockfile
-  pins; locally it is empty, so a developer adding a dependency sees the replay run, not a
-  lockfile error. Dependabot watches the fuzz crate's lockfile too (`/dataplane/fuzz`).
+- `make fuzz-regressions`: `cd dataplane/fuzz && cargo test --lib --no-default-features`. Not
+  `--locked`: the contracts job is the one place that fails on a stale fuzz lockfile, so a stale
+  lockfile gives one clear failure, not three, and still blocks the merge. Dependabot watches the
+  fuzz crate's lockfile too (`/dataplane/fuzz`), and `make hygiene` runs cargo-deny on it
+  (advisories, licenses, sources) with the data plane's policy. libfuzzer-sys bundles libFuzzer
+  under the permissive NCSA license, allowed for that crate only.
 - The set check also requires `required-features = ["fuzzing"]` on every `[[bin]]`, without which
-  a plain `cargo build` of the crate fails.
+  a plain `cargo build` of the crate fails; nothing but target directories directly under
+  `regressions/`, where an input would be read by neither the replay nor the fuzzer; and, in each
+  `fuzz_targets/<t>.rs`, exactly one `fuzz_target!` line, calling `flaminio_fuzz::<t>` and no
+  other harness (a mention in a comment does not count).
 - `make test` runs it after the data plane's and the Go tests.
-- `make lint` adds `cargo clippy $(LOCKED) --all-targets --all-features -- -D warnings` and
+- `make lint` adds `cargo clippy --all-targets --all-features -- -D warnings` and
   `cargo fmt --check` in `dataplane/fuzz`. Clippy builds the five binaries too; they build on
-  stable. CI passes `LOCKED=--locked`, as for the replay.
+  stable.
 - The fuzz job prunes copies of failing inputs older than 90 days from the runner host, as GitHub
   does with the artifacts.
 - A Dependabot pull request for `/dataplane` that changes a dependency the fuzz crate shares
   (through `flaminio-format` or `flaminio-net`) leaves the fuzz lockfile stale, and the contracts
-  and Rust test jobs fail; Dependabot cannot update the second lockfile in the same pull request.
+  job fails; Dependabot cannot update the second lockfile in the same pull request.
   The fix is one command on that branch, in `docs/ci.md`.
 - CI's Rust test job runs `make fuzz-regressions` after `cargo test --locked` in `dataplane`.
   `CARGO_TARGET_DIR` (from the setup action) applies to the fuzz crate as well: its builds share

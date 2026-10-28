@@ -24,6 +24,11 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# libFuzzer, bundled by libfuzzer-sys for the fuzz crate only (never shipped): permissive.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
 [licenses.private]
 # The workspace's own crates are not published.
 ignore = true

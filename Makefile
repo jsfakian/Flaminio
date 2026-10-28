@@ -35,9 +35,6 @@ ACTIONLINT  := $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 # installs it); NIGHTLY=nightly for the latest.
 NIGHTLY   ?= nightly-2026-10-28
 COUNT     ?= 1
-# CI passes LOCKED=--locked to make lint and make fuzz-regressions for the fuzz crate's own
-# workspace; locally, a stale lockfile is just updated.
-LOCKED    ?=
 # The data plane crates with threads, io_uring or unsafe code, for the sanitizers.
 SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net
 # Instrumented builds go apart from the normal ones, under CARGO_TARGET_DIR when it is set (CI).
@@ -73,7 +70,7 @@ sim: ## Replication-protocol simulation: SEEDS random runs, then every injected 
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
 
 fuzz-regressions: ## Replay every committed fuzz regression input, on the stable toolchain (docs/4)
-	cd $(DATAPLANE)/fuzz && $(CARGO) test $(LOCKED) --lib --no-default-features
+	cd $(DATAPLANE)/fuzz && $(CARGO) test --lib --no-default-features
 
 fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + cargo-fuzz if needed)
 	FUZZ_SECONDS=$(FUZZ_SECONDS) NIGHTLY=$(NIGHTLY) scripts/dev/fuzz.sh
@@ -83,7 +80,7 @@ meta-interop: ## The data plane's Rust metadata client against the Go service, o
 
 lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck, actionlint
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
-	cd $(DATAPLANE)/fuzz && $(CARGO) clippy $(LOCKED) --all-targets --all-features -- -D warnings && $(CARGO) fmt --check
+	cd $(DATAPLANE)/fuzz && $(CARGO) clippy --all-targets --all-features -- -D warnings && $(CARGO) fmt --check
 	$(GO) vet ./...
 	@test -z "$$(gofmt -l api meta pkg control)" || { echo "gofmt needed:"; gofmt -l api meta pkg control; exit 1; }
 	$(BUF) lint
@@ -107,6 +104,8 @@ meta-vectors: ## Regenerate the metadata transition vectors from the Rust model
 .PHONY: hygiene race contracts miri sanitize
 hygiene: ## Advisories and licenses (cargo-deny), unused crates, rustdoc, staticcheck, govulncheck, go.mod
 	cd $(DATAPLANE) && $(CARGO) deny check
+	cd $(DATAPLANE)/fuzz && $(CARGO) deny --config ../deny.toml check \
+	    -A license-not-encountered -A advisory-not-detected advisories licenses sources
 	cd $(DATAPLANE) && $(CARGO) machete
 	cd $(DATAPLANE) && RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps --workspace --quiet
 	$(STATICCHECK) ./...
