@@ -180,7 +180,7 @@ vssh_tty() {
     local jump
     jump=$(vm_jump "$1")
     ssh -t -o "UserKnownHostsFile=$LOCAL_STATE_DIR/known_hosts" -o StrictHostKeyChecking=accept-new \
-        ${jump:+-J "$jump"} "$VM_USER@$(vmvar "$1" IP)"
+        ${SSH_IDENTITY:+-i "$SSH_IDENTITY"} ${jump:+-J "$jump"} "$VM_USER@$(vmvar "$1" IP)"
 }
 
 cmd_console() {
@@ -352,7 +352,7 @@ cmd_repl_fault() {
 # overlay port of every VM (UDP), each open to the other server only. When DEMO_CP_SRC_IP is set
 # (Mac control-plane demo), the same UDP forwards also accept that source.
 forward_rules() {
-    local host=$1 vm other rules=() src
+    local host=$1 vm other rules=()
     if [[ $host == "$HOST_B" ]]; then
         rules+=("tcp/$REPL_PORT/$VM_B_IP/$REPL_PORT/$HOST_A_IP")
     fi

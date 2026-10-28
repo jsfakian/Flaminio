@@ -1,0 +1,76 @@
+# The long and slow checks, every night on main (docs/ci.md).
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  sim:
+    name: Simulation (200 000 new seeds every night)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - name: Random runs, from a different first seed each day
+        run: |
+          day=$(( $(date -u +%s) / 86400 ))
+          first=$(( day * 200000 ))
+          echo "seeds $first to $((first + 199999)); rerun one with run_seed(seed)"
+          cd dataplane && cargo run --release -q -p flaminio-repl --example sim -- "$first" 200000
+      - name: Every injected bug is caught
+        run: cd dataplane && cargo test --release -q -p flaminio-repl -- --include-ignored
+
+  crash:
+    name: Crash consistency (50 000 cases)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make crash-test
+
+  race:
+    name: Go tests under the race detector, 20 shuffled runs
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make race COUNT=20
+
+  sanitize:
+    name: Sanitizers (address and leaks, threads)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make sanitize
+
+  miri:
+    name: Miri (unsafe code)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make miri
+
+  hygiene:
+    # New advisories are published without any change here.
+    name: Hygiene (advisories, licenses, unused crates, rustdoc, staticcheck, govulncheck)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make hygiene

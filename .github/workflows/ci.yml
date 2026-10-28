@@ -1,0 +1,75 @@
+# Every pull request and every push to main, on the self-hosted runners (docs/ci.md). Each job
+# is one make target, so `make <target>` reproduces it locally.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Lint (clippy, rustfmt, go vet, gofmt, buf, shellcheck)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: shellcheck --version >/dev/null # make lint skips shellcheck when it is missing
+      - run: make lint
+
+  rust-test:
+    name: Rust tests (Linux, io_uring included)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: cd dataplane && cargo test --locked
+
+  go-test:
+    name: Go tests (race detector, goroutine leaks)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make race
+
+  hygiene:
+    name: Hygiene (advisories, licenses, unused crates, rustdoc, staticcheck, govulncheck)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make hygiene
+
+  contracts:
+    name: Contracts (generated code, vectors, fuzz lockfile, Rust client vs Go service)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make contracts
+
+  sim:
+    name: Protocol simulation (20 000 seeds, every injected bug caught)
+    runs-on: [self-hosted, flaminio]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup
+      - run: make sim

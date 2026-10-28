@@ -207,7 +207,7 @@ func client(args []string) error {
 	_ = fs.Parse(args)
 	args = fs.Args()
 	if len(args) == 0 {
-		return fmt.Errorf("usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete|volumes|move|drain|undrain ...")
+		return fmt.Errorf("usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete|volumes|move|drain|undrain [args]")
 	}
 	creds := insecure.NewCredentials()
 	if files.Cert != "" {

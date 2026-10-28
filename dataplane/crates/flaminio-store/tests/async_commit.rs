@@ -463,7 +463,10 @@ fn an_empty_staged_group_does_not_jump_the_queue() {
         "the empty group must not settle ahead of the commit in flight"
     );
     s.device().complete();
-    let first = s.poll_write_batch(false).unwrap().expect("the first commit");
+    let first = s
+        .poll_write_batch(false)
+        .unwrap()
+        .expect("the first commit");
     assert!(first.iter().all(Result::is_ok), "{first:?}");
     assert_eq!(&read(&s, o, d.len() as u64), &d);
     let second = s
@@ -471,7 +474,10 @@ fn an_empty_staged_group_does_not_jump_the_queue() {
         .unwrap()
         .expect("the empty staged group");
     assert_eq!(second.len(), 1);
-    assert!(matches!(second[0], Err(StoreError::StaleEpoch { .. })), "{second:?}");
+    assert!(
+        matches!(second[0], Err(StoreError::StaleEpoch { .. })),
+        "{second:?}"
+    );
     assert!(!s.commit_in_flight());
 }
 
