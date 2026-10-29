@@ -31,9 +31,9 @@ compare the header's revision in their transactions.
   moving.
 
 **S4. A deletion interrupted between its two steps** leaves the header marked. The volume stays
-gone for every other operation, and its id cannot be reused: a create with it gets `Aborted`,
-saying the volume is being deleted, so that the CSI provisioner retries it. The next `DeleteVolume` of it finds
-the mark, and does step 2.
+gone for every other operation. The next `DeleteVolume` of it finds the mark, and does step 2.
+A create with its id does the same, since the deletion's caller may never return, and then
+answers `Aborted`: the id is free once the tombstone is confirmed.
 
 **S4a. A deletion during a creation.** A creation writes its chunk records, and finally clears its
 own mark, each conditional on the header it claimed. A deletion's mark changes that header, so
@@ -86,8 +86,11 @@ reason, such as an unregistered destination, still fails the step.
   - `GetVolume` and `MoveReplica` return `NotFound`, `ListVolumes` leaves the volume out, and a
     create with its id gets `Aborted`;
   - `DeleteVolume` then finishes: no header, and a tombstone for the replicas.
-- **Deletion during a creation.** A deletion run when the creation reads its claimed header: the
-  creation fails, and leaves no header and no chunk records.
+- **Deletion during a creation.** A 130-chunk creation, with a deletion run after its first batch
+  of 120 chunk records commits: the creation fails with `Aborted`, and the tombstone names the
+  first batch's nodes.
+- **A deletion's retry** after chunk records were left behind clears them, and answers
+  `NotFound`.
 - **Volume deleted mid-move.** A deletion run when `MoveReplica` reads the header: the move gets
   `NotFound`.
 - **Damaged header.** A header overwritten with bytes that are not JSON: `DeleteVolume` removes

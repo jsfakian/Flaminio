@@ -31,12 +31,23 @@ revision from `readHeader`. That is what fences it off a deletion (S3). Its doc 
 **`ChangeIsr`** compares the header's revision already. No change, except that a chunk record
 missing because the volume is gone is `NotFound` (`chunkMissing`, which `MoveReplica` uses too).
 
+**`createVolume` and an interrupted deletion.** A create whose claim fails because a marked
+header holds the id finishes that deletion (`DeleteVolume`), then answers `Aborted`. A deletion
+interrupted after its mark may have no caller left to retry it (the CLI, say), and the volume is
+hidden from every listing, so this is where it gets finished. The deletion was decided already.
+
 **`createVolume`.** It claims the id with its `Creating` header through `TxnRev`. Every later
 write compares the claim's revision: the cleanup of leftover chunk records, each chunk batch,
 and the final write that clears `Creating`. Before, the batches had no compare, and the final
 write compared a fresh read. A deletion's mark in between now stops the creation. A claim that
-fails because a deleting header holds the id answers `Aborted` ("being deleted"), which the CSI
-provisioner retries, rather than `AlreadyExists`.
+fails because a deleting header holds the id answers `Aborted` (above), which the CSI
+provisioner retries, rather than `AlreadyExists`. A creation stopped by a deletion answers
+`Aborted` too, not `Unavailable`, which a client takes for a dead instance and replays
+elsewhere.
+
+**A deletion's retry clears leftover chunk records.** If `deleteChunks` fails after a deletion
+commits, the retry finds no header. Before it answers `NotFound`, it deletes the chunk records
+still there, conditional on the header still being absent.
 
 **The drain** (`control/drain/drain.go`). Each volume's moves are in `stepVolume`, whose progress
 the step adds up only for volumes still there. `NotFound` from `GetVolume` skips the volume. On
@@ -60,6 +71,13 @@ fails for another reason fails the step with that error.
 - **Compare every chunk's revision in `DeleteVolume`.** A transaction may hold at most
   `kv.MaxTxnOps` (120) compares, so this fails for volumes over 119 chunks (about 29.75 GiB at
   256 MiB a chunk).
+
+## Risks
+
+- **Mixed versions during a rolling upgrade.** A metadata instance older than this ignores
+  `Deleting`. A move or attach it serves can slip past a deletion, and an attach can rewrite the
+  header without the mark. Upgrade every instance before relying on the fence. The window lasts
+  only while versions are mixed.
 
 ## Costs
 
@@ -85,5 +103,5 @@ wrapped etcd.
 - **Deletion in between:** same hook point, deleting the header directly. `MoveReplica` returns
   `NotFound`; chunk 0 has no move.
 - **Interrupted deletion:** the header written marked directly. `GetVolume` and `MoveReplica`
-  return `NotFound`, `ListVolumes` is empty, and `CreateVolume` gets `AlreadyExists`. Then
-  `DeleteVolume` leaves no header, and a and b on the tombstone.
+  return `NotFound`, `ListVolumes` is empty, and `CreateVolume` gets `Aborted`, having finished
+  the deletion: no header, and a and b on the tombstone.

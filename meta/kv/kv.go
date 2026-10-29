@@ -41,7 +41,9 @@ type KV interface {
 	// Txn applies ops atomically if every compare holds. It reports whether it applied.
 	Txn(ctx context.Context, cmps []Cmp, ops []Op) (bool, error)
 	// TxnRev is Txn, and the revision its writes got (0 if it did not apply): a later compare
-	// on a key it wrote needs no read, so nothing can come between (docs/8).
+	// on a key it wrote needs no read, so nothing can come between (docs/8). It is meant for a
+	// transaction that writes a key: without one, the revision names no key, and differs
+	// between stores.
 	TxnRev(ctx context.Context, cmps []Cmp, ops []Op) (rev int64, ok bool, err error)
 	// PutTTL writes a key that disappears ttl after its last PutTTL.
 	PutTTL(ctx context.Context, key string, value []byte, ttl time.Duration) error

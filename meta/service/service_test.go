@@ -596,13 +596,15 @@ func TestMoveAndDrain(t *testing.T) {
 	})
 }
 
-// interleaveKV runs a hook once, after the first Get of `key`, or List of `prefix`, it sees and
-// before returning that read: the hook can make another write land between a read and the write
-// that follows it. It counts the Txn calls on `key` made outside the hook.
+// interleaveKV runs a hook once: after the first Get of `key`, or List of `prefix`, it sees, before
+// returning that read, or after the first write of `txnKey` that applied. The hook can make
+// another write land between a read and the write that follows it, or between two writes. It
+// counts the writes of `key` made outside the hook.
 type interleaveKV struct {
 	kv.KV
 	key    string
 	prefix string
+	txnKey string
 	hook   atomic.Pointer[func()]
 	inner  atomic.Bool
 	txns   atomic.Int32
@@ -634,12 +636,25 @@ func (k *interleaveKV) List(ctx context.Context, prefix string) ([]kv.Entry, err
 }
 
 func (k *interleaveKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := k.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+// TxnRev counts the writes of `key`, and runs the hook after the first write of `txnKey` that
+// applied.
+func (k *interleaveKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	wrote := false
 	for _, op := range ops {
 		if op.Key == k.key && !k.inner.Load() {
 			k.txns.Add(1)
 		}
+		wrote = wrote || (k.txnKey != "" && op.Key == k.txnKey && !op.Delete)
 	}
-	return k.KV.Txn(ctx, cmps, ops)
+	rev, ok, err := k.KV.TxnRev(ctx, cmps, ops)
+	if ok && wrote {
+		k.runHook()
+	}
+	return rev, ok, err
 }
 
 func nodeLabels(t *testing.T, s *Service, id string) (string, map[string]string) {
@@ -988,11 +1003,9 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
 			t.Fatalf("move of a volume being deleted: %v", err)
 		}
+		// A create over it finishes the deletion: its caller may never come back.
 		if _, err := create(s, "v", 2, 2, 1); code(err) != codes.Aborted {
 			t.Fatalf("create over a volume being deleted: %v", err)
-		}
-		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
-			t.Fatal(err)
 		}
 		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok || !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
 			t.Fatal("the deletion was not finished: header left, or tombstone missing")
@@ -1001,23 +1014,26 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 }
 
 // A deletion during a creation stops the creation: it adds no chunk after the deletion's listing,
-// and does not bring the volume back by clearing the deletion's mark (docs/8).
+// and does not bring the volume back by clearing the deletion's mark (docs/8). The deletion runs
+// after the creation's first batch of chunk records (120), so it lists them and tombstones their
+// nodes, and the creation's second batch is refused.
 func TestDeleteVolumeDuringItsCreation(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
 		s := New(store, Options{})
 		addNodes(t, s, "a", "b")
-		// After its claim, createVolume lists the chunk records (leftovers of an earlier deletion)
-		// before it writes its own: the deletion runs there.
-		store.prefix = chunkPrefix("v")
+		store.txnKey = chunkKey("v", 0)
 		hook := func() {
 			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
 				t.Error(err)
 			}
 		}
 		store.hook.Store(&hook)
-		if _, err := create(s, "v", 2, 2, 1); err == nil {
-			t.Fatal("a creation deleted midway succeeded")
+		if _, err := create(s, "v", 130, 2, 1); code(err) != codes.Aborted {
+			t.Fatalf("a creation deleted midway: %v, want Aborted", err)
+		}
+		if !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
+			t.Fatal("the first batch's nodes are not on the tombstone")
 		}
 		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok {
 			t.Fatal("the creation brought the deleted volume back")
@@ -1068,6 +1084,24 @@ func TestDeleteVolumeWithADamagedHeader(t *testing.T) {
 		}
 		if !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
 			t.Fatal("the tombstone does not name the replicas")
+		}
+	})
+}
+
+// A deletion whose chunk records were left behind (deleteChunks failed after its commit) has them
+// cleared by its retry, which then answers NotFound (docs/8).
+func TestDeleteVolumeRetryClearsLeftoverChunks(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: chunkKey("v", 0), Value: []byte("{}")}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
+			t.Fatalf("retry of a finished deletion: %v", err)
+		}
+		if l, err := store.List(ctx, chunkPrefix("v")); err != nil || len(l) != 0 {
+			t.Fatalf("chunk records left: %d %v", len(l), err)
 		}
 	})
 }

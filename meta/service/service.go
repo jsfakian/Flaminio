@@ -410,12 +410,15 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		return nil, err
 	}
 	if !ok {
-		// A deletion that was interrupted after its mark (docs/8) holds the id until it is
-		// finished: say so, rather than that the volume exists. Aborted, as the operation can
-		// succeed once the deletion is retried.
+		// A deletion that was interrupted after its mark (docs/8) holds the id. Its caller may
+		// never come back, and the volume is hidden from every listing, so finish it here: it was
+		// decided already. Aborted, as the id is free once the tombstone is confirmed.
 		if h, _, err := s.readHeader(ctx, spec.ID); errors.Is(err, domain.ErrNotFound) && h.Deleting {
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: spec.ID}); err != nil {
+				return nil, err
+			}
 			return nil, status.Errorf(codes.Aborted,
-				"volume %q is being deleted: finish its deletion (DeleteVolume) first", spec.ID)
+				"volume %q was being deleted: its deletion is finished now; the id is free once its replicas are deleted", spec.ID)
 		}
 		return nil, fmt.Errorf("%w: volume %q", domain.ErrExists, spec.ID)
 	}
@@ -423,7 +426,8 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	// deletion marks the header (docs/8), and the creation then stops, rather than add chunks
 	// after the deletion listed them, or clear the deletion's mark with its own header.
 	cmp := []kv.Cmp{{Key: volumeKey(spec.ID), Rev: claim}}
-	changed := fmt.Errorf("volume %q changed while being created (deleted?)", spec.ID)
+	// Aborted, like any contention: not Unavailable, which a client takes for a dead instance.
+	changed := status.Errorf(codes.Aborted, "volume %q changed while being created (deleted?)", spec.ID)
 	if ok, err := s.deleteChunks(ctx, spec.ID, cmp); err != nil { // leftovers of an interrupted delete
 		return nil, err
 	} else if !ok {
@@ -506,6 +510,11 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 			return nil, errStatus(err)
 		}
 		if !ok {
+			// A deletion whose chunk records were not all deleted (deleteChunks failed after its
+			// commit) leaves them for its retry to clear, while the header is still absent.
+			if _, err := s.deleteChunks(ctx, r.GetId(), []kv.Cmp{{Key: volumeKey(r.GetId()), Rev: 0}}); err != nil {
+				return nil, errStatus(err)
+			}
 			return nil, errStatus(fmt.Errorf("%w: volume %q", domain.ErrNotFound, r.GetId()))
 		}
 		// A header that does not parse needs no mark: readHeader fails on it, so no move or ISR
