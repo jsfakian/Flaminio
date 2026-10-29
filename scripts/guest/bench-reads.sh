@@ -4,6 +4,12 @@
 #   bench-reads.sh fill DEV SPAN         write all of SPAN once, with fio's checksum in every
 #                                        1 MiB block (so `verify` can check it later)
 #   bench-reads.sh warm DEV SPAN         read all of SPAN once, unmeasured
+#   bench-reads.sh range DEV SPAN DISK   read all of SPAN again, tracing the reads it makes from
+#                                        DISK; prints "FIRST END TOTAL DISK_BYTES": the 1 GiB
+#                                        regions of DISK it took 64 MiB or more from (FIRST to
+#                                        END, END excluded; 0 0 if none), the bytes it took from
+#                                        DISK, and DISK's size. The regions, one "INDEX BYTES" per
+#                                        line, go to /tmp/bench-range-regions.txt (docs/9)
 #   bench-reads.sh job DEV OFFSET SPAN NAME RW BS QD RUNTIME OUT [JOBS]
 #                                        one measured job; prints a TSV row: name, IOPS, MiB/s,
 #                                        p50 and p99 (us), fio's CPU and the ublk queue thread's
@@ -31,6 +37,53 @@ case "${1:-}" in
         drop_caches
         sudo fio --name=warm --filename="$2" --size="$3" --rw=read --bs=1m --iodepth=8 \
             "${fio_common[@]}" --output=/tmp/bench-warm.json >/dev/null
+        ;;
+    range)
+        dev=$2 span=$3 disk=$4
+        block_device "$dev"
+        block_device "$disk"
+        if ! command -v bpftrace >/dev/null; then
+            { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bpftrace; } \
+                >/dev/null 2>&1 || die "bpftrace is missing and could not be installed"
+        fi
+        fio=$(command -v fio) || die "fio is missing"
+        want=$(numfmt --from=iec "$span") || die "the volume's size $span is not a size"
+        name=${disk##*/}
+        IFS=: read -r major minor <"/sys/class/block/$name/dev"
+        disk_bytes=$(($(<"/sys/class/block/$name/size") * 512))
+        trace=/tmp/bench-range-trace.txt report=/tmp/bench-range-fio.json
+        regions=/tmp/bench-range-regions.txt
+        # The fio report is root's, in the sticky /tmp. A fio that fails before writing it must
+        # not pass on the last run's.
+        sudo rm -f "$trace" "$report" "$regions"
+        drop_caches
+        # bpftrace attaches, then runs fio (-c: no shell, so no quotes or redirections in it),
+        # and exits when fio does, printing the map: bytes read per 1 GiB region of the disk.
+        prog="tracepoint:block:block_rq_issue
+            /args.dev == $(((major << 20) | minor)) && strncmp(args.rwbs, \"R\", 1) == 0/
+            { @r[args.sector >> 21] = sum(args.bytes); }
+            END { printf(\"trace-end\\n\"); }"
+        # The trace file is this user's, written by this shell (SC2024): only bpftrace needs root.
+        # shellcheck disable=SC2024
+        if ! sudo timeout 300 bpftrace -B none -e "$prog" \
+            -c "$fio --name=range --filename=$dev --size=$span --rw=read --bs=1m --iodepth=8 --ioengine=io_uring --direct=1 --output-format=json --output=$report" \
+            >"$trace" 2>&1 || ! grep -qx trace-end "$trace"; then
+            tail -n 20 "$trace" >&2
+            die "the trace of $dev's read failed"
+        fi
+        jq -e --argjson want "$want" \
+            '.jobs[0].error == 0 and .jobs[0].read.io_bytes >= $want' "$report" >/dev/null 2>&1 ||
+            die "the traced read of $dev failed (fio's report: $report)"
+        # bpftrace sorts a map by value, and mawk cannot sort: sort -n. %.0f: mawk prints large
+        # integers in exponent form.
+        awk '/^@r\[[0-9]+\]: [0-9]+$/ { sub(/^@r\[/, ""); sub(/\]:/, ""); printf "%d %.0f\n", $1, $2 }' \
+            "$trace" | sort -n >"$regions"
+        awk -v disk="$disk_bytes" -v min=$((64 << 20)) '
+            { total += $2; if ($2 >= min) { if (first == "") first = $1; last = $1 } }
+            END {
+                if (first == "") printf "0 0 %.0f %.0f\n", total, disk
+                else printf "%d %d %.0f %.0f\n", first, last + 1, total, disk
+            }' "$regions"
         ;;
     job)
         dev=$2 off=$3 span=$4 name=$5 rw=$6 bs=$7 qd=$8 runtime=$9 out=${10} jobs=${11:-1}
@@ -66,5 +119,5 @@ case "${1:-}" in
             exit 1
         fi
         ;;
-    *) die "usage: bench-reads.sh fill|warm|job|verify|disk ..." ;;
+    *) die "usage: bench-reads.sh fill|warm|range|job|verify|disk ..." ;;
 esac

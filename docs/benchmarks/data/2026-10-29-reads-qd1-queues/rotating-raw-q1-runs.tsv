@@ -1,0 +1,7 @@
+rep	side	job	IOPS	MiB/s	p50	p99	fio_cpu	queue_cpu	temp
+1	raw	randread-4k-qd1	15388	60.1	62	93	5	-	48/46
+1	flaminio	randread-4k-qd1	13011	50.8	73	84	4	11.0	46/46
+2	raw	randread-4k-qd1	11310	44.1	83	100	3	-	46/46
+2	flaminio	randread-4k-qd1	13373	52.2	69	82	4	10.6	46/46
+3	raw	randread-4k-qd1	11363	44.3	82	101	4	-	46/46
+3	flaminio	randread-4k-qd1	13055	50.9	73	85	4	10.0	46/46

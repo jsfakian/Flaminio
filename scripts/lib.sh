@@ -217,3 +217,32 @@ wait_for() {
         sleep 5
     done
 }
+
+# The span the raw jobs of bench-reads read (docs/9): a span of the volume's size, from where its
+# data starts on the node's disk, as the guest step `bench-reads.sh range` found it.
+#   bench_reference SPAN FIRST END TOTAL DISK_BYTES
+# SPAN is the volume's size (16G); FIRST and END the range in GiB; TOTAL the bytes the traced
+# read took from the disk. Prints "OFFSET LENGTH" in GiB, or stops when the range cannot stand
+# for the volume's data. Integers only.
+bench_reference() {
+    (($# == 5)) || die "bench_reference: 5 arguments, not $#"
+    local span=$1 first=$2 end=$3 total=$4 disk=$5 n s sb d off
+    [[ $span =~ ^([1-9][0-9]*)G$ ]] || die "bench_reference: the volume's size $span is not <n>G"
+    s=${BASH_REMATCH[1]} sb=$((BASH_REMATCH[1] << 30))
+    # Leading zeros would be octal to bash.
+    for n in "$first" "$end" "$total" "$disk"; do
+        [[ $n =~ ^(0|[1-9][0-9]*)$ ]] || die "bench_reference: $n is not a number"
+    done
+    ((total * 10 >= sb * 9)) ||
+        die "the traced read took $((total >> 20)) MiB from the disk, under 90% of the volume ($span): its data is not on this disk, or was never written (FILL=1 writes it)"
+    ((total * 10 <= sb * 11)) ||
+        die "the traced read took $((total >> 20)) MiB from the disk, over 110% of the volume ($span): something else read the disk meanwhile; run again"
+    ((first < end)) || die "no 1 GiB region of the disk gave the traced read 64 MiB or more"
+    # A volume not aligned to 1 GiB takes one region more than its size.
+    (((end - first - 1) * 2 <= s * 3)) ||
+        die "the volume's data spans GiB $first-$end of the disk, more than 1.5 times its size ($span) and one region: it is spread out (refill it with FILL=1, or use a new volume), or something else read the disk meanwhile"
+    d=$((disk >> 30)) off=$first
+    ((first + s <= d)) || off=$((d - s))
+    ((off >= 0)) || die "the disk ($d GiB) is smaller than the volume ($span)"
+    echo "$off $s"
+}

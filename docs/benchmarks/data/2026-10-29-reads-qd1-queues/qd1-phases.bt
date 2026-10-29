@@ -1,0 +1,26 @@
+// Phases of a QD1 read through ublk, from block tracepoints: one request in flight at a time.
+// Usage: bpftrace qd1-phases.bt <ublk dev_t> <store dev_t>  (dev_t as MAJOR<<20 | MINOR)
+tracepoint:block:block_rq_issue
+/args.dev == $1 && args.rwbs == "R"/ { @t0 = nsecs; @n0++; }
+
+tracepoint:block:block_rq_issue
+/args.dev == $2 && @t0 != 0/ { @t1 = nsecs; }
+
+tracepoint:block:block_rq_complete
+/args.dev == $2 && @t1 != 0/ { @t2 = nsecs; }
+
+tracepoint:block:block_rq_complete
+/args.dev == $1 && @t0 != 0 && @t1 != 0 && @t2 != 0/ {
+  @dispatch_us = hist((@t1 - @t0) / 1000);
+  @device_us = hist((@t2 - @t1) / 1000);
+  @complete_us = hist((nsecs - @t2) / 1000);
+  @total_us = hist((nsecs - @t0) / 1000);
+  @dispatch_sum += @t1 - @t0; @device_sum += @t2 - @t1; @complete_sum += nsecs - @t2; @n++;
+  @t0 = 0; @t1 = 0; @t2 = 0;
+}
+
+END {
+  printf("reads %d: mean dispatch %d ns, device %d ns, completion %d ns\n", @n,
+    @dispatch_sum / @n, @device_sum / @n, @complete_sum / @n);
+  clear(@t0); clear(@t1); clear(@t2); clear(@n0);
+}

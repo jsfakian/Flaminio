@@ -1,0 +1,58 @@
+--- a/ublk.rs	2026-10-29 17:54:08
++++ b/ublk.rs	2026-10-29 17:54:08
+@@ -543,6 +543,8 @@
+     staging: Cell<u32>,
+     /// Arms this queue's timer for a commit waiting for writes to gather.
+     gather: std::cell::OnceCell<smol::channel::Sender<Duration>>,
++    /// PROTOTYPE: device reads in flight on this queue.
++    reading: Cell<u32>,
+ }
+ 
+ impl EngineCtx {
+@@ -989,6 +991,7 @@
+             due: Cell::new(false),
+             staging: Cell::new(0),
+             gather: std::cell::OnceCell::new(),
++            reading: Cell::new(0),
+         };
+         if let Err(e) = serve_with(qid, dev, &ctx, zero_copy) {
+             eprintln!("flaminio-io: queue {qid} stopped: {e}");
+@@ -1140,7 +1143,9 @@
+             }
+         };
+         let is_done = || tasks.iter().all(|t| t.is_finished());
+-        event_loop(&q, ctx.shared.poll, run_ops, is_done).await
++        let inflight_poll = std::env::var_os("FLAMINIO_POLL_INFLIGHT").is_some();
++        let inflight = || inflight_poll && ctx.reading.get() > 0;
++        event_loop(&q, ctx.shared.poll, run_ops, is_done, inflight).await
+     }));
+     result.map_err(|e| format!("event loop: {e}"))
+ }
+@@ -1453,8 +1458,10 @@
+         }
+     }
+     let mut refused = Vec::new();
++    ctx.reading.set(ctx.reading.get() + pending.len() as u32);
+     for (completion, to, len, device_offset) in pending {
+         let got = completion.await;
++        ctx.reading.set(ctx.reading.get() - 1);
+         if got == -libc::EINVAL {
+             refused.push((to, len, device_offset));
+         } else if got != len as i32 {
+@@ -1638,6 +1645,7 @@
+     poll: Duration,
+     run_ops: impl Fn(),
+     is_done: impl Fn() -> bool,
++    inflight: impl Fn() -> bool,
+ ) -> Result<(), UblkError> {
+     use libublk::uring_async::{
+         ublk_reap_io_events_with_update_queue, ublk_wake_task, uring_poll_io_fn,
+@@ -1645,7 +1653,7 @@
+     run_ops();
+     let mut last = Instant::now();
+     loop {
+-        let spinning = !poll.is_zero() && last.elapsed() < poll;
++        let spinning = (!poll.is_zero() && last.elapsed() < poll) || inflight();
+         // Submit what the tasks queued; wait for a completion only when not spinning.
+         let polled = if spinning {
+             uring_poll_io_fn::<io_uring::squeue::Entry>(q, None, 0)

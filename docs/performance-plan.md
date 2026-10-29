@@ -8,26 +8,33 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## Status (2026-10-21)
+## Status (2026-10-29)
 
-R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)). Measured on fl-b at 4 vCPUs,
-against raw on 16 GiB spans of the same disk, caches dropped before every job, medians of 3
-runs. Every run passed fio's end-to-end check of the whole volume, and every verify-mode run
-logged 0 checksum failures.
+R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)), and issue #9's QD1 work
+([results](benchmarks/2026-10-29-reads-qd1-queues.md)). Measured on fl-b at 4 vCPUs, caches
+dropped before every job, medians of 3 runs. Since 2026-10-29 raw reads a span of the volume's
+size where its data is (rule 2); the cells marked * were measured before, against raw rotating
+over 16 GiB regions at 0, 32 and 64 GiB. Every run passed fio's end-to-end check of the whole
+volume, and every verify-mode run logged 0 checksum failures.
 
-| Read job | Verify, start | Zero copy, start | **Zero copy now** | With 100 µs polling | Verify now |
+| Read job | Verify, start* | Zero copy, start* | **Zero copy now** | With 100 µs polling | Verify now* |
 |---|---:|---:|---:|---:|---:|
-| 4K random, QD1 | 82% | 83% | 84% | **88%** | 82% |
-| 4K random, QD32 | 74% | 88% | **95%** | 96% | 87% |
-| 1M sequential, QD8 | 51% | ≈ 100% | **≈ 100%** | 102% | 58% |
+| 4K random, QD1 | 82% | 83% | 85% | 88% | 82% |
+| 4K random, QD32 | 74% | 88% | **98%** | 96%* | 87% |
+| 1M sequential, QD8 | 51% | ≈ 100% | **100%** | 102%* | 58% |
 
-**Two fio jobs, 2 queues (R4):** 94% at QD32, against 90% with 1 queue.
+**4 queues, one per vCPU** (zero copy): QD1 88%, and 90% with 100 µs polling; QD32 86%, as one
+fio job then shares its CPU with its queue's thread; 1M 100%.
 
-**Goal:** QD32 and 1M meet it (≥ 90%). QD1 does not: 84% by default, 88% with polling. The
-rest is the ublk round trip, a larger change; next steps in the results document.
+**Two fio jobs, 2 queues (R4)*:** 94% at QD32, against 90% with 1 queue.
+
+**Goal:** QD32 and 1M meet it (≥ 90%). QD1 does not by default: 85%, 88% with polling or with
+4 queues. It reaches 90% only with both, which costs a core. The rest is the ublk round trip;
+next steps in issue #9's results.
 
 **Decided:** zero copy for performance, the verify path for integrity runs. Polling
-(`--poll-us`) and several queues (`--queues`) are per-node settings, off by default.
+(`--poll-us`) and several queues (`--queues`) are per-node settings, off by default. One queue
+per vCPU lowers QD1 latency, and costs a single submitter at QD32.
 
 **Writes (2026-10-14):** W1–W2's harness is done, and comparison A (RF 1 against raw
 O_DSYNC, steady state) is measured ([results](benchmarks/2026-10-14-writes-rf1.md)). 12
@@ -163,6 +170,16 @@ Every benchmark run, Flaminio's or the raw disk's, follows the same steps:
 2. **Same span.** The raw jobs cover a range of the same size as the Flaminio volume (16 GiB),
    not the whole 100 GiB disk. A drive's mapping-table cache makes larger spans slower, and the
    two sides must pay the same.
+   - **Where, for reads** (since 2026-10-29, [issue #9](9/design.md)): from where the volume's
+     data starts on the node's disk. `bench-reads` traces a read of the whole volume to find
+     the range its data is in, and stops if that range cannot stand for it: less than 90% or
+     more than 110% of the volume read from the disk, or a range over 1.5 times its size plus
+     one 1 GiB region.
+   - **Why:** regions of a disk can read at different speeds. On fl-b, the regions at 32 and
+     64 GiB took 37% longer per 4K read than the one at 0, while the volume's data was at
+     0–21 GiB. Before, raw rotated over 0, 32 and 64 GiB.
+   - **The raw span must have been written** (rule 1), as the volume's was.
+   - The write rules (section 4) keep their own span.
 3. **Caches cleared before every job**, in this order:
    1. `sync`;
    2. `echo 3 > /proc/sys/vm/drop_caches` in the guest;
