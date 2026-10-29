@@ -28,9 +28,11 @@ want() {
 want "0 16" 16G 0 21 $((16 * G)) $DISK
 # A range at the end of the disk: the span moves back inside it.
 want "84 16" 16G 85 100 $((15 * G)) $DISK
-# The range at most 1.5 times the volume.
-want "0 16" 16G 0 24 $((16 * G)) $DISK
-want refused 16G 0 25 $((16 * G)) $DISK
+# The range at most 1.5 times the volume, plus the region a volume not aligned to 1 GiB takes.
+want "0 16" 16G 0 25 $((16 * G)) $DISK
+want refused 16G 0 26 $((16 * G)) $DISK
+want "3 1" 1G 3 5 $G $DISK
+want refused 1G 3 6 $G $DISK
 # From 90% to 110% of the volume read from the disk (16 GiB: 15461882265.6 and 18897856102.4).
 want "0 16" 16G 0 21 15461882266 $DISK
 want refused 16G 0 21 15461882265 $DISK

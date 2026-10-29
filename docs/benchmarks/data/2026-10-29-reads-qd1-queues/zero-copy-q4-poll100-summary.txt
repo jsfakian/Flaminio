@@ -1,0 +1,5 @@
+job                 Flaminio  spread        raw  spread   share  p99 (us) queue thread CPU %
+randread-4k-qd1        13904    0.4%      15414    0.5%     90%        78  96.7 97.0 96.7
+  volb: data at GiB 0-21 of /dev/vdb (16384 MiB read there, regions.txt); raw reads GiB 0-16
+  4 vCPUs, 4 ublk queue(s), /dev/vdb with 4 hardware queue(s)
+  verified 16 GiB, errors 0

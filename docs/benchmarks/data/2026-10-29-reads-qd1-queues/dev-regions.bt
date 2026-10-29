@@ -1,0 +1,8 @@
+// Device latency of reads on one disk, by 8 GiB region. Usage: bpftrace dev-regions.bt <dev_t>
+tracepoint:block:block_rq_issue /args.dev == $1 && args.rwbs == "R"/ { @s[args.sector] = nsecs; }
+tracepoint:block:block_rq_complete /args.dev == $1 && @s[args.sector] != 0/ {
+  @lat_us[args.sector / 16777216 * 8] = avg((nsecs - @s[args.sector]) / 1000);
+  @n[args.sector / 16777216 * 8] = count();
+  delete(@s[args.sector]);
+}
+END { clear(@s); }

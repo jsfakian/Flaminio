@@ -234,12 +234,13 @@ bench_reference() {
         [[ $n =~ ^(0|[1-9][0-9]*)$ ]] || die "bench_reference: $n is not a number"
     done
     ((total * 10 >= sb * 9)) ||
-        die "the traced read took $((total >> 20)) MiB from the disk, under 90% of the volume ($span): its data is not on this disk, or was never written"
+        die "the traced read took $((total >> 20)) MiB from the disk, under 90% of the volume ($span): its data is not on this disk, or was never written (FILL=1 writes it)"
     ((total * 10 <= sb * 11)) ||
         die "the traced read took $((total >> 20)) MiB from the disk, over 110% of the volume ($span): something else read the disk meanwhile; run again"
     ((first < end)) || die "no 1 GiB region of the disk gave the traced read 64 MiB or more"
-    (((end - first) * 2 <= s * 3)) ||
-        die "the volume's data spans GiB $first-$end of the disk, more than 1.5 times its size ($span): it is spread out (refill it with FILL=1, or use a new volume), or something else read the disk meanwhile"
+    # A volume not aligned to 1 GiB takes one region more than its size.
+    (((end - first - 1) * 2 <= s * 3)) ||
+        die "the volume's data spans GiB $first-$end of the disk, more than 1.5 times its size ($span) and one region: it is spread out (refill it with FILL=1, or use a new volume), or something else read the disk meanwhile"
     d=$((disk >> 30)) off=$first
     ((first + s <= d)) || off=$((d - s))
     ((off >= 0)) || die "the disk ($d GiB) is smaller than the volume ($span)"

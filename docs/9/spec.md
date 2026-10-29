@@ -21,9 +21,10 @@ instead. There is no rotation between regions.
   not on the node's disk, or has not been written;
 - it took more than 110%: something else read the disk meanwhile;
 - the range starts at or after its end: no region reached 64 MiB;
-- the range is more than 1.5 times the volume's size. Either the data is too spread out for a
-  span of the volume's size to stand for it, or something else read the disk meanwhile. The
-  message names both, and suggests a refill (`FILL=1`) or a new volume for the first.
+- the range is more than 1.5 times the volume's size, plus the one region a volume not aligned
+  to 1 GiB takes. Either the data is too spread out for a span of the volume's size to stand
+  for it, or something else read the disk meanwhile. The message names both, and suggests a
+  refill (`FILL=1`) or a new volume for the first.
 
 **S3. Recorded.** These are in the run's log and its `summary.txt`:
 - the volume (`VOL`);

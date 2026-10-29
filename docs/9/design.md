@@ -70,8 +70,10 @@ the volume's size as `<n>G`. The harness takes it from the volume's record (`siz
 2. Refuses `TOTAL × 10 < SB × 9`: the volume's data is not on this disk, or was not written.
 3. Refuses `TOTAL × 10 > SB × 11`: something else read the disk during the trace.
 4. Refuses `FIRST ≥ END`.
-5. Refuses `(END − FIRST) × 2 > S × 3`. The message names both causes: data spread over the
-   disk (a refill, `FILL=1`, or a new volume), or other reads during the trace.
+5. Refuses `(END − FIRST − 1) × 2 > S × 3`: a range over 1.5 times the volume, plus the one
+   region a volume not aligned to 1 GiB takes (a 1 GiB volume at 3.5–4.5 GiB spans 2). The
+   message names both causes: data spread over the disk (a refill, `FILL=1`, or a new
+   volume), or other reads during the trace.
 6. **The span:**
    - `D = DISK_BYTES >> 30`;
    - `OFFSET = FIRST`, or `D − S` if `FIRST + S > D`;
@@ -83,7 +85,7 @@ vectors with the output each must give:
 - **fl-b:** `16G 0 21 <16 GiB> 107374182400` gives `0 16`.
 - **The end of the disk:** `16G 85 100 <15 GiB> 107374182400` gives `84 16`.
 - **The boundaries, with 16G:**
-  - `END − FIRST` of 24 passes and 25 refuses;
+  - `END − FIRST` of 25 passes and 26 refuses; with 1G, 2 passes and 3 refuses;
   - `TOTAL` 15461882266 passes and 15461882265 refuses (90% of 16 GiB is 15461882265.6);
   - `TOTAL` 18897856102 passes and 18897856103 refuses (110% is 18897856102.4).
 - **The rest:**
@@ -124,12 +126,12 @@ spans slower, and both sides must pay the same.
   or 1M.
 
 **The limits of the checks.**
-- **Spread-out data:** the 1.5× limit keeps the start of the range meaningful. A volume whose
-  data is spread over the disk has no region that stands for it. That happens after many
-  rewrites, when the store's cursor wraps.
+- **Spread-out data:** the limit of 1.5× plus one region keeps the start of the range
+  meaningful. A volume whose data is spread over the disk has no region that stands for it.
+  That happens after many rewrites, when the store's cursor wraps.
 - **A stray read near the data:** 64 MiB or more just before it moves `FIRST` earlier, with no
-  refusal, as long as the range stays within 1.5×. An example is a 256 MiB chunk being resynced.
-  `regions.txt` shows it.
+  refusal, as long as the range stays within the limit. An example is a 256 MiB chunk being
+  resynced. `regions.txt` shows it.
 
 **Rule 1 applies to raw's span too:** it must have been written. A never-written or discarded
 range reads as zeros from the host's file, without touching the drive.

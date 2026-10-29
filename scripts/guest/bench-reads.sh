@@ -42,9 +42,12 @@ case "${1:-}" in
         dev=$2 span=$3 disk=$4
         block_device "$dev"
         block_device "$disk"
-        command -v bpftrace >/dev/null ||
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bpftrace >/dev/null 2>&1 ||
-            die "bpftrace is missing and could not be installed"
+        if ! command -v bpftrace >/dev/null; then
+            { sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bpftrace; } \
+                >/dev/null 2>&1 || die "bpftrace is missing and could not be installed"
+        fi
+        fio=$(command -v fio) || die "fio is missing"
+        want=$(numfmt --from=iec "$span") || die "the volume's size $span is not a size"
         name=${disk##*/}
         IFS=: read -r major minor <"/sys/class/block/$name/dev"
         disk_bytes=$(($(<"/sys/class/block/$name/size") * 512))
@@ -63,12 +66,12 @@ case "${1:-}" in
         # The trace file is this user's, written by this shell (SC2024): only bpftrace needs root.
         # shellcheck disable=SC2024
         if ! sudo timeout 300 bpftrace -B none -e "$prog" \
-            -c "$(command -v fio) --name=range --filename=$dev --size=$span --rw=read --bs=1m --iodepth=8 --ioengine=io_uring --direct=1 --output-format=json --output=$report" \
+            -c "$fio --name=range --filename=$dev --size=$span --rw=read --bs=1m --iodepth=8 --ioengine=io_uring --direct=1 --output-format=json --output=$report" \
             >"$trace" 2>&1 || ! grep -qx trace-end "$trace"; then
             tail -n 20 "$trace" >&2
             die "the trace of $dev's read failed"
         fi
-        jq -e --argjson want "$(numfmt --from=iec "$span")" \
+        jq -e --argjson want "$want" \
             '.jobs[0].error == 0 and .jobs[0].read.io_bytes >= $want' "$report" >/dev/null 2>&1 ||
             die "the traced read of $dev failed (fio's report: $report)"
         # bpftrace sorts a map by value, and mawk cannot sort: sort -n. %.0f: mawk prints large

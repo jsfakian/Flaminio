@@ -1467,7 +1467,7 @@ drive_temp() {
 cmd_bench_reads() {
     local node mode=${MODE:-zero-copy} reps=${REPS:-3} runtime=${RUNTIME:-30} span size
     local dir raw zc=0 r spec name rw bs qd side dev off jspan row t0 t1 since
-    local meta range first end total disk_bytes reference roff rlen where cpus
+    local meta range first end total disk_bytes reference roff rlen where ncpu hwq cpus
     node=$(vms_of "${NODE:-b}")
     local nv=0 flags want queues=${QUEUES:-1} poll=${POLL_US:-0} jobs=${NUMJOBS:-1} defer=${DEFER_TASKRUN:-0}
     case $mode in
@@ -1523,12 +1523,14 @@ cmd_bench_reads() {
     reference=$(bench_reference "$span" "$first" "$end" "$total" "$disk_bytes")
     read -r roff rlen <<<"$reference"
     where="$VOL: data at GiB $first-$end of $raw ($((total >> 20)) MiB read there, regions.txt); raw reads GiB $roff-$((roff + rlen))"
-    cpus="$(vssh "$node" nproc) vCPUs, $queues ublk queue(s), $raw with $(vssh "$node" "ls /sys/block/${raw##*/}/mq | wc -l") hardware queue(s)"
+    ncpu=$(vssh "$node" nproc)
+    hwq=$(vssh "$node" "ls /sys/block/${raw##*/}/mq | wc -l")
+    cpus="$ncpu vCPUs, $queues ublk queue(s), $raw with $hwq hardware queue(s)"
     log "$where"
     log "$cpus"
 
     local filter=${JOBS:-.}
-    log "$node, $mode, $queues queue(s), ${poll} us polling, $jobs fio job(s), defer=$defer, filter=$filter, $(vssh "$node" nproc) vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
+    log "$node, $mode, $queues queue(s), ${poll} us polling, $jobs fio job(s), defer=$defer, filter=$filter, $ncpu vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
     printf 'rep\tside\tjob\tIOPS\tMiB/s\tp50\tp99\tfio_cpu\tqueue_cpu\ttemp\n' >"$dir/runs.tsv"
     for r in $(seq 1 "$reps"); do
         for spec in "randread-4k-qd1 randread 4k 1" "randread-4k-qd32 randread 4k 32" "read-1m-qd8 read 1m 8"; do

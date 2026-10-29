@@ -45,7 +45,9 @@ things.
    the node's usage text.
 3. The analysis recorded, with its numbers, so that the next step starts from them.
 
-The goal is not met here. Issue #9 stays open after this change.
+The goal is not met here without spinning. The bench runs found 90% only with 4 queues and
+100 µs polling, which cost a core ([results](../benchmarks/2026-10-29-reads-qd1-queues.md)).
+Issue #9 stays open after this change.
 
 ## Out of scope
 
