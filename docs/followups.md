@@ -176,10 +176,10 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
    fl-a and fl-b had the same chunk replicas and clusters in use as before (168 / 431 167 and
    144 / 393 216), and no tombstone was left.
    - Left: data nodes outside Kubernetes (item 14).
-   - Done (docs/8): a move recorded while `DeleteVolume` lists the chunks is no longer missed.
-     `MoveReplica` bumps a per-volume move record, which the deletion compares, and it compares
-     the volume header, so that no move is recorded for a deleted volume. A completed move's
-     source, which no record names any more, is item 13's.
+   - Done (docs/8): a move can no longer slip past `DeleteVolume`. A deletion first marks the
+     volume's header as deleting, which fences off moves and ISR changes (they compare the
+     header), then lists the chunks and writes the tombstone. A completed move's source, which
+     no record names any more, is item 13's.
 
 ## 9. The data plane in Kubernetes
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"slices"
+	"sync/atomic"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -127,5 +128,62 @@ func TestDrain(t *testing.T) {
 	completeMoves(t, c, "v2")
 	if p, _ := Step(ctx, c, "b"); p.Remaining != 0 {
 		t.Fatalf("after v2 moved: %+v", p)
+	}
+}
+
+// A volume deleted after a step listed it, before the step's move of its chunk: the step skips
+// it and goes on to the next volume, instead of failing (docs/8).
+func TestDrainSkipsAVolumeDeletedMidStep(t *testing.T) {
+	ctx := context.Background()
+	svc := service.New(kv.NewMem(nil), service.Options{})
+	var deleted atomic.Bool
+	// Deletes the volume just before the step's first move of it reaches the service.
+	intercept := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+		if m, ok := req.(*metav1.MoveReplicaRequest); ok && m.GetVolume() == "v1" && !deleted.Swap(true) {
+			if _, err := svc.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v1"}); err != nil {
+				t.Error(err)
+			}
+		}
+		return h(ctx, req)
+	}
+	srv := grpc.NewServer(grpc.UnaryInterceptor(intercept))
+	metav1.RegisterMetadataServiceServer(srv, svc)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	c := metav1.NewMetadataServiceClient(conn)
+	for _, n := range []string{"a", "b", "c"} {
+		addNode(t, c, n, nil)
+	}
+	for _, v := range []string{"v1", "v2"} {
+		if _, err := c.CreateVolume(ctx, &metav1.CreateVolumeRequest{Id: v, SizeBytes: 4 << 20, ChunkBytes: 1 << 20, Replicas: 3, MinIsr: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Attach(ctx, &metav1.AttachRequest{Volume: v, Node: "a"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addNode(t, c, "d", nil)
+	p, err := Step(ctx, c, "b")
+	if err != nil {
+		t.Fatalf("step with a volume deleted mid-step: %v", err)
+	}
+	// v2's four chunks were still moved off b.
+	g, err := c.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, ch := range g.GetVolume().GetChunks() {
+		if ch.GetMovingFrom() != "b" || ch.GetMovingTo() != "d" {
+			t.Fatalf("v2 chunk %d: move %q -> %q (progress %+v)", i, ch.GetMovingFrom(), ch.GetMovingTo(), p)
+		}
 	}
 }

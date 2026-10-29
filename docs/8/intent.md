@@ -19,8 +19,9 @@ yet. Draining volumes that are not attached (issue #17) will make it possible.
 ## What we want
 
 1. Every node that the volume's chunk records name, as a replica or in a pending move, when the
-   deletion commits is in its tombstone, however a move and the deletion interleave.
+   deletion takes them is in its tombstone, however a move and the deletion interleave.
 2. A volume can still be deleted while one of its chunks is moving.
+3. A deletion is not held up by moves of the volume, such as a drain's.
 
 ## Out of scope
 

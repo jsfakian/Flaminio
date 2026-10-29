@@ -3,7 +3,7 @@
 ## Behaviour
 
 **S1. Which nodes are on a tombstone.** These are the nodes that the volume's chunk records name
-when the deletion commits:
+when the deletion lists them:
 - each chunk's replicas;
 - while a chunk is moving, the move's source and destination. A destination may hold a partial
   copy before it becomes a replica.
@@ -11,49 +11,59 @@ when the deletion commits:
 This is as today. A completed move's source is no longer named by any record. It is not on the
 tombstone, and its copy is issue #13's (intent, out of scope).
 
-**S2. A move after the list is seen.** Recording a move (`MoveReplica`) changes the volume's move
-record, `/flaminio/v1/moves/<volume>`, in the same transaction that marks the chunk as moving. A
-deletion compares that record's revision, along with the header's, and deletes both atomically.
-So a deletion that listed the chunks before the move fails its compare, lists them again, and
-includes the move's destination.
+**S2. A deletion in two steps.**
+1. **Mark.** `DeleteVolume` marks the volume's header as deleting, in a transaction conditional
+   on the header it read. From then on the volume does not exist for any other operation: it
+   reads as `NotFound` and is not listed.
+2. **List and delete.** It then lists the chunks. In one transaction, conditional on the marked
+   header, it deletes the header and writes the tombstone. It deletes the chunk records after,
+   as now.
 
-**S3. A move needs the header it read.** A move's transaction compares the volume header's
-revision. It is applied only if the volume still exists, unchanged since the move read it.
-- **A deletion in between** fails the move with `NotFound`, the volume being gone.
-- **An attach in between** makes the move read again.
+**S3. No chunk changes after the mark.** Moves (`MoveReplica`) and ISR changes (`ChangeIsr`)
+compare the header's revision in their transactions.
+- **Fenced by the mark:** one that read the header before the mark fails its compare. On its
+  retry it finds the volume gone (`NotFound`). One that starts after the mark finds it gone at
+  once. So the listing in S2 is final, and nothing can retry against it.
+- **Recorded before the mark:** a move or ISR change committed before the mark is in that
+  listing.
+- **ISR changes add no unlisted node:** an ISR change can only add a chunk's moving destination
+  to its replicas, or drop its moving source (`validMove`). Both are named while the chunk is
+  moving.
 
-Without this compare, a move could be recorded for a volume deleted meanwhile. The move record
-would then outlive the header: it would never be deleted, and would block nothing.
+**S4. A deletion interrupted between its two steps** leaves the header marked. The volume stays
+gone for every other operation, and its id cannot be reused. The next `DeleteVolume` of it finds
+the mark, and does step 2.
 
-**S4. Other chunk changes need nothing.**
-- **ISR changes are covered.** An ISR change can only add a chunk's moving destination to its
-  replicas, or drop its moving source (`validMove`). Both were on the tombstone while the chunk
-  was moving.
-- **A source dropped before the deletion lists the chunks is not on it** (S1).
-- **After the deletion,** an ISR change fails, because the header is gone.
+**S5. A move needs the header it read.** A move's transaction compares the header's revision, so
+that it is applied only to a volume that exists, unchanged since the move read it. An attach in
+between makes the move read again. A deletion in between fails it with `NotFound` (S3).
 
-**S5. Unchanged.**
+**S6. The drain skips a deleted volume.** A drain step whose move of a volume's chunk gets
+`NotFound` (the volume was deleted after the step listed it) goes on to the next volume, instead
+of failing the step.
+
+**S7. Unchanged.**
 - **Deleting during a move:** a volume can still be deleted whatever its chunks are doing.
-- **The rest of `DeleteVolume`:** deleting the chunk records after the transaction, and keeping
-  the volume's id from being reused while the tombstone remains.
-- **Attaches and ISR changes** neither read nor write the move record, so recording a move never
-  makes them fail. A move still retries after an attach (S3), and conflicts with an ISR change of
-  the same chunk through the chunk's compare, as today.
+- **Contention:** the mark conflicts only with other writes of the header (attaches). A drain's
+  moves no longer delay a deletion.
+- **The tombstone:** the volume's id is not reused while it remains.
 
 ## Tests
 
-`meta/service/service_test.go`:
-- **Racing move.** A test store runs a `MoveReplica` of chunk 0, to a node that holds no replica
-  of it, right after `DeleteVolume` lists the chunks and before it writes. The tombstone lists
-  that node. Without S2, it does not, and the test fails.
+`meta/service/service_test.go`, each against the in-memory store and against etcd:
+- **A move before the mark.** A test store runs a move of chunk 0 to a node that holds no
+  replica of it, right after `DeleteVolume` reads the header, before it marks it. The tombstone
+  lists that node.
+- **Moves after the mark.** A move run when `DeleteVolume` lists the chunks (after the mark) gets
+  `NotFound`. The tombstone lists the replicas, and not the refused move's destination. Without
+  the mark, the move would be applied after the listing, and the test fails.
 - **Moving chunk.** A volume deleted while a chunk is moving: the tombstone lists the move's
-  destination. This holds today, and the test keeps it so.
-- **Attach in between.** The test store runs an `Attach` to another node right after
-  `MoveReplica` reads the chunk, before it writes. The move's first write fails its compare on
-  the header and the second is applied: two writes to the chunk, where there would be one
-  without S3's compare. The volume ends at the attach's epoch and target.
-- **Deletion in between.** At the same point, the test store deletes the volume's header
-  directly, as a `DeleteVolume` would before it deletes the chunk records. `MoveReplica` returns
-  `NotFound`, and no move record is left.
-- **The move record.** `MoveReplica` changes the move record's revision and leaves the header's
-  revision as it was. `DeleteVolume` removes the move record.
+  destination.
+- **Attach in between a move's read and write.** The move writes twice, the first refused on the
+  header, and is applied. The volume ends at the attach's epoch and target.
+- **Deletion in between a move's read and write.** The header is deleted directly, as by a
+  deletion. The move returns `NotFound`, and the chunk is not moving.
+- **Interrupted deletion.** With the header marked directly:
+  - `GetVolume` and `MoveReplica` return `NotFound`, `ListVolumes` leaves the volume out, and a
+    create with its id is refused;
+  - `DeleteVolume` then finishes: no header, and a tombstone for the replicas.

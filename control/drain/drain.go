@@ -15,6 +15,8 @@ import (
 	"time"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // WitnessLabel marks a node that holds no volume data (as in the metadata service).
@@ -90,6 +92,10 @@ func Step(ctx context.Context, c metav1.MetadataServiceClient, node string) (Pro
 				return p, fmt.Errorf("volume %s chunk %d: no node to move to (live, not a witness, not draining, without a replica of it)", v.GetId(), i)
 			}
 			r, err := c.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: v.GetId(), Chunk: uint32(i), From: node, To: to})
+			if status.Code(err) == codes.NotFound {
+				// Deleted since it was listed: its replicas go with its tombstone.
+				break
+			}
 			if err != nil {
 				return p, err
 			}
