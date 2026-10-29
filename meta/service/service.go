@@ -286,6 +286,16 @@ func (s *Service) readHeader(ctx context.Context, id string) (domain.Header, int
 	return h, e.Rev, nil
 }
 
+// chunkMissing explains a chunk record that is not there: the volume was deleted (or is being
+// deleted) since its header was read, which is NotFound like any other operation on it, or its
+// records are damaged.
+func (s *Service) chunkMissing(ctx context.Context, id string, chunk uint32) error {
+	if _, _, err := s.readHeader(ctx, id); err != nil {
+		return err
+	}
+	return status.Errorf(codes.Internal, "volume %q: chunk %d missing", id, chunk)
+}
+
 func (s *Service) readVolume(ctx context.Context, id string) (*domain.Volume, error) {
 	h, _, err := s.readHeader(ctx, id)
 	if err != nil {
@@ -400,8 +410,29 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		return nil, err
 	}
 	if !ok {
+		// A deletion that was interrupted after its mark (docs/8) holds the id until it is
+		// finished: say so, rather than that the volume exists.
+		if e, found, err := s.kv.Get(ctx, volumeKey(spec.ID)); err == nil && found {
+			var h domain.Header
+			if json.Unmarshal(e.Value, &h) == nil && h.Deleting {
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"volume %q is being deleted: finish its deletion (DeleteVolume) first", spec.ID)
+			}
+		}
 		return nil, fmt.Errorf("%w: volume %q", domain.ErrExists, spec.ID)
 	}
+	// Every later write is conditional on this claim: a deletion marks the header (docs/8), and
+	// the creation then stops, rather than add chunks after the deletion listed them, or clear
+	// the deletion's mark with its own header.
+	claim, ok, err := s.kv.Get(ctx, volumeKey(spec.ID))
+	if err != nil {
+		return nil, err
+	}
+	changed := fmt.Errorf("volume %q changed while being created (deleted?)", spec.ID)
+	if !ok {
+		return nil, changed
+	}
+	cmp := []kv.Cmp{{Key: volumeKey(spec.ID), Rev: claim.Rev}}
 	if err := s.deleteChunks(ctx, spec.ID); err != nil { // leftovers of an interrupted delete
 		return nil, err
 	}
@@ -410,24 +441,24 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		b, _ := json.Marshal(c)
 		ops = append(ops, kv.Op{Key: chunkKey(spec.ID, uint32(i)), Value: b})
 		if len(ops) == kv.MaxTxnOps || i == len(v.Chunks)-1 {
-			if _, err := s.kv.Txn(ctx, nil, ops); err != nil {
+			ok, err := s.kv.Txn(ctx, cmp, ops)
+			if err != nil {
 				return nil, err
+			}
+			if !ok {
+				return nil, changed
 			}
 			ops = ops[:0]
 		}
 	}
-	e, _, err := s.kv.Get(ctx, volumeKey(spec.ID))
-	if err != nil {
-		return nil, err
-	}
 	v.Creating = false
 	hb, _ = json.Marshal(v.Header)
-	ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: volumeKey(spec.ID), Rev: e.Rev}}, []kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
+	ok, err = s.kv.Txn(ctx, cmp, []kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("volume %q changed while being created", spec.ID)
+		return nil, changed
 	}
 	return v, nil
 }
@@ -459,15 +490,13 @@ func (s *Service) GetVolume(ctx context.Context, r *metav1.GetVolumeRequest) (*m
 	return &metav1.GetVolumeResponse{Volume: volumePB(v)}, nil
 }
 
-// DeleteVolume removes the header at once (so the volume disappears), writes a tombstone naming
-// every node that held its chunks, then drops the chunk metadata. Nodes delete their local
-// replicas and ConfirmDeletion; the tombstone goes when all have confirmed.
 // DeleteVolume deletes a volume in two steps (docs/8). First it marks the header as deleting:
 // from then on the volume does not exist for any other operation, and moves and ISR changes,
 // which compare the header, can no longer change a chunk's replicas. Then it lists the chunks,
 // so its tombstone names every node that may hold a copy, and deletes the header and writes the
 // tombstone in one transaction. A deletion interrupted between the two steps leaves the header
-// marked; the next DeleteVolume of the volume finishes it.
+// marked; the next DeleteVolume of the volume finishes it. It drops the chunk records last. Nodes
+// delete their local replicas and ConfirmDeletion; the tombstone goes when all have confirmed.
 func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeRequest) (*metav1.DeleteVolumeResponse, error) {
 	for attempt := range retries {
 		if attempt > 0 {
@@ -496,9 +525,12 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 			if !ok {
 				continue
 			}
+			// The marked header's revision. Anything else there now (another deletion done,
+			// or a header written since) means reading again.
 			if e, ok, err = s.kv.Get(ctx, volumeKey(r.GetId())); err != nil {
 				return nil, errStatus(err)
-			} else if !ok {
+			}
+			if !ok || json.Unmarshal(e.Value, &h) != nil || !h.Deleting {
 				continue
 			}
 		}
@@ -707,7 +739,7 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 				return nil, errStatus(err)
 			}
 			if !ok {
-				return nil, status.Errorf(codes.Internal, "volume %q: chunk %d missing", h.ID, c.Chunk)
+				return nil, errStatus(s.chunkMissing(ctx, h.ID, c.Chunk))
 			}
 			if err := json.Unmarshal(e.Value, &named[i]); err != nil {
 				return nil, errStatus(err)
@@ -816,7 +848,7 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 			return nil, errStatus(err)
 		}
 		if !ok {
-			return nil, status.Errorf(codes.Internal, "volume %q: chunk %d missing", h.ID, r.GetChunk())
+			return nil, errStatus(s.chunkMissing(ctx, h.ID, r.GetChunk()))
 		}
 		var c domain.Chunk
 		if err := json.Unmarshal(e.Value, &c); err != nil {

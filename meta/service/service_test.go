@@ -28,11 +28,16 @@ const mib = 1 << 20
 
 // stores runs a test against the in-memory store and against a real etcd.
 func stores(t *testing.T, f func(t *testing.T, s *Service)) {
-	t.Run("mem", func(t *testing.T) { f(t, New(kv.NewMem(nil), Options{})) })
+	backends(t, func(t *testing.T, store kv.KV) { f(t, New(store, Options{})) })
+}
+
+// backends runs a test against the in-memory store and against a real etcd.
+func backends(t *testing.T, f func(t *testing.T, store kv.KV)) {
+	t.Run("mem", func(t *testing.T) { f(t, kv.NewMem(nil)) })
 	t.Run("etcd", func(t *testing.T) {
 		e := kvtest.Etcd(t)
 		defer e.Close()
-		f(t, New(e, Options{}))
+		f(t, e)
 	})
 }
 
@@ -804,12 +809,7 @@ func TestRegisterNodeThatChangesNothingDoesNotWrite(t *testing.T) {
 
 // interleaveStores runs a test against a wrapped in-memory store and a wrapped real etcd.
 func interleaveStores(t *testing.T, f func(t *testing.T, store *interleaveKV)) {
-	t.Run("mem", func(t *testing.T) { f(t, &interleaveKV{KV: kv.NewMem(nil)}) })
-	t.Run("etcd", func(t *testing.T) {
-		e := kvtest.Etcd(t)
-		defer e.Close()
-		f(t, &interleaveKV{KV: e})
-	})
+	backends(t, func(t *testing.T, store kv.KV) { f(t, &interleaveKV{KV: store}) })
 }
 
 // moveFixture is a volume v of 2 chunks on nodes a and b (RF 2), with node c registered after
@@ -988,7 +988,7 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
 			t.Fatalf("move of a volume being deleted: %v", err)
 		}
-		if _, err := create(s, "v", 2, 2, 1); code(err) != codes.AlreadyExists {
+		if _, err := create(s, "v", 2, 2, 1); code(err) != codes.FailedPrecondition {
 			t.Fatalf("create over a volume being deleted: %v", err)
 		}
 		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
@@ -996,6 +996,52 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 		}
 		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok || !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
 			t.Fatal("the deletion was not finished: header left, or tombstone missing")
+		}
+	})
+}
+
+// A deletion during a creation stops the creation: it adds no chunk after the deletion's listing,
+// and does not bring the volume back by clearing the deletion's mark (docs/8).
+func TestDeleteVolumeDuringItsCreation(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b")
+		// createVolume reads its claimed header once, before it writes the chunks.
+		store.key = volumeKey("v")
+		hook := func() {
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := create(s, "v", 2, 2, 1); err == nil {
+			t.Fatal("a creation deleted midway succeeded")
+		}
+		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok {
+			t.Fatal("the creation brought the deleted volume back")
+		}
+		if chunks, err := store.KV.List(ctx, chunkPrefix("v")); err != nil || len(chunks) != 0 {
+			t.Fatalf("chunk records after the deletion: %d %v", len(chunks), err)
+		}
+	})
+}
+
+// A volume deleted between a move's read of its header and of the chunk: NotFound, as for any
+// operation on a deleted volume, not a missing chunk (docs/8).
+func TestMoveReplicaOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		store.key = volumeKey("v")
+		hook := func() {
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
+			t.Fatalf("move of a volume deleted mid-call: %v", err)
 		}
 	})
 }

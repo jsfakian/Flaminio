@@ -9,6 +9,7 @@ package drain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -54,6 +55,9 @@ func Step(ctx context.Context, c metav1.MetadataServiceClient, node string) (Pro
 	load := map[string]int{}
 	for _, id := range ids.GetIds() {
 		g, err := c.GetVolume(ctx, &metav1.GetVolumeRequest{Id: id})
+		if status.Code(err) == codes.NotFound {
+			continue // deleted since it was listed
+		}
 		if err != nil {
 			return p, err
 		}
@@ -74,39 +78,62 @@ func Step(ctx context.Context, c metav1.MetadataServiceClient, node string) (Pro
 		}
 	}
 	for _, v := range vols {
-		waiting := false
-		for i, ch := range v.GetChunks() {
-			if !slices.Contains(ch.GetReplicas(), node) {
-				continue
-			}
-			p.Remaining++
-			if v.GetTarget() == "" {
-				waiting = true
-			}
-			if ch.GetMovingFrom() != "" {
-				p.Moving++
-				continue
-			}
-			to := leastLoaded(candidates, ch.GetReplicas(), load)
-			if to == "" {
-				return p, fmt.Errorf("volume %s chunk %d: no node to move to (live, not a witness, not draining, without a replica of it)", v.GetId(), i)
-			}
-			r, err := c.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: v.GetId(), Chunk: uint32(i), From: node, To: to})
-			if status.Code(err) == codes.NotFound {
-				// Deleted since it was listed: its replicas go with its tombstone.
-				break
-			}
-			if err != nil {
-				return p, err
-			}
-			if r.GetApplied() {
-				load[to]++
-				p.Moving++
+		vp, err := stepVolume(ctx, c, node, v, candidates, load)
+		if errors.Is(err, errVolumeGone) {
+			continue // deleted since it was listed: its replicas go with its tombstone (docs/8)
+		}
+		if err != nil {
+			return p, err
+		}
+		p.Remaining += vp.Remaining
+		p.Moving += vp.Moving
+		p.Unattached = append(p.Unattached, vp.Unattached...)
+	}
+	return p, nil
+}
+
+// errVolumeGone reports a volume deleted since the step listed it.
+var errVolumeGone = errors.New("volume deleted")
+
+// stepVolume requests the moves of one volume's chunk replicas on the node, and reports what is
+// left of it.
+func stepVolume(ctx context.Context, c metav1.MetadataServiceClient, node string, v *metav1.Volume,
+	candidates []string, load map[string]int) (Progress, error) {
+	var p Progress
+	waiting := false
+	for i, ch := range v.GetChunks() {
+		if !slices.Contains(ch.GetReplicas(), node) {
+			continue
+		}
+		p.Remaining++
+		if v.GetTarget() == "" {
+			waiting = true
+		}
+		if ch.GetMovingFrom() != "" {
+			p.Moving++
+			continue
+		}
+		to := leastLoaded(candidates, ch.GetReplicas(), load)
+		if to == "" {
+			return p, fmt.Errorf("volume %s chunk %d: no node to move to (live, not a witness, not draining, without a replica of it)", v.GetId(), i)
+		}
+		r, err := c.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: v.GetId(), Chunk: uint32(i), From: node, To: to})
+		if status.Code(err) == codes.NotFound {
+			// The volume deleted since it was listed, or the destination gone: tell which.
+			if _, gerr := c.GetVolume(ctx, &metav1.GetVolumeRequest{Id: v.GetId()}); status.Code(gerr) == codes.NotFound {
+				return p, errVolumeGone
 			}
 		}
-		if waiting {
-			p.Unattached = append(p.Unattached, v.GetId())
+		if err != nil {
+			return p, err
 		}
+		if r.GetApplied() {
+			load[to]++
+			p.Moving++
+		}
+	}
+	if waiting {
+		p.Unattached = append(p.Unattached, v.GetId())
 	}
 	return p, nil
 }

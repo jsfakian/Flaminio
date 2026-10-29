@@ -31,16 +31,27 @@ compare the header's revision in their transactions.
   moving.
 
 **S4. A deletion interrupted between its two steps** leaves the header marked. The volume stays
-gone for every other operation, and its id cannot be reused. The next `DeleteVolume` of it finds
+gone for every other operation, and its id cannot be reused: a create with it gets
+`FailedPrecondition`, saying the volume is being deleted. The next `DeleteVolume` of it finds
 the mark, and does step 2.
+
+**S4a. A deletion during a creation.** A creation writes its chunk records, and finally clears its
+own mark, each conditional on the header it claimed. A deletion's mark changes that header, so
+the creation stops there with an error. It adds no chunk after the deletion's listing, and does
+not bring the header back.
+
+**S4b. A chunk missing because the volume is gone.** A move or an ISR change that read the header
+before a deletion, and finds a chunk record gone, answers `NotFound`, as for any operation on a
+deleted volume, not `Internal`.
 
 **S5. A move needs the header it read.** A move's transaction compares the header's revision, so
 that it is applied only to a volume that exists, unchanged since the move read it. An attach in
 between makes the move read again. A deletion in between fails it with `NotFound` (S3).
 
-**S6. The drain skips a deleted volume.** A drain step whose move of a volume's chunk gets
-`NotFound` (the volume was deleted after the step listed it) goes on to the next volume, instead
-of failing the step.
+**S6. The drain skips a deleted volume.** A volume deleted after a drain step listed it, found
+at its read (`GetVolume`) or at a move of its chunk, is left out of the step: the step goes on to
+the next volume, and its progress does not count the deleted one. A move's `NotFound` for another
+reason, such as an unregistered destination, still fails the step.
 
 **S7. Unchanged.**
 - **Deleting during a move:** a volume can still be deleted whatever its chunks are doing.
@@ -65,5 +76,13 @@ of failing the step.
   deletion. The move returns `NotFound`, and the chunk is not moving.
 - **Interrupted deletion.** With the header marked directly:
   - `GetVolume` and `MoveReplica` return `NotFound`, `ListVolumes` leaves the volume out, and a
-    create with its id is refused;
+    create with its id gets `FailedPrecondition`;
   - `DeleteVolume` then finishes: no header, and a tombstone for the replicas.
+- **Deletion during a creation.** A deletion run when the creation reads its claimed header: the
+  creation fails, and leaves no header and no chunk records.
+- **Volume deleted mid-move.** A deletion run when `MoveReplica` reads the header: the move gets
+  `NotFound`.
+
+`control/drain/drain_test.go`: a volume deleted before the step's move of it, and one deleted
+before the step reads it, are both skipped, and the step counts only the other volume. A move
+refused with another `NotFound` fails the step.

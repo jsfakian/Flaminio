@@ -21,10 +21,20 @@ A deletion that finds the header already marked (an interrupted one, S4) starts 
 **`MoveReplica`.** Its transaction compares the chunk's revision, as now, and the header's
 revision from `readHeader`. That is what fences it off a deletion (S3). Its doc comment says so.
 
-**`ChangeIsr`** compares the header's revision already. No change.
+**`ChangeIsr`** compares the header's revision already. No change, except that a chunk record
+missing because the volume is gone is `NotFound` (`chunkMissing`, which `MoveReplica` uses too).
 
-**The drain** (`control/drain/drain.go`). On `NotFound` from `MoveReplica`, it leaves the volume's
-remaining chunks and goes on to the next volume.
+**`createVolume`.** After claiming the id with its `Creating` header, it reads that header's
+revision once. Every chunk batch, and the final write that clears `Creating`, compare it. Before,
+the batches had no compare, and the final write compared a fresh read. A deletion's mark in
+between now stops the creation. A claim that fails because a deleting header holds the id
+answers `FailedPrecondition`.
+
+**The drain** (`control/drain/drain.go`). Each volume's moves are in `stepVolume`, whose progress
+the step adds up only for volumes still there. `NotFound` from `GetVolume` skips the volume. On
+`NotFound` from `MoveReplica`, it reads the volume: if that is `NotFound` too, the volume was
+deleted and is skipped, uncounted. Otherwise, as for an unregistered destination, the error
+fails the step.
 
 **The package doc's key list** gains `drain/<node>`, which it was missing.
 
