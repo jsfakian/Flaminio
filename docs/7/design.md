@@ -42,14 +42,17 @@ return nil, status.Error(codes.Aborted, "too much contention")
   modelled on, which return an error when a record does not parse. Here, failing would leave
   the node unable to register, and `ListNodes`, which fails on such a record, broken.
 - **No address.** An empty address takes the stored record's. If there is none, the call returns
-  `FailedPrecondition` from inside the loop, before any write. The validation no longer requires
-  an address.
+  `NotFound` (`domain.ErrNotFound`, through `errStatus`) from inside the loop, before any write.
+  The validation no longer requires an address, and the proto comments say what an empty one
+  means.
 - **No change, no write.** If the merged JSON equals `e.Value`, it returns success without a
   `Txn`.
 - **CSI topology sync** (`control/csi/topology.go`): `syncTopologyOnce` reads the Kubernetes
   labels, then calls `registerTopology`. That function sends `RegisterNode` with the labels and
-  no address, and maps `FailedPrecondition` to `errNodeNotRegistered`. It no longer reads the
-  address with `ListNodes`.
+  no address, and maps `NotFound` to `errNodeNotRegistered`. On `InvalidArgument`, from a
+  metadata service older than this, it falls back to the old registration: the address read
+  with `ListNodes`. The client keeps preferring an instance that answered, so without the
+  fallback a rolling upgrade could hold the labels back until every instance is upgraded.
 - **Unchanged.** `RegisterNode` is the only code that writes a node record, so no other path
   needs the loop.
 

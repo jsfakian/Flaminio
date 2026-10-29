@@ -13,8 +13,10 @@ package flaminio.meta.v1;
 option go_package = "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1;metav1";
 
 service MetadataService {
-  // Registers a node, or updates its address and failure domain. Caller: that node, or an
-  // administrator.
+  // Registers a node, or updates its address and failure domain. The request's labels are added
+  // to the stored ones, replacing those of the same name. An empty address keeps the stored one,
+  // for a caller that only sets labels; for a node not registered yet it is refused with
+  // NOT_FOUND. Caller: that node, or an administrator.
   rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
   // Renews a node's liveness record. Liveness only decides when to fail over; it never grants
   // permission to serve I/O (ARCHITECTURE §8.5). Caller: that node, or an administrator.
@@ -60,7 +62,8 @@ service MetadataService {
 
 message Node {
   string id = 1;
-  // Address of the node's data plane, host:port.
+  // Address of the node's data plane, host:port. Empty in a RegisterNode request: keep the
+  // stored address.
   string address = 2;
   // Failure domain labels, e.g. zone and rack.
   map<string, string> labels = 3;

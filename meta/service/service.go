@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"strings"
@@ -170,41 +171,33 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		if err != nil {
 			return nil, errStatus(err)
 		}
-		labels := map[string]string{}
 		// A record that does not parse counts as having no labels, and is overwritten: failing
 		// would leave the node unable to register, and ListNodes broken.
 		var rec nodeRecord
 		if ok && json.Unmarshal(e.Value, &rec) != nil {
 			rec = nodeRecord{}
 		}
-		for k, v := range rec.Labels {
-			labels[k] = v
-		}
-		// The request's labels last: they override stored ones of the same name.
-		for k, v := range n.GetLabels() {
-			labels[k] = v
-		}
 		// No address keeps the stored one: the CSI node plugin registers labels only, and must
 		// not put back an address it read before the data plane registered a new one (docs/7).
 		address := n.GetAddress()
 		if address == "" {
 			if rec.Address == "" {
-				return nil, status.Errorf(codes.FailedPrecondition,
-					"node %q is not registered: a registration without an address needs one with an address first", n.GetId())
+				return nil, errStatus(fmt.Errorf("%w: node %q has no address on record: it registers with one first",
+					domain.ErrNotFound, n.GetId()))
 			}
 			address = rec.Address
 		}
+		// The request's labels last: they override stored ones of the same name.
+		labels := map[string]string{}
+		maps.Copy(labels, rec.Labels)
+		maps.Copy(labels, n.GetLabels())
 		b, _ := json.Marshal(nodeRecord{Address: address, Labels: labels})
 		// Nothing to change: no write, so no other registration in flight has to retry.
 		if ok && bytes.Equal(b, e.Value) {
 			return &metav1.RegisterNodeResponse{}, nil
 		}
-		// Rev 0 when it read none: the record must still be absent.
-		rev := int64(0)
-		if ok {
-			rev = e.Rev
-		}
-		applied, err := s.kv.Txn(ctx, []kv.Cmp{{Key: key, Rev: rev}}, []kv.Op{{Key: key, Value: b}})
+		// e.Rev is 0 when it read none: the record must then still be absent.
+		applied, err := s.kv.Txn(ctx, []kv.Cmp{{Key: key, Rev: e.Rev}}, []kv.Op{{Key: key, Value: b}})
 		if err != nil {
 			return nil, errStatus(err)
 		}

@@ -59,15 +59,41 @@ func syncTopologyOnce(ctx context.Context, meta *Meta, kube *failover.APIClient,
 
 // registerTopology adds labels to the node's registration without an address, so the metadata
 // service keeps the one the data plane registered, even if it changes meanwhile (docs/7). A
-// node the data plane has not registered yet is refused with FailedPrecondition. A metadata
-// service older than this refuses the missing address; SyncTopologyLabels then retries until
-// it is upgraded.
+// node the data plane has not registered yet is refused with NotFound.
+//
+// A metadata service older than this refuses the missing address with InvalidArgument. During
+// a rolling upgrade the client may keep reaching such an instance, so the labels then go the
+// old way, with the address read from ListNodes: they are not held back until every instance
+// is upgraded, at the cost of the old race on the address.
 func registerTopology(ctx context.Context, meta *Meta, nodeID string, topo map[string]string) error {
 	err := meta.RegisterNode(ctx, &metav1.Node{Id: nodeID, Labels: topo})
-	if status.Code(err) == codes.FailedPrecondition {
+	switch status.Code(err) {
+	case codes.NotFound:
 		return errNodeNotRegistered
+	case codes.InvalidArgument:
+		return registerTopologyWithAddress(ctx, meta, nodeID, topo)
 	}
 	return err
+}
+
+// registerTopologyWithAddress is the registration an older metadata service takes: it needs
+// the address, read here with ListNodes.
+func registerTopologyWithAddress(ctx context.Context, meta *Meta, nodeID string, topo map[string]string) error {
+	nodes, err := meta.ListNodes(ctx)
+	if err != nil {
+		return err
+	}
+	var address string
+	for _, n := range nodes {
+		if n.GetId() == nodeID {
+			address = n.GetAddress()
+			break
+		}
+	}
+	if address == "" {
+		return errNodeNotRegistered
+	}
+	return meta.RegisterNode(ctx, &metav1.Node{Id: nodeID, Address: address, Labels: topo})
 }
 
 type notRegisteredError struct{}

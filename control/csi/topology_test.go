@@ -2,8 +2,16 @@ package csi
 
 import (
 	"context"
+	"net"
 	"slices"
+	"sync"
 	"testing"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/grpc/test/bufconn"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/domain"
@@ -27,9 +35,8 @@ func TestTopologyFromKube(t *testing.T) {
 	}
 }
 
-// The topology sync registers labels without an address: it waits for the data plane's
-// registration, and keeps whatever address the data plane registered, even one registered after
-// the sync started (docs/7).
+// The topology sync waits for the data plane's registration, then adds its labels and keeps
+// whatever address the data plane registered (docs/7).
 func TestRegisterTopologyKeepsTheDataPlanesAddress(t *testing.T) {
 	ctx := context.Background()
 	m := metaFixture(t)
@@ -52,5 +59,72 @@ func TestRegisterTopologyKeepsTheDataPlanesAddress(t *testing.T) {
 		if i < 0 || nodes[i].GetAddress() != addr || nodes[i].GetLabels()[domain.LabelZone] != "z1" {
 			t.Fatalf("nodes %v, want n1 at %s with zone z1", nodes, addr)
 		}
+	}
+}
+
+// recordingMeta is a metadata service that records RegisterNode requests and answers them with
+// `answer`, and lists one node at `listed`.
+type recordingMeta struct {
+	metav1.UnimplementedMetadataServiceServer
+	mu       sync.Mutex
+	requests []*metav1.Node
+	answer   func(*metav1.Node) error
+	listed   string
+}
+
+func (r *recordingMeta) RegisterNode(_ context.Context, req *metav1.RegisterNodeRequest) (*metav1.RegisterNodeResponse, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requests = append(r.requests, req.GetNode())
+	return &metav1.RegisterNodeResponse{}, r.answer(req.GetNode())
+}
+
+func (r *recordingMeta) ListNodes(context.Context, *metav1.ListNodesRequest) (*metav1.ListNodesResponse, error) {
+	return &metav1.ListNodesResponse{Nodes: []*metav1.Node{{Id: "n1", Address: r.listed}}}, nil
+}
+
+func recordingFixture(t *testing.T, r *recordingMeta) *Meta {
+	t.Helper()
+	l := bufconn.Listen(1 << 20)
+	srv := grpc.NewServer()
+	metav1.RegisterMetadataServiceServer(srv, r)
+	go func() { _ = srv.Serve(l) }()
+	m, err := dialMeta([]string{"passthrough:///bufnet"},
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return l.Dial() }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		m.Close()
+		srv.Stop()
+	})
+	return m
+}
+
+// The sync's registration carries no address, so it cannot put back one the data plane
+// changed; against an older metadata service, which refuses that, it sends the listed address.
+func TestRegisterTopologySendsNoAddress(t *testing.T) {
+	ctx := context.Background()
+	topo := map[string]string{domain.LabelZone: "z1"}
+	r := &recordingMeta{answer: func(*metav1.Node) error { return nil }}
+	if err := registerTopology(ctx, recordingFixture(t, r), "n1", topo); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.requests) != 1 || r.requests[0].GetAddress() != "" || r.requests[0].GetLabels()[domain.LabelZone] != "z1" {
+		t.Fatalf("requests %v", r.requests)
+	}
+
+	old := &recordingMeta{listed: "n1:7411", answer: func(n *metav1.Node) error {
+		if n.GetAddress() == "" {
+			return status.Error(codes.InvalidArgument, "node needs a valid id and an address")
+		}
+		return nil
+	}}
+	if err := registerTopology(ctx, recordingFixture(t, old), "n1", topo); err != nil {
+		t.Fatal(err)
+	}
+	if len(old.requests) != 2 || old.requests[1].GetAddress() != "n1:7411" {
+		t.Fatalf("requests to an older service %v", old.requests)
 	}
 }

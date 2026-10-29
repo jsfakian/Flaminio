@@ -33,7 +33,8 @@ const (
 type Node struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// Address of the node's data plane, host:port.
+	// Address of the node's data plane, host:port. Empty in a RegisterNode request: keep the
+	// stored address.
 	Address string `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`
 	// Failure domain labels, e.g. zone and rack.
 	Labels map[string]string `protobuf:"bytes,3,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`

@@ -746,7 +746,7 @@ func TestRegisterNodeOverwritesAnUnparseableRecord(t *testing.T) {
 func TestRegisterNodeWithoutAnAddressKeepsTheStoredOne(t *testing.T) {
 	stores(t, func(t *testing.T, s *Service) {
 		ctx := context.Background()
-		if err := register(ctx, s, "n1", "", map[string]string{"zone": "z1"}); code(err) != codes.FailedPrecondition {
+		if err := register(ctx, s, "n1", "", map[string]string{"zone": "z1"}); code(err) != codes.NotFound {
 			t.Fatalf("labels for an unregistered node: %v", err)
 		}
 		if err := register(ctx, s, "n1", "n1:1", nil); err != nil {
