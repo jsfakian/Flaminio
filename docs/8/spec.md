@@ -31,14 +31,22 @@ compare the header's revision in their transactions.
   moving.
 
 **S4. A deletion interrupted between its two steps** leaves the header marked. The volume stays
-gone for every other operation, and its id cannot be reused: a create with it gets
-`FailedPrecondition`, saying the volume is being deleted. The next `DeleteVolume` of it finds
+gone for every other operation, and its id cannot be reused: a create with it gets `Aborted`,
+saying the volume is being deleted, so that the CSI provisioner retries it. The next `DeleteVolume` of it finds
 the mark, and does step 2.
 
 **S4a. A deletion during a creation.** A creation writes its chunk records, and finally clears its
 own mark, each conditional on the header it claimed. A deletion's mark changes that header, so
 the creation stops there with an error. It adds no chunk after the deletion's listing, and does
 not bring the header back.
+
+**S4c. A header that does not parse** is deleted without a mark: no move or ISR change can
+commit against it, as `readHeader` fails on it.
+
+**S4d. Chunk records are deleted only while they are the deleted volume's.** After a deletion,
+its chunk records are deleted conditional on the header still being absent. A creation's
+cleanup of leftovers is conditional on its own claim. Neither can delete a newer creation's
+records.
 
 **S4b. A chunk missing because the volume is gone.** A move or an ISR change that read the header
 before a deletion, and finds a chunk record gone, answers `NotFound`, as for any operation on a
@@ -76,12 +84,17 @@ reason, such as an unregistered destination, still fails the step.
   deletion. The move returns `NotFound`, and the chunk is not moving.
 - **Interrupted deletion.** With the header marked directly:
   - `GetVolume` and `MoveReplica` return `NotFound`, `ListVolumes` leaves the volume out, and a
-    create with its id gets `FailedPrecondition`;
+    create with its id gets `Aborted`;
   - `DeleteVolume` then finishes: no header, and a tombstone for the replicas.
 - **Deletion during a creation.** A deletion run when the creation reads its claimed header: the
   creation fails, and leaves no header and no chunk records.
 - **Volume deleted mid-move.** A deletion run when `MoveReplica` reads the header: the move gets
   `NotFound`.
+- **Damaged header.** A header overwritten with bytes that are not JSON: `DeleteVolume` removes
+  it and tombstones the replicas.
+
+`meta/kv/kv_test.go`, against both stores: `TxnRev` gives the revision of the keys it wrote,
+a compare at it holds, and a failed compare gives 0.
 
 `control/drain/drain_test.go`: a volume deleted before the step's move of it, and one deleted
 before the step reads it, are both skipped, and the step counts only the other volume. A move

@@ -988,7 +988,7 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
 			t.Fatalf("move of a volume being deleted: %v", err)
 		}
-		if _, err := create(s, "v", 2, 2, 1); code(err) != codes.FailedPrecondition {
+		if _, err := create(s, "v", 2, 2, 1); code(err) != codes.Aborted {
 			t.Fatalf("create over a volume being deleted: %v", err)
 		}
 		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
@@ -1007,8 +1007,9 @@ func TestDeleteVolumeDuringItsCreation(t *testing.T) {
 		ctx := context.Background()
 		s := New(store, Options{})
 		addNodes(t, s, "a", "b")
-		// createVolume reads its claimed header once, before it writes the chunks.
-		store.key = volumeKey("v")
+		// After its claim, createVolume lists the chunk records (leftovers of an earlier deletion)
+		// before it writes its own: the deletion runs there.
+		store.prefix = chunkPrefix("v")
 		hook := func() {
 			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
 				t.Error(err)
@@ -1042,6 +1043,31 @@ func TestMoveReplicaOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
 		store.hook.Store(&hook)
 		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
 			t.Fatalf("move of a volume deleted mid-call: %v", err)
+		}
+	})
+}
+
+// A volume whose header does not parse can still be deleted: no move or ISR change can commit
+// against it, so it needs no mark (docs/8).
+func TestDeleteVolumeWithADamagedHeader(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b")
+		if _, err := create(s, "v", 2, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey("v"), Value: []byte("not json")}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, _ := store.Get(ctx, volumeKey("v")); ok {
+			t.Fatal("the damaged header is still there")
+		}
+		if !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
+			t.Fatal("the tombstone does not name the replicas")
 		}
 	})
 }

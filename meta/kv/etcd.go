@@ -82,8 +82,14 @@ func (e *Etcd) List(ctx context.Context, prefix string) ([]Entry, error) {
 }
 
 func (e *Etcd) Txn(ctx context.Context, cmps []Cmp, ops []Op) (bool, error) {
+	_, ok, err := e.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+// TxnRev's revision is the transaction's: etcd gives every key written in it that ModRevision.
+func (e *Etcd) TxnRev(ctx context.Context, cmps []Cmp, ops []Op) (int64, bool, error) {
 	if len(cmps) > MaxTxnOps || len(ops) > MaxTxnOps {
-		return false, fmt.Errorf("transaction too large: %d compares, %d ops", len(cmps), len(ops))
+		return 0, false, fmt.Errorf("transaction too large: %d compares, %d ops", len(cmps), len(ops))
 	}
 	cs := make([]clientv3.Cmp, len(cmps))
 	for i, c := range cmps {
@@ -101,9 +107,12 @@ func (e *Etcd) Txn(ctx context.Context, cmps []Cmp, ops []Op) (bool, error) {
 		return e.c.Txn(ctx).If(cs...).Then(os...).Commit()
 	})
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
-	return r.Succeeded, nil
+	if !r.Succeeded {
+		return 0, false, nil // nothing written: no revision to give
+	}
+	return r.Header.GetRevision(), true, nil
 }
 
 func (e *Etcd) PutTTL(ctx context.Context, key string, value []byte, ttl time.Duration) error {

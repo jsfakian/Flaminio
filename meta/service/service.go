@@ -403,7 +403,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	// compare keeps a concurrent DeleteVolume's leftover from racing with this claim.
 	v.Creating = true
 	hb, _ := json.Marshal(v.Header)
-	ok, err := s.kv.Txn(ctx,
+	claim, ok, err := s.kv.TxnRev(ctx,
 		[]kv.Cmp{{Key: volumeKey(spec.ID), Rev: 0}, {Key: tombstoneKey(spec.ID), Rev: 0}},
 		[]kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
 	if err != nil {
@@ -411,30 +411,23 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	}
 	if !ok {
 		// A deletion that was interrupted after its mark (docs/8) holds the id until it is
-		// finished: say so, rather than that the volume exists.
-		if e, found, err := s.kv.Get(ctx, volumeKey(spec.ID)); err == nil && found {
-			var h domain.Header
-			if json.Unmarshal(e.Value, &h) == nil && h.Deleting {
-				return nil, status.Errorf(codes.FailedPrecondition,
-					"volume %q is being deleted: finish its deletion (DeleteVolume) first", spec.ID)
-			}
+		// finished: say so, rather than that the volume exists. Aborted, as the operation can
+		// succeed once the deletion is retried.
+		if h, _, err := s.readHeader(ctx, spec.ID); errors.Is(err, domain.ErrNotFound) && h.Deleting {
+			return nil, status.Errorf(codes.Aborted,
+				"volume %q is being deleted: finish its deletion (DeleteVolume) first", spec.ID)
 		}
 		return nil, fmt.Errorf("%w: volume %q", domain.ErrExists, spec.ID)
 	}
-	// Every later write is conditional on this claim: a deletion marks the header (docs/8), and
-	// the creation then stops, rather than add chunks after the deletion listed them, or clear
-	// the deletion's mark with its own header.
-	claim, ok, err := s.kv.Get(ctx, volumeKey(spec.ID))
-	if err != nil {
-		return nil, err
-	}
+	// Every later write is conditional on this claim, at the revision the claim wrote: a
+	// deletion marks the header (docs/8), and the creation then stops, rather than add chunks
+	// after the deletion listed them, or clear the deletion's mark with its own header.
+	cmp := []kv.Cmp{{Key: volumeKey(spec.ID), Rev: claim}}
 	changed := fmt.Errorf("volume %q changed while being created (deleted?)", spec.ID)
-	if !ok {
-		return nil, changed
-	}
-	cmp := []kv.Cmp{{Key: volumeKey(spec.ID), Rev: claim.Rev}}
-	if err := s.deleteChunks(ctx, spec.ID); err != nil { // leftovers of an interrupted delete
+	if ok, err := s.deleteChunks(ctx, spec.ID, cmp); err != nil { // leftovers of an interrupted delete
 		return nil, err
+	} else if !ok {
+		return nil, changed
 	}
 	var ops []kv.Op
 	for i, c := range v.Chunks {
@@ -463,10 +456,13 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	return v, nil
 }
 
-func (s *Service) deleteChunks(ctx context.Context, id string) error {
+// deleteChunks deletes a volume's chunk records, in batches, each conditional on `cmps`: a
+// creation's claim, or a deleted header still being absent. It stops, reporting false, when the
+// condition fails: the chunk records are someone else's by then (a newer creation's).
+func (s *Service) deleteChunks(ctx context.Context, id string, cmps []kv.Cmp) (bool, error) {
 	entries, err := s.kv.List(ctx, chunkPrefix(id))
 	if err != nil {
-		return err
+		return false, err
 	}
 	for len(entries) > 0 {
 		n := min(len(entries), kv.MaxTxnOps)
@@ -474,12 +470,13 @@ func (s *Service) deleteChunks(ctx context.Context, id string) error {
 		for i := range n {
 			ops[i] = kv.Op{Key: entries[i].Key, Delete: true}
 		}
-		if _, err := s.kv.Txn(ctx, nil, ops); err != nil {
-			return err
+		ok, err := s.kv.Txn(ctx, cmps, ops)
+		if err != nil || !ok {
+			return false, err
 		}
 		entries = entries[n:]
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Service) GetVolume(ctx context.Context, r *metav1.GetVolumeRequest) (*metav1.GetVolumeResponse, error) {
@@ -511,28 +508,22 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 		if !ok {
 			return nil, errStatus(fmt.Errorf("%w: volume %q", domain.ErrNotFound, r.GetId()))
 		}
+		// A header that does not parse needs no mark: readHeader fails on it, so no move or ISR
+		// change can commit against it either, and the deletion must still be able to remove it.
+		rev := e.Rev
 		var h domain.Header
-		if err := json.Unmarshal(e.Value, &h); err != nil {
-			return nil, errStatus(err)
-		}
-		if !h.Deleting {
+		if json.Unmarshal(e.Value, &h) == nil && !h.Deleting {
 			h.Deleting = true
 			b, _ := json.Marshal(h)
-			ok, err := s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Value: b}})
+			marked, ok, err := s.kv.TxnRev(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Value: b}})
 			if err != nil {
 				return nil, errStatus(err)
 			}
 			if !ok {
 				continue
 			}
-			// The marked header's revision. Anything else there now (another deletion done,
-			// or a header written since) means reading again.
-			if e, ok, err = s.kv.Get(ctx, volumeKey(r.GetId())); err != nil {
-				return nil, errStatus(err)
-			}
-			if !ok || json.Unmarshal(e.Value, &h) != nil || !h.Deleting {
-				continue
-			}
+			// The revision the mark wrote: no read, so nothing can come between.
+			rev = marked
 		}
 		// Marked: no move or ISR change can commit now, so the listing below stays current.
 		entries, err := s.kv.List(ctx, chunkPrefix(r.GetId()))
@@ -552,12 +543,15 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 			tb, _ := json.Marshal(tombstoneRecord{Nodes: nodes})
 			ops = append(ops, kv.Op{Key: tombstoneKey(r.GetId()), Value: tb})
 		}
-		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, ops)
+		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: rev}}, ops)
 		if err != nil {
 			return nil, errStatus(err)
 		}
 		if ok {
-			return &metav1.DeleteVolumeResponse{}, errStatus(s.deleteChunks(ctx, r.GetId()))
+			// The header must stay absent: a creation that claims the id meanwhile deletes the
+			// leftovers itself, under its own claim, and these records are its own by then.
+			_, err := s.deleteChunks(ctx, r.GetId(), []kv.Cmp{{Key: e.Key, Rev: 0}})
+			return &metav1.DeleteVolumeResponse{}, errStatus(err)
 		}
 	}
 	return nil, status.Error(codes.Aborted, "too much contention")

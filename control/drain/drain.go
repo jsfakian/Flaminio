@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"time"
@@ -78,9 +79,14 @@ func Step(ctx context.Context, c metav1.MetadataServiceClient, node string) (Pro
 		}
 	}
 	for _, v := range vols {
+		before := maps.Clone(load)
 		vp, err := stepVolume(ctx, c, node, v, candidates, load)
 		if errors.Is(err, errVolumeGone) {
-			continue // deleted since it was listed: its replicas go with its tombstone (docs/8)
+			// Deleted since it was listed: its replicas go with its tombstone (docs/8), and the
+			// moves it was given no longer weigh on their destinations.
+			clear(load)
+			maps.Copy(load, before)
+			continue
 		}
 		if err != nil {
 			return p, err
@@ -120,8 +126,12 @@ func stepVolume(ctx context.Context, c metav1.MetadataServiceClient, node string
 		r, err := c.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: v.GetId(), Chunk: uint32(i), From: node, To: to})
 		if status.Code(err) == codes.NotFound {
 			// The volume deleted since it was listed, or the destination gone: tell which.
-			if _, gerr := c.GetVolume(ctx, &metav1.GetVolumeRequest{Id: v.GetId()}); status.Code(gerr) == codes.NotFound {
+			switch _, gerr := c.GetVolume(ctx, &metav1.GetVolumeRequest{Id: v.GetId()}); status.Code(gerr) {
+			case codes.NotFound:
 				return p, errVolumeGone
+			case codes.OK:
+			default:
+				return p, gerr
 			}
 		}
 		if err != nil {

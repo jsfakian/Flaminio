@@ -48,6 +48,22 @@ func testKV(t *testing.T, s kv.KV) {
 	if e, found, _ := s.Get(ctx, "/ttl"); !found || string(e.Value) != "y" {
 		t.Fatalf("ttl key: %+v %v", e, found)
 	}
+	// TxnRev gives the revision its writes got: a compare at it holds with no read between.
+	rev, ok, err := s.TxnRev(ctx, nil, []kv.Op{{Key: "/r", Value: []byte("1")}, {Key: "/r2", Value: []byte("2")}})
+	if err != nil || !ok || rev == 0 {
+		t.Fatalf("txnrev: %d %v %v", rev, ok, err)
+	}
+	for _, k := range []string{"/r", "/r2"} {
+		if e, _, _ := s.Get(ctx, k); e.Rev != rev {
+			t.Fatalf("%s at revision %d, TxnRev said %d", k, e.Rev, rev)
+		}
+	}
+	if ok, err := s.Txn(ctx, []kv.Cmp{{Key: "/r", Rev: rev}}, []kv.Op{{Key: "/r", Delete: true}}); err != nil || !ok {
+		t.Fatalf("compare at the revision TxnRev gave: %v %v", ok, err)
+	}
+	if rev, ok, err := s.TxnRev(ctx, []kv.Cmp{{Key: "/r2", Rev: 1 << 40}}, nil); err != nil || ok || rev != 0 {
+		t.Fatalf("txnrev on a failed compare: %d %v %v", rev, ok, err)
+	}
 }
 
 func TestMem(t *testing.T) {

@@ -7,14 +7,21 @@ header with either as absent (`NotFound`), and `ListVolumes` leaves it out, as f
 So every operation that reads the volume through `readHeader` sees it gone once a deletion has
 marked it. That covers attaches, ISR changes, moves and reads.
 
+**`kv.TxnRev`** (`meta/kv`): `Txn`, also returning the revision its writes got. etcd gives every
+key written in a transaction the response header's revision, and `kv.Mem` its counter. It
+returns 0 when the transaction did not apply. A caller that compares a key it just wrote takes
+the revision from the write, with no read in between, so no other write can slip in.
+
 **`DeleteVolume`** (`meta/service/service.go`). In the existing retry loop:
 1. **Read** the header (`kv.Get`, not `readHeader`, so that it sees a marked one).
-2. **Mark.** If the header is not marked, write it with `Deleting` set, conditional on its
-   revision. On a conflict, read again. Then read it once more, for the marked header's
-   revision.
+2. **Mark.** If the header is not marked, write it with `Deleting` set (`TxnRev`), conditional on
+   its revision. On a conflict, read again. The mark's revision is the one later compares use.
+   A header that does not parse is not marked: `readHeader` fails on it, so nothing can commit
+   against it, and the deletion must still be able to remove it.
 3. **List** the chunks and compute the tombstone's nodes (`replicaNodes`), as now.
 4. **Commit.** In one transaction, conditional on the marked header's revision, delete it and
-   write the tombstone. Then delete the chunk records, as now.
+   write the tombstone. Then delete the chunk records, each batch conditional on the header
+   still being absent: a creation that claims the id meanwhile cleans the leftovers itself.
 
 A deletion that finds the header already marked (an interrupted one, S4) starts at step 3.
 
@@ -24,17 +31,19 @@ revision from `readHeader`. That is what fences it off a deletion (S3). Its doc 
 **`ChangeIsr`** compares the header's revision already. No change, except that a chunk record
 missing because the volume is gone is `NotFound` (`chunkMissing`, which `MoveReplica` uses too).
 
-**`createVolume`.** After claiming the id with its `Creating` header, it reads that header's
-revision once. Every chunk batch, and the final write that clears `Creating`, compare it. Before,
-the batches had no compare, and the final write compared a fresh read. A deletion's mark in
-between now stops the creation. A claim that fails because a deleting header holds the id
-answers `FailedPrecondition`.
+**`createVolume`.** It claims the id with its `Creating` header through `TxnRev`. Every later
+write compares the claim's revision: the cleanup of leftover chunk records, each chunk batch,
+and the final write that clears `Creating`. Before, the batches had no compare, and the final
+write compared a fresh read. A deletion's mark in between now stops the creation. A claim that
+fails because a deleting header holds the id answers `Aborted` ("being deleted"), which the CSI
+provisioner retries, rather than `AlreadyExists`.
 
 **The drain** (`control/drain/drain.go`). Each volume's moves are in `stepVolume`, whose progress
 the step adds up only for volumes still there. `NotFound` from `GetVolume` skips the volume. On
 `NotFound` from `MoveReplica`, it reads the volume: if that is `NotFound` too, the volume was
-deleted and is skipped, uncounted. Otherwise, as for an unregistered destination, the error
-fails the step.
+deleted and is skipped, uncounted, and the loads its earlier moves added are taken back.
+Otherwise, as for an unregistered destination, the error fails the step. A `GetVolume` that
+fails for another reason fails the step with that error.
 
 **The package doc's key list** gains `drain/<node>`, which it was missing.
 
