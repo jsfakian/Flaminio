@@ -62,6 +62,11 @@ func nodeKey(id string) string            { return prefix + "nodes/" + id }
 func aliveKey(id string) string           { return prefix + "alive/" + id }
 func tombstoneKey(id string) string       { return prefix + "tombstones/" + id }
 
+// moveKey is a volume's move record: its value does not matter, only its revision, which every
+// recorded move of the volume changes. A deletion compares it, so that a move recorded after the
+// deletion listed the chunks makes it list them again (docs/8).
+func moveKey(id string) string { return prefix + "moves/" + id }
+
 // tombstoneRecord is the etcd value for a deleted volume until every node that held its
 // chunks has confirmed local deletion (docs/followups.md §8).
 type tombstoneRecord struct {
@@ -474,6 +479,12 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 		if !ok {
 			return nil, errStatus(fmt.Errorf("%w: volume %q", domain.ErrNotFound, r.GetId()))
 		}
+		// Read before the chunks: a move recorded after this changes it, and fails the
+		// transaction below. Its revision is 0, absent, if the volume never had a move.
+		mv, _, err := s.kv.Get(ctx, moveKey(r.GetId()))
+		if err != nil {
+			return nil, errStatus(err)
+		}
 		entries, err := s.kv.List(ctx, chunkPrefix(r.GetId()))
 		if err != nil {
 			return nil, errStatus(err)
@@ -486,12 +497,13 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 			}
 			chunks = append(chunks, c)
 		}
-		ops := []kv.Op{{Key: e.Key, Delete: true}}
+		ops := []kv.Op{{Key: e.Key, Delete: true}, {Key: moveKey(r.GetId()), Delete: true}}
 		if nodes := replicaNodes(chunks); len(nodes) > 0 {
 			tb, _ := json.Marshal(tombstoneRecord{Nodes: nodes})
 			ops = append(ops, kv.Op{Key: tombstoneKey(r.GetId()), Value: tb})
 		}
-		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, ops)
+		cmps := []kv.Cmp{{Key: e.Key, Rev: e.Rev}, {Key: moveKey(r.GetId()), Rev: mv.Rev}}
+		ok, err = s.kv.Txn(ctx, cmps, ops)
 		if err != nil {
 			return nil, errStatus(err)
 		}
@@ -772,7 +784,7 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 				return nil, errStatus(err)
 			}
 		}
-		h, _, err := s.readHeader(ctx, r.GetVolume())
+		h, hrev, err := s.readHeader(ctx, r.GetVolume())
 		if err != nil {
 			return nil, errStatus(err)
 		}
@@ -795,7 +807,12 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 		}
 		domain.ApplyMove(&c, r.GetFrom(), r.GetTo())
 		b, _ := json.Marshal(c)
-		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Value: b}})
+		// The header must be as read: a move must not be recorded for a volume deleted, or
+		// attached elsewhere, meanwhile. The move record tells a deletion that read the chunks
+		// before this move to read them again (docs/8).
+		ok, err = s.kv.Txn(ctx,
+			[]kv.Cmp{{Key: e.Key, Rev: e.Rev}, {Key: volumeKey(h.ID), Rev: hrev}},
+			[]kv.Op{{Key: e.Key, Value: b}, {Key: moveKey(h.ID), Value: []byte("1")}})
 		if err != nil {
 			return nil, errStatus(err)
 		}
