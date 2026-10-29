@@ -45,8 +45,13 @@ return nil, status.Error(codes.Aborted, "too much contention")
   `NotFound` (`domain.ErrNotFound`, through `errStatus`) from inside the loop, before any write.
   The validation no longer requires an address, and the proto comments say what an empty one
   means.
-- **No change, no write.** If the merged JSON equals `e.Value`, it returns success without a
-  `Txn`.
+- **No change, no write.** If the stored record parsed, and has the merged record's address and
+  labels (`maps.Equal`), it returns success without a `Txn`. An unparseable record is logged
+  and overwritten.
+- **Data plane registration** (`flaminio-node/src/engine.rs`): `Engine` keeps a `Registration`
+  state (in flight, done, needed). The registration's answer moves it to done, or, if it
+  failed, to needed. A heartbeat answered `NotFound` also sets needed. At each heartbeat tick,
+  a node that needs a registration sends it instead of the heartbeat.
 - **CSI topology sync** (`control/csi/topology.go`): `syncTopologyOnce` reads the Kubernetes
   labels, then calls `registerTopology`. That function sends `RegisterNode` with the labels and
   no address, and maps `NotFound` to `errNodeNotRegistered`. On `InvalidArgument`, from a

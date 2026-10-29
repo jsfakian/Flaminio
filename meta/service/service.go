@@ -15,11 +15,11 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math/rand/v2"
 	"slices"
@@ -175,7 +175,9 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		// would leave the node unable to register, and ListNodes broken.
 		var rec nodeRecord
 		if ok && json.Unmarshal(e.Value, &rec) != nil {
+			slog.Warn("node record does not parse: overwriting it", "node", n.GetId())
 			rec = nodeRecord{}
+			ok = false
 		}
 		// No address keeps the stored one: the CSI node plugin registers labels only, and must
 		// not put back an address it read before the data plane registered a new one (docs/7).
@@ -191,11 +193,11 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		labels := map[string]string{}
 		maps.Copy(labels, rec.Labels)
 		maps.Copy(labels, n.GetLabels())
-		b, _ := json.Marshal(nodeRecord{Address: address, Labels: labels})
 		// Nothing to change: no write, so no other registration in flight has to retry.
-		if ok && bytes.Equal(b, e.Value) {
+		if ok && rec.Address == address && maps.Equal(rec.Labels, labels) {
 			return &metav1.RegisterNodeResponse{}, nil
 		}
+		b, _ := json.Marshal(nodeRecord{Address: address, Labels: labels})
 		// e.Rev is 0 when it read none: the record must then still be absent.
 		applied, err := s.kv.Txn(ctx, []kv.Cmp{{Key: key, Rev: e.Rev}}, []kv.Op{{Key: key, Value: b}})
 		if err != nil {

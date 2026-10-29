@@ -10,10 +10,13 @@ service's other updates do (`backoff`, up to `retries` attempts).
 **S2. Contention.** After `retries` (32) failed attempts, it fails with `Aborted` ("too much
 contention"), like the other updates.
 - **Who retries:** the CSI node plugin's topology sync retries a failed registration every 5 s.
-  The data plane registers once, when it starts, and does not retry.
-- **Why the data plane never sees it in practice:** an attempt fails only when another
-  registration of the same node commits during it. A node has a handful of writers (the data
-  plane, the CSI node plugin, an operator's `metactl`), far fewer than 32.
+  The data plane sends its registration again at each heartbeat until one succeeds, and again
+  after a heartbeat answered `NotFound` (the service lost its record). Before this, it
+  registered once at start, so a metadata service that was down or contended then left the
+  node unregistered, and never live, until a restart.
+- **How rare it is:** an attempt fails only when another registration of the same node commits
+  during it. A node has a handful of writers (the data plane, the CSI node plugin, an
+  operator's `metactl`), far fewer than 32.
 
 **S3. No address keeps the stored one.** A registration with an empty address keeps the stored
 address, and merges its labels as above. For a node without a record (or without an address in
@@ -26,8 +29,8 @@ service older than this refuses the empty address with `InvalidArgument`. The sy
 its labels the old way, with the address it reads from `ListNodes`, so that a rolling upgrade
 does not hold the labels back.
 
-**S4. A registration that changes nothing writes nothing.** If the merged record equals the
-stored one byte for byte, `RegisterNode` succeeds without writing. So another registration in
+**S4. A registration that changes nothing writes nothing.** If the merged record has the stored
+record's address and labels, `RegisterNode` succeeds without writing. So another registration in
 flight does not have to retry for nothing.
 
 **S5. Unchanged.**
@@ -62,10 +65,14 @@ flight does not have to retry for nothing.
   address keep `n1:2`.
 - **No change:** registering the same address and labels again, or no address and no labels,
   makes no `Txn` on the node's key.
+- **Data plane** (`flaminio-node/tests/engine.rs`): with the first two registrations refused, the
+  node is registered at a later heartbeat. After the service loses the record, a heartbeat's
+  `NotFound` makes the node register again.
 - **CSI topology sync** (`control/csi/topology_test.go`):
   - **In-process metadata service:** before the data plane registers, `registerTopology`
     reports the node as not registered. After each address the data plane registers, the
     labels are added and that address is kept.
   - **Recording fake:** the registration it sends carries no address. Against a fake that
     refuses an empty address with `InvalidArgument`, as an older service does, it sends again
-    with the address from `ListNodes`.
+    with the address from `ListNodes`. A refusal for another reason, with the node not listed,
+    comes back as it is.

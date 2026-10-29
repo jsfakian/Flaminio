@@ -2,16 +2,12 @@ package csi
 
 import (
 	"context"
-	"net"
 	"slices"
 	"sync"
 	"testing"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	"google.golang.org/grpc/test/bufconn"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/domain"
@@ -83,32 +79,13 @@ func (r *recordingMeta) ListNodes(context.Context, *metav1.ListNodesRequest) (*m
 	return &metav1.ListNodesResponse{Nodes: []*metav1.Node{{Id: "n1", Address: r.listed}}}, nil
 }
 
-func recordingFixture(t *testing.T, r *recordingMeta) *Meta {
-	t.Helper()
-	l := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
-	metav1.RegisterMetadataServiceServer(srv, r)
-	go func() { _ = srv.Serve(l) }()
-	m, err := dialMeta([]string{"passthrough:///bufnet"},
-		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return l.Dial() }),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		m.Close()
-		srv.Stop()
-	})
-	return m
-}
-
 // The sync's registration carries no address, so it cannot put back one the data plane
 // changed; against an older metadata service, which refuses that, it sends the listed address.
 func TestRegisterTopologySendsNoAddress(t *testing.T) {
 	ctx := context.Background()
 	topo := map[string]string{domain.LabelZone: "z1"}
 	r := &recordingMeta{answer: func(*metav1.Node) error { return nil }}
-	if err := registerTopology(ctx, recordingFixture(t, r), "n1", topo); err != nil {
+	if err := registerTopology(ctx, serveMeta(t, r), "n1", topo); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.requests) != 1 || r.requests[0].GetAddress() != "" || r.requests[0].GetLabels()[domain.LabelZone] != "z1" {
@@ -121,10 +98,22 @@ func TestRegisterTopologySendsNoAddress(t *testing.T) {
 		}
 		return nil
 	}}
-	if err := registerTopology(ctx, recordingFixture(t, old), "n1", topo); err != nil {
+	if err := registerTopology(ctx, serveMeta(t, old), "n1", topo); err != nil {
 		t.Fatal(err)
 	}
 	if len(old.requests) != 2 || old.requests[1].GetAddress() != "n1:7411" {
 		t.Fatalf("requests to an older service %v", old.requests)
+	}
+}
+
+// A refusal that is not about the address (an invalid id) comes back as it is, rather than as
+// "not registered", which the sync would retry for good.
+func TestRegisterTopologyPassesOnOtherRefusals(t *testing.T) {
+	r := &recordingMeta{answer: func(*metav1.Node) error {
+		return status.Error(codes.InvalidArgument, "node needs a valid id")
+	}}
+	err := registerTopology(context.Background(), serveMeta(t, r), "Not A Valid Id", nil)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("got %v, want the InvalidArgument", err)
 	}
 }

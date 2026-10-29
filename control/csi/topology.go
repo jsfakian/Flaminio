@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"time"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
@@ -71,29 +72,24 @@ func registerTopology(ctx context.Context, meta *Meta, nodeID string, topo map[s
 	case codes.NotFound:
 		return errNodeNotRegistered
 	case codes.InvalidArgument:
-		return registerTopologyWithAddress(ctx, meta, nodeID, topo)
+		return registerTopologyWithAddress(ctx, meta, nodeID, topo, err)
 	}
 	return err
 }
 
 // registerTopologyWithAddress is the registration an older metadata service takes: it needs
-// the address, read here with ListNodes.
-func registerTopologyWithAddress(ctx context.Context, meta *Meta, nodeID string, topo map[string]string) error {
+// the address, read here with ListNodes. If the node is not listed, the refusal was not about
+// the address (an invalid id, say): `refused` is returned as it is.
+func registerTopologyWithAddress(ctx context.Context, meta *Meta, nodeID string, topo map[string]string, refused error) error {
 	nodes, err := meta.ListNodes(ctx)
 	if err != nil {
 		return err
 	}
-	var address string
-	for _, n := range nodes {
-		if n.GetId() == nodeID {
-			address = n.GetAddress()
-			break
-		}
+	i := slices.IndexFunc(nodes, func(n *metav1.Node) bool { return n.GetId() == nodeID })
+	if i < 0 || nodes[i].GetAddress() == "" {
+		return refused
 	}
-	if address == "" {
-		return errNodeNotRegistered
-	}
-	return meta.RegisterNode(ctx, &metav1.Node{Id: nodeID, Address: address, Labels: topo})
+	return meta.RegisterNode(ctx, &metav1.Node{Id: nodeID, Address: nodes[i].GetAddress(), Labels: topo})
 }
 
 type notRegisteredError struct{}
