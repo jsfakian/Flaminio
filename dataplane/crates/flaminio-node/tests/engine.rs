@@ -36,6 +36,8 @@ const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 struct Model {
     nodes: BTreeMap<String, String>,
     volume: Option<pb::Volume>,
+    /// Registrations to refuse, as a contended or unreachable service does.
+    refuse_registrations: u32,
 }
 
 struct FakeMeta {
@@ -47,11 +49,22 @@ impl MetaPort for FakeMeta {
     fn call(&self, id: u64, call: Call) {
         let mut m = self.model.lock().unwrap();
         let answer = match call {
+            Call::RegisterNode(_) if m.refuse_registrations > 0 => {
+                m.refuse_registrations -= 1;
+                Answer::Failed {
+                    code: flaminio_metaclient::Code::Aborted,
+                    message: "too much contention".into(),
+                }
+            }
             Call::RegisterNode(r) => {
                 let n = r.node.unwrap();
                 m.nodes.insert(n.id, n.address);
                 Answer::RegisterNode(pb::RegisterNodeResponse {})
             }
+            Call::NodeHeartbeat(h) if !m.nodes.contains_key(&h.node) => Answer::Failed {
+                code: flaminio_metaclient::Code::NotFound,
+                message: format!("node {:?} is not registered", h.node),
+            },
             Call::NodeHeartbeat(_) => {
                 Answer::NodeHeartbeat(pb::NodeHeartbeatResponse { ttl_seconds: 10 })
             }
@@ -413,6 +426,7 @@ fn hand_driven(
     token_key: TokenKey,
     model: Arc<Mutex<Model>>,
     timing: Timing,
+    heartbeat: Option<Duration>,
 ) -> (Engine<MemDevice>, mpsc::Receiver<Input>) {
     let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
     let addr = listener.local_addr().unwrap();
@@ -438,7 +452,7 @@ fn hand_driven(
         address: addr.to_string(),
         timing,
         max_io: 64,
-        heartbeat: None,
+        heartbeat,
     };
     let meta = Box::new(FakeMeta { model, inbox: tx });
     (
@@ -555,6 +569,7 @@ fn direct_reads_from_the_local_replica() {
         TokenKey::from_raw(signer.public_key().as_ref()).unwrap(),
         model.clone(),
         Timing::default(),
+        None,
     );
     model.lock().unwrap().volume = Some(pb::Volume {
         id: "v".into(),
@@ -817,7 +832,14 @@ fn a_failed_local_read_on_the_only_replica_fails_at_once() {
     let model = Arc::new(Mutex::new(Model::default()));
     let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
+    let (mut engine, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        key,
+        model.clone(),
+        Timing::default(),
+        None,
+    );
     model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
     attach(&mut engine, &rx, &signer, 1);
     write_at_0(&mut engine, &rx, 1, pattern(1, 64 << 10));
@@ -858,7 +880,14 @@ fn a_failed_local_read_is_read_from_the_other_replica() {
     let signer = Ed25519KeyPair::from_seed_unchecked(&[8; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
     let _b = start_node("fl-b", &ids["fl-b"], key.clone(), model.clone());
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
+    let (mut engine, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        key,
+        model.clone(),
+        Timing::default(),
+        None,
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     while !model.lock().unwrap().nodes.contains_key("fl-b") {
         assert!(Instant::now() < deadline, "fl-b did not register");
@@ -909,7 +938,14 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
     let model = Arc::new(Mutex::new(Model::default()));
     let signer = Ed25519KeyPair::from_seed_unchecked(&[9; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
+    let (mut engine, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        key,
+        model.clone(),
+        Timing::default(),
+        None,
+    );
     model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
 
     // A direct read whose local read is held back.
@@ -1025,7 +1061,14 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
         refresh: 300_000_000,
         ..Timing::default()
     };
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key.clone(), model.clone(), quiet);
+    let (mut engine, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        key.clone(),
+        model.clone(),
+        quiet,
+        None,
+    );
     let b = start_node("fl-b", &ids["fl-b"], key, model.clone());
     let deadline = Instant::now() + Duration::from_secs(10);
     while model.lock().unwrap().nodes.len() < 2 {
@@ -1146,7 +1189,14 @@ fn dropped_attach(late: Late) {
     let model = Arc::new(Mutex::new(Model::default()));
     let signer = Ed25519KeyPair::from_seed_unchecked(&[11; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model.clone(), Timing::default());
+    let (mut engine, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        key,
+        model.clone(),
+        Timing::default(),
+        None,
+    );
     model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
     let attach_input = |epoch| Input::Attach {
         volume: "v".into(),
@@ -1255,7 +1305,7 @@ fn an_attach_of_an_unknown_volume_fails_at_once() {
     let model = Arc::new(Mutex::new(Model::default()));
     let signer = Ed25519KeyPair::from_seed_unchecked(&[12; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
-    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model, Timing::default());
+    let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model, Timing::default(), None);
     engine.handle(
         Instant::now(),
         Input::Attach {
@@ -1291,6 +1341,44 @@ fn late_answers_to_a_dropped_attach_leave_a_new_attach_alone() {
 #[test]
 fn late_failures_of_a_dropped_attach_leave_a_new_attach_alone() {
     dropped_attach(Late::FailedBeforeNewAttach);
+}
+
+/// A registration the metadata service refuses (contended, or unreachable at start) is sent
+/// again, heartbeats or not, and so is one the service lost (docs/7): the node does not stay
+/// unregistered, and never live, until a restart.
+#[test]
+fn a_refused_or_lost_registration_is_sent_again() {
+    let dir = std::env::temp_dir().join(format!("flaminio-register-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let model = Arc::new(Mutex::new(Model {
+        refuse_registrations: 2,
+        ..Model::default()
+    }));
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[13; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let (mut engine, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        key,
+        model.clone(),
+        Timing::default(),
+        Some(Duration::from_millis(20)),
+    );
+    let registered = |engine: &mut Engine<MemDevice>| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !model.lock().unwrap().nodes.contains_key("fl-a") {
+            assert!(Instant::now() < deadline, "fl-a never registered");
+            pump(engine, &rx);
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+    registered(&mut engine);
+    assert_eq!(model.lock().unwrap().refuse_registrations, 0);
+    // The service loses the record: the next heartbeat gets NotFound, and the node registers again.
+    model.lock().unwrap().nodes.clear();
+    registered(&mut engine);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A single-node engine whose local replica's commits stay in flight until the test lands

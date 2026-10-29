@@ -359,7 +359,23 @@ struct Attaching {
     nodes: Option<Vec<pb::Node>>,
 }
 
+/// How long after a failed registration it is sent again.
+const REGISTER_RETRY: Duration = Duration::from_secs(3);
+
+/// Where the node's registration with the metadata service stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Registration {
+    InFlight,
+    Done,
+    /// It failed, or the service lost it: sent again at the next heartbeat.
+    Needed,
+}
+
 enum MetaWait {
+    /// The node's registration.
+    Register,
+    /// A node heartbeat, sent under the registration numbered `registered`.
+    Heartbeat { registered: u64 },
     Attach {
         volume: String,
         part: u8,
@@ -371,15 +387,9 @@ enum MetaWait {
         chunks: Vec<u32>,
     },
     /// The target's read of its volume.
-    Refresh {
-        volume: String,
-        sm_req: u64,
-    },
+    Refresh { volume: String, sm_req: u64 },
     /// Addresses of nodes the target learned of after it started (a move's destination).
-    Nodes {
-        volume: String,
-    },
-    Background,
+    Nodes { volume: String },
 }
 
 /// Where a reply from the local replica goes.
@@ -435,6 +445,13 @@ pub struct Engine<D: BlockDevice> {
     draining: bool,
     pending_drain: std::collections::BTreeSet<String>,
     next_heartbeat: Instant,
+    /// Whether the metadata service has this node's registration.
+    registration: Registration,
+    /// Successful registrations so far: a heartbeat's NotFound counts only if no registration
+    /// succeeded after the heartbeat was sent.
+    registrations: u64,
+    /// When a failed registration is sent again, heartbeats or not.
+    next_register: Instant,
     deaf_until: Option<Instant>,
 }
 
@@ -477,16 +494,26 @@ impl<D: BlockDevice> Engine<D> {
             pending_drain: std::collections::BTreeSet::new(),
             next_heartbeat: now,
             deaf_until: None,
+            registration: Registration::Needed,
+            registrations: 0,
+            next_register: now,
         };
+        e.register();
+        e
+    }
+
+    /// Registers the node's address with the metadata service. A registration that fails is
+    /// sent again `REGISTER_RETRY` later (docs/7).
+    fn register(&mut self) {
         let reg = pb::RegisterNodeRequest {
             node: Some(pb::Node {
-                id: e.cfg.node.clone(),
-                address: e.cfg.address.clone(),
+                id: self.cfg.node.clone(),
+                address: self.cfg.address.clone(),
                 ..Default::default()
             }),
         };
-        e.meta_call(Call::RegisterNode(reg), MetaWait::Background);
-        e
+        self.registration = Registration::InFlight;
+        self.meta_call(Call::RegisterNode(reg), MetaWait::Register);
     }
 
     pub fn service(&self) -> &ReplicaService<D> {
@@ -516,6 +543,9 @@ impl<D: BlockDevice> Engine<D> {
     /// The next time [`Engine::turn`] has work, if no input arrives before.
     pub fn next_wakeup(&self) -> Instant {
         let mut t = self.next_heartbeat;
+        if self.registration == Registration::Needed {
+            t = t.min(self.next_register);
+        }
         for rt in self.targets.values() {
             let now_us = self.us(Instant::now());
             if let Some(w) = rt.sm.next_wakeup(now_us) {
@@ -604,14 +634,23 @@ impl<D: BlockDevice> Engine<D> {
 
     /// Ticks targets and heartbeats, and sends what queued for the local replica.
     pub fn turn(&mut self, now: Instant) {
+        // A registration that failed, or that the service lost, goes again, with or without
+        // heartbeats. Without this, a metadata service that was down or contended when the node
+        // started would leave it unregistered, and never live, until a restart.
+        if self.registration == Registration::Needed && now >= self.next_register {
+            self.register();
+        }
         if let Some(every) = self.cfg.heartbeat
             && now >= self.next_heartbeat
         {
             self.next_heartbeat = now + every;
+            // Sent whatever the registration's state: a node whose record exists stays live
+            // while a registration that keeps failing is retried.
             let hb = pb::NodeHeartbeatRequest {
                 node: self.cfg.node.clone(),
             };
-            self.meta_call(Call::NodeHeartbeat(hb), MetaWait::Background);
+            let registered = self.registrations;
+            self.meta_call(Call::NodeHeartbeat(hb), MetaWait::Heartbeat { registered });
         } else if self.cfg.heartbeat.is_none() {
             self.next_heartbeat = now + Duration::from_secs(3600);
         }
@@ -1114,9 +1153,33 @@ impl<D: BlockDevice> Engine<D> {
             return;
         };
         match wait {
-            MetaWait::Background => {
+            MetaWait::Register => match answer {
+                Answer::Failed { code, message } => {
+                    eprintln!(
+                        "flaminio-node: registration failed: {code:?}: {message}; trying again"
+                    );
+                    self.registration = Registration::Needed;
+                    self.next_register = now + REGISTER_RETRY;
+                }
+                _ => {
+                    self.registration = Registration::Done;
+                    self.registrations += 1;
+                    // Live at once: the first heartbeat goes out at the next turn.
+                    self.next_heartbeat = now;
+                }
+            },
+            MetaWait::Heartbeat { registered } => {
                 if let Answer::Failed { code, message } = answer {
-                    eprintln!("flaminio-node: metadata call failed: {code:?}: {message}");
+                    eprintln!("flaminio-node: heartbeat failed: {code:?}: {message}");
+                    // The service does not know the node (its record is gone): register again,
+                    // unless a registration already succeeded since this heartbeat went out.
+                    if code == flaminio_metaclient::Code::NotFound
+                        && registered == self.registrations
+                        && self.registration == Registration::Done
+                    {
+                        self.registration = Registration::Needed;
+                        self.next_register = now;
+                    }
                 }
             }
             MetaWait::Attach {

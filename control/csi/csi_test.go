@@ -18,12 +18,10 @@ import (
 	"github.com/flaminio/flaminio/meta/service"
 )
 
-// metaFixture runs an in-memory metadata service, without authentication (its rules are
-// tested in meta/service), with live nodes a and b. The first endpoint given to the client
+// serveMeta serves `svc` on a local port and dials it. The first endpoint given to the client
 // refuses connections, so every call also exercises the move to the next instance.
-func metaFixture(t *testing.T) *Meta {
+func serveMeta(t *testing.T, svc metav1.MetadataServiceServer) *Meta {
 	t.Helper()
-	svc := service.New(kv.NewMem(nil), service.Options{})
 	srv := grpc.NewServer()
 	metav1.RegisterMetadataServiceServer(srv, svc)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -37,6 +35,15 @@ func metaFixture(t *testing.T) *Meta {
 		t.Fatal(err)
 	}
 	t.Cleanup(m.Close)
+	return m
+}
+
+// metaFixture runs an in-memory metadata service, without authentication (its rules are
+// tested in meta/service), with live nodes a and b.
+func metaFixture(t *testing.T) *Meta {
+	t.Helper()
+	svc := service.New(kv.NewMem(nil), service.Options{})
+	m := serveMeta(t, svc)
 	ctx := context.Background()
 	for _, n := range []string{"a", "b"} {
 		if _, err := svc.RegisterNode(ctx, &metav1.RegisterNodeRequest{Node: &metav1.Node{Id: n, Address: n + ":7411"}}); err != nil {

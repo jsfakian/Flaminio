@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"math/rand/v2"
 	"net"
 	"sync"
@@ -585,4 +586,202 @@ func TestMoveAndDrain(t *testing.T) {
 			t.Fatalf("after undrain: %v", err)
 		}
 	})
+}
+
+// interleaveKV runs a hook once, after the first Get of `key` it sees and before returning that
+// read: the hook can make another write land between a read and the write that follows it. It
+// counts the Txn calls on `key` made outside the hook.
+type interleaveKV struct {
+	kv.KV
+	key   string
+	hook  atomic.Pointer[func()]
+	inner atomic.Bool
+	txns  atomic.Int32
+}
+
+func (k *interleaveKV) Get(ctx context.Context, key string) (kv.Entry, bool, error) {
+	e, ok, err := k.KV.Get(ctx, key)
+	// Swapped out before it runs: the hook's own Get does not run it again.
+	if key == k.key {
+		if h := k.hook.Swap(nil); h != nil {
+			k.inner.Store(true)
+			(*h)()
+			k.inner.Store(false)
+		}
+	}
+	return e, ok, err
+}
+
+func (k *interleaveKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	for _, op := range ops {
+		if op.Key == k.key && !k.inner.Load() {
+			k.txns.Add(1)
+		}
+	}
+	return k.KV.Txn(ctx, cmps, ops)
+}
+
+func nodeLabels(t *testing.T, s *Service, id string) (string, map[string]string) {
+	t.Helper()
+	r, err := s.ListNodes(context.Background(), &metav1.ListNodesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range r.GetNodes() {
+		if n.GetId() == id {
+			return n.GetAddress(), n.GetLabels()
+		}
+	}
+	t.Fatalf("node %q not listed", id)
+	return "", nil
+}
+
+func register(ctx context.Context, s *Service, id, addr string, labels map[string]string) error {
+	_, err := s.RegisterNode(ctx, &metav1.RegisterNodeRequest{Node: &metav1.Node{Id: id, Address: addr, Labels: labels}})
+	return err
+}
+
+// Two registrations of a node that interleave, one between the other's read and write, keep
+// both their labels (docs/7): with no record yet, and with one.
+func TestRegisterNodeInterleavedKeepsLabels(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		existing bool
+	}{{"no record", false}, {"existing record", true}} {
+		existing := tc.existing
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := &interleaveKV{KV: kv.NewMem(nil), key: nodeKey("n1")}
+			s := New(store, Options{})
+			if existing {
+				if err := register(ctx, s, "n1", "n1:7410", map[string]string{"old": "1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hook := func() {
+				if err := register(ctx, s, "n1", "n1:7410", map[string]string{"zone": "z1"}); err != nil {
+					t.Error(err)
+				}
+			}
+			store.txns.Store(0)
+			store.hook.Store(&hook)
+			if err := register(ctx, s, "n1", "n1:7410", map[string]string{"rack": "r1"}); err != nil {
+				t.Fatal(err)
+			}
+			// The first write lost its compare to the hook's, and the second applied.
+			if got := store.txns.Load(); got != 2 {
+				t.Fatalf("%d writes by the first registration, want 2", got)
+			}
+			_, labels := nodeLabels(t, s, "n1")
+			if labels["zone"] != "z1" || labels["rack"] != "r1" || (existing && labels["old"] != "1") {
+				t.Fatalf("labels %v", labels)
+			}
+		})
+	}
+}
+
+// Twenty registrations of a node at once, each with its own label, all succeed and leave every
+// label (docs/7).
+func TestRegisterNodeConcurrentKeepsLabels(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		ctx := context.Background()
+		const n = 20
+		var wg sync.WaitGroup
+		errs := make(chan error, n)
+		for i := range n {
+			wg.Go(func() {
+				errs <- register(ctx, s, "n1", "n1:7410", map[string]string{fmt.Sprintf("l%02d", i): "x"})
+			})
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, labels := nodeLabels(t, s, "n1"); len(labels) != n {
+			t.Fatalf("%d labels, want %d: %v", len(labels), n, labels)
+		}
+	})
+}
+
+// A registration's label overrides a stored one of the same name; other stored labels stay, and
+// the address is replaced.
+func TestRegisterNodeOverwritesLabelsAndAddress(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		ctx := context.Background()
+		if err := register(ctx, s, "n1", "n1:1", map[string]string{"zone": "z1", "rack": "r1"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := register(ctx, s, "n1", "n1:2", map[string]string{"zone": "z2"}); err != nil {
+			t.Fatal(err)
+		}
+		addr, labels := nodeLabels(t, s, "n1")
+		if addr != "n1:2" || labels["zone"] != "z2" || labels["rack"] != "r1" {
+			t.Fatalf("address %q, labels %v", addr, labels)
+		}
+	})
+}
+
+// A node record that does not parse is overwritten by the next registration, which makes
+// ListNodes work again.
+func TestRegisterNodeOverwritesAnUnparseableRecord(t *testing.T) {
+	ctx := context.Background()
+	m := kv.NewMem(nil)
+	if _, err := m.Txn(ctx, nil, []kv.Op{{Key: nodeKey("n1"), Value: []byte("not json")}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New(m, Options{})
+	if err := register(ctx, s, "n1", "n1:7410", map[string]string{"zone": "z1"}); err != nil {
+		t.Fatal(err)
+	}
+	if addr, labels := nodeLabels(t, s, "n1"); addr != "n1:7410" || labels["zone"] != "z1" {
+		t.Fatalf("address %q, labels %v", addr, labels)
+	}
+}
+
+// A registration without an address adds its labels and keeps the stored address, so the CSI
+// node plugin cannot put back an old one; a node not registered yet is refused (docs/7).
+func TestRegisterNodeWithoutAnAddressKeepsTheStoredOne(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		ctx := context.Background()
+		if err := register(ctx, s, "n1", "", map[string]string{"zone": "z1"}); code(err) != codes.NotFound {
+			t.Fatalf("labels for an unregistered node: %v", err)
+		}
+		if err := register(ctx, s, "n1", "n1:1", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := register(ctx, s, "n1", "n1:2", nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := register(ctx, s, "n1", "", map[string]string{"zone": "z1"}); err != nil {
+			t.Fatal(err)
+		}
+		if addr, labels := nodeLabels(t, s, "n1"); addr != "n1:2" || labels["zone"] != "z1" {
+			t.Fatalf("address %q, labels %v", addr, labels)
+		}
+	})
+}
+
+// A registration that changes nothing writes nothing: other registrations in flight need not
+// retry.
+func TestRegisterNodeThatChangesNothingDoesNotWrite(t *testing.T) {
+	ctx := context.Background()
+	store := &interleaveKV{KV: kv.NewMem(nil), key: nodeKey("n1")}
+	s := New(store, Options{})
+	labels := map[string]string{"zone": "z1"}
+	if err := register(ctx, s, "n1", "n1:7410", labels); err != nil {
+		t.Fatal(err)
+	}
+	store.txns.Store(0)
+	if err := register(ctx, s, "n1", "n1:7410", labels); err != nil {
+		t.Fatal(err)
+	}
+	if err := register(ctx, s, "n1", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.txns.Load(); got != 0 {
+		t.Fatalf("%d writes for registrations that change nothing", got)
+	}
 }

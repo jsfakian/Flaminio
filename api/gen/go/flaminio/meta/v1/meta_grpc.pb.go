@@ -47,8 +47,10 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type MetadataServiceClient interface {
-	// Registers a node, or updates its address and failure domain. Caller: that node, or an
-	// administrator.
+	// Registers a node, or updates its address and failure domain. The request's labels are added
+	// to the stored ones, replacing those of the same name. An empty address keeps the stored one,
+	// for a caller that only sets labels; for a node not registered yet it is refused with
+	// NOT_FOUND. Caller: that node, or an administrator.
 	RegisterNode(ctx context.Context, in *RegisterNodeRequest, opts ...grpc.CallOption) (*RegisterNodeResponse, error)
 	// Renews a node's liveness record. Liveness only decides when to fail over; it never grants
 	// permission to serve I/O (ARCHITECTURE §8.5). Caller: that node, or an administrator.
@@ -232,8 +234,10 @@ func (c *metadataServiceClient) MoveReplica(ctx context.Context, in *MoveReplica
 // All implementations must embed UnimplementedMetadataServiceServer
 // for forward compatibility.
 type MetadataServiceServer interface {
-	// Registers a node, or updates its address and failure domain. Caller: that node, or an
-	// administrator.
+	// Registers a node, or updates its address and failure domain. The request's labels are added
+	// to the stored ones, replacing those of the same name. An empty address keeps the stored one,
+	// for a caller that only sets labels; for a node not registered yet it is refused with
+	// NOT_FOUND. Caller: that node, or an administrator.
 	RegisterNode(context.Context, *RegisterNodeRequest) (*RegisterNodeResponse, error)
 	// Renews a node's liveness record. Liveness only decides when to fail over; it never grants
 	// permission to serve I/O (ARCHITECTURE §8.5). Caller: that node, or an administrator.
