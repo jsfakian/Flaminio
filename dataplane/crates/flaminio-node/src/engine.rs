@@ -644,14 +644,13 @@ impl<D: BlockDevice> Engine<D> {
             && now >= self.next_heartbeat
         {
             self.next_heartbeat = now + every;
-            // Heartbeats need a registration: none goes out until one succeeds.
-            if self.registration == Registration::Done {
-                let hb = pb::NodeHeartbeatRequest {
-                    node: self.cfg.node.clone(),
-                };
-                let registered = self.registrations;
-                self.meta_call(Call::NodeHeartbeat(hb), MetaWait::Heartbeat { registered });
-            }
+            // Sent whatever the registration's state: a node whose record exists stays live
+            // while a registration that keeps failing is retried.
+            let hb = pb::NodeHeartbeatRequest {
+                node: self.cfg.node.clone(),
+            };
+            let registered = self.registrations;
+            self.meta_call(Call::NodeHeartbeat(hb), MetaWait::Heartbeat { registered });
         } else if self.cfg.heartbeat.is_none() {
             self.next_heartbeat = now + Duration::from_secs(3600);
         }

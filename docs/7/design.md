@@ -53,8 +53,9 @@ return nil, status.Error(codes.Aborted, "too much contention")
   - **Answers:** a successful registration moves the state to done, counts, and sends the first
     heartbeat at the next turn. A failed one moves it to needed, with a retry `REGISTER_RETRY`
     = 3 s later, in `turn`, whether heartbeats are configured or not.
-  - **Heartbeats:** none goes out until the node is registered. Each carries the count it was
-    sent under. A `NotFound` answer sets needed only if no registration has succeeded since,
+  - **Heartbeats:** they go out as before, whatever the registration's state, so a node whose
+    record exists stays live while a failing registration is retried. Each carries the count it
+    was sent under. A `NotFound` answer sets needed only if no registration has succeeded since,
     so a late answer to an earlier heartbeat causes no extra registration.
 - **CSI topology sync** (`control/csi/topology.go`): `syncTopologyOnce` reads the Kubernetes
   labels, then calls `registerTopology`. That function sends `RegisterNode` with the labels and

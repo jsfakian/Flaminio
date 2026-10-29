@@ -174,8 +174,8 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		// A record that does not parse counts as having no labels, and is overwritten: failing
 		// would leave the node unable to register, and ListNodes broken.
 		var rec nodeRecord
-		if ok && json.Unmarshal(e.Value, &rec) != nil {
-			slog.Warn("node record does not parse: overwriting it", "node", n.GetId())
+		corrupt := ok && json.Unmarshal(e.Value, &rec) != nil
+		if corrupt {
 			rec = nodeRecord{}
 			ok = false
 		}
@@ -198,6 +198,9 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 			return &metav1.RegisterNodeResponse{}, nil
 		}
 		b, _ := json.Marshal(nodeRecord{Address: address, Labels: labels})
+		if corrupt {
+			slog.Warn("node record does not parse: overwriting it", "node", n.GetId())
+		}
 		// e.Rev is 0 when it read none: the record must then still be absent.
 		applied, err := s.kv.Txn(ctx, []kv.Cmp{{Key: key, Rev: e.Rev}}, []kv.Op{{Key: key, Value: b}})
 		if err != nil {

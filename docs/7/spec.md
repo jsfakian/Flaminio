@@ -11,8 +11,10 @@ service's other updates do (`backoff`, up to `retries` attempts).
 contention"), like the other updates.
 - **Who retries:** the CSI node plugin's topology sync retries a failed registration every 5 s.
   The data plane sends its registration again every 3 s until one succeeds, with or without
-  heartbeats, and again after a heartbeat answered `NotFound` (the service lost its record). It
-  sends no heartbeat until it is registered, and its first heartbeat right after. Before this, it
+  heartbeats, and again after a heartbeat answered `NotFound` (the service lost its record). Its
+  heartbeats go out as before, whatever the registration's state, so a node whose record
+  exists stays live while its registration is retried. The first heartbeat after a successful
+  registration goes out at once. Before this, it
   registered once at start, so a metadata service that was down or contended then left the
   node unregistered, and never live, until a restart.
 - **How rare it is:** an attempt fails only when another registration of the same node commits
