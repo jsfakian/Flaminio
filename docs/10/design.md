@@ -99,6 +99,9 @@ Three gates allow staging only behind a commit in flight, or into an existing he
 it starts one.
 - **`Engine::flush_local`:** its held-group path calls `stage_local` before it looks for a
   group. So a large write at the head of the queue is staged, and its data written, at once.
+  - **When something is left queued behind the group** (a request it could not take), it starts
+    the group at once (`launch_held`): in order, the group can grow no more (S1.4).
+  - **Otherwise** the group's wait decides (`maybe_launch_staged`).
 - **`Store::launch_staged`:** it already starts a held group with nothing in flight.
 
 **Why it is safe:** it is W4.2's argument, with nothing in flight instead of one commit.

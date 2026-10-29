@@ -28,6 +28,9 @@ starts when the first of these holds:
    - 2 ms for a large-write wait: the group at the landing holds a large write, or every write
      of the landed commit was large;
    - 300 µs otherwise.
+4. **behind it:** a request the group cannot take is queued behind it: a small write, a read,
+   or a write the store refuses. Kept in order, the group can grow no more. (Found while
+   testing: without this, a small write behind a group held it for its whole window.)
 
 **A group started with nothing in flight (S2)** uses the wait armed at the last landing, while
 that wait's window has not passed. At 1M QD8, every group starts this way, with all 16 requests
@@ -84,8 +87,8 @@ Small-write waits never hold for this.
   - early data goes to clusters that no durable batch references until its batch is durable;
   - batches become durable one at a time, in order;
   - checkpoints wait while a group is staged, as with W4.2.
-- **Small writes,** and the order of a node's writes: a small write behind a group goes into
-  the commit after it.
+- **Small writes,** and the order of a node's writes: a small write behind a group starts the
+  group (S1.4), and goes into the commit after it.
 - **Copy mode:** S1, S2 and S5 apply. It has no copy-in, so S3 and S4 do not arise.
 - **Where holding applies:** a node with no volume attached commits synchronously and never
   holds. A node with a volume attached holds peers' large writes too: up to 2 ms more per

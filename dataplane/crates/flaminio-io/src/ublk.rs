@@ -476,7 +476,7 @@ async fn drive(
 // --- Phase 1: a volume served by the node engine (flaminio-io node --attach) ---------------
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -528,6 +528,31 @@ struct Shared {
     /// Per queue: what wakes its thread when another thread completes one of its operations.
     /// Queue 0's is the node's eventfd, which the network and metadata threads signal too.
     wakes: Vec<Arc<EventFd>>,
+    /// The engine holds staged groups (docs/10): large writes are handed over as soon as each
+    /// is copied in, and counted in `arrivals` meanwhile.
+    holding: bool,
+    /// The store's cluster size, for telling large writes.
+    cluster_size: u64,
+    /// The large writes being copied in, shared with the engine.
+    arrivals: Arc<AtomicUsize>,
+}
+
+/// A large write being copied in (docs/10, S4): counted in the device's arrivals while it
+/// lives, so that a commit waiting for writes to gather waits for it too. Dropped when the
+/// write is handed to the engine, or its copy failed, or its task stops.
+struct Arrival<'a>(&'a AtomicUsize);
+
+impl<'a> Arrival<'a> {
+    fn new(arrivals: &'a AtomicUsize) -> Self {
+        arrivals.fetch_add(1, Ordering::Relaxed);
+        Self(arrivals)
+    }
+}
+
+impl Drop for Arrival<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A queue thread's handle on the shared engine.
@@ -540,9 +565,11 @@ struct EngineCtx {
     due: Cell<bool>,
     /// Writes whose data is still being copied into the staging area (zero copy). The pump
     /// waits for them, so that they join the same group commit as the writes before them.
+    /// Large writes, while the engine holds groups, are not counted here but in arrivals: they
+    /// go to the engine one by one (docs/10, S3).
     staging: Cell<u32>,
-    /// Arms this queue's timer for a commit waiting for writes to gather.
-    gather: std::cell::OnceCell<smol::channel::Sender<Duration>>,
+    /// Arms this queue's timer for the end of a commit's wait for writes to gather.
+    gather: std::cell::OnceCell<smol::channel::Sender<Instant>>,
 }
 
 impl EngineCtx {
@@ -566,8 +593,8 @@ impl EngineCtx {
             } else {
                 e.flush(now);
             }
-            if let (Some(d), Some(tx)) = (e.take_gather_timer(), self.gather.get()) {
-                let _ = tx.try_send(d);
+            if let (Some(at), Some(tx)) = (e.take_gather_timer(), self.gather.get()) {
+                let _ = tx.try_send(at);
             }
             e.take_output()
         };
@@ -955,6 +982,11 @@ fn run_device(
     if let Some(mib) = c.commit_target_mib {
         engine.set_commit_target_bytes(mib << 20);
     }
+    // Read after every engine setting above (docs/10, S3). A new counter per device: a count
+    // left by a device that stopped mid-copy cannot hold the next one's commits.
+    let (holding, cluster_size) = (engine.holding(), engine.cluster_size());
+    let arrivals = Arc::new(AtomicUsize::new(0));
+    engine.set_arrivals(arrivals.clone());
     let mut wakes = vec![efd];
     for _ in 1..c.queues {
         wakes.push(Arc::new(
@@ -980,6 +1012,9 @@ fn run_device(
         poll: Duration::from_micros(c.poll_us),
         defer_taskrun: c.defer_taskrun,
         wakes,
+        holding,
+        cluster_size,
+        arrivals,
     });
     let (qshared, zero_copy) = (shared.clone(), c.zero_copy);
     let queue = move |qid: u16, dev: &UblkDev| {
@@ -1106,16 +1141,31 @@ fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Resu
             }
         })
     };
-    // A commit waiting for writes to gather: pump when its wait ends.
-    let (gather_tx, gather_rx) = smol::channel::unbounded::<Duration>();
+    // A commit waiting for writes to gather: pump when its wait ends. A timeout per wait, each
+    // in its own task, so that a short wait never queues behind a long one (docs/10).
+    let (gather_tx, gather_rx) = smol::channel::unbounded::<Instant>();
     let _ = ctx.gather.set(gather_tx);
     let _gather = {
-        let q = q.clone();
+        let (q, timers) = (q.clone(), exe.clone());
         exe.spawn(async move {
-            while let Ok(d) = gather_rx.recv().await {
-                let ts = types::Timespec::new().nsec(d.as_nanos() as u32);
-                let _ = q.ublk_submit_sqe(opcode::Timeout::new(&ts).build()).await;
-                ctx.pump();
+            while let Ok(at) = gather_rx.recv().await {
+                let Some(d) = at
+                    .checked_duration_since(Instant::now())
+                    .filter(|d| !d.is_zero())
+                else {
+                    ctx.pump();
+                    continue;
+                };
+                let q = q.clone();
+                timers
+                    .spawn(async move {
+                        let ts = types::Timespec::new()
+                            .sec(d.as_secs())
+                            .nsec(d.subsec_nanos());
+                        let _ = q.ublk_submit_sqe(opcode::Timeout::new(&ts).build()).await;
+                        ctx.pump();
+                    })
+                    .detach();
             }
         })
     };
@@ -1354,6 +1404,11 @@ async fn engine_io_task_zc(
                     }
                 }
                 sys::UBLK_IO_OP_WRITE if n <= st.slot_len() => {
+                    // A large write, while the engine holds groups, goes to it as soon as its
+                    // own data is copied in, and is counted in arrivals meanwhile. The others
+                    // wait for one another, which gathers them (docs/10, S3).
+                    let large = ctx.shared.holding
+                        && flaminio_store::large(ctx.shared.cluster_size, offset, len);
                     // The write's data, from the request's pages into the staging slot.
                     let sqe = opcode::WriteFixed::new(
                         types::Fd(st.fd()),
@@ -1363,10 +1418,18 @@ async fn engine_io_task_zc(
                     )
                     .offset(st.offset(tag as usize, 0))
                     .build();
-                    ctx.staging.set(ctx.staging.get() + 1);
+                    let arrival = large.then(|| Arrival::new(&ctx.shared.arrivals));
+                    if !large {
+                        ctx.staging.set(ctx.staging.get() + 1);
+                    }
                     let copied = q.ublk_submit_sqe(sqe).await;
-                    ctx.staging.set(ctx.staging.get() - 1);
+                    if !large {
+                        ctx.staging.set(ctx.staging.get() - 1);
+                    }
                     if copied != n as i32 {
+                        drop(arrival);
+                        // A wait for writes may have held for this one: the engine looks again.
+                        ctx.due.set(true);
                         -libc::EIO
                     } else {
                         // The one copy of the write's data in user space: into an aligned
@@ -1374,6 +1437,7 @@ async fn engine_io_task_zc(
                         let data =
                             st.with_slot(tag as usize, |b| AlignedBuf::shared_copy_of(&b[..n]));
                         ctx.submit(Io::Write { offset, data }, done_tx.clone());
+                        drop(arrival);
                         match done_rx.recv().await {
                             Ok(Event::Done(Ok(_))) => len as i32,
                             Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
@@ -1672,4 +1736,28 @@ async fn event_loop(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Arrival;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn an_arrival_counts_while_it_lives() {
+        let n = AtomicUsize::new(0);
+        let a = Arrival::new(&n);
+        let b = Arrival::new(&n);
+        assert_eq!(n.load(Ordering::Relaxed), 2);
+        drop(a);
+        assert_eq!(n.load(Ordering::Relaxed), 1);
+        // A task stopped mid-copy drops its arrival with it.
+        let task = move || drop(b);
+        task();
+        assert_eq!(n.load(Ordering::Relaxed), 0);
+        // An optional one, as the write path takes it.
+        let none = false.then(|| Arrival::new(&n));
+        assert!(none.is_none());
+        assert_eq!(n.load(Ordering::Relaxed), 0);
+    }
 }

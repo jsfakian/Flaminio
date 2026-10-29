@@ -452,3 +452,69 @@ fn pipelined_commits_answer_in_order() {
         [vec![1u8; 16], vec![2; 16], vec![3; 16]].concat()
     );
 }
+
+/// A service whose commits stay in flight until the test completes them, holding staged groups
+/// (docs/10).
+fn held_service() -> ReplicaService<DeferredDevice> {
+    let store = Store::open(DeferredDevice::new(formatted()), StoreConfig::default()).unwrap();
+    let mut s = ReplicaService::new(store);
+    s.set_hold_staged(true);
+    s
+}
+
+#[test]
+fn holding_stages_with_nothing_in_flight() {
+    let mut s = held_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    assert!(!s.commit_in_flight());
+    assert_eq!(
+        s.stage(&[(sess, write(2, 0, 0, &[1; 16], 1))]),
+        1,
+        "a whole cluster"
+    );
+    assert!(!s.store().device().in_flight(), "held: no commit yet");
+    assert!(s.launch());
+    assert!(s.poll(false).is_none());
+    assert_eq!(
+        s.store().device().pending_writes(),
+        1,
+        "its batch only: the data was written when it was staged"
+    );
+    s.store().device().complete();
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 2 })]));
+    let r = s.handle(&[(sess, read(3, 0, 0, 16))]);
+    assert_eq!(blocks(&r[0]), vec![1u8; 16]);
+}
+
+#[test]
+fn a_held_group_with_no_writes_is_answered() {
+    let mut s = held_service();
+    let (old, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    s.hello(&accepted(2, 2, &[0])).unwrap();
+    // The old session's write is answered by the replica (fenced), not written: the group has
+    // nothing for the store, and nothing in flight would ever land to answer it.
+    assert_eq!(s.stage(&[(old, write(2, 0, 0, &[1; 16], 1))]), 1);
+    assert!(s.launch(), "answered without a commit");
+    assert!(!s.store().device().in_flight());
+    let r = s.poll(false).expect("answered");
+    assert_eq!(r.len(), 1);
+    assert_ne!(r[0], Reply::Send(Frame::Ok { req: 2 }), "{:?}", r[0]);
+    assert!(!s.commit_in_flight());
+}
+
+#[test]
+fn a_held_group_whose_commit_cannot_start_is_answered_with_the_error() {
+    let mut s = held_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    // The commit ahead fails: the store is poisoned, and the held group cannot start.
+    s.store().device().fail_commit();
+    let r = s.poll(false).expect("the failed commit answered");
+    assert_ne!(r[0], Reply::Send(Frame::Ok { req: 2 }));
+    assert!(s.launch(), "the held group is answered, not stranded");
+    let r = s.poll(false).expect("answered with the error");
+    assert_eq!(r.len(), 1);
+    assert_ne!(r[0], Reply::Send(Frame::Ok { req: 3 }), "{:?}", r[0]);
+    assert!(!s.commit_in_flight());
+}
