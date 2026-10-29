@@ -15,10 +15,23 @@ contention"), like the other updates.
   registration of the same node commits during it. A node has a handful of writers (the data
   plane, the CSI node plugin, an operator's `metactl`), far fewer than 32.
 
-**S3. Unchanged.**
+**S3. No address keeps the stored one.** A registration with an empty address keeps the stored
+address, and merges its labels as above. For a node without a record (or without an address in
+it), it fails with `FailedPrecondition`: a node is first registered by its data plane, with an
+address. The CSI node plugin's topology sync registers its labels this way, without an
+address, and so can no longer put back an address it read before the data plane registered a
+new one. It takes `FailedPrecondition` as "not registered yet" and retries every 5 s, as it did.
+A metadata service older than this refuses the empty address. The sync then keeps retrying
+until the service is upgraded.
+
+**S4. A registration that changes nothing writes nothing.** If the merged record equals the
+stored one byte for byte, `RegisterNode` succeeds without writing. So another registration in
+flight does not have to retry for nothing.
+
+**S5. Unchanged.**
 - **Merge rules (intent, 2):** a request's label overrides a stored label of the same name.
   Stored labels the request does not name are kept, and the address is replaced.
-- **Validation** of the request.
+- **Validation** of the id. (An empty address is no longer refused: S3.)
 - **Unparseable record:** a stored record that does not parse counts as having no labels and is
   overwritten, as now. That is what lets the node register again, and `ListNodes` work again,
   after such a record.
@@ -42,3 +55,12 @@ contention"), like the other updates.
 - **Unparseable record:** write bytes that are not a record at the node's key, through the
   in-memory store. `RegisterNode` then succeeds, and `ListNodes` returns the node with the new
   address and labels.
+- **No address** (in-memory and etcd): labels without an address for an unregistered node get
+  `FailedPrecondition`. After the node registers `n1:1` and then `n1:2`, labels without an
+  address keep `n1:2`.
+- **No change:** registering the same address and labels again, or no address and no labels,
+  makes no `Txn` on the node's key.
+- **CSI topology sync** (`control/csi/topology_test.go`, against an in-process metadata
+  service): before the data plane registers, `registerTopology` reports the node as not
+  registered. After each address the data plane registers, the labels are added, and that
+  address is kept.

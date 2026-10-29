@@ -15,6 +15,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -151,8 +152,8 @@ type nodeRecord struct {
 
 func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeRequest) (*metav1.RegisterNodeResponse, error) {
 	n := r.GetNode()
-	if n == nil || !domain.ValidID(n.GetId()) || n.GetAddress() == "" {
-		return nil, errStatus(fmt.Errorf("%w: node needs a valid id and an address", domain.ErrInvalid))
+	if n == nil || !domain.ValidID(n.GetId()) {
+		return nil, errStatus(fmt.Errorf("%w: node needs a valid id", domain.ErrInvalid))
 	}
 	// Merge labels into any existing record so the data plane's address registration does not
 	// wipe failure-domain labels the agent set, and the agent can overlay zone/rack without
@@ -173,16 +174,31 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		// A record that does not parse counts as having no labels, and is overwritten: failing
 		// would leave the node unable to register, and ListNodes broken.
 		var rec nodeRecord
-		if ok && json.Unmarshal(e.Value, &rec) == nil {
-			for k, v := range rec.Labels {
-				labels[k] = v
-			}
+		if ok && json.Unmarshal(e.Value, &rec) != nil {
+			rec = nodeRecord{}
+		}
+		for k, v := range rec.Labels {
+			labels[k] = v
 		}
 		// The request's labels last: they override stored ones of the same name.
 		for k, v := range n.GetLabels() {
 			labels[k] = v
 		}
-		b, _ := json.Marshal(nodeRecord{Address: n.GetAddress(), Labels: labels})
+		// No address keeps the stored one: the CSI node plugin registers labels only, and must
+		// not put back an address it read before the data plane registered a new one (docs/7).
+		address := n.GetAddress()
+		if address == "" {
+			if rec.Address == "" {
+				return nil, status.Errorf(codes.FailedPrecondition,
+					"node %q is not registered: a registration without an address needs one with an address first", n.GetId())
+			}
+			address = rec.Address
+		}
+		b, _ := json.Marshal(nodeRecord{Address: address, Labels: labels})
+		// Nothing to change: no write, so no other registration in flight has to retry.
+		if ok && bytes.Equal(b, e.Value) {
+			return &metav1.RegisterNodeResponse{}, nil
+		}
 		// Rev 0 when it read none: the record must still be absent.
 		rev := int64(0)
 		if ok {

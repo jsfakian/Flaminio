@@ -8,6 +8,8 @@ import (
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/control/failover"
 	"github.com/flaminio/flaminio/meta/domain"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TopologyKeys are the Kubernetes Node labels copied into the metadata service on register
@@ -26,8 +28,9 @@ func topologyFromKube(labels map[string]string) map[string]string {
 }
 
 // SyncTopologyLabels reads this node's zone/rack labels from Kubernetes and overlays them on
-// the metadata service registration. It waits until the data plane has registered an address.
-// Missing labels are skipped; an empty topology is fine (placement stays at node level).
+// the metadata service registration. It waits until the data plane has registered an address,
+// and retries every 5 s until it succeeds. Missing labels are skipped; an empty topology is fine
+// (placement stays at node level).
 func SyncTopologyLabels(ctx context.Context, meta *Meta, kube *failover.APIClient, nodeID string) {
 	for {
 		if err := syncTopologyOnce(ctx, meta, kube, nodeID); err != nil {
@@ -51,22 +54,20 @@ func syncTopologyOnce(ctx context.Context, meta *Meta, kube *failover.APIClient,
 	if err != nil {
 		return err
 	}
-	topo := topologyFromKube(kubeLabels)
-	nodes, err := meta.ListNodes(ctx)
-	if err != nil {
-		return err
-	}
-	var address string
-	for _, n := range nodes {
-		if n.GetId() == nodeID {
-			address = n.GetAddress()
-			break
-		}
-	}
-	if address == "" {
+	return registerTopology(ctx, meta, nodeID, topologyFromKube(kubeLabels))
+}
+
+// registerTopology adds labels to the node's registration without an address, so the metadata
+// service keeps the one the data plane registered, even if it changes meanwhile (docs/7). A
+// node the data plane has not registered yet is refused with FailedPrecondition. A metadata
+// service older than this refuses the missing address; SyncTopologyLabels then retries until
+// it is upgraded.
+func registerTopology(ctx context.Context, meta *Meta, nodeID string, topo map[string]string) error {
+	err := meta.RegisterNode(ctx, &metav1.Node{Id: nodeID, Labels: topo})
+	if status.Code(err) == codes.FailedPrecondition {
 		return errNodeNotRegistered
 	}
-	return meta.RegisterNode(ctx, &metav1.Node{Id: nodeID, Address: address, Labels: topo})
+	return err
 }
 
 type notRegisteredError struct{}

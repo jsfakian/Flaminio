@@ -22,6 +22,7 @@ zone, and can put two replicas of a chunk in one failure domain without knowing.
    interleave.
 2. The rules of a registration stay as they are: its labels are added to the stored ones,
    overwriting a label of the same name, and its address replaces the stored address.
+3. The CSI node plugin, which registers only to add labels, never puts back an old address.
 
 ## Out of scope
 
@@ -30,7 +31,8 @@ zone, and can put two replicas of a chunk in one failure domain without knowing.
   and tombstones already use the optimistic pattern this issue applies here. `NodeHeartbeat`
   and `DrainNode` only check that a node's record exists before they write their own keys,
   and nothing deletes a node record, so they need no compare.
-- **The address the CSI node plugin sends.** The plugin reads the address with `ListNodes` and
-  sends it back with the labels, in a separate call. If the data plane registers a new address
-  in between, the plugin's registration puts back the old one. The change here protects labels
-  only.
+- **The address the CSI node plugin sent** (now in scope, goal 3, from the code review). The
+  plugin read the address with `ListNodes` and sent it back with the labels, in a separate call.
+  If the data plane registered a new address in between, the plugin's registration put back the
+  old one. A registration without an address now keeps the stored one, and the plugin sends
+  none.
