@@ -306,6 +306,11 @@ func (s *Service) readVolume(ctx context.Context, id string) (*domain.Volume, er
 		return nil, err
 	}
 	if len(entries) != h.ChunkCount() {
+		// A deletion since the header was read (docs/8) is NotFound, as for any operation on a
+		// deleted volume; only a volume still there has damaged records.
+		if _, _, err := s.readHeader(ctx, id); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("volume %q: %d chunk records, want %d", id, len(entries), h.ChunkCount())
 	}
 	v := &domain.Volume{Header: h, Chunks: make([]domain.Chunk, len(entries))}
@@ -414,7 +419,8 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		// never come back, and the volume is hidden from every listing, so finish it here: it was
 		// decided already. Aborted, as the id is free once the tombstone is confirmed.
 		if h, _, err := s.readHeader(ctx, spec.ID); errors.Is(err, domain.ErrNotFound) && h.Deleting {
-			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: spec.ID}); err != nil {
+			// NotFound: another caller finished it first, which is as good.
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: spec.ID}); err != nil && status.Code(err) != codes.NotFound {
 				return nil, err
 			}
 			return nil, status.Errorf(codes.Aborted,

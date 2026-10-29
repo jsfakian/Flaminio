@@ -78,6 +78,10 @@ fails for another reason fails the step with that error.
   `Deleting`. A move or attach it serves can slip past a deletion, and an attach can rewrite the
   header without the mark. Upgrade every instance before relying on the fence. The window lasts
   only while versions are mixed.
+- **An interrupted deletion whose caller never returns, and whose id is never reused,** stays
+  marked: hidden from every listing, with no tombstone, so its replicas are not swept. The CSI
+  provisioner retries a failed deletion, and a create of the id finishes it. A background pass
+  over marked headers would cover the rest; it is not part of this issue.
 
 ## Costs
 

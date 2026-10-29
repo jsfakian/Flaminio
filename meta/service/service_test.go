@@ -1105,3 +1105,22 @@ func TestDeleteVolumeRetryClearsLeftoverChunks(t *testing.T) {
 		}
 	})
 }
+
+// A volume deleted between GetVolume's read of its header and of its chunks: NotFound, as for any
+// deleted volume, not a chunk-count mismatch (docs/8).
+func TestGetVolumeOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		store.key = volumeKey("v")
+		hook := func() {
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
+			t.Fatalf("get of a volume deleted mid-call: %v", err)
+		}
+	})
+}
