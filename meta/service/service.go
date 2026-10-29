@@ -156,24 +156,47 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 	}
 	// Merge labels into any existing record so the data plane's address registration does not
 	// wipe failure-domain labels the agent set, and the agent can overlay zone/rack without
-	// clearing other labels (e.g. witness).
-	labels := map[string]string{}
-	if e, ok, err := s.kv.Get(ctx, nodeKey(n.GetId())); err != nil {
-		return nil, errStatus(err)
-	} else if ok {
+	// clearing other labels (e.g. witness). The two register the same node, maybe at once: the
+	// merged record is written only if the record is still the one read (docs/7).
+	key := nodeKey(n.GetId())
+	for attempt := range retries {
+		if attempt > 0 {
+			if err := backoff(ctx, attempt); err != nil {
+				return nil, errStatus(err)
+			}
+		}
+		e, ok, err := s.kv.Get(ctx, key)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		labels := map[string]string{}
+		// A record that does not parse counts as having no labels, and is overwritten: failing
+		// would leave the node unable to register, and ListNodes broken.
 		var rec nodeRecord
-		if json.Unmarshal(e.Value, &rec) == nil {
+		if ok && json.Unmarshal(e.Value, &rec) == nil {
 			for k, v := range rec.Labels {
 				labels[k] = v
 			}
 		}
+		// The request's labels last: they override stored ones of the same name.
+		for k, v := range n.GetLabels() {
+			labels[k] = v
+		}
+		b, _ := json.Marshal(nodeRecord{Address: n.GetAddress(), Labels: labels})
+		// Rev 0 when it read none: the record must still be absent.
+		rev := int64(0)
+		if ok {
+			rev = e.Rev
+		}
+		applied, err := s.kv.Txn(ctx, []kv.Cmp{{Key: key, Rev: rev}}, []kv.Op{{Key: key, Value: b}})
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if applied {
+			return &metav1.RegisterNodeResponse{}, nil
+		}
 	}
-	for k, v := range n.GetLabels() {
-		labels[k] = v
-	}
-	b, _ := json.Marshal(nodeRecord{Address: n.GetAddress(), Labels: labels})
-	_, err := s.kv.Txn(ctx, nil, []kv.Op{{Key: nodeKey(n.GetId()), Value: b}})
-	return &metav1.RegisterNodeResponse{}, errStatus(err)
+	return nil, status.Error(codes.Aborted, "too much contention")
 }
 
 func (s *Service) NodeHeartbeat(ctx context.Context, r *metav1.NodeHeartbeatRequest) (*metav1.NodeHeartbeatResponse, error) {
