@@ -49,9 +49,13 @@ return nil, status.Error(codes.Aborted, "too much contention")
   labels (`maps.Equal`), it returns success without a `Txn`. An unparseable record is logged
   and overwritten.
 - **Data plane registration** (`flaminio-node/src/engine.rs`): `Engine` keeps a `Registration`
-  state (in flight, done, needed). The registration's answer moves it to done, or, if it
-  failed, to needed. A heartbeat answered `NotFound` also sets needed. At each heartbeat tick,
-  a node that needs a registration sends it instead of the heartbeat.
+  state (in flight, done, needed) and a count of successful registrations.
+  - **Answers:** a successful registration moves the state to done, counts, and sends the first
+    heartbeat at the next turn. A failed one moves it to needed, with a retry `REGISTER_RETRY`
+    = 3 s later, in `turn`, whether heartbeats are configured or not.
+  - **Heartbeats:** none goes out until the node is registered. Each carries the count it was
+    sent under. A `NotFound` answer sets needed only if no registration has succeeded since,
+    so a late answer to an earlier heartbeat causes no extra registration.
 - **CSI topology sync** (`control/csi/topology.go`): `syncTopologyOnce` reads the Kubernetes
   labels, then calls `registerTopology`. That function sends `RegisterNode` with the labels and
   no address, and maps `NotFound` to `errNodeNotRegistered`. On `InvalidArgument`, from a

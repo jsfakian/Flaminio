@@ -10,8 +10,9 @@ service's other updates do (`backoff`, up to `retries` attempts).
 **S2. Contention.** After `retries` (32) failed attempts, it fails with `Aborted` ("too much
 contention"), like the other updates.
 - **Who retries:** the CSI node plugin's topology sync retries a failed registration every 5 s.
-  The data plane sends its registration again at each heartbeat until one succeeds, and again
-  after a heartbeat answered `NotFound` (the service lost its record). Before this, it
+  The data plane sends its registration again every 3 s until one succeeds, with or without
+  heartbeats, and again after a heartbeat answered `NotFound` (the service lost its record). It
+  sends no heartbeat until it is registered, and its first heartbeat right after. Before this, it
   registered once at start, so a metadata service that was down or contended then left the
   node unregistered, and never live, until a restart.
 - **How rare it is:** an attempt fails only when another registration of the same node commits

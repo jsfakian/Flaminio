@@ -117,3 +117,15 @@ func TestRegisterTopologyPassesOnOtherRefusals(t *testing.T) {
 		t.Fatalf("got %v, want the InvalidArgument", err)
 	}
 }
+
+// Against an older metadata service, a valid node the data plane has not registered yet is
+// reported as not registered, as with a current one.
+func TestRegisterTopologyOnAnOlderServiceBeforeTheDataPlane(t *testing.T) {
+	old := &recordingMeta{answer: func(*metav1.Node) error {
+		return status.Error(codes.InvalidArgument, "node needs a valid id and an address")
+	}}
+	err := registerTopology(context.Background(), serveMeta(t, old), "n2", nil)
+	if err != errNodeNotRegistered {
+		t.Fatalf("got %v, want errNodeNotRegistered", err)
+	}
+}

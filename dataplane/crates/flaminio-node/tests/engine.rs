@@ -1344,7 +1344,7 @@ fn late_failures_of_a_dropped_attach_leave_a_new_attach_alone() {
 }
 
 /// A registration the metadata service refuses (contended, or unreachable at start) is sent
-/// again at the next heartbeat, and so is one the service lost (docs/7): the node does not stay
+/// again, heartbeats or not, and so is one the service lost (docs/7): the node does not stay
 /// unregistered, and never live, until a restart.
 #[test]
 fn a_refused_or_lost_registration_is_sent_again() {
@@ -1366,7 +1366,7 @@ fn a_refused_or_lost_registration_is_sent_again() {
         Some(Duration::from_millis(20)),
     );
     let registered = |engine: &mut Engine<MemDevice>| {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(15);
         while !model.lock().unwrap().nodes.contains_key("fl-a") {
             assert!(Instant::now() < deadline, "fl-a never registered");
             pump(engine, &rx);

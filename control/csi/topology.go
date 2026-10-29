@@ -78,16 +78,19 @@ func registerTopology(ctx context.Context, meta *Meta, nodeID string, topo map[s
 }
 
 // registerTopologyWithAddress is the registration an older metadata service takes: it needs
-// the address, read here with ListNodes. If the node is not listed, the refusal was not about
-// the address (an invalid id, say): `refused` is returned as it is.
+// the address, read here with ListNodes. An invalid id is refused by any service: `refused` is
+// returned as it is then. A valid one that is not listed is not registered yet.
 func registerTopologyWithAddress(ctx context.Context, meta *Meta, nodeID string, topo map[string]string, refused error) error {
+	if !domain.ValidID(nodeID) {
+		return refused
+	}
 	nodes, err := meta.ListNodes(ctx)
 	if err != nil {
 		return err
 	}
 	i := slices.IndexFunc(nodes, func(n *metav1.Node) bool { return n.GetId() == nodeID })
 	if i < 0 || nodes[i].GetAddress() == "" {
-		return refused
+		return errNodeNotRegistered
 	}
 	return meta.RegisterNode(ctx, &metav1.Node{Id: nodeID, Address: nodes[i].GetAddress(), Labels: topo})
 }
