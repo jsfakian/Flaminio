@@ -86,6 +86,7 @@ lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellch
 	$(BUF) lint
 	@if command -v shellcheck >/dev/null; then shellcheck -x $(SHELL_SCRIPTS) && echo "shellcheck: ok"; \
 	 else echo "shellcheck not installed (brew install shellcheck); skipped"; fi
+	@bash scripts/tools/bench-reference-test.sh
 	$(ACTIONLINT)
 
 fmt: ## Format Rust and Go code
@@ -278,7 +279,7 @@ bench-writes: ## Writes against raw O_DSYNC, each run from an empty, reset disk 
 	    JOBS='$(if $(filter file,$(origin JOBS)),.,$(JOBS))' $(LAB) bench-writes
 
 .PHONY: bench-reads
-bench-reads: ## vol1 against the same 16 GiB of the raw disk (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30, QUEUES=1, POLL_US=0, NUMJOBS=1, DEFER_TASKRUN=0, JOBS=regex)
+bench-reads: ## VOL (vol1) against the raw disk where its data is (MODE=zero-copy|verify, NODE=b, REPS=3, RUNTIME=30, QUEUES=1, POLL_US=0, NUMJOBS=1, DEFER_TASKRUN=0, JOBS=regex)
 	MODE=$(or $(MODE),zero-copy) NODE=$(or $(NODE),b) REPS=$(or $(REPS),3) RUNTIME=$(RUNTIME) FILL=$(FILL) \
 	    QUEUES=$(or $(QUEUES),1) POLL_US=$(or $(POLL_US),0) NUMJOBS=$(or $(NUMJOBS),1) \
 	    DEFER_TASKRUN=$(or $(DEFER_TASKRUN),0) JOBS='$(if $(filter file,$(origin JOBS)),.,$(JOBS))' $(LAB) bench-reads

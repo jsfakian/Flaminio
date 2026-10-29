@@ -48,7 +48,11 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
                            under load to save the wake-ups of low queue depths
       --queues N           ublk queues, each served by a thread of its own (default 1). The
                            kernel maps each submitting CPU to one queue: more queues serve more
-                           submitting threads at once
+                           submitting threads at once. One per CPU lowers latency at low queue
+                           depth, as each CPU's requests stay on it; but a single deep submitter
+                           then shares its CPU with its queue's thread, and loses throughput.
+                           With several queues the kernel gives the device no I/O scheduler.
+                           Each queue has its own buffers (docs/9)
       --no-verify          EXPERIMENT ONLY: skip the checksum check of local reads (to measure
                            what verification costs)
       --zero-copy          local reads go straight from the disk into the request's pages

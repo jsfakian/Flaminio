@@ -1459,13 +1459,15 @@ drive_temp() {
         sudo -n smartctl -A "$d" 2>/dev/null | awk "/^Temperature:/ {print \$2; exit}"' 2>/dev/null | grep . || echo -
 }
 
-# MODE=zero-copy|verify, NODE (fl-b), REPS (3), RUNTIME (30): the volume vol1 (16 GiB) on NODE
-# against 16 GiB spans of NODE's raw data disk, at offsets 0, 32 and 64 GiB in turn. FILL=1
-# writes the volume again first. The node runs with QUEUES ublk queues (1) and POLL_US of
-# polling (0); fio runs NUMJOBS jobs (1) on both sides.
+# MODE=zero-copy|verify, NODE (fl-b), REPS (3), RUNTIME (30): the volume VOL (vol1) on NODE
+# against NODE's raw data disk where the volume's data is: a span of the volume's size, from the
+# start of the range a traced read of the volume found (docs/9). FILL=1 writes the volume again
+# first. The node runs with QUEUES ublk queues (1) and POLL_US of polling (0); fio runs NUMJOBS
+# jobs (1) on both sides.
 cmd_bench_reads() {
-    local node mode=${MODE:-zero-copy} reps=${REPS:-3} runtime=${RUNTIME:-30} span=16G
-    local dir raw zc=0 r spec name rw bs qd side dev off row t0 t1 since
+    local node mode=${MODE:-zero-copy} reps=${REPS:-3} runtime=${RUNTIME:-30} span size
+    local dir raw zc=0 r spec name rw bs qd side dev off jspan row t0 t1 since
+    local meta range first end total disk_bytes reference roff rlen where cpus
     node=$(vms_of "${NODE:-b}")
     local nv=0 flags want queues=${QUEUES:-1} poll=${POLL_US:-0} jobs=${NUMJOBS:-1} defer=${DEFER_TASKRUN:-0}
     case $mode in
@@ -1494,19 +1496,36 @@ cmd_bench_reads() {
     # Local reads only: every chunk must have a replica on the target node. After a write
     # campaign the restore can leave the ISR elsewhere; measuring then reads over the wire.
     local n_chunks local_n
-    n_chunks=$(metactl "$VM_A" "$VM_A" get "$VOL" | jq '.volume.chunks | length')
+    meta=$(metactl "$VM_A" "$VM_A" get "$VOL")
+    n_chunks=$(jq '.volume.chunks | length' <<<"$meta")
+    size=$(jq -r '.volume.sizeBytes' <<<"$meta")
+    if ! [[ $size =~ ^[1-9][0-9]*$ ]] || ((size % (1 << 30))); then
+        die "$VOL: its size ($size bytes) is not a whole number of GiB"
+    fi
+    span=$((size >> 30))G
     local_n=$(chunks_on "$node")
     [[ $local_n == "$n_chunks" ]] ||
         die "$VOL: only $local_n/$n_chunks chunks have a replica on $node (need local ISR for read benches)"
     since=$(vssh "$node" "date '+%Y-%m-%d %H:%M:%S'")
     raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)
     if [[ ${FILL:-0} == 1 ]] || ! vssh "$node" "test -f ~/.flaminio-bench-filled-$VOL"; then
-        log "filling $VOL (16 GiB, fio checksums in every block): once"
+        log "filling $VOL ($span, fio checksums in every block): once"
         run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" fill /dev/ublkb1 "$span"
         vssh "$node" "touch ~/.flaminio-bench-filled-$VOL"
     fi
     log "warm-up read of $VOL (waits for reconciliation after a restart)"
     run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" warm /dev/ublkb1 "$span"
+    # Raw reads where the volume's data is: a traced read of all of it finds the range.
+    log "where $VOL's data is on $raw: a read of all of it, traced"
+    range=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" range /dev/ublkb1 "$span" "$raw")
+    vssh "$node" "cat /tmp/bench-range-regions.txt" >"$dir/regions.txt"
+    read -r first end total disk_bytes <<<"$range"
+    reference=$(bench_reference "$span" "$first" "$end" "$total" "$disk_bytes")
+    read -r roff rlen <<<"$reference"
+    where="$VOL: data at GiB $first-$end of $raw ($((total >> 20)) MiB read there, regions.txt); raw reads GiB $roff-$((roff + rlen))"
+    cpus="$(vssh "$node" nproc) vCPUs, $queues ublk queue(s), $raw with $(vssh "$node" "ls /sys/block/${raw##*/}/mq | wc -l") hardware queue(s)"
+    log "$where"
+    log "$cpus"
 
     local filter=${JOBS:-.}
     log "$node, $mode, $queues queue(s), ${poll} us polling, $jobs fio job(s), defer=$defer, filter=$filter, $(vssh "$node" nproc) vCPUs, $reps repetitions, ${runtime}s per job, caches dropped before each"
@@ -1516,17 +1535,14 @@ cmd_bench_reads() {
             read -r name rw bs qd <<<"$spec"
             [[ $name =~ $filter ]] || continue
             for side in raw flaminio; do
-                # The raw disk reads at different speeds in different regions (6.4–6.7 GB/s
-                # sequential on fl-b), and the store's data is spread over all of them: each
-                # repetition reads raw in another region.
                 if [[ $side == raw ]]; then
-                    dev=$raw off=$(((r - 1) % 3 * 32))G
+                    dev=$raw off=${roff}G jspan=${rlen}G
                 else
-                    dev=/dev/ublkb1 off=0
+                    dev=/dev/ublkb1 off=0 jspan=$span
                 fi
                 host_drop_caches "$node"
                 t0=$(drive_temp "$node")
-                row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" job "$dev" "$off" "$span" "$name" "$rw" "$bs" "$qd" \
+                row=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" job "$dev" "$off" "$jspan" "$name" "$rw" "$bs" "$qd" \
                     "$runtime" "/tmp/bench-$side-$name-$r.json" "$jobs")
                 t1=$(drive_temp "$node")
                 vssh "$node" "cat /tmp/bench-$side-$name-$r.json" >"$dir/$side-$name-$r.json"
@@ -1536,6 +1552,7 @@ cmd_bench_reads() {
         done
     done
     bench_summary "$dir/runs.tsv" | tee "$dir/summary.txt"
+    printf '  %s\n' "$where" "$cpus" | tee -a "$dir/summary.txt"
 
     log "integrity: fio reads all of $VOL and checks every block's checksum ($mode path)"
     run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" verify /dev/ublkb1 "$span" | tee -a "$dir/summary.txt"
@@ -1924,7 +1941,7 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   drain-test   verified writes while $VM_B is drained into $VM_C; $VM_C alone then serves every byte
   chaos        ROUNDS (4) of random faults under a verified write load, each ending with a crashed target
   bench-writes writes against raw O_DSYNC from an empty state each run: NODE, RF, REPS, IDLE, ROUND, JOBS, QUEUES, NUMJOBS
-  bench-reads  vol1 against the same span of the raw disk: MODE=zero-copy|verify, NODE, REPS, RUNTIME, QUEUES, NUMJOBS
+  bench-reads  VOL against the raw disk where its data is: MODE=zero-copy|verify, NODE, REPS, RUNTIME, QUEUES, NUMJOBS
   bench-pod    reads from a pod with a Flaminio volume (NODE=fl-b, RUNTIME=30), against the raw disk
   partition    $VM_A (the target) cut off the overlay; $VM_B takes over; no stale reads, no lost writes
   pki ACTION [VM]  identities: init (CAs and token key, here) | issue (keys made in the VMs)
