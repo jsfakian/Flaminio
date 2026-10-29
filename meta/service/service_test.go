@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +19,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"github.com/flaminio/flaminio/meta/domain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/kv/kvtest"
 )
@@ -25,11 +28,16 @@ const mib = 1 << 20
 
 // stores runs a test against the in-memory store and against a real etcd.
 func stores(t *testing.T, f func(t *testing.T, s *Service)) {
-	t.Run("mem", func(t *testing.T) { f(t, New(kv.NewMem(nil), Options{})) })
+	backends(t, func(t *testing.T, store kv.KV) { f(t, New(store, Options{})) })
+}
+
+// backends runs a test against the in-memory store and against a real etcd.
+func backends(t *testing.T, f func(t *testing.T, store kv.KV)) {
+	t.Run("mem", func(t *testing.T) { f(t, kv.NewMem(nil)) })
 	t.Run("etcd", func(t *testing.T) {
 		e := kvtest.Etcd(t)
 		defer e.Close()
-		f(t, New(e, Options{}))
+		f(t, e)
 	})
 }
 
@@ -588,37 +596,65 @@ func TestMoveAndDrain(t *testing.T) {
 	})
 }
 
-// interleaveKV runs a hook once, after the first Get of `key` it sees and before returning that
-// read: the hook can make another write land between a read and the write that follows it. It
-// counts the Txn calls on `key` made outside the hook.
+// interleaveKV runs a hook once: after the first Get of `key`, or List of `prefix`, it sees, before
+// returning that read, or after the first write of `txnKey` that applied. The hook can make
+// another write land between a read and the write that follows it, or between two writes. It
+// counts the writes of `key` made outside the hook.
 type interleaveKV struct {
 	kv.KV
-	key   string
-	hook  atomic.Pointer[func()]
-	inner atomic.Bool
-	txns  atomic.Int32
+	key    string
+	prefix string
+	txnKey string
+	hook   atomic.Pointer[func()]
+	inner  atomic.Bool
+	txns   atomic.Int32
+}
+
+// runHook runs the hook, swapped out before it runs, so that its own reads do not run it again.
+func (k *interleaveKV) runHook() {
+	if h := k.hook.Swap(nil); h != nil {
+		k.inner.Store(true)
+		(*h)()
+		k.inner.Store(false)
+	}
 }
 
 func (k *interleaveKV) Get(ctx context.Context, key string) (kv.Entry, bool, error) {
 	e, ok, err := k.KV.Get(ctx, key)
-	// Swapped out before it runs: the hook's own Get does not run it again.
 	if key == k.key {
-		if h := k.hook.Swap(nil); h != nil {
-			k.inner.Store(true)
-			(*h)()
-			k.inner.Store(false)
-		}
+		k.runHook()
 	}
 	return e, ok, err
 }
 
+func (k *interleaveKV) List(ctx context.Context, prefix string) ([]kv.Entry, error) {
+	es, err := k.KV.List(ctx, prefix)
+	if k.prefix != "" && prefix == k.prefix {
+		k.runHook()
+	}
+	return es, err
+}
+
 func (k *interleaveKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := k.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+// TxnRev counts the writes of `key`, and runs the hook after the first write of `txnKey` that
+// applied.
+func (k *interleaveKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	wrote := false
 	for _, op := range ops {
 		if op.Key == k.key && !k.inner.Load() {
 			k.txns.Add(1)
 		}
+		wrote = wrote || (k.txnKey != "" && op.Key == k.txnKey && !op.Delete)
 	}
-	return k.KV.Txn(ctx, cmps, ops)
+	rev, ok, err := k.KV.TxnRev(ctx, cmps, ops)
+	if ok && wrote {
+		k.runHook()
+	}
+	return rev, ok, err
 }
 
 func nodeLabels(t *testing.T, s *Service, id string) (string, map[string]string) {
@@ -784,4 +820,307 @@ func TestRegisterNodeThatChangesNothingDoesNotWrite(t *testing.T) {
 	if got := store.txns.Load(); got != 0 {
 		t.Fatalf("%d writes for registrations that change nothing", got)
 	}
+}
+
+// interleaveStores runs a test against a wrapped in-memory store and a wrapped real etcd.
+func interleaveStores(t *testing.T, f func(t *testing.T, store *interleaveKV)) {
+	backends(t, func(t *testing.T, store kv.KV) { f(t, &interleaveKV{KV: store}) })
+}
+
+// moveFixture is a volume v of 2 chunks on nodes a and b (RF 2), with node c registered after
+// it, so that c holds no replica: a move of chunk 0 from a to c is always accepted.
+func moveFixture(t *testing.T, store *interleaveKV) *Service {
+	t.Helper()
+	s := New(store, Options{})
+	addNodes(t, s, "a", "b")
+	if _, err := create(s, "v", 2, 2, 1); err != nil {
+		t.Fatal(err)
+	}
+	addNodes(t, s, "c")
+	return s
+}
+
+func move(ctx context.Context, s *Service, from, to string) (*metav1.MoveReplicaResponse, error) {
+	return s.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: "v", Chunk: 0, From: from, To: to})
+}
+
+func tombstoned(t *testing.T, s *Service, node, volume string) bool {
+	t.Helper()
+	r, err := s.ListTombstones(context.Background(), &metav1.ListTombstonesRequest{Node: node})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return slices.ContainsFunc(r.GetTombstones(), func(tb *metav1.Tombstone) bool { return tb.GetVolume() == volume })
+}
+
+// A move recorded after DeleteVolume read the header, before it marked it, is in the chunks it
+// lists, so the move's destination is on the tombstone (docs/8).
+func TestDeleteVolumeSeesAMoveBeforeItMarks(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		store.key = volumeKey("v")
+		hook := func() {
+			if r, err := move(ctx, s, "a", "c"); err != nil || !r.GetApplied() {
+				t.Errorf("move: %v %v", r, err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+			t.Fatal(err)
+		}
+		if !tombstoned(t, s, "c", "v") {
+			t.Fatal("the move's destination is not on the tombstone")
+		}
+	})
+}
+
+// Once DeleteVolume has marked the header, a move is refused: the volume is gone for it, so the
+// chunks it lists stay current (docs/8).
+func TestDeleteVolumeFencesMoves(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		store.prefix = chunkPrefix("v")
+		hook := func() {
+			if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
+				t.Errorf("move of a volume being deleted: %v", err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+			t.Fatal(err)
+		}
+		if !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") || tombstoned(t, s, "c", "v") {
+			t.Fatal("the tombstone should list a and b, and not c, whose move was refused")
+		}
+	})
+}
+
+// A volume deleted while a chunk is moving has the move's destination on its tombstone.
+func TestDeleteVolumeDuringAMove(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		if r, err := move(ctx, s, "a", "c"); err != nil || !r.GetApplied() {
+			t.Fatalf("move: %v %v", r, err)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+			t.Fatal(err)
+		}
+		if !tombstoned(t, s, "c", "v") {
+			t.Fatal("the move's destination is not on the tombstone")
+		}
+	})
+}
+
+// An attach between a move's read and its write makes the move read again: two writes, the
+// first refused on the header (docs/8).
+func TestMoveReplicaAfterAnAttachReadsAgain(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		store.key = chunkKey("v", 0)
+		hook := func() {
+			if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.txns.Store(0)
+		store.hook.Store(&hook)
+		if r, err := move(ctx, s, "a", "c"); err != nil || !r.GetApplied() {
+			t.Fatalf("move: %v %v", r, err)
+		}
+		if got := store.txns.Load(); got != 2 {
+			t.Fatalf("%d writes of the chunk, want 2: the first refused on the header", got)
+		}
+		v, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.GetVolume().GetEpoch() != 2 || v.GetVolume().GetTarget() != "b" || v.GetVolume().GetChunks()[0].GetMovingTo() != "c" {
+			t.Fatalf("volume %v", v.GetVolume())
+		}
+	})
+}
+
+// A volume deleted between a move's read and its write gets no move (docs/8).
+func TestMoveReplicaAfterADeletionFails(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		store.key = chunkKey("v", 0)
+		// As a DeleteVolume that has deleted the header, before it deletes the chunk records.
+		hook := func() {
+			if _, err := store.KV.Txn(ctx, nil, []kv.Op{{Key: volumeKey("v"), Delete: true}}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
+			t.Fatalf("move of a deleted volume: %v", err)
+		}
+		e, _, err := store.KV.Get(ctx, chunkKey("v", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var c domain.Chunk
+		if err := json.Unmarshal(e.Value, &c); err != nil || c.Moving != nil {
+			t.Fatalf("chunk 0 after a refused move: %+v %v", c, err)
+		}
+	})
+}
+
+// A deletion interrupted after marking the header leaves a volume that no operation sees but
+// DeleteVolume, which finishes it (docs/8).
+func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		// As a DeleteVolume that stopped after its first transaction.
+		e, _, err := store.KV.Get(ctx, volumeKey("v"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var h domain.Header
+		if err := json.Unmarshal(e.Value, &h); err != nil {
+			t.Fatal(err)
+		}
+		h.Deleting = true
+		b, _ := json.Marshal(h)
+		if _, err := store.KV.Txn(ctx, nil, []kv.Op{{Key: volumeKey("v"), Value: b}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
+			t.Fatalf("get of a volume being deleted: %v", err)
+		}
+		if l, err := s.ListVolumes(ctx, &metav1.ListVolumesRequest{}); err != nil || len(l.GetIds()) != 0 {
+			t.Fatalf("list: %v %v", l, err)
+		}
+		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
+			t.Fatalf("move of a volume being deleted: %v", err)
+		}
+		// A create over it finishes the deletion: its caller may never come back.
+		if _, err := create(s, "v", 2, 2, 1); code(err) != codes.Aborted {
+			t.Fatalf("create over a volume being deleted: %v", err)
+		}
+		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok || !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
+			t.Fatal("the deletion was not finished: header left, or tombstone missing")
+		}
+	})
+}
+
+// A deletion during a creation stops the creation: it adds no chunk after the deletion's listing,
+// and does not bring the volume back by clearing the deletion's mark (docs/8). The deletion runs
+// after the creation's first batch of chunk records (120), so it lists them and tombstones their
+// nodes, and the creation's second batch is refused.
+func TestDeleteVolumeDuringItsCreation(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b")
+		store.txnKey = chunkKey("v", 0)
+		hook := func() {
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := create(s, "v", 130, 2, 1); code(err) != codes.Aborted {
+			t.Fatalf("a creation deleted midway: %v, want Aborted", err)
+		}
+		if !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
+			t.Fatal("the first batch's nodes are not on the tombstone")
+		}
+		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok {
+			t.Fatal("the creation brought the deleted volume back")
+		}
+		if chunks, err := store.KV.List(ctx, chunkPrefix("v")); err != nil || len(chunks) != 0 {
+			t.Fatalf("chunk records after the deletion: %d %v", len(chunks), err)
+		}
+	})
+}
+
+// A volume deleted between a move's read of its header and of the chunk: NotFound, as for any
+// operation on a deleted volume, not a missing chunk (docs/8).
+func TestMoveReplicaOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		store.key = volumeKey("v")
+		hook := func() {
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
+			t.Fatalf("move of a volume deleted mid-call: %v", err)
+		}
+	})
+}
+
+// A volume whose header does not parse can still be deleted: no move or ISR change can commit
+// against it, so it needs no mark (docs/8).
+func TestDeleteVolumeWithADamagedHeader(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b")
+		if _, err := create(s, "v", 2, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey("v"), Value: []byte("not json")}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, _ := store.Get(ctx, volumeKey("v")); ok {
+			t.Fatal("the damaged header is still there")
+		}
+		if !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
+			t.Fatal("the tombstone does not name the replicas")
+		}
+	})
+}
+
+// A deletion whose chunk records were left behind (deleteChunks failed after its commit) has them
+// cleared by its retry, which then answers NotFound (docs/8).
+func TestDeleteVolumeRetryClearsLeftoverChunks(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: chunkKey("v", 0), Value: []byte("{}")}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
+			t.Fatalf("retry of a finished deletion: %v", err)
+		}
+		if l, err := store.List(ctx, chunkPrefix("v")); err != nil || len(l) != 0 {
+			t.Fatalf("chunk records left: %d %v", len(l), err)
+		}
+	})
+}
+
+// A volume deleted between GetVolume's read of its header and of its chunks: NotFound, as for any
+// deleted volume, not a chunk-count mismatch (docs/8).
+func TestGetVolumeOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := moveFixture(t, store)
+		store.key = volumeKey("v")
+		hook := func() {
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.hook.Store(&hook)
+		if _, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
+			t.Fatalf("get of a volume deleted mid-call: %v", err)
+		}
+	})
 }

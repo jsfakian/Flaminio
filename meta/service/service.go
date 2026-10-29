@@ -8,6 +8,7 @@
 //	nodes/<id>               registered node (JSON)
 //	alive/<id>               liveness record, expires without heartbeats
 //	tombstones/<id>          deleted volume awaiting replica cleanup (JSON)
+//	drain/<node>             node being drained: no new replicas go there
 //
 // Every update is an optimistic transaction: read, check with the domain rules, then write
 // conditional on the revisions read. A conflict means a concurrent update; the operation is
@@ -278,10 +279,21 @@ func (s *Service) readHeader(ctx context.Context, id string) (domain.Header, int
 			return h, 0, err
 		}
 	}
-	if !ok || h.Creating {
+	// A volume being created or deleted does not exist for any other operation.
+	if !ok || h.Creating || h.Deleting {
 		return h, 0, fmt.Errorf("%w: volume %q", domain.ErrNotFound, id)
 	}
 	return h, e.Rev, nil
+}
+
+// chunkMissing explains a chunk record that is not there: the volume was deleted (or is being
+// deleted) since its header was read, which is NotFound like any other operation on it, or its
+// records are damaged.
+func (s *Service) chunkMissing(ctx context.Context, id string, chunk uint32) error {
+	if _, _, err := s.readHeader(ctx, id); err != nil {
+		return err
+	}
+	return status.Errorf(codes.Internal, "volume %q: chunk %d missing", id, chunk)
 }
 
 func (s *Service) readVolume(ctx context.Context, id string) (*domain.Volume, error) {
@@ -294,6 +306,11 @@ func (s *Service) readVolume(ctx context.Context, id string) (*domain.Volume, er
 		return nil, err
 	}
 	if len(entries) != h.ChunkCount() {
+		// A deletion since the header was read (docs/8) is NotFound, as for any operation on a
+		// deleted volume; only a volume still there has damaged records.
+		if _, _, err := s.readHeader(ctx, id); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("volume %q: %d chunk records, want %d", id, len(entries), h.ChunkCount())
 	}
 	v := &domain.Volume{Header: h, Chunks: make([]domain.Chunk, len(entries))}
@@ -391,49 +408,71 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 	// compare keeps a concurrent DeleteVolume's leftover from racing with this claim.
 	v.Creating = true
 	hb, _ := json.Marshal(v.Header)
-	ok, err := s.kv.Txn(ctx,
+	claim, ok, err := s.kv.TxnRev(ctx,
 		[]kv.Cmp{{Key: volumeKey(spec.ID), Rev: 0}, {Key: tombstoneKey(spec.ID), Rev: 0}},
 		[]kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
+		// A deletion that was interrupted after its mark (docs/8) holds the id. Its caller may
+		// never come back, and the volume is hidden from every listing, so finish it here: it was
+		// decided already. Aborted, as the id is free once the tombstone is confirmed.
+		if h, _, err := s.readHeader(ctx, spec.ID); errors.Is(err, domain.ErrNotFound) && h.Deleting {
+			// NotFound: another caller finished it first, which is as good.
+			if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: spec.ID}); err != nil && status.Code(err) != codes.NotFound {
+				return nil, err
+			}
+			return nil, status.Errorf(codes.Aborted,
+				"volume %q was being deleted: its deletion is finished now; the id is free once its replicas are deleted", spec.ID)
+		}
 		return nil, fmt.Errorf("%w: volume %q", domain.ErrExists, spec.ID)
 	}
-	if err := s.deleteChunks(ctx, spec.ID); err != nil { // leftovers of an interrupted delete
+	// Every later write is conditional on this claim, at the revision the claim wrote: a
+	// deletion marks the header (docs/8), and the creation then stops, rather than add chunks
+	// after the deletion listed them, or clear the deletion's mark with its own header.
+	cmp := []kv.Cmp{{Key: volumeKey(spec.ID), Rev: claim}}
+	// Aborted, like any contention: not Unavailable, which a client takes for a dead instance.
+	changed := status.Errorf(codes.Aborted, "volume %q changed while being created (deleted?)", spec.ID)
+	if ok, err := s.deleteChunks(ctx, spec.ID, cmp); err != nil { // leftovers of an interrupted delete
 		return nil, err
+	} else if !ok {
+		return nil, changed
 	}
 	var ops []kv.Op
 	for i, c := range v.Chunks {
 		b, _ := json.Marshal(c)
 		ops = append(ops, kv.Op{Key: chunkKey(spec.ID, uint32(i)), Value: b})
 		if len(ops) == kv.MaxTxnOps || i == len(v.Chunks)-1 {
-			if _, err := s.kv.Txn(ctx, nil, ops); err != nil {
+			ok, err := s.kv.Txn(ctx, cmp, ops)
+			if err != nil {
 				return nil, err
+			}
+			if !ok {
+				return nil, changed
 			}
 			ops = ops[:0]
 		}
 	}
-	e, _, err := s.kv.Get(ctx, volumeKey(spec.ID))
-	if err != nil {
-		return nil, err
-	}
 	v.Creating = false
 	hb, _ = json.Marshal(v.Header)
-	ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: volumeKey(spec.ID), Rev: e.Rev}}, []kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
+	ok, err = s.kv.Txn(ctx, cmp, []kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("volume %q changed while being created", spec.ID)
+		return nil, changed
 	}
 	return v, nil
 }
 
-func (s *Service) deleteChunks(ctx context.Context, id string) error {
+// deleteChunks deletes a volume's chunk records, in batches, each conditional on `cmps`: a
+// creation's claim, or a deleted header still being absent. It stops, reporting false, when the
+// condition fails: the chunk records are someone else's by then (a newer creation's).
+func (s *Service) deleteChunks(ctx context.Context, id string, cmps []kv.Cmp) (bool, error) {
 	entries, err := s.kv.List(ctx, chunkPrefix(id))
 	if err != nil {
-		return err
+		return false, err
 	}
 	for len(entries) > 0 {
 		n := min(len(entries), kv.MaxTxnOps)
@@ -441,12 +480,13 @@ func (s *Service) deleteChunks(ctx context.Context, id string) error {
 		for i := range n {
 			ops[i] = kv.Op{Key: entries[i].Key, Delete: true}
 		}
-		if _, err := s.kv.Txn(ctx, nil, ops); err != nil {
-			return err
+		ok, err := s.kv.Txn(ctx, cmps, ops)
+		if err != nil || !ok {
+			return false, err
 		}
 		entries = entries[n:]
 	}
-	return nil
+	return true, nil
 }
 
 func (s *Service) GetVolume(ctx context.Context, r *metav1.GetVolumeRequest) (*metav1.GetVolumeResponse, error) {
@@ -457,9 +497,13 @@ func (s *Service) GetVolume(ctx context.Context, r *metav1.GetVolumeRequest) (*m
 	return &metav1.GetVolumeResponse{Volume: volumePB(v)}, nil
 }
 
-// DeleteVolume removes the header at once (so the volume disappears), writes a tombstone naming
-// every node that held its chunks, then drops the chunk metadata. Nodes delete their local
-// replicas and ConfirmDeletion; the tombstone goes when all have confirmed.
+// DeleteVolume deletes a volume in two steps (docs/8). First it marks the header as deleting:
+// from then on the volume does not exist for any other operation, and moves and ISR changes,
+// which compare the header, can no longer change a chunk's replicas. Then it lists the chunks,
+// so its tombstone names every node that may hold a copy, and deletes the header and writes the
+// tombstone in one transaction. A deletion interrupted between the two steps leaves the header
+// marked; the next DeleteVolume of the volume finishes it. It drops the chunk records last. Nodes
+// delete their local replicas and ConfirmDeletion; the tombstone goes when all have confirmed.
 func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeRequest) (*metav1.DeleteVolumeResponse, error) {
 	for attempt := range retries {
 		if attempt > 0 {
@@ -472,8 +516,31 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 			return nil, errStatus(err)
 		}
 		if !ok {
+			// A deletion whose chunk records were not all deleted (deleteChunks failed after its
+			// commit) leaves them for its retry to clear, while the header is still absent.
+			if _, err := s.deleteChunks(ctx, r.GetId(), []kv.Cmp{{Key: volumeKey(r.GetId()), Rev: 0}}); err != nil {
+				return nil, errStatus(err)
+			}
 			return nil, errStatus(fmt.Errorf("%w: volume %q", domain.ErrNotFound, r.GetId()))
 		}
+		// A header that does not parse needs no mark: readHeader fails on it, so no move or ISR
+		// change can commit against it either, and the deletion must still be able to remove it.
+		rev := e.Rev
+		var h domain.Header
+		if json.Unmarshal(e.Value, &h) == nil && !h.Deleting {
+			h.Deleting = true
+			b, _ := json.Marshal(h)
+			marked, ok, err := s.kv.TxnRev(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Value: b}})
+			if err != nil {
+				return nil, errStatus(err)
+			}
+			if !ok {
+				continue
+			}
+			// The revision the mark wrote: no read, so nothing can come between.
+			rev = marked
+		}
+		// Marked: no move or ISR change can commit now, so the listing below stays current.
 		entries, err := s.kv.List(ctx, chunkPrefix(r.GetId()))
 		if err != nil {
 			return nil, errStatus(err)
@@ -491,12 +558,15 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 			tb, _ := json.Marshal(tombstoneRecord{Nodes: nodes})
 			ops = append(ops, kv.Op{Key: tombstoneKey(r.GetId()), Value: tb})
 		}
-		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, ops)
+		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: rev}}, ops)
 		if err != nil {
 			return nil, errStatus(err)
 		}
 		if ok {
-			return &metav1.DeleteVolumeResponse{}, errStatus(s.deleteChunks(ctx, r.GetId()))
+			// The header must stay absent: a creation that claims the id meanwhile deletes the
+			// leftovers itself, under its own claim, and these records are its own by then.
+			_, err := s.deleteChunks(ctx, r.GetId(), []kv.Cmp{{Key: e.Key, Rev: 0}})
+			return &metav1.DeleteVolumeResponse{}, errStatus(err)
 		}
 	}
 	return nil, status.Error(codes.Aborted, "too much contention")
@@ -678,7 +748,7 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 				return nil, errStatus(err)
 			}
 			if !ok {
-				return nil, status.Errorf(codes.Internal, "volume %q: chunk %d missing", h.ID, c.Chunk)
+				return nil, errStatus(s.chunkMissing(ctx, h.ID, c.Chunk))
 			}
 			if err := json.Unmarshal(e.Value, &named[i]); err != nil {
 				return nil, errStatus(err)
@@ -746,16 +816,19 @@ func (s *Service) ListVolumes(ctx context.Context, _ *metav1.ListVolumesRequest)
 	out := &metav1.ListVolumesResponse{}
 	for _, e := range entries {
 		var h domain.Header
-		if json.Unmarshal(e.Value, &h) == nil && !h.Creating {
+		if json.Unmarshal(e.Value, &h) == nil && !h.Creating && !h.Deleting {
 			out.Ids = append(out.Ids, h.ID)
 		}
 	}
 	return out, nil
 }
 
-// MoveReplica records a requested move on the chunk, conditional on the chunk record it read.
-// It changes neither replicas nor ISR, and bumps no version: the target does that, under its
-// epoch, and a concurrent ISR change of the target's fails its compare and is tried again.
+// MoveReplica records a requested move on the chunk, conditional on the chunk record and the
+// volume header it read. It changes neither replicas nor ISR, and bumps no version: the target
+// does that, under its epoch, and a concurrent ISR change of the target's fails its compare and
+// is tried again. Comparing the header fences the move off a volume being deleted (docs/8): a
+// deletion marks the header first, so the move then finds the volume gone (NotFound). An attach
+// meanwhile makes the move read again.
 func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest) (*metav1.MoveReplicaResponse, error) {
 	if !domain.ValidID(r.GetFrom()) || !domain.ValidID(r.GetTo()) {
 		return nil, errStatus(fmt.Errorf("%w: node ids %q, %q", domain.ErrInvalid, r.GetFrom(), r.GetTo()))
@@ -772,7 +845,7 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 				return nil, errStatus(err)
 			}
 		}
-		h, _, err := s.readHeader(ctx, r.GetVolume())
+		h, hrev, err := s.readHeader(ctx, r.GetVolume())
 		if err != nil {
 			return nil, errStatus(err)
 		}
@@ -784,7 +857,7 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 			return nil, errStatus(err)
 		}
 		if !ok {
-			return nil, status.Errorf(codes.Internal, "volume %q: chunk %d missing", h.ID, r.GetChunk())
+			return nil, errStatus(s.chunkMissing(ctx, h.ID, r.GetChunk()))
 		}
 		var c domain.Chunk
 		if err := json.Unmarshal(e.Value, &c); err != nil {
@@ -795,7 +868,11 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 		}
 		domain.ApplyMove(&c, r.GetFrom(), r.GetTo())
 		b, _ := json.Marshal(c)
-		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Value: b}})
+		// The header must be as read: a deletion marks it before it lists the chunks, so no move
+		// is recorded after that listing (docs/8).
+		ok, err = s.kv.Txn(ctx,
+			[]kv.Cmp{{Key: e.Key, Rev: e.Rev}, {Key: volumeKey(h.ID), Rev: hrev}},
+			[]kv.Op{{Key: e.Key, Value: b}})
 		if err != nil {
 			return nil, errStatus(err)
 		}

@@ -60,13 +60,18 @@ func (m *Mem) List(_ context.Context, prefix string) ([]Entry, error) {
 	return out, nil
 }
 
-func (m *Mem) Txn(_ context.Context, cmps []Cmp, ops []Op) (bool, error) {
+func (m *Mem) Txn(ctx context.Context, cmps []Cmp, ops []Op) (bool, error) {
+	_, ok, err := m.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (m *Mem) TxnRev(_ context.Context, cmps []Cmp, ops []Op) (int64, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.expire()
 	for _, c := range cmps {
 		if m.data[c.Key].Rev != c.Rev {
-			return false, nil
+			return 0, false, nil
 		}
 	}
 	m.rev++
@@ -78,7 +83,7 @@ func (m *Mem) Txn(_ context.Context, cmps []Cmp, ops []Op) (bool, error) {
 			m.data[o.Key] = Entry{Key: o.Key, Value: slices.Clone(o.Value), Rev: m.rev}
 		}
 	}
-	return true, nil
+	return m.rev, true, nil
 }
 
 func (m *Mem) PutTTL(_ context.Context, key string, value []byte, ttl time.Duration) error {
