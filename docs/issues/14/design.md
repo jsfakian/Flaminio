@@ -24,7 +24,8 @@ The facts it starts from:
 `meta/cmd/flaminio-meta/main.go`.
 - **The client** becomes `client(args []string, stdout, stderr io.Writer) error`; `main` exits.
   Its flag set uses `ContinueOnError` and writes to `stderr`, so `-h` and a bad flag exit 1. It
-  gains `--trust-domain`, which `metactl` passes.
+  gains `--trust-domain`, used by `confirm` only; `metactl` does not pass it (an older binary
+  would reject every call).
 - **`tombstones [node]`:** with a node, `ListTombstones`; without, `ListNodes` then
   `ListTombstones` for each, merged by volume. The JSON is built whole and printed only on
   success: `{"tombstones": [{"volume", "nodes", "pending"}]}`, `{}` for none. A tombstone
@@ -37,8 +38,9 @@ The facts it starts from:
   1. **Identity, before any call:** the leaf that `tls.LoadX509KeyPair` loads from `--cert`
      (its first certificate) must have exactly one URI SAN, in `--trust-domain`, which
      `pki.ParseID` reads as component `agent`, node equal to the argument: as
-     `pki.PeerIdentity` checks a peer. No certificate, an administrator, another node, `io` or
-     `meta`, two URI SANs, another trust domain, a file whose leaf is not first: exit 1,
+     `pki.PeerIdentity` checks a peer. An empty `--trust-domain`, no certificate, an
+     administrator, another node, `io` or `meta`, two URI SANs, another trust domain, a file
+     whose leaf is not first: exit 1,
      pointing to `lab.sh vol-confirm`.
   2. **Read:** `ListTombstones(node)`. Stderr: the identity, the volume, the node, and the
      tombstone's `nodes` and `pending`, or "nothing pending".
@@ -63,9 +65,10 @@ and that the client retries (`meta/kv/etcd.go`) finds the node confirmed: no lin
 - **`delete`:** `deleted <n>` (exit 0) for `ok <n> replicas deleted`; `not running` (exit 3);
   anything else exit 1.
 - **`detach`:** `detached` (0), `not attached` (0), `not running` (3), else 1.
-- **`control()`** moves to `scripts/guest/common.sh`, which `run_on_vm` prepends to every guest
-  script, so `confirm.sh` uses the same one. The socket path is a variable passed to `python3` as
-  an argument (`sudo` resets the environment).
+- **`control()`** moves to `scripts/guest/common.sh`, which `run_on_vm` and `run_detached`
+  prepend to every guest script (its comment says both), so `confirm.sh` uses the same one.
+  The socket path is a variable passed to `python3` as an argument (`sudo` resets the
+  environment).
 - **Callers that do not redirect stdout** get `>/dev/null`: `cmd_vol` (attach, detach),
   `node_fault`'s detach, the CSI cleanup's, the drain test's, and `scripts/checks/reconcile.sh`.
 
@@ -88,9 +91,9 @@ removal pass the campaign's node; `vol delete` passes none. In order:
 5. **Clean** every data node: `node.sh delete` must print `deleted <n>`; anything else, `not
    running` included: exit 1, naming the node.
 6. **Pending without a sweep:** `tombstones` (administrator) shows the volume pending for a node
-   outside `vms_of all`: exit 1 at once, naming that node, and printing the procedure:
-   `lab.sh vol-confirm <volume> <node>`, then the interrupted command again (`RESUME=<dir> make
-   bench-writes`, or `make vol-delete`).
+   outside `vms_of all`: exit 1 at once, naming that node. For `$VM_C`, it prints the procedure:
+   `lab.sh vol-confirm <volume> $VM_C`, then the interrupted command again (`RESUME=<dir> make
+   bench-writes`, or `make vol-delete`). For any other node, it says no procedure applies.
 7. **Wait:** `tombstones` every 5 s, for `TOMBSTONE_WAIT` s (120). A failed poll is retried. On
    time-out: exit 255 if the last poll failed with 255, else 1, naming the pending nodes and
    `make csi-deploy`.
@@ -102,11 +105,12 @@ Callers run it before stopping or formatting a node (`write_reset`, `write_whole
 
 `cmd_bench_writes`, `write_volume`.
 - **Before the first reset, decided over every volume before any removal:** `metactl volumes`
-  (ids), then `get` of each; a volume's nodes are its chunks' replicas, and a moving chunk's
-  source and destination, as `replicaNodes`. Any volume other than wbench and `$VOL` on `NODE`:
-  exit 1, naming them, nothing removed. Only then, if `$VOL` is on `NODE`, `delete_volume "$VOL"
-  "$node"`. A volume being created or deleted is not listed (`ListVolumes`); the check holds at
-  the campaign's start only (decisions, accepted risks).
+  (ids), then `get` of each (`NotFound`: gone meanwhile, skipped); a volume's nodes are its
+  chunks' replicas, and a moving chunk's source and destination, as `replicaNodes`. Any volume
+  other than wbench and `$VOL` on `NODE`: exit 1, naming them, nothing removed. Only then, if
+  `$VOL` is on `NODE`, `delete_volume "$VOL" "$node"`. A volume being created or deleted is not
+  listed (`ListVolumes`); the check holds at the campaign's start only (decisions, accepted
+  risks).
 - **`write_volume`:** after `node up`, it polls `ListNodes` until `NODE` is alive (bounded),
   creates wbench, and checks every chunk has a replica on `NODE`; else exit 1.
 - **The restore's drain loop** (`$VOL`'s replicas moved back) goes, with its comment, and the
@@ -119,7 +123,8 @@ Callers run it before stopping or formatting a node (`write_reset`, `write_whole
 on the node, as subcommands of one guest script, `scripts/guest/confirm.sh`, which takes the
 paths of `flaminio-meta`, `flaminio-agent` and the disk tool (`agent.sh`'s,
 `~/flaminio/dataplane/target/release/flaminio-disk`) as variables, and confirms as the node's
-agent (`/etc/flaminio/pki/agent.crt`).
+agent (`/etc/flaminio/pki/agent.crt`). The workstation passes `TRUST_DOMAIN` (`ENV_VARS`), and
+`confirm.sh` passes `--trust-domain "$TRUST_DOMAIN"` to `confirm`.
 1. **Workstation:** `vms_of <node>` must give exactly one VM, not in `vms_of cluster`; it is
    used for every later step. Else exit 1, before anything is installed.
 2. **Workstation:** builds `flaminio-meta` as `meta up` does; installs it on the node when its
@@ -159,7 +164,7 @@ Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
   - `confirm` refusals, each with no call (a counting server): no token, `=false`, single dash,
     misspelling, a third argument, `-h`; no certificate; an administrator for a registered,
     stopped node; an `io` and a `meta` certificate; an agent for another node; two URI SANs;
-    another trust domain; a certificate file with the leaf second;
+    another trust domain; an empty `--trust-domain`; a certificate file with the leaf second;
   - as the node's agent: the token before and after the positionals; stdout and stderr as
     above; the last confirmation frees the id; again, an unknown volume, a node not on the
     tombstone: `{}`, exit 0, no `ConfirmDeletion`.
@@ -175,7 +180,9 @@ Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
   directory; the fake socket in a short temporary path, under macOS's 104 bytes):
   - `node.sh`: `common.sh` prepended, `sudo` and `systemctl` stubbed, a real `python3` against a
     fake socket server: each status line and exit, for its answer, an inactive unit, an error;
-  - `confirm.sh`: `pgrep` and `systemctl` stubbed, fakes at the given paths: each check's stop;
+  - `confirm.sh`: `common.sh` prepended, `pgrep` and `systemctl` stubbed, fakes at the given
+    paths, a fake socket answering the deletes: each check's stop; `confirm` gets
+    `--trust-domain` with `TRUST_DOMAIN`;
     the unit inactive, no `flaminio-io`, two, one whose PID is not `MainPID`; the disk check
     with none, two, the wrong one, a symlink to the right one; the second delete finding 1;
     `confirm` printing `{}`;
@@ -190,11 +197,12 @@ Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
       (fl-a stopped while `NODE=fl-b`; fl-c stopped during `vol delete`: `FORMAT=0`); a failed
       start; the volume found again at step 4: no `node.sh delete`; `not running` at the
       clean; pending for fl-c: stops at once, naming fl-c, the procedure with the command to
-      run again; a failed poll then gone: success; time-out: 1, or 255 after a 255 poll;
+      run again; pending for another node outside `vms_of all`: stops, naming it, no
+      procedure; a failed poll then gone: success; time-out: 1, or 255 after a 255 poll;
       `unknown command`: the hint;
     - the campaign's start: `NODE` stopped, `$VOL` listed before another volume X, both on
       `NODE` (X through a moving chunk too): exit 1 naming X, no `FORMAT=1` start, no delete;
-      only `$VOL` on `NODE`: removed;
+      only `$VOL` on `NODE`: removed; a listed id whose `get` answers `NotFound`: skipped;
     - the restore: no `drain` or `undrain` call;
     - `write_volume`: creates only once `NODE` is alive; a chunk without a replica there: stop;
     - `vol-confirm`: `c`, `fl-c` accepted; `a`, `all`, `cluster`, `fl-w` refused before any
