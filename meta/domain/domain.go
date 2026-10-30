@@ -45,7 +45,7 @@ type Header struct {
 	// True until every chunk record is written.
 	Creating bool `json:"creating,omitempty"`
 	// True once a deletion has begun: the volume no longer exists for any other operation, and
-	// its chunks' replicas can no longer change (docs/8).
+	// its chunks' replicas can no longer change (docs/issues/8).
 	Deleting bool `json:"deleting,omitempty"`
 }
 

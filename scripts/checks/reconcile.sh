@@ -2,8 +2,8 @@
 # Lab check for follow-ups §2: restart every replica of VOL, attach it on NODE, and time the
 # first read and a read of one block in every chunk. Fails if the first read waits longer than
 # LIMIT seconds. Takes VOL over: it is detached everywhere first and left attached on NODE.
-# Also (docs/5): reads across a chunk boundary into a buffer aligned only to 4 bytes, and fails
-# if NODE's node logged a failed local read or a request timeout, or, with zero copy, never
+# Also (docs/issues/5): reads across a chunk boundary into a buffer aligned only to 4 bytes, and
+# fails if NODE's node logged a failed local read or a request timeout, or, with zero copy, never
 # copied a read through its staging area. NODE must hold a replica of VOL.
 #   ZERO_COPY=1 VOL=vol1 NODE=fl-a LIMIT=5 scripts/checks/reconcile.sh
 set -euo pipefail
@@ -65,7 +65,7 @@ echo "device $path ready: $(since "$t0") s"
 read_block "$path" 0
 echo "first read (block 0): $(since "$t0") s"
 # A direct read into a buffer 4 bytes past a page boundary, which the ublk device accepts and
-# the disk under the store does not (docs/5). It reads the two blocks around the start of a
+# the disk under the store does not (docs/issues/5). It reads the two blocks around the start of a
 # local chunk with data, so the plan has device reads, the second piece at a non-zero offset;
 # it must return what a page-aligned read does.
 # shellcheck disable=SC2086 # one argument per chunk

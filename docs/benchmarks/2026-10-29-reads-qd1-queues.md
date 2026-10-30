@@ -1,7 +1,8 @@
 # Reads, QD1: the raw reference, one queue per vCPU, and the round trip (2026-10-29)
 
-[Issue #9](https://github.com/jsfakian/Flaminio/issues/9), design in [docs/9](../9/design.md).
-fl-b, 4 vCPUs, zero copy, volume volb (16 GiB, replicas fl-b+fl-a and fl-b+fl-c), one fio job.
+[Issue #9](https://github.com/jsfakian/Flaminio/issues/9), design in
+[docs/issues/9](../issues/9/design.md). fl-b, 4 vCPUs, zero copy, volume volb (16 GiB, replicas
+fl-b+fl-a and fl-b+fl-c), one fio job.
 
 **Verdict.**
 - **The bench's raw reference had stopped meaning anything.** It now reads where the volume's

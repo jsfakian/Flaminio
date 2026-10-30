@@ -160,7 +160,7 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 	// Merge labels into any existing record so the data plane's address registration does not
 	// wipe failure-domain labels the agent set, and the agent can overlay zone/rack without
 	// clearing other labels (e.g. witness). The two register the same node, maybe at once: the
-	// merged record is written only if the record is still the one read (docs/7).
+	// merged record is written only if the record is still the one read (docs/issues/7).
 	key := nodeKey(n.GetId())
 	for attempt := range retries {
 		if attempt > 0 {
@@ -181,7 +181,7 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 			ok = false
 		}
 		// No address keeps the stored one: the CSI node plugin registers labels only, and must
-		// not put back an address it read before the data plane registered a new one (docs/7).
+		// not put back an address it read before the data plane registered a new one (docs/issues/7).
 		address := n.GetAddress()
 		if address == "" {
 			if rec.Address == "" {
@@ -306,7 +306,7 @@ func (s *Service) readVolume(ctx context.Context, id string) (*domain.Volume, er
 		return nil, err
 	}
 	if len(entries) != h.ChunkCount() {
-		// A deletion since the header was read (docs/8) is NotFound, as for any operation on a
+		// A deletion since the header was read (docs/issues/8) is NotFound, as for any operation on a
 		// deleted volume; only a volume still there has damaged records.
 		if _, _, err := s.readHeader(ctx, id); err != nil {
 			return nil, err
@@ -415,7 +415,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		return nil, err
 	}
 	if !ok {
-		// A deletion that was interrupted after its mark (docs/8) holds the id. Its caller may
+		// A deletion that was interrupted after its mark (docs/issues/8) holds the id. Its caller may
 		// never come back, and the volume is hidden from every listing, so finish it here: it was
 		// decided already. Aborted, as the id is free once the tombstone is confirmed.
 		if h, _, err := s.readHeader(ctx, spec.ID); errors.Is(err, domain.ErrNotFound) && h.Deleting {
@@ -429,7 +429,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		return nil, fmt.Errorf("%w: volume %q", domain.ErrExists, spec.ID)
 	}
 	// Every later write is conditional on this claim, at the revision the claim wrote: a
-	// deletion marks the header (docs/8), and the creation then stops, rather than add chunks
+	// deletion marks the header (docs/issues/8), and the creation then stops, rather than add chunks
 	// after the deletion listed them, or clear the deletion's mark with its own header.
 	cmp := []kv.Cmp{{Key: volumeKey(spec.ID), Rev: claim}}
 	// Aborted, like any contention: not Unavailable, which a client takes for a dead instance.
@@ -497,11 +497,11 @@ func (s *Service) GetVolume(ctx context.Context, r *metav1.GetVolumeRequest) (*m
 	return &metav1.GetVolumeResponse{Volume: volumePB(v)}, nil
 }
 
-// DeleteVolume deletes a volume in two steps (docs/8). First it marks the header as deleting:
-// from then on the volume does not exist for any other operation, and moves and ISR changes,
-// which compare the header, can no longer change a chunk's replicas. Then it lists the chunks,
-// so its tombstone names every node that may hold a copy, and deletes the header and writes the
-// tombstone in one transaction. A deletion interrupted between the two steps leaves the header
+// DeleteVolume deletes a volume in two steps (docs/issues/8). First it marks the header as
+// deleting: from then on the volume does not exist for any other operation, and moves and ISR
+// changes, which compare the header, can no longer change a chunk's replicas. Then it lists the
+// chunks, so its tombstone names every node that may hold a copy, and deletes the header and writes
+// the tombstone in one transaction. A deletion interrupted between the two steps leaves the header
 // marked; the next DeleteVolume of the volume finishes it. It drops the chunk records last. Nodes
 // delete their local replicas and ConfirmDeletion; the tombstone goes when all have confirmed.
 func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeRequest) (*metav1.DeleteVolumeResponse, error) {
@@ -826,8 +826,8 @@ func (s *Service) ListVolumes(ctx context.Context, _ *metav1.ListVolumesRequest)
 // MoveReplica records a requested move on the chunk, conditional on the chunk record and the
 // volume header it read. It changes neither replicas nor ISR, and bumps no version: the target
 // does that, under its epoch, and a concurrent ISR change of the target's fails its compare and
-// is tried again. Comparing the header fences the move off a volume being deleted (docs/8): a
-// deletion marks the header first, so the move then finds the volume gone (NotFound). An attach
+// is tried again. Comparing the header fences the move off a volume being deleted (docs/issues/8):
+// a deletion marks the header first, so the move then finds the volume gone (NotFound). An attach
 // meanwhile makes the move read again.
 func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest) (*metav1.MoveReplicaResponse, error) {
 	if !domain.ValidID(r.GetFrom()) || !domain.ValidID(r.GetTo()) {
@@ -869,7 +869,7 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 		domain.ApplyMove(&c, r.GetFrom(), r.GetTo())
 		b, _ := json.Marshal(c)
 		// The header must be as read: a deletion marks it before it lists the chunks, so no move
-		// is recorded after that listing (docs/8).
+		// is recorded after that listing (docs/issues/8).
 		ok, err = s.kv.Txn(ctx,
 			[]kv.Cmp{{Key: e.Key, Rev: e.Rev}, {Key: volumeKey(h.ID), Rev: hrev}},
 			[]kv.Op{{Key: e.Key, Value: b}})

@@ -52,7 +52,7 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
                            depth, as each CPU's requests stay on it; but a single deep submitter
                            then shares its CPU with its queue's thread, and loses throughput.
                            With several queues the kernel gives the device no I/O scheduler.
-                           Each queue has its own buffers (docs/9)
+                           Each queue has its own buffers (docs/issues/9)
       --no-verify          EXPERIMENT ONLY: skip the checksum check of local reads (to measure
                            what verification costs)
       --zero-copy          local reads go straight from the disk into the request's pages

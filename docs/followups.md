@@ -19,7 +19,7 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 | 7 | Short-lived certificates, rotated | Lab certificates last 30 days and are issued by hand | With the operator (phase 1 step 7+) | [#16](https://github.com/jsfakian/Flaminio/issues/16) |
 | 8 | Deleting a volume's replicas | Done: 100 PVC create/delete cycles leave the stores' used space where it started | With the node agent (step 6) | [#8](https://github.com/jsfakian/Flaminio/issues/8) |
 | 9 | The data plane in Kubernetes | `flaminio-io node` runs as a systemd unit beside k3s; the CSI node plugin drives it through its control socket | With the node agent (step 6) | [#12](https://github.com/jsfakian/Flaminio/issues/12) |
-| 10 | A faster first attach after a restart | Attach limits sized for what an attach does now (docs/6); partition scanning goes off once libublk accepts the flag (ublk-org/libublk-rs#72) | With item 2 | [#6](https://github.com/jsfakian/Flaminio/issues/6) |
+| 10 | A faster first attach after a restart | Attach limits sized for what an attach does now (docs/issues/6); partition scanning goes off once libublk accepts the flag (ublk-org/libublk-rs#72) | With item 2 | [#6](https://github.com/jsfakian/Flaminio/issues/6) |
 | 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator | [#17](https://github.com/jsfakian/Flaminio/issues/17) |
 | 12 | Zero-copy local reads after an attach | With `--zero-copy`, local reads that waited for reconciliation fail with EINVAL, and the target drops the local replica for 3 s each time | Before the chaos run (step 8) | [#5](https://github.com/jsfakian/Flaminio/issues/5) |
 | 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) | [#13](https://github.com/jsfakian/Flaminio/issues/13) |
@@ -176,7 +176,7 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
    fl-a and fl-b had the same chunk replicas and clusters in use as before (168 / 431 167 and
    144 / 393 216), and no tombstone was left.
    - Left: data nodes outside Kubernetes (item 14).
-   - Done (docs/8): a move can no longer slip past `DeleteVolume`. A deletion first marks the
+   - Done (docs/issues/8): a move can no longer slip past `DeleteVolume`. A deletion first marks the
      volume's header as deleting, which fences off moves and ISR changes (they compare the
      header), then lists the chunks and writes the tombstone. A completed move's source, which
      no record names any more, is item 13's.
@@ -197,8 +197,8 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
 When an attach completes, the new target must still reconcile. Reads of chunks reported uncertain
 wait for it.
 - **Item 2 fixed the cause:** reconciling 16 GiB after both replicas restarted takes about 1 s.
-- **The attach no longer waits for reads** (docs/6, measured on Linux 7.0). The control socket
-  answers in under 0.1 s, even when the first read waits 5.8 s for a takeover: the kernel's
+- **The attach no longer waits for reads** (docs/issues/6, measured on Linux 7.0). The control
+  socket answers in under 0.1 s, even when the first read waits 5.8 s for a takeover: the kernel's
   partition scan runs after the device has started.
 - **Done: limits sized for what an attach does now.**
   - The data plane answers a control command within 50 s: 30 s for the metadata service, 10 s

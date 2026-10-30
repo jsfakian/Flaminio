@@ -9,7 +9,7 @@
 #                                        regions of DISK it took 64 MiB or more from (FIRST to
 #                                        END, END excluded; 0 0 if none), the bytes it took from
 #                                        DISK, and DISK's size. The regions, one "INDEX BYTES" per
-#                                        line, go to /tmp/bench-range-regions.txt (docs/9)
+#                                        line, go to /tmp/bench-range-regions.txt (docs/issues/9)
 #   bench-reads.sh job DEV OFFSET SPAN NAME RW BS QD RUNTIME OUT [JOBS]
 #                                        one measured job; prints a TSV row: name, IOPS, MiB/s,
 #                                        p50 and p99 (us), fio's CPU and the ublk queue thread's

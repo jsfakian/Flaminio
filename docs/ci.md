@@ -47,7 +47,7 @@ The lab VMs are not needed: centaur builds and tests the Linux-only code (io_uri
 
 Each target's harness is a function of the fuzz crate (`dataplane/fuzz/src/lib.rs`); the target
 binary only calls it. `dataplane/fuzz/regressions/<target>/` holds every input that ever made a
-target fail, committed (design: [docs/4](4/design.md)):
+target fail, committed (design: [docs/issues/4](issues/4/design.md)):
 
 - **On every pull request,** `make fuzz-regressions` replays them on the stable toolchain. An
   input fails if its harness panics, aborts, or runs longer than 5 seconds (on a 2 MiB stack:

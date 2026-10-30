@@ -69,7 +69,7 @@ sim: ## Replication-protocol simulation: SEEDS random runs, then every injected 
 	cd $(DATAPLANE) && $(CARGO) run --release -q -p flaminio-repl --example sim -- 0 $(SEEDS)
 	cd $(DATAPLANE) && $(CARGO) test --release -q -p flaminio-repl -- --include-ignored
 
-fuzz-regressions: ## Replay every committed fuzz regression input, on the stable toolchain (docs/4)
+fuzz-regressions: ## Replay every committed fuzz regression input, on the stable toolchain (docs/issues/4)
 	cd $(DATAPLANE)/fuzz && $(CARGO) test --lib --no-default-features
 
 fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + cargo-fuzz if needed)

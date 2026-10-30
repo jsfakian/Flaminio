@@ -44,7 +44,7 @@ pub enum OpResult<P> {
     /// The target was deposed. A write may or may not have taken effect.
     Failed,
     /// A read that no ISR member could serve: the one that failed it was the only member left
-    /// (docs/5).
+    /// (docs/issues/5).
     Unreadable,
 }
 
@@ -356,7 +356,7 @@ pub struct Target<P> {
     queue: VecDeque<Work<P>>,
     /// Client reads that failed on a member without a reply and wait to be sent again, by
     /// operation: the member each must not go to next, and how many times in a row it failed
-    /// there (docs/5).
+    /// there (docs/issues/5).
     avoid: BTreeMap<u64, (NodeId, u32)>,
     meta_inflight: Option<(u64, Time)>,
     next_heartbeat: Time,
@@ -880,8 +880,8 @@ impl<P: Clone + Debug> Target<P> {
     }
 
     /// The client read `req`, sent to `from` at `epoch` on `session`, failed there without a
-    /// reply: a local read whose device read or checksums failed (docs/5). It is sent again to
-    /// another ISR member, and `from` stays a member, its session open. A report that does not
+    /// reply: a local read whose device read or checksums failed (docs/issues/5). It is sent again
+    /// to another ISR member, and `from` stays a member, its session open. A report that does not
     /// match a client read in flight is ignored, as a stray reply is: then it returns false.
     pub fn on_read_failed(
         &mut self,
@@ -1386,7 +1386,7 @@ impl<P: Clone + Debug> Target<P> {
             ReadFor::Client { op } => {
                 self.chunks[chunk as usize].locks.remove(&ext);
                 if self.lease_ok(chunk as usize, now) {
-                    // Served, possibly by the member that failed it before (docs/5).
+                    // Served, possibly by the member that failed it before (docs/issues/5).
                     self.avoid.remove(&op);
                     self.out.push(Output::Done {
                         op,
@@ -1547,7 +1547,7 @@ impl<P: Clone + Debug> Target<P> {
                         // A read that failed on a member goes to another one. With no other
                         // member left to serve it, it goes back to that member once more, in
                         // case the failure passed, and ends as unreadable if it fails there
-                        // again (docs/5).
+                        // again (docs/issues/5).
                         let avoid = self.avoid.get(&op).copied();
                         let other =
                             avoid.is_some_and(|(failed, _)| self.has_other_source(i, failed));
@@ -2197,8 +2197,8 @@ fn digest_mismatch(ext: &Extent, got: &BTreeMap<NodeId, Vec<Option<u32>>>) -> Ex
 
 #[cfg(test)]
 mod tests {
-    //! A failed local read (docs/5), against a target on node 1 whose messages to its replicas
-    //! and to the metadata service are delivered at once, unless a test holds them back.
+    //! A failed local read (docs/issues/5), against a target on node 1 whose messages to its
+    //! replicas and to the metadata service are delivered at once, unless a test holds them back.
     use super::*;
     use crate::meta::{MetaRequest, Metadata};
     use crate::msg::Request;

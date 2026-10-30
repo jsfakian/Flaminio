@@ -352,7 +352,7 @@ impl TargetRt {
 
 struct Attaching {
     /// Which attach of the volume this is: answers to an earlier one, dropped since, carry
-    /// another (docs/6).
+    /// another (docs/issues/6).
     attempt: u64,
     token: Vec<u8>,
     volume: Option<pb::Volume>,
@@ -503,7 +503,7 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     /// Registers the node's address with the metadata service. A registration that fails is
-    /// sent again `REGISTER_RETRY` later (docs/7).
+    /// sent again `REGISTER_RETRY` later (docs/issues/7).
     fn register(&mut self) {
         let reg = pb::RegisterNodeRequest {
             node: Some(pb::Node {
@@ -1188,7 +1188,7 @@ impl<D: BlockDevice> Engine<D> {
                 attempt,
             } => {
                 // An answer to an attach dropped since, whether data or a failure, must neither
-                // fill in nor end the attach that holds the volume now (docs/6, S3).
+                // fill in nor end the attach that holds the volume now (docs/issues/6, S3).
                 let Some(a) = self
                     .attaching
                     .get_mut(&volume)
@@ -1992,7 +1992,7 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     /// Ends a local read: `ok` if its device reads completed and verified. A failed read is
-    /// sent again to another ISR member, and the local replica stays a member (docs/5).
+    /// sent again to another ISR member, and the local replica stays a member (docs/issues/5).
     pub fn local_read_done(
         &mut self,
         now: Instant,
