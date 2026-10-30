@@ -1,7 +1,9 @@
 # Issue #13: Replicas left behind by moves — intent
 
 [Issue #13](https://github.com/jsfakian/Flaminio/issues/13), follow-ups §13. It takes in issue
-#14's step 1: the tombstone sweep moves into the node agent.
+#14's step 1: the tombstone sweep moves into the node agent. It depends on
+[issue #30](https://github.com/jsfakian/Flaminio/issues/30): a volume created again starts above
+every earlier epoch of its name.
 
 ## Why
 
@@ -67,33 +69,33 @@ record, and no tombstone if the volume is deleted later (`replicaNodes`,
 2. Only the node's own agent deletes it, and only what the metadata service released to it. A
    deletion never touches a copy that the volume, or a later volume of the same name, uses.
    No copy a record named is left for a later volume of the same name to adopt.
-3. A later volume of a name starts above every epoch of the earlier ones, so their fences and
-   capability tokens are stale against it.
-4. A `Hello` at the epoch a node is already fenced at creates no chunk.
-5. A node keeps its fence for a volume after deleting its last chunk of it.
-6. Moving a chunk back to a node, deleting the volume, and creating it again all still work.
+3. A `Hello` at the epoch a node is already fenced at creates no chunk.
+4. A node keeps its fence for a volume after deleting its last chunk of it.
+5. Moving a chunk back to a node, deleting the volume, and creating it again all still work.
    At most, they wait for that node's deletion.
-7. One sweeper per node, the agent, for releases and tombstones, on every data node.
-8. Draining a node leaves no replicas of the drained volumes on its disk.
+6. One sweeper per node, the agent, for releases and tombstones, on every data node.
+7. Draining a node leaves no replicas of the drained volumes on its disk.
+
+The new volume's epochs (item 5's fences and tokens) are issue #30's.
 
 ## Out of scope
 
 - **Copies no record names:** left before this change, or by a node that came back after an
   administrator confirmed a tombstone for it (issue #14). This change makes no new ones, but in
-  one window of its rollout (spec, S14). They are listed (spec, S9) and deleted by hand once in
-  the lab. Their automatic deletion, and a hold on the name hash so that a later volume of the
-  name does not adopt them, are follow-ups (follow-ups §13).
-- **A volume's incarnation** in the store, the tombstones and the tokens. With want 3 an earlier
-  volume's fences and tokens are stale; its copies are not, and a target of a deleted volume
-  still running can still create chunks on a node that never held it. It changes
-  the store's keys, the protocol's `Hello` and the API (follow-ups §14).
+  one window of its rollout (spec, S14). They are listed (spec, S8) and deleted by hand once in
+  the lab. A later volume of the name does not adopt them: #30 drops them at its first session.
+  Their automatic deletion is a follow-up (follow-ups §13).
+- **A volume's incarnation** in the store and the tombstones, beyond #30's first epoch: what
+  #30 leaves open stays open here (follow-ups §14).
 - **`delete VOLUME` without a token.** Any root process with the control socket can delete a
   volume's copies today. A tombstone token for it is a follow-up.
 - **Forgetting a node** that is gone for good: its releases stay, and a deletion of their
-  volume names it on the tombstone (spec, S15). A follow-up.
+  volume names it on the tombstone, which nothing can then confirm (spec, S11). A follow-up.
 - **An index of releases by node.** The listing reads every chunk record (spec, S4); an index
   is a follow-up, for clusters larger than the lab.
 - **A drain that waits for the deletions.** A drain still ends when the metadata service places
   no replica on the node. It shows the releases still held.
 - **Draining volumes that are not attached** (issue #17).
-- **The replication protocol** and the target: unchanged.
+- **Unchanged:** the replication protocol and the target; moves and ISR changes, but for the
+  release and its refusal; the two-step deletion (#8); the drain's end; the simulator, but that
+  it confirms the releases it makes.
