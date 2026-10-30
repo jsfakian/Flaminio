@@ -132,9 +132,9 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
        it, and ends the device at its last close, whether or not the process lives;
      - **before 6.9,** with `DEL_DEV` on a thread of its own, which can block until the last
        close. Step 4 does not wait for that thread;
-  3. the record goes when the delete returns `Ok` or `ENOENT`: at once with `DEL_DEV_ASYNC`, and
+  3. the record goes when the delete returns `Ok` or `ENODEV`: at once with `DEL_DEV_ASYNC`, and
      when the thread's `DEL_DEV` returns before 6.9. Any other error keeps the record, logs it,
-     and leaves the device to the startup cleanup. So does an exit before the delete returns;
+     and leaves the device to the startup cleanup, as does an exit before the delete returns;
   4. last, under the entry's lock, which also covers its state and its detach flag:
      - flag set: the thread closes the fd and ends the entry;
      - flag clear (a deposition, or a device that stopped on its own): it marks the entry
@@ -331,7 +331,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - A record without `dev_info`, from a crash between `ADD_DEV` and the rename, is logged and
     left alone.
 
-  Then it deletes the device with `DEL_DEV_ASYNC`.
+  Then it deletes the device as a detach does (step 2 above: `DEL_DEV_ASYNC` on 6.9 and later,
+  `DEL_DEV` on a thread before), and removes the record on the same `Ok` or `ENODEV` rule.
   - **A recorded device that is not yet dead** (`GET_DEV_INFO`'s state is not `UBLK_S_DEV_DEAD`),
     as after an exit with a device thread blocked in `kill_dev`, is checked again for up to 5 s.
     - Then it is logged as an error, and its record is kept for the next start.
@@ -448,8 +449,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
       starts meanwhile;
     - a recorded device that is not dead: it is checked again, then kept and logged, and the
       node still starts;
-    - a delete that fails other than with `ENOENT` keeps the record and logs it; `Ok` and
-      `ENOENT` remove it. Before 6.9, the record goes only when the `DEL_DEV` thread returns;
+    - a delete that fails other than with `ENODEV` keeps the record and logs it; `Ok` and
+      `ENODEV` remove it. Before 6.9, the record goes only when the `DEL_DEV` thread returns;
   - with 10 000 inputs queued and two threads taking the lock in a loop, the lock wait and the
     heartbeat lateness stay under 100 ms;
   - queue threads leave the inputs to the engine thread.
