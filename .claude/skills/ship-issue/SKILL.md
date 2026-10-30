@@ -79,6 +79,24 @@ and security loops alike). After each round from the 5th on:
   reviewers, and go on until a round reports only Low and Nit. Do not stop to
   ask the user for these; tell them, in a line, which round the loop is in.
 
+## Agents
+
+| Task | Agent type | Model and effort |
+|---|---|---|
+| Drafting and revising `docs/issues/<n>/` | `general-purpose` (it writes files) | the session's |
+| Round 1 and the last round before a gate | `Plan` (read-only: no Edit or Write) | the session's |
+| Delta rounds | `Plan` | `model: "sonnet"`, `effort: "lower"` |
+| Implementation and its fix rounds | `general-purpose` | the session's |
+
+- **One drafter per issue,** resumed with SendMessage for every revision: it keeps
+  the code it has read, so a revision costs a fraction of a fresh agent's.
+- **Reviewers are always new agents,** so no round anchors on an earlier verdict.
+- **Not for this work:** `Explore` (it reads excerpts and locates code; it does
+  not review), or persona agents from other plugins (their own tools and
+  framing; the lighter ones are too weak for fencing and ordering arguments).
+- **Commit each revision** before its delta review, so the reviewer reads a
+  `git diff` of exactly what changed.
+
 ## Steps
 
 ### 1. Intent and spec
