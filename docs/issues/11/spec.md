@@ -181,8 +181,8 @@ persistence stays item 2.
   - **every client operation tried** (S4): every slot taken, a client read queued on a serving
     chunk starts in the same pump;
   - **sent again** (S8), with `min_isr` equal to the ISR's size, so that a failed session starts
-    no removal: a waited chunk's digest in flight and a later chunk's queued; the session fails
-    and reopens: the waited one goes first;
+    no removal: another chunk's digest fails in flight and goes back to the front; a waited
+    chunk's digest still goes first;
   - **integrity** (S5):
     - a waited chunk whose digests differ: its queued read is sent only once the repairs are
       acknowledged, and returns the authority's value;
@@ -211,8 +211,9 @@ persistence stays item 2.
   - **every catch is checked** (`sim/tests.rs`, under `cargo test`; the example binary runs no
     checks). Every mutation check is a safety switch, so a catch is a failure with `not
     linearizable` or `replicas diverge`. A failure of another class is not a catch: it is
-    counted, printed, and the search goes on. And the seed must pass with no switch on; if it
-    does not, the check fails at once, naming the seed: that is a bug, not a catch. Today
+    counted, printed, and the search goes on. Every failing seed, caught or not, must pass with
+    no switch on; if it does not, the check fails at once, naming the seed: that is a bug, not a
+    catch. Today
     (measured on centaur, release, 47 s for all):
 
     | Check | First seed | Error |
@@ -231,8 +232,8 @@ persistence stays item 2.
     `chunks = 3 + seed % 6`, other fields unchanged, 200 seeds. On today's code, one thread on
     centaur: 5.8 s in a debug build (the existing campaign: 4.7 s); 2 000 seeds in 6.2 s in
     release. It reports how many runs had a resync item queued while a chunk was waited. `make
-    sim` does not sweep it over 20 000 seeds: about a minute more, for runs the unit tests
-    already pin down;
+    sim` runs it over 2 000 seeds (about 6 s), not 20 000: about a minute more, for runs the
+    unit tests already pin down;
   - **six checks on it too,** in `make sim`, with a budget of 20 000 seeds. On today's code,
     first safety catches: `no_reconcile` 1, `trust_single_digest` 1, `early_settle` 85,
     `no_dirty_inflight` 35, `move_without_resync` 2, `copies_over_live_writes` 116. (On this

@@ -82,7 +82,7 @@ data, and they all go before chunk 0's.
    in the digests of chunks fenced together, from chunk 0 up.
 5. **Checked:** unit tests of the target (they carry "only for its own chunk"), with a property
    test that client operations start as today; a campaign with more chunks in `make test`, and
-   four reconciliation checks run on it; every mutation catch checked for its error and against
+   six checks run on it; every mutation catch checked for its error and against
    a clean run.
 6. **The checks searched again** from seed 0 (issue step 2), their hints and §9 updated, and
    `make sim` failing fast, not searching for hours, if the fencing check's hint stops catching.
