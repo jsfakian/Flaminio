@@ -159,29 +159,36 @@ apart by that word.
   `delete`, `status`). `up` refuses where the socket answers and the unit is not active.
 - **Token files:** `up` with `ATTACH` writes them with `install -m 600`.
   - `detach` deletes `/run/flaminio/<VOLUME>.token`.
-  - `down` deletes the file named by the unit's `--token`, read from its `ExecStart`. That is
-    `/run/flaminio/<ATTACH>.token`. With no `--token`, or an unreadable unit, it deletes no
-    token file, and says so.
+  - `down`, once its unit has stopped, deletes every `/run/flaminio/*.token`. The unit's
+    `up` is their only writer, since the CSI node plugin stores none.
 - **The token** still travels on command lines, as today (decisions, accepted risks).
 
 **`node.sh down` and `ublk.sh down`** delete a ublk device only while their own unit is active,
 and only that unit's id (1 and 0). Where the socket answers but the unit is inactive, they
 refuse.
 
-**`node.sh status` prints one sentinel line** about the socket, which the lab's checks match
-exactly:
-- `socket: absent`: no socket answers;
-- `socket: none`: it answers `ok none`;
-- `socket: <the answer>`: otherwise.
+**`node.sh socket`** prints exactly one line to stdout, and nothing else. It sends `status` with a
+5 s limit, and catches every error:
+- **`socket: absent`:** only when the socket's path does not exist, or the connection fails with
+  `ENOENT` or `ECONNREFUSED`;
+- **`socket: none`:** the answer is `ok none`;
+- **`socket: answer <the answer>`:** any other answer;
+- **`socket: error <reason>`:** a time-out, any other error, or a failure of sudo or Python.
+  A hung data plane gives this, never `absent`.
 
-**The pod-node guard.** `node.sh up`, `ublk.sh up` and `replica.sh up` refuse on a pod node,
-whether or not its data plane answers.
-- **The test:** `sudo k3s crictl pods --state ready --name '^flaminio-dataplane-' -q` prints a
-  pod. A ready sandbox stays while its container is stopped. The NotReady sandboxes of a removed
-  DaemonSet do not count.
-- **A `crictl` error where k3s is installed,** such as k3s stopped while its shims keep the
-  containers running: they refuse, unless the socket check prints `socket: absent`.
-- **Where k3s is absent** (fl-c), the guard passes.
+**The host's match:** the caller captures stdout alone, without stderr. It requires ssh to exit
+0, and exactly one line, matched whole with `grep -qx`. Empty or extra output refuses.
+
+**The pod-node guard.** `node.sh up`, `ublk.sh up` and `replica.sh up` refuse unless both hold:
+- `node.sh socket` prints `socket: absent`;
+- where k3s is installed,
+  `sudo k3s crictl pods --state ready --name '^flaminio-dataplane-' -q` succeeds and prints
+  nothing.
+  - A ready sandbox stays while its container is stopped. The NotReady sandboxes of a removed
+    DaemonSet do not count.
+  - A `crictl` error refuses. This happens with k3s stopped, while its shims keep the
+    containers running.
+  - Where k3s is absent (fl-c), only the socket counts.
 
 **`ublk.sh up`** also refuses where the socket answers, or `/dev/ublkc0` already exists. Its unit is
 active before `serve` fails, so an active unit does not prove it owns the id.
@@ -235,11 +242,10 @@ deleted before its data plane is up does not wait 3600 s.
 
 **`make k8s-down` and `make k8s-uninstall`:**
 They ask each pod node over ssh, not through Kubernetes, which may be the thing that is down.
-They run `run_on_vm NODE node.sh status`.
-- **They proceed** only when ssh exits 0 and the output is exactly `socket: absent` or
-  `socket: none`.
-- **Anything else refuses:** an attach, an ssh failure (an unreachable VM, a timeout), or
-  empty output.
+They run `run_on_vm NODE node.sh socket`, matched as above.
+- **They proceed** only on `socket: absent` or `socket: none`.
+- **Anything else refuses:** an attach, `socket: error`, an ssh failure (an unreachable VM, a
+  time-out), or output that is empty or extra.
 - **`FORCE=1`** skips the check.
 
 **`make csi-undeploy`:** it deletes `flaminio-test` first. It then refuses while any
@@ -465,8 +471,13 @@ when it differs. A restart of the service leaves the pods running.
      - attached, it keeps serving, and exits after the volume's detach.
    - **Refusals:** `make k8s-down`, `make k8s-uninstall` and `make csi-undeploy`.
    - **With Kubernetes down:** k3s stopped on fl-w, `make k8s-down` still refuses.
-   - **An unreachable node:** with fl-b's ssh blocked, `make k8s-down` refuses, naming fl-b.
-   - **k3s stopped on fl-a,** its data plane still up: `node.sh up` on fl-a refuses.
+   - **An unreachable node:** with fl-b's ssh blocked, `make k8s-down` and
+     `make k8s-uninstall` refuse, naming fl-b.
+   - **A hung data plane:** fl-a's `flaminio-io` SIGSTOPped. `node.sh socket` prints
+     `socket: error`, so `make k8s-down` and `node.sh up` refuse.
+   - **The `crictl` error alone:** fl-a's data-plane container stopped (the socket is
+     `absent`), then k3s stopped on fl-a. `crictl` fails, so `node.sh up` refuses.
+     Then started again, and k3s restarted.
 7. **A crash.**
    - **Setup:** `crictl stop -t 0` on the data-plane container, with the test pod on fl-a.
    - **The data plane:** fl-a is alive again. A few container restarts are allowed, as the
@@ -478,4 +489,5 @@ when it differs. A restart of the service leaves the pods running.
 9. **The units' `down`s,** with `make csi-test` `KEEP=1` on fl-a: `make node-down` and
    `make ublk-down` on fl-a refuse, and the test pod's volume stays attached.
 10. **Token files:** after `make vol-attach` with the unit (fl-c), the token file is 0600. It
-    is gone after `node.sh detach`, and, after a new attach, after `node.sh down`.
+    is gone after `node.sh detach`. After a new attach, and a stray `.token` file planted by
+    hand, `node.sh down` leaves none.
