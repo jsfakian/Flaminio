@@ -63,3 +63,6 @@ Settled in the plan reviews (seven rounds). Reviewers treat these as given.
   `vol-confirm`, then the interrupted command again.
 - **A volume placed on the campaign's node during the campaign** is lost at its next reset, as
   today.
+- **The one-time cleanup starts fl-c with `make node-up VM=c`,** which takes the disk by serial
+  rather than re-running the claim as `ensure_node_c` does; it is the same disk in the lab, and
+  `vol-confirm`'s disk check refuses if it is not (final review, Low).
