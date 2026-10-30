@@ -80,7 +80,7 @@ func Step(ctx context.Context, c metav1.MetadataServiceClient, node string) (Pro
 	for _, v := range vols {
 		vp, moved, err := stepVolume(ctx, c, node, v, candidates, load)
 		if errors.Is(err, errVolumeGone) {
-			// Deleted since it was listed: its replicas go with its tombstone (docs/8), and the
+			// Deleted since it was listed: its replicas go with its tombstone (docs/issues/8), and the
 			// moves it was given no longer weigh on their destinations.
 			for _, to := range moved {
 				load[to]--

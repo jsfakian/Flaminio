@@ -28,7 +28,7 @@ use crate::ublk::{ADD_DEVICE_LIMIT, Attached, Control, METADATA_LIMIT, START_LIM
 type Wake = Arc<dyn Fn() + Send + Sync>;
 
 /// How long an attach may take before the socket answers without it: the sum of its steps
-/// (docs/6). The CSI node plugin waits longer (`DefaultControlTimeout` in
+/// (docs/issues/6). The CSI node plugin waits longer (`DefaultControlTimeout` in
 /// control/csi/dataplane.go), so this answer reaches it.
 pub(crate) const ATTACH_LIMIT: Duration = METADATA_LIMIT
     .saturating_add(ADD_DEVICE_LIMIT)
@@ -138,7 +138,7 @@ fn attach(
         Ok(a) => a,
         // The request carries this deadline. Not begun yet, it never will be; begun, its steps
         // have ended by now, but starting the device, which is not bounded, may still bring
-        // the device up (docs/6, S2).
+        // the device up (docs/issues/6, S2).
         Err(mpsc::RecvTimeoutError::Timeout) => {
             format!("error: no answer within {}", seconds(limit))
         }
@@ -149,7 +149,7 @@ fn attach(
 }
 
 /// The limit on an attach: `ATTACH_LIMIT`, or less if the caller says it waits less (its
-/// time left, in milliseconds), so that its answer reaches the caller (docs/6).
+/// time left, in milliseconds), so that its answer reaches the caller (docs/issues/6).
 fn attach_limit(within: Option<&str>) -> Result<Duration, String> {
     match within {
         None => Ok(ATTACH_LIMIT),
@@ -251,7 +251,7 @@ mod tests {
     }
 
     /// The CSI node plugin's limit, read from its source: the data plane's answers must come
-    /// before it gives up, or kubelet sees no cause (docs/6). Takes `N * time.Second` or
+    /// before it gives up, or kubelet sees no cause (docs/issues/6). Takes `N * time.Second` or
     /// `N * time.Minute`, in a const declaration or block, with or without a comment.
     fn csi_control_timeout() -> Duration {
         let go = include_str!("../../../../control/csi/dataplane.go");

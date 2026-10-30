@@ -170,9 +170,9 @@ Every benchmark run, Flaminio's or the raw disk's, follows the same steps:
 2. **Same span.** The raw jobs cover a range of the same size as the Flaminio volume (16 GiB),
    not the whole 100 GiB disk. A drive's mapping-table cache makes larger spans slower, and the
    two sides must pay the same.
-   - **Where, for reads** (since 2026-10-29, [issue #9](9/design.md)): from where the volume's
-     data starts on the node's disk. `bench-reads` traces a read of the whole volume to find
-     the range its data is in, and stops if that range cannot stand for it: less than 90% or
+   - **Where, for reads** (since 2026-10-29, [issue #9](issues/9/design.md)): from where the
+     volume's data starts on the node's disk. `bench-reads` traces a read of the whole volume to
+     find the range its data is in, and stops if that range cannot stand for it: less than 90% or
      more than 110% of the volume read from the disk, or a range over 1.5 times its size plus
      one 1 GiB region.
    - **Why:** regions of a disk can read at different speeds. On fl-b, the regions at 32 and

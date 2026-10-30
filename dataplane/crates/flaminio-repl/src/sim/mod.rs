@@ -119,7 +119,7 @@ pub struct Config {
     /// Client reads take the fast path when the target admits them (spec §5, fast reads).
     pub fast_reads: bool,
     /// Percent of the target's client reads from its own replica that fail without a reply,
-    /// during chaos: the data plane's failed local reads, which fail over (docs/5).
+    /// during chaos: the data plane's failed local reads, which fail over (docs/issues/5).
     pub local_read_fail_pct: u64,
 }
 
@@ -179,7 +179,7 @@ pub struct Report {
     pub partitions: u64,
     pub final_epoch: Epoch,
     pub events: u64,
-    /// Client reads from a target's own replica that the run failed (docs/5).
+    /// Client reads from a target's own replica that the run failed (docs/issues/5).
     pub failed_local_reads: u64,
 }
 
@@ -714,7 +714,7 @@ impl Sim {
             Body::FromReplica(m) => {
                 // A client read from the target's own replica may fail instead, during chaos
                 // only: the final reads after settling must all complete. Nothing is drawn at a
-                // rate of 0, so such seeds run as they did before (docs/5).
+                // rate of 0, so such seeds run as they did before (docs/issues/5).
                 let pct = self.cfg.local_read_fail_pct;
                 let fail = pct > 0
                     && self.chaos

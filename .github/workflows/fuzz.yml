@@ -1,4 +1,4 @@
-# Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md, docs/4). The
+# Every fuzz target for 10 minutes, every Saturday (follow-ups §6, docs/ci.md, docs/issues/4). The
 # corpus carries over between runs on the runner host. Failing inputs are kept, as an artifact
 # and on the runner host; a failed run is reported in an issue labelled fuzz.
 name: Fuzz

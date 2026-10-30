@@ -33,7 +33,7 @@ type ControlSocket struct {
 }
 
 // DefaultControlTimeout bounds a control command when the caller's deadline does not come
-// first (docs/6). Kubelet's calls have a deadline of their own (2 minutes), so this is a
+// first (docs/issues/6). Kubelet's calls have a deadline of their own (2 minutes), so this is a
 // backstop for a data plane that never answers, and the limit for callers without one, such
 // as the tombstone sweep. It must stay above the data plane's own limits on a command
 // (ATTACH_LIMIT and DELETE_LIMIT, 50 s, in control.rs, whose tests read this line), so that
@@ -100,7 +100,7 @@ func (s ControlSocket) Status(ctx context.Context) (string, string, error) {
 
 // Attach tells the data plane how long this caller still waits, less answerMargin, so that it
 // ends the attach in time to answer with its cause rather than leave the caller with only its
-// own deadline (docs/6).
+// own deadline (docs/issues/6).
 //
 // A data plane older than this answers the time limit with its usage line: the attach is then
 // sent again without it, so the two can be upgraded in either order.

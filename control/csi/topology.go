@@ -59,7 +59,7 @@ func syncTopologyOnce(ctx context.Context, meta *Meta, kube *failover.APIClient,
 }
 
 // registerTopology adds labels to the node's registration without an address, so the metadata
-// service keeps the one the data plane registered, even if it changes meanwhile (docs/7). A
+// service keeps the one the data plane registered, even if it changes meanwhile (docs/issues/7). A
 // node the data plane has not registered yet is refused with NotFound.
 //
 // A metadata service older than this refuses the missing address with InvalidArgument. During

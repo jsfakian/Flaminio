@@ -1,13 +1,13 @@
 # Issue #9: 4K reads at queue depth 1 — intent
 
 [Issue #9](https://github.com/jsfakian/Flaminio/issues/9), follow-ups §1, the
-[performance plan](../performance-plan.md).
+[performance plan](../../performance-plan.md).
 
 ## Why
 
 Zero-copy reads reach 84% of raw at QD1 on fl-b, against the raw reference the bench has used
 so far. The plan's goal is 90%. A profile of one read's
-round trip (2026-10-29, [results](../benchmarks/2026-10-29-reads-qd1-queues.md)) found three
+round trip (2026-10-29, [results](../../benchmarks/2026-10-29-reads-qd1-queues.md)) found three
 things.
 
 1. **The raw reference no longer means anything.**
@@ -46,7 +46,7 @@ things.
 3. The analysis recorded, with its numbers, so that the next step starts from them.
 
 The goal is not met here without spinning. The bench runs found 90% only with 4 queues and
-100 µs polling, which cost a core ([results](../benchmarks/2026-10-29-reads-qd1-queues.md)).
+100 µs polling, which cost a core ([results](../../benchmarks/2026-10-29-reads-qd1-queues.md)).
 Issue #9 stays open after this change.
 
 ## Out of scope

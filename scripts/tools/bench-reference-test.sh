@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Checks bench_reference (scripts/lib.sh): from the volume's range on the node's disk, the span
-# the raw jobs of bench-reads read (docs/9). Run by `make lint`.
+# the raw jobs of bench-reads read (docs/issues/9). Run by `make lint`.
 if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
     echo "bench-reference-test: needs bash >= 4.4 (found $BASH_VERSION); skipped"
     exit 0

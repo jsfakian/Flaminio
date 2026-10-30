@@ -1,6 +1,6 @@
-//! The fuzz harnesses, one function per target (docs/4/design.md). Each `fuzz_targets/<target>.rs`
-//! only calls its function, and the regression test below replays the committed inputs of
-//! `regressions/<target>/` through the same function, on the stable toolchain.
+//! The fuzz harnesses, one function per target (docs/issues/4/design.md). Each
+//! `fuzz_targets/<target>.rs` only calls its function, and the regression test below replays the
+//! committed inputs of `regressions/<target>/` through the same function, on the stable toolchain.
 //!
 //! Nothing here may refer to `libfuzzer_sys`: that keeps libFuzzer out of the test binary.
 
@@ -151,7 +151,7 @@ pub fn capability_token(data: &[u8]) {
     }
 }
 
-/// Replays every committed regression input (docs/4/spec.md, S4 and S6).
+/// Replays every committed regression input (docs/issues/4/spec.md, S4 and S6).
 #[cfg(test)]
 mod regressions {
     use std::collections::BTreeSet;
@@ -230,7 +230,7 @@ mod regressions {
             .collect()
     }
 
-    /// Whether `name` is the name of a regression input (docs/4/spec.md, S3): `empty`,
+    /// Whether `name` is the name of a regression input (docs/issues/4/spec.md, S3): `empty`,
     /// `seed-<what>`, or libFuzzer's `<kind>-<sha1>` (`minimized-from-` from `cargo fuzz tmin`).
     /// libFuzzer loads every file of the directory, so a file named otherwise (an editor backup, a
     /// stray file) would be replayed by the fuzzer and must not be ignored here. The one exception
