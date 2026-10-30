@@ -291,9 +291,11 @@ pinning.
 **The token still crosses the ssh command line to the agents,** in `ENV_VARS`. It is visible in
 `ps` for a moment. sudo no longer logs it.
 
-**Modes:** `config.yaml` and `agent-token` are created 0600 before any secret is written:
-`sudo install -m 0600 /dev/null FILE`, then the write. Today's `sudo tee` creates them 0644
-(`k3s.sh`).
+**Modes:** `config.yaml` and `agent-token` are 0600 before any secret is written. Today's
+`sudo tee` creates them 0644 (`k3s.sh`).
+- **An absent file** is created with `sudo install -m 0600 /dev/null FILE`.
+- **An existing one** is first read, for the restart decision's comparison, then set with
+  `chmod 600`, then written.
 
 **When the configuration changes:** `install_k3s` returns early while the right version runs.
 So `server` and `agent` compare the configuration they write with the old one, and restart k3s
@@ -353,6 +355,11 @@ when it differs. A restart of the service leaves the pods running.
     take the signal, are never started.
   - It then sends `kill(getpid(), SIGTERM)`: `requested()` becomes true, and the process lives
     on.
+  - **`unsafe`:** the crate denies it. The file has `#![allow(unsafe_code)]`, and a `// SAFETY`
+    comment on the `libc::kill` call.
+  - **Off Linux,** where `libc` is not a dependency: the Linux body is under
+    `#[cfg(target_os = "linux")]`. A stub `main` does nothing under
+    `#[cfg(not(target_os = "linux"))]`, so the harness-less target still builds.
 - **`flaminio-io`, `should_exit`:** true only for SIGTERM requested with the state `None`.
   False for `Attaching` and for `Attached`, and true once the state goes back to `None`: an
   exit after the next detach.
