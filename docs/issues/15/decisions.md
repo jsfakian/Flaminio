@@ -145,16 +145,22 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
 - **The startup record:**
   - written `O_EXCL`, so an id whose record exists is skipped; removed on any `ADD_DEV` failure,
     and when `GET_DEV_INFO` gives `ENODEV`;
-  - holds `ADD_DEV`'s `dev_info` (flags, queues, depth, I/O size, owner), all compared at
-    cleanup;
+  - written before `ADD_DEV` with the volume, instance and generation, then replaced atomically
+    with the `dev_info` that `ADD_DEV` returned, which the kernel rewrites. All of it is compared
+    at cleanup. A record without `dev_info` is logged and left, unless its device is gone;
   - `first_id` counts the recorded ids, is at least 0, and `--id -1` sets no floor.
 - **Lock order:** the registry, then the engine. The arrivals counters live in the engine.
 - **The device thread's failures** (`add_device`, `start_dev`, `START_LIMIT`) each answer the
-  attach, send `Detach`, remove the record, and end the entry.
+  attach, send `Detach`, remove the record, and end the entry. After a `start_dev` failure, a
+  stop flag and each queue's eventfd make the queue threads drop their rings, and the device is
+  deleted once all have exited.
 - **A late-started device** reached running after the socket had answered its attach as timed
   out. It stays running, and counts against the limit.
 - **`pending_delete`** clears only when a delete finishes, even after a store error that does not
-  poison the store.
+  poison the store. A running delete is tracked apart from it, so a later `delete` restarts one
+  that a store error stopped.
+- **One wire prefix for every epoch refusal:** `error: VOLUME: epoch: <reason>`. The CSI node
+  plugin maps it to `FailedPrecondition`.
 - **The CSI node plugin maps an epoch refusal to `FailedPrecondition`.** Recovering takes a new
   `ControllerPublishVolume`.
 - **`write-load.sh`** runs by size, not by runtime, so that its verify reads back everything

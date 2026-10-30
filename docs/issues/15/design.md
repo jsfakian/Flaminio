@@ -98,9 +98,13 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   with the reason. It sends `Input::Detach { volume, generation }`, removes the record, and
   ends the entry.
   - **`add_device` fails:** there is no device.
-  - **`run_target` returns `Err` before the callback** (`start_dev` failed): its queue threads
-    were spawned and are not joined. The thread deletes the device asynchronously, which aborts
-    the queues, so they end with `QueueIsDown`. It logs them.
+  - **`run_target` returns `Err` before the callback** (`start_dev` failed). Its queue threads
+    were spawned and are not joined, and some may not have sent their FETCH yet, so deleting
+    the device alone does not end them.
+    - The thread sets a stop flag in `Shared`, and signals each queue's own eventfd.
+    - Each `q_fn` sees the flag, leaves its loop and drops its ring, which cancels a late FETCH.
+      It counts its exit in `Shared`.
+    - The thread waits for every exit, then deletes the device.
   - **Step 1's `START_LIMIT` runs out:** the callback stops the device itself, and returns.
     No fd was opened.
 - **A late-started device** is one whose attach the socket had already answered as timed out
@@ -157,8 +161,9 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
 - **Unchanged:** `EngineCtx::submit` and `pump_if_due`, under the lock.
 - **Gone from queue 0:** the 10 ms ticker, and the wait on the node's eventfd (`serve_with`).
   Each queue keeps its own eventfd.
-- **#10's arrivals:** each device registers its `Arc<AtomicUsize>` in `Node` when it starts, and
-  removes it after `run_target`. `Engine::arrivals()` sums them.
+- **#10's arrivals:** each device registers its `Arc<AtomicUsize>` with
+  `Engine::add_arrivals` when it starts, and `remove_arrivals` after `run_target`.
+  `Engine::arrivals()` sums them.
 
 ## S5 and S6: isolation, settling, the shared store
 
@@ -193,13 +198,16 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   - A store error stops the delete, and leaves the volume in the set. Errors that do not poison
     the store, such as `OutOfSpace` on the delete's commit, are among them.
   - After a restart, the fence at `u64::MAX` refuses the same.
-- **A second `delete`** answers `error: VOLUME: a delete is under way`. The socket's 50 s ends the
-  answer, not the delete.
+- **`deleting`** is tracked apart from `pending_delete`: it is the volume whose steps are running.
+  - A `delete` while `deleting` holds the volume answers `error: VOLUME: a delete is under way`.
+  - A `delete` of a pending volume with no running step, as after a store error, restarts
+    `begin_delete`.
+  - The socket's 50 s ends the answer, not the delete.
 - **Crash ordering:**
   - **The fence comes first.** Its record is durable before any chunk is forgotten or deleted.
     So a restart in the middle finds every remaining chunk fenced at `u64::MAX`.
-  - **What that refuses:** every `Hello` and attach, at any epoch below `u64::MAX`. A volume made again at a newer
-    epoch (#30) cannot adopt these chunks.
+  - **What that refuses:** every `Hello` and attach, at any epoch below `u64::MAX`. A volume
+    made again at a newer epoch (#30) cannot adopt these chunks.
   - **A later `delete`** ends the work.
   - **Today:** `delete_chunk` passes `u64::MAX` only to its epoch check, and writes no `Fence`.
     `delete_volume` forgets the volume first.
@@ -219,6 +227,7 @@ list                             ->  ok limit N [VOLUME STATE ...]
   (`dataplane.go`, `command`).
 - **Why plain `status` names one volume:** an older plugin's `strings.Cut` would take a longer
   line's rest as the path.
+- **An attach refused for its epoch** answers `error: VOLUME: epoch: <reason>` (S11).
 - **`detach`, by state:**
   - starting: `error: VOLUME is attaching`;
   - running or stopping: it feeds the stop channel, waits for `run_target` to return, closes the
@@ -234,7 +243,7 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - an attach that times out: `DeadlineExceeded`;
   - starting: `Unavailable`;
   - stopping: `FailedPrecondition`;
-  - an attach refused for its epoch: `FailedPrecondition`. Kubelet's retry reuses the publish
+  - an attach refused for its epoch (`: epoch:`, S11): `FailedPrecondition`. Kubelet's retry reuses the publish
     context, so only a new `ControllerPublishVolume` recovers.
 - **The identity check** (`NodeStageVolume`, `NodePublishVolume`):
   1. `status VOLUME`;
@@ -261,10 +270,12 @@ list                             ->  ok limit N [VOLUME STATE ...]
 
 ## S10: crash and restart
 
-- **The record:** `/run/flaminio/ublk/<id>` holds the volume, the instance, the generation, and
-  `ADD_DEV`'s `dev_info`: flags, `nr_hw_queues`, `queue_depth`, `max_io_buf_bytes` and the
-  owner's uid.
-  - It is written with `O_EXCL` before `ADD_DEV`. If it already exists, that id is skipped.
+- **The record:** `/run/flaminio/ublk/<id>`.
+  - **Before `ADD_DEV`:** it is written with `O_EXCL`, holding the volume, the instance and the
+    generation. If it already exists, that id is skipped.
+  - **After `ADD_DEV`:** it is replaced atomically, by a temporary file and a rename, with the
+    `dev_info` that `ADD_DEV` returned. The kernel rewrites the flags, caps `nr_hw_queues` and
+    `queue_depth`, and sets the owner, so only the returned `dev_info` can be compared later.
   - It is removed on any `ADD_DEV` failure, and after the device's delete.
   - The CSI pod mounts `/run/flaminio` (#12's plan).
   - libublk's `/run/ublksrvd/<id>.json` goes with `run_target`'s own `stop_dev`. Only a crash
@@ -275,7 +286,9 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - every recorded `dev_info` field matches. The flags alone do not identify Flaminio, as they
     are 0 without zero copy.
 
-  A record whose `GET_DEV_INFO` gives `ENODEV` is removed.
+  - A record whose `GET_DEV_INFO` gives `ENODEV` is removed.
+  - A record without `dev_info`, from a crash between `ADD_DEV` and the rename, is logged and
+    left alone.
 
   Then it deletes the device with `DEL_DEV_ASYNC`. Anything else is logged and left alone.
 - **`DEL_DEV_ASYNC`** is in Linux 6.9 and later. Centaur's 6.8 headers lack it, and the lab runs
@@ -292,6 +305,12 @@ list                             ->  ok limit N [VOLUME STATE ...]
 
 - **The engine gets the `TokenKey`.** `Input::Attach` verifies the token, and keeps its claims.
   After `GetVolume` (`start_target`), `claims.epoch` must equal `volume.epoch`.
+- **Every epoch refusal** answers `error: VOLUME: epoch: <reason>`. The reasons:
+  - an epoch already run (`ran_epochs`);
+  - at or below the fence, including `u64::MAX` after a delete;
+  - `claims.epoch` is not the volume's epoch.
+
+  The CSI node plugin matches `: epoch:`, and maps it to `FailedPrecondition` (S9).
 - **Refused epochs:**
   - one in `ran_epochs`, which is kept for the run;
   - one at or below the local replica's durable fence for the volume (`ReplicaCore`, recovered
@@ -310,8 +329,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
   1. creates `VOL2` beside `VOL`;
   2. attaches both on fl-a;
   3. runs `write-load.sh` on both, with `DEV`, a seed and a 1 s fio log each.
-     - `write-load.sh` takes `SEED`, `SIZE` and `LOG`, and writes its JSON next to `LOG`, not to
-       the shared `/tmp/write-verify.json`.
+     - `write-load.sh` takes `SEED`, `SIZE` and `LOG`, and writes its JSON next to `LOG`. `LOG`
+       defaults to a name built from `DEV`, so two runs never share an output, and `node-fault`
+       passes one for each volume.
+     - A `VERIFY_ONLY` run passes the same `SEED` and `SIZE` as the write.
      - Its length is set by `SIZE`, not by a runtime, so that the verify phase reads back
        everything written;
   4. checks that neither log has an empty second;
@@ -375,7 +396,7 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - a `Hello` and an `Attach` between turns are refused;
   - a second delete gets its answer;
   - an `OutOfSpace` on a delete's commit, in the run, leaves the volume refused, and a later
-    delete finishes it;
+    delete restarts `begin_delete` and finishes it;
   - **a crash after `begin_delete`:** after the restart, a `Hello` and an `Attach` at E + 1 are
     refused, and a new delete completes (store crash images).
 - **S8:** `status` with none, one, and three running and one starting; `status VOLUME`, `detach`
@@ -383,7 +404,7 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **S9** (Go):
   - name validation; `list` and its fallback; `MaxVolumesPerNode` 1, or an error;
   - `ResourceExhausted` on `limit:`, `DeadlineExceeded` on an attach's timeout, and
-    `FailedPrecondition` on an epoch refusal;
+    `FailedPrecondition` on each of the three `: epoch:` answers;
   - starting gives `Unavailable`, stopping `FailedPrecondition`;
   - an older plugin's parse of the new `status`;
   - **`HostMounter`** (Linux, root, loop devices): a mismatch at the open, at the second status,
@@ -394,6 +415,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - a live device of another ublk server is left;
   - a record left by a failed `ADD_DEV` is gone, and one whose device is gone (`ENODEV`) is
     removed;
+  - forced `set_params` and `mlock` failures make `start_dev` fail: every queue thread exits, then
+    the device is deleted. This runs on the lab's kernel, and on the synchronous-delete fallback;
   - a device thread's three failures (`add_device`, `start_dev`, `START_LIMIT`) each answer the
     attach, and end the entry;
   - **raw block:** a raw block pod's volume; then the data plane is killed, the CSI node plugin
