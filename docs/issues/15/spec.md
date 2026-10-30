@@ -128,7 +128,8 @@ Terms:
 - **At start, the node deletes only its own leftovers:** recorded, dead, and matching what it
   recorded.
   Others are never touched.
-- **The attach at startup** takes one volume, and retries while that volume is not attached.
+- **The attach at startup** takes one volume. It retries until that volume has an entry, or
+  until an epoch refusal, which is final.
 - **The store's recovery is unchanged.**
 
 **S11. Tokens and epochs.**

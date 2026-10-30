@@ -142,6 +142,12 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
 - **No automatic re-attach after a crash.** The old token is refused. The lab attaches again with
   `cmd_vol attach`, which takes a new token.
 - **The startup `--attach`** takes the socket's reserve-and-token path.
+- **Its retry stops** once that volume has an entry, or at an epoch refusal. Today it stops once
+  any volume is attached.
+- **A detach ends the target before `kill_dev`,** as today, so that a target stuck on its ISR
+  cannot block the device's stop. The socket waits 30 s at most.
+- **`bench-ab` runs each revision's own `node.sh`.** Main writes no records, and needs its
+  `del --id`.
 - **The startup record:**
   - written `O_EXCL`, so an id whose record exists is skipped; removed on any `ADD_DEV` failure,
     and when `GET_DEV_INFO` gives `ENODEV`;

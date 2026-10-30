@@ -26,8 +26,9 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   so `Engine::arrivals()` reads them under its own lock.
 
 **The router** (`Node::route`), called by whichever thread took the outputs:
-- `Done`, `LocalRead` and `Piece` go by op id to the waiting tag, through the table of op →
-  (generation, queue, channel);
+- `Done`, `LocalRead` and `Piece` go by op id to the waiting tag, through `Mutex<Routes>`: op →
+  (generation, queue, channel), as `waiters` today. That lock is a leaf: it is never held while
+  another lock is taken;
 - `Attached`, `AttachFailed` and `Detached` go by `(volume, generation)` to the registry entry's
   waiter;
 - `Deposed` goes to the entry's stop channel (S2);
@@ -92,8 +93,10 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
      - a `detach`;
      - the routed `Deposed`;
      - any queue closure returning;
-  5. then runs `kill_dev`, and returns, so that `run_target` joins the queues and stops the
-     device.
+  5. then sends `Input::Detach { volume, generation }` and signals the node's eventfd, so that
+     the target ends first and fails its pending ops (`NotAttached`), as today's detach does;
+  6. then runs `kill_dev`, and returns, so that `run_target` joins the queues and stops the
+     device. With the target gone, nothing in flight waits for it.
 - **Failures:** in each case the device thread answers the attach, if it is still waiting,
   with the reason. It sends `Input::Detach { volume, generation }`, removes the record, and
   ends the entry.
@@ -125,7 +128,6 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
 - **After `run_target` returns:**
   - the router purges the generation;
   - the arrivals counter is removed;
-  - the engine gets `Input::Detach { volume, generation }`, and `Detached` comes back;
   - the device is deleted asynchronously (S10).
   - **On a detach:** the fd is closed, and the entry goes.
   - **On a deposition, or a stopped device:** the entry stays stopping, holding the fd, until a
@@ -140,8 +142,8 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   - the fast-read path (`try_fast_read`, `plan_fast_read`, `finish_fast_read`) takes it, and
     refuses a mismatch;
   - `Detach` with no target now gives `Detached` (`Engine::detach`).
-- **Stopping entries** are shown in `list`. One stopping for more than 5 minutes is logged, and
-  logged again every 5 minutes.
+- **Stopping entries** are shown in `list`. One stopping for more than 5 minutes is logged while
+  it lasts.
 
 ## S3: the engine thread
 
@@ -163,7 +165,8 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   - its heartbeats' longest lateness: sent, less due.
 - **If the 100 ms engine test fails:** a hand-off flag, with a condvar (a follow-up).
 - **Commits:**
-  - `set_async_commits(true)` when the running count goes from 0 to 1;
+  - `set_async_commits(!c.sync_commits)` when the running count goes from 0 to 1, as on #10's
+    branch;
   - `set_async_commits(false)` when it goes back to 0.
 - **Device control** runs only on the device thread (S2). Today it runs on a one-off thread for a
   deposition (`pump_with`), and on the socket's thread for a detach (`control.rs`).
@@ -242,8 +245,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **An attach refused for its epoch** answers `error: VOLUME: epoch: <reason>` (S11).
 - **`detach`, by state:**
   - starting: `error: VOLUME is attaching`;
-  - running or stopping: it feeds the stop channel, waits for `run_target` to return, closes the
-    fd, and answers `ok`;
+  - running or stopping: it feeds the stop channel (the device thread ends the target first),
+    waits up to 30 s, as today, for `run_target` to return, closes the fd, and answers `ok`.
+    Past 30 s it answers `error: VOLUME: the device did not stop within 30 s`, and the entry
+    stays stopping;
   - no entry: `error: VOLUME is not attached here`, today's wording.
 
 ## S9: the CSI node plugin (`control/csi`)
@@ -297,8 +302,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **At start:** for each record that parses, the node checks with `GET_DEV_INFO`:
   - the state is `UBLK_S_DEV_DEAD`;
   - there is no `UBLK_F_USER_RECOVERY`;
-  - every recorded `dev_info` field matches. The flags alone do not identify Flaminio, as they
-    are 0 without zero copy.
+  - these recorded `dev_info` fields match: id, `nr_hw_queues`, `queue_depth`,
+    `max_io_buf_bytes`, flags and owner. The flags alone do not identify Flaminio, as they are 0
+    without zero copy. The state and `ublksrv_pid` are not compared: the kernel rewrites them at
+    `START_DEV`, and nothing is decided by pid.
 
   - A record whose `GET_DEV_INFO` gives `ENODEV` is removed.
   - A record without `dev_info`, from a crash between `ADD_DEV` and the rename, is logged and
@@ -307,12 +314,15 @@ list                             ->  ok limit N [VOLUME STATE ...]
   Then it deletes the device with `DEL_DEV_ASYNC`. Anything else is logged and left alone.
 - **`DEL_DEV_ASYNC`** is in Linux 6.9 and later. Centaur's 6.8 headers lack it, and the lab runs
   7.0.
-  - libublk's control handle is built with `UBLK_DEV_F_DEL_DEV_ASYNC`, as its drop deletes
-    (`UblkCtrlInner::drop`).
+  - libublk's control handle deletes when dropped (`UblkCtrlInner::drop`). On 6.9 and later it is
+    built with `UBLK_DEV_F_DEL_DEV_ASYNC`. On an older kernel, which would only trace the failed
+    command, it is disowned, and the node deletes the device itself.
   - `flaminio-io del` uses `del_dev_async`.
   - On an older kernel, the synchronous `DEL_DEV` runs on a thread of its own.
 - **Scripts:**
-  - `node.sh down` stops the unit, then deletes the recorded devices;
+  - `node.sh down` stops the unit, then deletes the recorded devices. A build without records,
+    such as main in `bench-ab`, keeps today's `del --id` before the stop: `bench-ab` runs each
+    revision's own `scripts/guest/node.sh` from its archive, and A keeps `--id`;
   - every script takes the path from the attach or `status VOLUME`.
 
 ## S11: tokens and epochs
@@ -380,7 +390,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
     1 s;
   - every error names its volume;
   - the attach's timeout sends `Detach` with its generation;
-  - the startup `--attach` takes the same path.
+  - the startup `--attach` takes the same path. Its retry stops once that volume has an entry,
+    or at an `epoch:` refusal, which is permanent; another volume's entry does not stop it.
 - **S2:**
   - ids: above those present and recorded, and at or above `--id`. `EEXIST` is skipped, and no
     id comes twice;
@@ -393,7 +404,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
     deposition and a queue's end each reach the stop channel.
 - **S3:**
   - a gather deadline and an arrivals deadline, armed from another thread, fire on time;
-  - asynchronous commits turn on with the first device and off after the last;
+  - asynchronous commits turn on with the first device and off after the last, and stay off
+    under `--sync-commits`;
+  - **a detach with ops pending** on a target that cannot complete them (its ISR unreachable)
+    answers within 30 s. Its ops fail with `NotAttached`;
   - with 10 000 inputs queued and two threads taking the lock in a loop, the lock wait and the
     heartbeat lateness stay under 100 ms;
   - queue threads leave the inputs to the engine thread.
@@ -464,10 +478,7 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - writes: 4K QD1 at RF 1 and RF 2, with one raw run for both; and 1M QD8 at RF 1.
 - **RF 2 topology:** the 2026-10-17 campaign's. The target is on fl-b, with a replica of each
   chunk on fl-b and one on fl-a or fl-c. Only fl-b is reset.
-- **Time:** reads, under an hour. Writes: 24 runs of about 25 minutes (2 raw and 6 build runs per
-  repetition), about 10 hours.
-- **Wear:** about 0.6 TB per 1M run (9 runs), and about 0.14 TB per 4K run (15 runs). About
-  7.5 TB in all.
+- **Time and wear:** as in decisions.md.
 
 ## Risks
 
