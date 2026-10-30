@@ -73,17 +73,19 @@ CSI image:
 **The base:** `image.sh` pins it by digest (`ubuntu:resolute-20260912@sha256:...`), for both
 images.
 
-**The tag is content-derived:** `docker.io/flaminio/dataplane:<the first 16 hex digits of the
-tarball's manifest digest>` (`crane digest --tarball`).
+**The tag is content-derived:** `docker.io/flaminio/dataplane:<first 16 hex digits>` of the
+sha256 of:
+- the binaries' sha256 sums;
+- the base's digest;
+- `image.sh` itself.
+
+It is computed before the build, since the tarball's own digest is not known while its tag is
+written (`image.sh`).
 - **Why a tag:** `k3s ctr -n k8s.io images import` names the image by its tag only, so the
   template names that tag.
 - **After the import,** `lab.sh` lists the tag with `k3s ctr -n k8s.io images ls` on each pod
   node, and stops if it is missing.
-- **Determinism:** the same binaries give the same tag only if the build is deterministic.
-  - `image.sh` already zeroes the layer's timestamps and owners.
-  - The design's first step checks that two builds give the same manifest digest. If
-    `crane append` puts a time in the config, the tag is taken from the sha256 of the binaries
-    and the base's digest instead.
+- **Same inputs, same tag:** so an unchanged build changes no template.
 - **The CSI image** keeps its dated tag, and its pods restart on each deploy, as now.
 
 ## Checks and claim (S2)
@@ -112,29 +114,36 @@ Its tests take the version and a root directory as arguments.
 
 A symlink, or another owner, is refused.
 
-**Attach state:** `Attached` becomes three states:
-- `None`;
-- `Attaching(volume)`: set by `serve` when it sends `Control::Attach`;
-- `Attached(volume, device)`.
+**Attach state:** `Attached` becomes three states: `None`, `Attaching(volume)` and
+`Attached(volume, device)`.
 
-The main thread writes the end of an attach: `Attached`, or `None` on an error or a dropped
-request. So the state stays `Attaching` after the caller's own limit has passed, until the main
-thread ends the attach.
+**One helper, `begin_attach`** (`control.rs`), builds every attach request: for `serve`, and
+for the startup `--attach` and its retry thread (`ublk.rs`). In one acquisition of the lock, it:
+1. refuses unless the state is `None` ("already attaching" or "already attached");
+2. sets `Attaching(volume)`;
+3. then sends `Control::Attach`. If the send fails, it sets `None` again.
+
+**Only the main thread** moves `Attaching` on: to `Attached`, or to `None` on an error or a
+dropped request.
+- So the state stays `Attaching` after the caller's own limit has passed, until the main thread
+  ends the attach.
+- The startup retry thread's `done()` stops on `Attached`. It retries from `None`.
+- `detach`'s wait loop (`control.rs`) waits for `None`.
 
 **`status`:**
 - `ok VOLUME /dev/ublkbN` once attached;
 - `ok attaching VOLUME` while attaching;
 - `ok none` otherwise.
 
-A device always starts with `/dev/`, so a volume named `attaching` is not ambiguous: the first
-form has a second word starting `/dev/`, the second form does not.
+An attached answer's second word always starts with `/dev/`. The parser tells the two forms
+apart by that word.
 
 **The CSI node plugin** (`dataplane.go`, `Status`) parses the new form.
 - **`device`:** it returns `Unavailable` while attaching. So does the raw-block branch of
   `NodePublishVolume`.
-- **An old plugin with a new data plane** reads `attaching VOLUME` as volume `attaching` on
-  device `VOLUME`. It answers `ResourceExhausted`, and kubelet retries: no harm, and the
-  deploy updates both.
+- **An old plugin with a new data plane** reads `attaching VOLUME` as volume `attaching`, and
+  answers `ResourceExhausted`. Kubelet retries, and the deploy updates both. No volume is named
+  `attaching`: CSI volume ids are `pvc-<uuid>`.
 
 **`node.sh`:**
 - **Is a data plane running:** it tests whether the socket answers, not the unit (`attach`,
@@ -146,6 +155,9 @@ form has a second word starting `/dev/`, the second form does not.
 **`node.sh down` and `ublk.sh down`** delete a ublk device only while their own unit is active,
 and only that unit's id (1 and 0). Where the socket answers but the unit is inactive, they
 refuse.
+
+**`ublk.sh up`** refuses where the socket answers, or `/dev/ublkc0` already exists. Its unit is
+active before `serve` fails, so an active unit does not prove it owns the id.
 - **Why:** both used to delete their id whatever owned it.
 - **The mount check misses binds:** `findmnt` does not see a raw block volume bind-mounted for
   a pod.
@@ -165,8 +177,16 @@ refuse.
 
 **SIGTERM.** A module `sigterm` goes in `flaminio-uring`, where `unsafe` is allowed;
 `flaminio-io` forbids it.
-- **`install()`:** a `sigaction` handler that sets a static `AtomicBool`.
+- **`install()`:** blocks SIGTERM, and starts the `sigwait` thread that sets a static
+  `AtomicBool` (below).
 - **`requested()`:** safe.
+
+**The handler.** `install()` runs first in `main`, before any thread starts.
+- It blocks SIGTERM in the process's signal mask, so every thread inherits the block.
+- A dedicated thread runs `sigwait` and sets the flag.
+
+No thread is interrupted, so ublk control commands never see `EINTR` (libublk ignores
+`submit_and_wait`'s errors, `ctrl.rs`).
 
 **When it exits:** `should_exit(requested, state)`, a pure function, is true when SIGTERM was
 requested and the state is `None`.
@@ -223,8 +243,11 @@ VolumeAttachment of `csi.flaminio.io` remains.
   - no VolumeAttachment for the node;
   - every ISR full, and `minIsr`;
   - the data-plane pod's UID and revision are those read at step 1.
-- **Delete:** a `DELETE` of the pod with `preconditions.uid`, sent to the API through
-  `kubectl proxy` on fl-w. `kubectl delete` cannot carry a precondition.
+- **Delete:**
+  `kubectl delete --raw /api/v1/namespaces/flaminio-system/pods/POD -f body.json
+  --request-timeout=30s`.
+  - `body.json` is a `DeleteOptions` with `preconditions.uid`.
+  - A pod replaced since the re-check is not deleted.
 - **Then** it waits for a pod on the node at the newest revision to be Ready (300 s), then for
   `served_isr_full` (900 s). On a time-out, it reports whether the old pod is still
   `Terminating` and serving.
@@ -239,13 +262,15 @@ VolumeAttachment of `csi.flaminio.io` remains.
 ## The k3s agents (S7)
 
 **The agent token:** `k3s.sh server` writes `agent-token:` into `config.yaml` once. The secret
-is kept in `/etc/rancher/k3s/agent-token`.
+is kept in `/etc/rancher/k3s/agent-token`, mode 0600.
 
 **`k3s.sh token`** prints it in the full form `K10<CA hash>::node:<secret>`, which keeps the CA
 pinning.
 
 **On the agents:**
-- `k3s.sh agent` writes `token:` into `config.yaml`;
+- `k3s.sh agent` writes `token:` into `config.yaml` before the install;
+- `install_k3s` no longer passes `K3S_TOKEN`. On its command line, sudo logs it, and the
+  installer writes it into the service's environment file;
 - it removes `K3S_TOKEN` from `/etc/systemd/system/k3s-agent.service.env`;
 - it restarts the agent when either changed.
 
@@ -304,8 +329,9 @@ when it differs. A restart of the service leaves the pods running.
   - `out-of-service` tolerated by the data plane, and not by the node plugin.
 
 **Rust:**
-- **`flaminio-uring`, `sigterm`:** after `install()`, the test raises SIGTERM in its own
-  process, and `requested()` is true.
+- **`flaminio-uring`, `sigterm`:** after `install()`, in a test binary of its own (it changes
+  the process's mask), `kill(getpid(), SIGTERM)` makes `requested()` true, and the process
+  lives on.
 - **`flaminio-io`, `should_exit`:** true only for SIGTERM requested with the state `None`.
   False for `Attaching` and for `Attached`, and true once the state goes back to `None`: an
   exit after the next detach.
@@ -313,6 +339,8 @@ when it differs. A restart of the service leaves the pods running.
   - with a fake engine that answers after the caller's limit, `status` answers
     `ok attaching v` after the caller's error, until the late answer. It then answers
     `ok none` on an error, or `ok v /dev/...` on success;
+  - a second attach while `Attaching` is refused, and so is one while `Attached`;
+  - two concurrent attaches: exactly one is sent to the engine;
   - the directory is 0700 after `spawn`;
   - a symlinked directory, and one with another owner, are refused.
 
@@ -322,9 +350,11 @@ when it differs. A restart of the service leaves the pods running.
 1. **From the unit to pods.**
    - **Setup:** `make node-down`, `make k8s-up` (on the existing lab), `make deploy`,
      `make csi-deploy`.
-   - **k3s:** it was restarted. On fl-a and fl-b, `grep -r` finds the server token's secret
-     in none of `/etc`, `/var/lib/rancher` and `/etc/systemd`, nor in the journal (since the
-     restart). The configuration files are 0600.
+   - **k3s:** it was restarted. On fl-a and fl-b, `grep -r` searches `/etc`,
+     `/var/lib/rancher`, `/etc/systemd` and the journal since the restart:
+     - the server token's secret is in none of them;
+     - the agent token's secret is only in 0600 files;
+     - the configuration files are 0600.
    - **Kubernetes refuses:**
      - a kubelet's own label (`kubectl --kubeconfig` with the node's credentials);
      - a privileged pod, and a hostPath pod, in a new namespace;

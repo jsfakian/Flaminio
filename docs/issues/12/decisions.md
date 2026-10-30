@@ -60,10 +60,14 @@ These are settled. Each line gives the choice, then the reason.
   attached for the upgrade, the preStop hook and SIGTERM.
 - **Attaching lasts until the main thread ends the attach,** not until the caller's limit. A
   late attach must not look like none.
-- **`ok attaching VOLUME` is told apart by its second word:** an attached answer's second word
-  starts with `/dev/`.
-- **An old CSI plugin answers `ResourceExhausted`** to the new form, which kubelet retries. The
-  deploy updates both.
+- **One attach at a time, checked and set under one lock** (`begin_attach`), for the socket
+  and the startup attach alike. Only the main thread ends an attach. Concurrent attaches would
+  otherwise both be sent.
+- **`ok attaching VOLUME`** is told apart from an attached answer, whose second word starts
+  with `/dev/`. An old CSI plugin answers `ResourceExhausted`, which kubelet retries. No volume
+  is named `attaching` (`pvc-<uuid>`).
+- **SIGTERM is blocked in every thread and taken by a `sigwait` thread,** so no ublk control
+  command is interrupted.
 - **`status --none` passes when no socket answers,** so a preStop hook does not wait 3600 s for
   a data plane that never came up.
 - **`k8s-down` and `k8s-uninstall` refuse only on an answer naming an attach,** and `FORCE=1`
@@ -100,8 +104,13 @@ These are settled. Each line gives the choice, then the reason.
 - **Nodes without a Flaminio volume go first,** which saves moves.
 - **"Needs an upgrade"** is the pod's `controller-revision-hash` against the newest revision.
   A change to the manifest alone rolls out too.
-- **The image is named by a content-derived tag:** the first 16 hex digits of its manifest
-  digest. `ctr import` names by tag only, and an unchanged build then changes nothing.
+- **The image is named by a content-derived tag,** from its inputs: the binaries, the base's
+  digest and `image.sh`. It is computed before the build, as the tarball's digest is not known
+  yet. `ctr import` names by tag only, and an unchanged build then changes nothing.
+- **The pod is deleted with a UID precondition** (`kubectl delete --raw` with `DeleteOptions`),
+  not through a proxy.
+- **The k3s token never goes on an installer's command line.** It goes in `config.yaml`
+  (0600), written before the install.
 - **`kubectl rollout status` is not used:** it fails for `OnDelete`. The deploy polls
   `observedGeneration` and `numberReady` instead.
 - **No `O_EXCL` change in `flaminio-disk format`:** no rule needs it.
