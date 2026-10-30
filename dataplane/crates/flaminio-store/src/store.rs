@@ -1042,6 +1042,15 @@ impl<D: BlockDevice> Store<D> {
             return None;
         }
         let slot = self.state.slot_of(key).ok()?;
+        // `check_io`'s range rule first: what follows indexes the chunk's tables. A write
+        // outside the chunk is not staged, and the plain path refuses it.
+        let size = self.state.chunk(slot).chunk_size;
+        if !offset.is_multiple_of(BLOCK_SIZE_U64)
+            || !len.is_multiple_of(BLOCK_SIZE_U64)
+            || offset.checked_add(len).is_none_or(|end| end > size)
+        {
+            return None;
+        }
         let cs = self.state.cluster_size();
         let clusters = offset / cs..=(offset + len - 1) / cs;
         if !covers_cluster(cs, offset, len) {
@@ -1553,8 +1562,6 @@ impl<D: BlockDevice> Store<D> {
         .map(Some)
     }
 
-    /// True from [`Self::start_write_batch`] returning [`Started::InFlight`] until
-    /// [`Self::poll_write_batch`] has returned the results of every batch in flight or staged.
     /// The data cluster size, in bytes.
     pub fn cluster_size(&self) -> u64 {
         self.state.cluster_size()
@@ -1565,6 +1572,13 @@ impl<D: BlockDevice> Store<D> {
         self.staged.is_some()
     }
 
+    /// True when several commits may be in flight at once (pipelined commits).
+    pub fn pipelined(&self) -> bool {
+        self.pipeline_depth() > 1
+    }
+
+    /// True from [`Self::start_write_batch`] returning [`Started::InFlight`] until
+    /// [`Self::poll_write_batch`] has returned the results of every batch in flight or staged.
     pub fn commit_in_flight(&self) -> bool {
         !self.in_flight.is_empty() || self.staged.is_some() || !self.settled.is_empty()
     }

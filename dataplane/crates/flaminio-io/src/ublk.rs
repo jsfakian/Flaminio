@@ -1146,7 +1146,10 @@ fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Resu
     let (gather_tx, gather_rx) = smol::channel::unbounded::<Instant>();
     let _ = ctx.gather.set(gather_tx);
     let _gather = {
-        let (q, timers) = (q.clone(), exe.clone());
+        // A weak handle: a task of the executor holding it strongly would keep the executor,
+        // and every task's queue handle, alive past the device (`UblkQueue::drop` unmaps the
+        // device's command buffer, which deleting the device waits for).
+        let (q, timers) = (q.clone(), Rc::downgrade(&exe));
         exe.spawn(async move {
             while let Ok(at) = gather_rx.recv().await {
                 let Some(d) = at
@@ -1155,6 +1158,9 @@ fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Resu
                 else {
                     ctx.pump();
                     continue;
+                };
+                let Some(timers) = timers.upgrade() else {
+                    break;
                 };
                 let q = q.clone();
                 timers

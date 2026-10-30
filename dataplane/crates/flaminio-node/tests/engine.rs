@@ -2125,7 +2125,17 @@ fn holding_staged_groups() {
         1,
         "the group's commit; the 4K's comes after it"
     );
-    h.acked(53..=54);
+    // At the group's landing the 4K starts, with no wait (the window here is 10 s, and a
+    // session's request times out after 3 s).
+    let t = Instant::now();
+    h.acked(53..=53);
+    h.idle(3);
+    assert!(
+        h.in_flight(),
+        "the 4K's commit started at the group's landing"
+    );
+    h.acked(54..=54);
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
     h.reads_back(53, 9 * MIB, MIB);
     h.reads_back(54, 13 * MIB, 4096);
 
@@ -2203,10 +2213,35 @@ fn holding_staged_groups() {
     );
     assert!(peer.try_recv().is_ok(), "the Hello was answered");
     h.acked(82..=82);
-    // Turning asynchronous commits off (detach).
-    hold(&mut h, 90);
+    // Turning asynchronous commits off (detach), with a commit in flight, a group staged
+    // behind it, and a request queued behind the group.
+    h.write(90, 11 * MIB, MIB);
+    h.write(91, 12 * MIB, MIB);
+    h.idle(3);
+    assert!(h.in_flight(), "two, by the count rule");
+    h.write(92, 13 * MIB, MIB); // staged behind the commit in flight
+    h.write(93, 14 * MIB + MIB / 2, 4096); // queued behind the group
+    h.idle(3);
+    assert_eq!(h.engine.device().commits_in_flight(), 1);
     h.engine.set_async_commits(Instant::now(), false);
-    let done = h.run(100, &|o| matches!(o, Output::Done { op: 92, .. }));
-    assert_eq!(done.len(), 1, "the held group's write is answered");
-    h.reads_back(92, 11 * MIB, MIB);
+    let mut answered = Vec::new();
+    for _ in 0..100 {
+        for o in h.run(1, &|o| matches!(o, Output::Done { op: 90..=93, .. })) {
+            if let Output::Done { op, result } = o {
+                assert!(result.is_ok(), "write {op}: {result:?}");
+                answered.push(op);
+            }
+        }
+        if answered.len() == 4 {
+            break;
+        }
+    }
+    answered.sort();
+    assert_eq!(
+        answered,
+        [90, 91, 92, 93],
+        "every write answered, none refused"
+    );
+    h.reads_back(92, 13 * MIB, MIB);
+    h.reads_back(93, 14 * MIB + MIB / 2, 4096);
 }

@@ -121,6 +121,9 @@ struct LocalGroup {
     writes: usize,
     bytes: u64,
     large: usize,
+    /// Started at once for a request queued behind it (or to settle): no wait after its
+    /// landing, so that the request starts then.
+    forced: bool,
 }
 
 /// Which wait for writes to gather a commit is in (docs/10, S1).
@@ -141,6 +144,8 @@ struct Gather {
     wait: Wait,
     /// It went on past its window for writes being copied in (counted once).
     held: bool,
+    /// ... and reached the limit (counted once).
+    limited: bool,
 }
 
 /// Local commits since the last report.
@@ -839,9 +844,13 @@ impl<D: BlockDevice> Engine<D> {
     /// pumps the engine when the store's device signals a commit done. Turning it off settles
     /// the local replica: the commits in flight, a held group and the queued requests.
     pub fn set_async_commits(&mut self, now: Instant, on: bool) {
-        self.async_commits = on;
+        // Settled while still asynchronous, so that a held group is handled by the held rules
+        // (`holding()` reads this flag).
         if !on {
             self.settle_local(now);
+        }
+        self.async_commits = on;
+        if !on {
             self.gather = None;
             let s = std::mem::take(&mut self.commit_stats);
             if s.commits > 0 {
@@ -950,6 +959,7 @@ impl<D: BlockDevice> Engine<D> {
             until,
             wait,
             held: false,
+            limited: false,
         });
         self.gather_timer = Some(until);
     }
@@ -961,6 +971,11 @@ impl<D: BlockDevice> Engine<D> {
     /// the client's writes into two halves that commit in turn (4K QD32: 13 writes per commit
     /// against 23; 1M QD8: 4 MiB per flush against 8).
     fn arm_after_landing(&mut self, now: Instant, landed: &LocalGroup) {
+        if landed.forced {
+            // It started for what is queued behind it, which starts now.
+            self.gather = None;
+            return;
+        }
         let queued = self.queued_writes();
         let (staged, staged_large) = self.staged.as_ref().map_or((0, 0), |s| (s.writes, s.large));
         let large = staged_large > 0 || (landed.writes > 0 && landed.large == landed.writes);
@@ -994,14 +1009,18 @@ impl<D: BlockDevice> Engine<D> {
             return (true, false);
         }
         if arriving {
+            let g = self.gather.as_mut().expect("gather");
+            if !g.held {
+                g.held = true;
+                self.commit_stats.arrival_waits += 1;
+            }
             if now < g.until + ARRIVALS_LIMIT {
-                if !g.held {
-                    self.commit_stats.arrival_waits += 1;
-                    self.gather.as_mut().expect("gather").held = true;
-                }
                 return (false, false);
             }
-            self.commit_stats.limit_hits += 1;
+            if !g.limited {
+                g.limited = true;
+                self.commit_stats.limit_hits += 1;
+            }
         }
         (true, true)
     }
@@ -1054,6 +1073,8 @@ impl<D: BlockDevice> Engine<D> {
                 from.push(f);
                 items.push((s, frame));
             }
+            // The store holds no group the engine has not launched (docs/10, S5).
+            debug_assert!(self.staged.is_none(), "start with a group staged");
             let p = self.service.start(&items);
             self.progress += p.handled as u64;
             // Requests not handled yet wait for the commit, ahead of anything queued since.
@@ -1083,6 +1104,7 @@ impl<D: BlockDevice> Engine<D> {
                     writes,
                     bytes,
                     large,
+                    forced: false,
                 });
             }
             self.deliver_local(now, from, p.replies);
@@ -1129,7 +1151,7 @@ impl<D: BlockDevice> Engine<D> {
                 }
             } else if let Some(st) = self.staged.as_ref() {
                 if st.bytes >= self.commit_target_bytes && self.service.launch() {
-                    self.take_staged();
+                    self.take_staged(false);
                 } else if self.async_commits {
                     self.arm_after_landing(now, &landed);
                 }
@@ -1138,6 +1160,7 @@ impl<D: BlockDevice> Engine<D> {
                 from,
                 writes,
                 large,
+                forced,
                 ..
             } = landed;
             self.deliver_local(now, from, replies);
@@ -1148,6 +1171,7 @@ impl<D: BlockDevice> Engine<D> {
                 let landed = LocalGroup {
                     writes,
                     large,
+                    forced,
                     ..LocalGroup::default()
                 };
                 self.arm_after_landing(now, &landed);
@@ -1243,6 +1267,10 @@ impl<D: BlockDevice> Engine<D> {
         };
         if self.async_commits && !self.gather_window.is_zero() {
             if self.gather.is_none() {
+                // Behind a commit in flight that nothing can join: its landing arms the wait.
+                if !self.committing.is_empty() && !self.service.pipelined() {
+                    return;
+                }
                 let wait = if self.commit_target_bytes > 0 && staged_large > 0 {
                     Wait::Large
                 } else {
@@ -1257,23 +1285,27 @@ impl<D: BlockDevice> Engine<D> {
                 }
             }
             let (ready, expired) = self.gather_ready(now, self.pending_write_count());
-            if !ready {
+            // The wait stays until the group can start: behind a commit in flight, it may not.
+            if !ready || !self.service.launch() {
                 return;
             }
             if expired {
                 self.commit_stats.expired += 1;
             }
             self.gather = None;
+            self.take_staged(false);
+            return;
         }
         if self.service.launch() {
-            self.take_staged();
+            self.take_staged(false);
         }
     }
 
     /// The staged group, launched (`ReplicaService::launch` returned true), joins the commits in
-    /// flight.
-    fn take_staged(&mut self) {
-        let st = self.staged.take().expect("staged");
+    /// flight. `forced`: it started for a request queued behind it, or to settle.
+    fn take_staged(&mut self, forced: bool) {
+        let mut st = self.staged.take().expect("staged");
+        st.forced = forced;
         self.count_staged(st.writes);
         self.progress += 1;
         self.committing.push_back(st);
@@ -1289,7 +1321,7 @@ impl<D: BlockDevice> Engine<D> {
     /// anything that settles the store (docs/10, S5).
     fn launch_held(&mut self) {
         if self.committing.is_empty() && self.staged.is_some() && self.service.launch() {
-            self.take_staged();
+            self.take_staged(true);
         }
     }
 
@@ -1302,6 +1334,7 @@ impl<D: BlockDevice> Engine<D> {
             let before = self.progress;
             self.launch_held();
             self.finish_commit(now, true);
+            self.launch_held();
             self.flush_local(now);
             if self.progress == before {
                 eprintln!(

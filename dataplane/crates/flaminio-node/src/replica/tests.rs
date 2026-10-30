@@ -518,3 +518,25 @@ fn a_held_group_whose_commit_cannot_start_is_answered_with_the_error() {
     assert_ne!(r[0], Reply::Send(Frame::Ok { req: 3 }), "{:?}", r[0]);
     assert!(!s.commit_in_flight());
 }
+
+#[test]
+fn a_staged_write_outside_its_chunk_is_refused_not_a_panic() {
+    // A peer's whole-cluster write past the end of a chunk that has a mapping table: staging
+    // must refuse it before touching the chunk's tables, from a current session or a fenced one
+    // (the security review of docs/10). It then goes the plain way, where it is refused too.
+    let mut s = held_service();
+    let (old, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    let (cur, _) = s.hello(&accepted(2, 2, &[0])).unwrap();
+    assert!(s.start(&[(cur, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    s.store().device().complete();
+    assert!(s.poll(false).is_some());
+    for (sess, req) in [(cur, 3), (old, 4)] {
+        let w = write(req, 0, BLOCKS * 64, &[2; 16], 2);
+        assert_eq!(s.stage(&[(sess, w.clone())]), 0, "session of request {req}");
+        let r = s.handle(&[(sess, w)]);
+        assert_ne!(r[0], Reply::Send(Frame::Ok { req }), "{:?}", r[0]);
+    }
+    assert!(!s.commit_in_flight());
+    let r = s.handle(&[(cur, read(5, 0, 0, 16))]);
+    assert_eq!(blocks(&r[0]), vec![1u8; 16], "the chunk is intact");
+}

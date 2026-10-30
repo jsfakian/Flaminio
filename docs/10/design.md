@@ -14,7 +14,9 @@ The changes start from the measured prototype (`docs/benchmarks/data/2026-10-29-
 - **The wait's kind:** it comes from the writes (large or not), not from the average size.
 - **Which waits hold on arrivals:** only `Wait::Large`. The prototype held any wait once a floor
   was set.
-- **`maybe_launch_staged`:** it checks the wait at once after arming. The prototype returned.
+- **`maybe_launch_staged`:** it keeps a wait until the group can start, and arms none behind a
+  commit in flight that nothing can join (that commit's landing arms it). A group that already
+  holds the floor's bytes starts without waiting for the next pump.
 - **The gather timer** takes deadlines (below).
 
 At 1M QD8 in steady state these coincide: 16 writes, all large, no group at the landing. So the
@@ -100,7 +102,8 @@ it starts one.
 - **`Engine::flush_local`:** its held-group path calls `stage_local` before it looks for a
   group. So a large write at the head of the queue is staged, and its data written, at once.
   - **When something is left queued behind the group** (a request it could not take), it starts
-    the group at once (`launch_held`): in order, the group can grow no more (S1.4).
+    the group at once (`launch_held`): in order, the group can grow no more (S1.4). Such a group
+    is marked `forced`: at its landing no wait is armed, so the request behind it starts then.
   - **Otherwise** the group's wait decides (`maybe_launch_staged`).
 - **`Store::launch_staged`:** it already starts a held group with nothing in flight.
 
@@ -115,6 +118,12 @@ it starts one.
     refuses a write for lack of journal room. The group then starts by its rule, and the
     checkpoint follows its landing, as W4.2 does when the journal fills. A store test covers
     this case while holding.
+
+**Staging checks the range first.** `stage_check` refuses a write that is not 4 KiB aligned,
+or not inside its chunk, before anything indexes the chunk's tables: the plain path then
+refuses it. Before, a peer's whole-cluster write past the end of a chunk panicked the node there
+(the security review of this change: staging with nothing in flight made it one frame away; a
+fenced session could do it too, as the check came before any epoch's).
 
 **"Stageable" and "large", in one place:**
 - **`flaminio_store::covers_cluster(cluster_size, offset, len)`:** stage_check's shape test today,
@@ -183,9 +192,11 @@ reaped yet. The count rule, not the window, is what waits for those.
 - **Today:** every wait queues a timeout, and the task runs them one at a time. On a device whose
   cycle is shorter than the window, they pile up, and a 300 µs wait can end up to 2 ms late.
   With holding by default, every large-write landing arms 2 ms.
-- **Now:** the task races `recv` against its sleep.
-  - **A new, earlier deadline:** it sleeps again to that one.
-  - **At each expiry:** it pumps, and drops the deadlines that pump covered.
+- **Now:** one timeout task per deadline, so a short wait never queues behind a long one.
+  - **A deadline already past:** it pumps at once.
+  - **The executor handle:** the task keeps only a weak one. A strong one would keep the
+    executor, and every task's queue handle, alive past the device, and deleting the device
+    waits for `UblkQueue::drop` to unmap its command buffer: detach hung in the first lab run.
 
 ## A held group is never stranded (S5)
 
@@ -193,8 +204,12 @@ reaped yet. The count rule, not the window, is what waits for those.
 group's commit (`service.launch`), without regard to the gather, and moves it to `committing`.
 
 **`settle_local(now)`:**
-- **Its loop:** `launch_held`, `finish_commit(wait)`, then `flush_local` with `settling` set.
-  It runs while `committing`, `local` or `staged` is non-empty.
+- **Its loop:** `launch_held`, `finish_commit(wait)`, `launch_held` again (the landing may
+  leave the group free to start), then `flush_local` with `settling` set. It runs while
+  `committing`, `local` or `staged` is non-empty.
+- **Asynchronously:** `set_async_commits(false)` settles before it clears the flag, so that a
+  held group is still handled by the held rules. A `debug_assert` before `service.start` checks
+  that no group is staged.
 - **Progress** is a counter of landings, launches and requests started. Sizes are not enough:
   one iteration can land a commit and start the next with the same sizes.
 - **`settling`:** the gather counts as ready, so a queued small write is committed, not left
@@ -206,7 +221,7 @@ group's commit (`service.launch`), without regard to the gather, and moves it to
   - `InspectLocal`, `DeleteReplicas` and `NetEvent::Closed` (already; a peer's close now also
     starts a held group, which is intended: the store settles then today);
   - before both direct `service.hello` calls (`on_net` Opened, and the attach path);
-  - `set_async_commits(false)`, before it clears the gather.
+  - `set_async_commits(false)`, before it clears the asynchronous flag and the gather.
 
 **The invariant:** `service.start`, and any store operation that settles, is never called while
 the store holds a group the engine has not launched. `flush_local`'s held path returns before

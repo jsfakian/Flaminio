@@ -440,6 +440,11 @@ impl<D: BlockDevice> ReplicaService<D> {
         }
     }
 
+    /// True when several commits may be in flight at once (the store's pipelined commits).
+    pub fn pipelined(&self) -> bool {
+        self.store.pipelined()
+    }
+
     /// True while staged groups are held (see [`Self::set_hold_staged`]).
     pub fn holding(&self) -> bool {
         self.hold_staged
