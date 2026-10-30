@@ -93,16 +93,19 @@ timeout it answers that the request may have begun; the agent confirms nothing f
    That is the guarantee: once a request has read the records, no per-chunk check would stop a
    chunk moved back in the same epoch, so nothing may confirm meanwhile. The next agent's request
    is refused, so it does not confirm; only a later one runs, with a fresh read. **Not begun by
-   the deadline:** dropped. Begun: `Call::GetVolume` (a `MetaWait`, as attach's), bounded by the
-   deadline.
+   the deadline:** dropped. Begun: `Call::GetVolume` (a `MetaWait` with a per-request attempt id,
+   as attach's), bounded by the deadline. Any `ReplicaService::delete_volume` of the volume (a
+   tombstone's `delete VOLUME`, #30's drop) drops the pending request in any phase; a late
+   answer whose attempt id is gone is discarded.
 2. **The answer:** `NotFound` or none in time: nothing deleted. Otherwise keep `E` (the volume's
    epoch) and the chunks whose record has this node in `released`, and not in `replicas`,
    `moving_from` or `moving_to`. The others are refused.
 3. **One chunk per engine turn,** so replication I/O goes on; `next_wakeup` returns now while
-   chunks are queued. Before each: the deadline; no local target's view places the chunk here;
-   `core.fenced(vol) <= E`; no `ReplicaService::delete_volume` of the volume since (a tombstone's
-   `delete VOLUME`, or #30's drop: either cancels the queue). Any failing: that chunk and the rest
-   refused.
+   chunks are queued. Before each, the volume is resolved by its uuid at that moment (not a
+   `VolumeId` kept from before: a new volume of the name gets a new one, its old one's fence
+   reads 0): the deadline; no local target's view places the chunk here; `core.fenced(vol) <= E`.
+   Any failing: that chunk and the rest refused. Unlike `DeleteReplicas`, an attached local
+   target does not refuse it, only its view.
 4. **The deletion,** in the same engine turn as the check: `Store::delete_chunk_keep_fence(key)`
    (its `guard` settles every commit in flight first: one commit's stall per chunk, accepted);
    `core.remove_chunk`; drop it from `vols[uuid].chunks`. No fence argument: check and deletion
@@ -142,7 +145,8 @@ timeout it answers that the request may have begun; the agent confirms nothing f
 
 **Format** (`docs/format/on-disk-format-v1.md`, `flaminio-format`):
 - **Chunk header state 4 = fence only** (§5.3): `volume_uuid`, `fenced_epoch`; chunk and volume
-  size 0; `layer_count` 0.
+  size 0; `layer_count` 0. `ChunkHeader::decode` and `load_chunk` accept size 0 and no layers for
+  state 4 only.
 - **Journal record 9, `FenceOnly`:** `slot u32`, reserved u32, `volume_uuid [16]`, `epoch u64`;
   not optional (§6.3). `Fence` (3) raises fence-only slots of its volume too. `ChunkCreate` may
   take a fence-only slot of its volume, at its fence or above: that supersedes it.
@@ -208,8 +212,7 @@ timeout it answers that the request may have begun; the agent confirms nothing f
 - **`leastLoaded`** also excludes the chunk's `GetReleased()`.
 - **No candidate because only released nodes remain:** the chunk counts as waiting, instead of
   `stepVolume`'s "no node to move to" error, which stays for other causes.
-- **`Progress`:** `Released`, releases held for the node; `WaitingRelease`, its chunks waiting
-  because the only candidates are released nodes. Both shown by `String()`.
+- **`Progress.Released`:** releases held for the node, shown by `String()`.
 
 ## Rollout (S13, S14)
 
@@ -253,11 +256,14 @@ released, not a fence holder, no tombstone pending for it). The format document.
   and `io` cannot call the release methods. `flaminio-meta` has no `confirm` command any more.
 - **S7** (`flaminio-node`, `flaminio-io`): refused for a chunk not in `released`, in `replicas` or
   `moving`, placed by a local view; over 119; `NotFound`; no answer in time. A delete held past
-  its deadline never runs. **A delete held while the volume is deleted and created again:** it
-  deletes nothing of the new volume. **A request held at its `GetVolume` wait, a second one
-  refused, the release confirmed, the chunk moved back:** the held one reads the record and
-  deletes nothing. **A request past its read, chunks queued:** a second one is refused until its
-  last chunk or its deadline, then runs with a fresh read (no confirmation out of band meanwhile).
+  its deadline never runs. **A delete held at its `GetVolume` wait, its answer read before the
+  volume is deleted and created again:** the answer is discarded; nothing of the new volume is
+  deleted. **A newer attach fencing the node after the read:** that chunk and the rest refused.
+  **The local target attached, its view no longer placing the chunk:** deleted. **A request
+  held at its `GetVolume` wait, a second one refused, the release confirmed, the chunk moved
+  back:** the held one reads the record and deletes nothing. **A request past its read, chunks
+  queued:** a second one is refused until its last chunk or its deadline, then runs with a fresh
+  read (no confirmation out of band meanwhile).
   The other chunks and the fence stay. **I/O during a 119-chunk delete:** reads and writes of
   the volume's other chunks complete between deletions. **With no other I/O,** the queue still
   drains, one chunk per turn.

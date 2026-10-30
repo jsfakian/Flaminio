@@ -61,6 +61,8 @@ Settled in plan review rounds 1–4. Reviewers treat these as settled.
   fl-c, and moves #14's `tombstones` calls to `sweep`.
 - **The hand cleanup** deletes a volume's copies on a node only when no record names the node for
   it: otherwise it could delete a live or released copy.
+- **The drain's progress counts releases held,** not the chunks waiting on them: one counter
+  is enough to see why a drain waits.
 - **Metadata and data-plane rollback is unsupported** once a release, a fence holder or a
   fence-only slot exists. Simpler than a two-step rollout.
 
@@ -90,3 +92,7 @@ Settled in plan review rounds 1–4. Reviewers treat these as settled.
 - **A target of a deleted volume still running** can create chunks on a node that never held it:
   the incarnation follow-up.
 - **The listing reads every chunk record every 5 s per node:** an index by node is a follow-up.
+
+## Review
+
+- **The plan review ended at round 5** with only Lows and nits, all fixed in the last revision.
