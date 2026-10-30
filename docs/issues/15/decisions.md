@@ -154,6 +154,9 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
 - **Shutdown uses `process::exit`,** and does not join a thread blocked in `kill_dev`. Startup
   cleanup retries a recorded device that is not yet dead for a few seconds, then keeps its
   record and logs it.
+- **A record goes only when its delete returns `Ok` or `ENOENT`:** at once with
+  `DEL_DEV_ASYNC`, and when the `DEL_DEV` thread returns before 6.9. Otherwise it stays, for the
+  startup cleanup.
 - **`DEL_DEV_ASYNC` is chosen by the kernel's release** (`uname`'s major and minor, 6.9 and
   later). Otherwise, or if it cannot be parsed, the control handle is disowned.
 - **`bench-ab` runs each revision's own `node.sh`.** Main writes no records, and needs its

@@ -127,9 +127,14 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   retry finds it through `status VOLUME`.
 - **After `run_target` returns,** in this order:
   1. the router purges the generation, and the arrivals counter is removed;
-  2. the device is deleted asynchronously (S10). The kernel has the command once it returns, and
-     ends the device at its last close, whether or not the process lives;
-  3. so the record can then go;
+  2. the device is deleted (S10):
+     - **on 6.9 and later,** with `DEL_DEV_ASYNC`. Once the command returns, the kernel holds
+       it, and ends the device at its last close, whether or not the process lives;
+     - **before 6.9,** with `DEL_DEV` on a thread of its own, which can block until the last
+       close. Step 4 does not wait for that thread;
+  3. the record goes when the delete returns `Ok` or `ENOENT`: at once with `DEL_DEV_ASYNC`, and
+     when the thread's `DEL_DEV` returns before 6.9. Any other error keeps the record, logs it,
+     and leaves the device to the startup cleanup. So does an exit before the delete returns;
   4. last, under the entry's lock, which also covers its state and its detach flag:
      - flag set: the thread closes the fd and ends the entry;
      - flag clear (a deposition, or a device that stopped on its own): it marks the entry
@@ -140,8 +145,12 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
 
   Neither side can miss the other.
 - **Node shutdown** ends with `process::exit`, as returning from `main` would wait for a device
-  thread blocked in `kill_dev`. The kernel stops such a device after the exit. The next start's
-  cleanup takes it (S10).
+  thread blocked in `kill_dev`.
+  - The kernel stops such a device once the process has finished exiting, which that thread can
+    delay.
+  - The next start's cleanup works from the record, not from the device being gone (S10).
+  - `process::exit` skips `Drop` and buffered output. This loses nothing: commits are durable
+    before they are acknowledged, and the logs are flushed before the exit.
 - **Why mounting by path, then checking, is enough** (S9): while the node runs, ids are never
   reused, and the held fd keeps the gendisk and its minor alive. So between the check and the
   mount, the path can name only that device, or nothing.
@@ -323,9 +332,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
     left alone.
 
   Then it deletes the device with `DEL_DEV_ASYNC`.
-  - **A recorded device that is not yet dead,** as after an exit with a device thread blocked in
-    `kill_dev`, is checked again for up to 5 s. Then it is logged as an error, and its record is
-    kept for the next start.
+  - **A recorded device that is not yet dead** (`GET_DEV_INFO`'s state is not `UBLK_S_DEV_DEAD`),
+    as after an exit with a device thread blocked in `kill_dev`, is checked again for up to 5 s.
+    - Then it is logged as an error, and its record is kept for the next start.
+    - The node starts anyway: its ids begin above the recorded one.
   - Anything else is logged and left alone.
 - **`DEL_DEV_ASYNC`** is in Linux 6.9 and later. Centaur's 6.8 headers lack it, and the lab runs
   7.0.
@@ -436,7 +446,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
       thread's last step. Either way, the entry ends once;
     - a detach waiting on generation G answers once G ends, even when a new entry of the volume
       starts meanwhile;
-    - a recorded device that is not dead: it is checked again, then kept and logged;
+    - a recorded device that is not dead: it is checked again, then kept and logged, and the
+      node still starts;
+    - a delete that fails other than with `ENOENT` keeps the record and logs it; `Ok` and
+      `ENOENT` remove it. Before 6.9, the record goes only when the `DEL_DEV` thread returns;
   - with 10 000 inputs queued and two threads taking the lock in a loop, the lock wait and the
     heartbeat lateness stay under 100 ms;
   - queue threads leave the inputs to the engine thread.
