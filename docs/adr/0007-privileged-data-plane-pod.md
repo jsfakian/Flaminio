@@ -50,7 +50,8 @@ disks to claim one.
     privileged CSI node plugin among them;
   - anyone who may:
     - create a namespace, or label one `privileged`;
-    - `exec` or `attach` into pods in `flaminio-system`;
+    - `exec` or `attach` into pods in `flaminio-system`, or add ephemeral containers to them
+      (`pods/ephemeralcontainers`, `kubectl debug`);
     - use `nodes/proxy`;
     - update the two DaemonSets;
     - create k3s `HelmChart` objects, which run as privileged jobs;

@@ -73,8 +73,14 @@ These are settled. Each line gives the choice, then the reason.
   - Its test is a harness-less test binary, as libtest's threads would take the signal.
 - **`status --none` passes when no socket answers,** so a preStop hook does not wait 3600 s for
   a data plane that never came up.
-- **`k8s-down` and `k8s-uninstall` refuse only on an answer naming an attach,** and `FORCE=1`
-  skips the check. A dead data plane must not block them.
+- **`k8s-down` and `k8s-uninstall` ask the socket over ssh, not through Kubernetes.** They
+  refuse only on an answer naming an attach, and `FORCE=1` skips the check.
+  - With Kubernetes down, a live data plane still blocks them.
+  - A dead data plane does not.
+- **`detach` while attaching answers an error,** which the plugin maps to `Unavailable`. It does
+  not wait for the attach to end: that is simpler, and kubelet retries.
+- **The units' `up` refuse on a pod node by its pod sandbox** (`crictl pods`), not by the
+  socket. A stopped data plane must still block them.
 - **The units' `down` deletes only a device its own active unit serves,** and refuses where the
   socket answers. They used to delete ids 1 and 0 whatever owned them.
 - **The kernel checks are those of ADR 0003,** `io_uring_disabled` must be 0 included. The ADR
@@ -103,7 +109,8 @@ These are settled. Each line gives the choice, then the reason.
   The delete carries a UID precondition. This closes the gap between the check and the
   deletion, without a hold.
 - **The checks:** RF 1, every ISR full, ISR − 1 ≥ `minIsr`, and room for an evicted pod. They
-  are what an eviction or a restart needs.
+  are what an eviction or a restart needs. All of them cover served volumes only: an unserved
+  volume has no I/O to lose, and unserved RF 1 volumes would block every upgrade.
 - **Nodes without a Flaminio volume go first,** which saves moves.
 - **"Needs an upgrade"** is the pod's `controller-revision-hash` against the newest revision.
   A change to the manifest alone rolls out too.

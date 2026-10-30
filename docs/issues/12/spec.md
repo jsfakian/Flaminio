@@ -72,8 +72,8 @@ Settled choices and accepted risks are in [decisions.md](decisions.md). The mech
   detach.
 - **The out-of-service mark:** the data-plane pod runs under it, so the failover controller can
   lift it. The CSI node plugin does not, so nothing is staged under the mark.
-- **Lab commands that would kill containers without warning** refuse while a pod node reports
-  an attach: stopping or uninstalling k3s, and undeploying the driver. Removing the test
+- **Lab commands that would kill containers without warning** refuse while a pod node's socket,
+  asked from the host, reports an attach: stopping or uninstalling k3s, and undeploying the driver. Removing the test
   namespace first is allowed.
 - **The units' `down`** (`make node-down`, `make ublk-down`) never deletes a ublk device its own
   unit does not serve.
@@ -84,7 +84,8 @@ time, nodes without a Flaminio volume first. For each node:
 1. **Cordon,** unless the node is cordoned already.
 2. **Check.** It refuses, uncordons what it cordoned, and names the cause, unless:
    - every ISR is full (it waits up to 900 s);
-   - every chunk with a replica on the node keeps `minIsr` without it. RF 1 chunks fail this;
+   - every chunk of a served volume with a replica on the node keeps `minIsr` without it. RF 1
+     chunks fail this. Unserved volumes do not count;
    - every pod using a Flaminio volume on the node has a controller;
    - if the node has a Flaminio volume, another uncordoned data node has none (#15).
 3. **Evict** the pods that use a Flaminio volume on the node. A refused eviction is a refusal.
@@ -95,8 +96,8 @@ time, nodes without a Flaminio volume first. For each node:
    Otherwise it refuses, and leaves the node cordoned.
 7. **Uncordon,** if it cordoned.
 
-A rerun starts over, and skips the nodes already at the newest revision. Runs are one at a
-time.
+A rerun starts over, and skips the nodes already at the newest revision. Running one at a
+time is documented, not enforced.
 
 **S6. What a pod with a PVC sees.**
 - **While another node upgrades:** no I/O error. Its target drops that node's replicas from the
@@ -156,5 +157,5 @@ time.
      Stopping k3s and undeploying refuse.
   7. **A crash while attached:** the volume's pod, deleted, comes back on the same node with its
      data, at a higher epoch.
-  8. **One data plane per node:** `node.sh up` refuses on a pod node, and the units' `down`
-     leave a pod's volume attached.
+  8. **One data plane per node:** the units' `up` refuse on a pod node, even with its data
+     plane stopped, and the units' `down` leave a pod's volume attached.

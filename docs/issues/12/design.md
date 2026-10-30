@@ -135,6 +135,9 @@ dropped request.
   - a refusal because the state is `Attaching` is retried like a failed attempt;
   - a refusal because it is `Attached` stops the thread, as `done()` does.
 - `detach`'s wait loop (`control.rs`) waits for `None`.
+- **`detach V` while `Attaching(V)`** answers `error: V is attaching`. Today, "is not attached
+  here" counts as success for the plugin (`dataplane.go`). The CSI node plugin maps the new
+  error to `Unavailable`, and kubelet retries the unstage.
 
 **`status`:**
 - `ok VOLUME /dev/ublkbN` once attached;
@@ -154,15 +157,23 @@ apart by that word.
 **`node.sh`:**
 - **Is a data plane running:** it tests whether the socket answers, not the unit (`attach`,
   `delete`, `status`). `up` refuses where the socket answers and the unit is not active.
-- **Token files:** `up` with `ATTACH` writes them with `install -m 600`. `detach` and `down`
-  delete `/run/flaminio/<volume>.token`.
+- **Token files:** `up` with `ATTACH` writes them with `install -m 600`.
+  - `detach` deletes `/run/flaminio/<VOLUME>.token`.
+  - `down` deletes the file named by the unit's `--token`, read from its `ExecStart`. That is
+    `/run/flaminio/<ATTACH>.token`.
 - **The token** still travels on command lines, as today (decisions, accepted risks).
 
 **`node.sh down` and `ublk.sh down`** delete a ublk device only while their own unit is active,
 and only that unit's id (1 and 0). Where the socket answers but the unit is inactive, they
 refuse.
 
-**`ublk.sh up`** refuses where the socket answers, or `/dev/ublkc0` already exists. Its unit is
+**The pod-node guard.** `node.sh up`, `ublk.sh up` and `replica.sh up` refuse on a pod node,
+whether or not its data plane answers.
+- **The test:** `sudo k3s crictl pods --name flaminio-dataplane -q` prints a pod. The pod's
+  sandbox stays while its container is stopped.
+- **Where k3s is absent** (fl-c), the test finds nothing.
+
+**`ublk.sh up`** also refuses where the socket answers, or `/dev/ublkc0` already exists. Its unit is
 active before `serve` fails, so an active unit does not prove it owns the id.
 - **A device left by a killed `serve`:** when the unit is inactive and no socket answers, the
   refusal prints `flaminio-io del --id 0` to run.
@@ -213,10 +224,11 @@ requested and the state is `None`.
 deleted before its data plane is up does not wait 3600 s.
 
 **`make k8s-down` and `make k8s-uninstall`:**
-- they refuse when a pod node's `status` (through `kubectl exec`) names an attach, attached or
-  attaching;
-- on no answer, they proceed;
-- `FORCE=1` skips the check.
+They ask each pod node over ssh, not through Kubernetes, which may be the thing that is down.
+They run `run_on_vm NODE node.sh status` against `/run/flaminio/node.sock`.
+- **An answer that names an attach,** attached or attaching: they refuse.
+- **No answer from the socket:** they proceed.
+- **`FORCE=1`** skips the check.
 
 **`make csi-undeploy`:** it deletes `flaminio-test` first. It then refuses while any
 VolumeAttachment of `csi.flaminio.io` remains.
@@ -241,8 +253,9 @@ VolumeAttachment of `csi.flaminio.io` remains.
   1. lists the volumes (`metactl ... volumes`);
   2. finds the served ones, from the VolumeAttachments and from each data node's `status`;
   3. checks every chunk's ISR against its replicas.
-- **`minIsr`:** from `metactl get`: for each chunk with a replica on the node,
-  `(isr | length) - 1 >= minIsr`.
+- **`minIsr`:** from `metactl get`, for the served volumes only, the set `served_isr_full`
+  uses: for each chunk with a replica on the node, `(isr | length) - 1 >= minIsr`. An unserved
+  RF 1 volume, such as `wbench`, does not block the upgrade.
 - **Controllers:** each pod using a PVC bound to a `csi.flaminio.io` PV whose VolumeAttachment
   names the node has an `ownerReferences` entry with `controller: true`, whose owner exists.
 - **Room:** another uncordoned `flaminio.io/storage=true` node with no VolumeAttachment.
@@ -369,6 +382,8 @@ when it differs. A restart of the service leaves the pods running.
     `ok none` on an error, or `ok v /dev/...` on success;
   - a second attach while `Attaching` is refused, and so is one while `Attached`;
   - two concurrent attaches: exactly one is sent to the engine;
+  - `detach v` while the slow fake engine holds `Attaching(v)` answers `error: v is
+    attaching`, and the attach then completes;
   - the directory is 0700 after `spawn`;
   - a symlinked directory, and one with another owner, are refused.
 
@@ -407,6 +422,8 @@ when it differs. A restart of the service leaves the pods running.
    - **fl-a:** the pod is Ready on fl-b within 300 s, and fio verifies the saved state.
    - **The data-plane pods:** both at the newest revision, with restart count 0.
    - **A second `make csi-deploy`** with the same build changes no revision.
+   - **A second `make node-upgrade`** skips both nodes: neither is cordoned, and no pod is
+     deleted.
 5. **The refusals,** each from a clean lab, with its own setup:
    - **#15:** a PVC pod on each node. It refuses at fl-a's step 2.
    - **Outside Kubernetes:** vol1 attached by `make vol-attach VM=a`, with no load pod. It
@@ -420,19 +437,27 @@ when it differs. A restart of the service leaves the pods running.
    - **ISR not full:** the load on fl-a, and fl-b's data-plane container killed during fl-a's
      step 4, after the eviction. The step-5 check finds an ISR not full, and refuses at once.
    - **An administrator's cordon:** fl-a cordoned before the run. It stays cordoned after.
+   - **Interrupted:** the run killed (SIGINT) during fl-b's step 2. The `EXIT` trap uncordons
+     fl-b.
+   - **`make csi-deploy` over a unit:** with the unit serving vol1 on fl-a, it refuses there,
+     and fl-a gets no data-plane pod.
 6. **Deletions while attached,** `make csi-test` with `KEEP=1` on fl-a:
    - **The label removed:** the pod is `Terminating` and keeps serving. It is gone within 10 s
      of the test pod's move (cordon and delete).
    - **The DaemonSet deleted:** the same.
-   - **SIGTERM by hand** to `flaminio-io`: the volume stays served.
+   - **SIGTERM by hand** to `flaminio-io`:
+     - with nothing attached, it exits within seconds;
+     - attached, it keeps serving, and exits after the volume's detach.
    - **Refusals:** `make k8s-down`, `make k8s-uninstall` and `make csi-undeploy`.
+   - **With Kubernetes down:** k3s stopped on fl-w, `make k8s-down` still refuses.
 7. **A crash.**
    - **Setup:** `crictl stop -t 0` on the data-plane container, with the test pod on fl-a.
    - **The data plane:** fl-a is alive again. A few container restarts are allowed, as the
      claim does not rerun.
    - **The test pod:** deleted, with fl-b cordoned, it is Ready on fl-a with "verified on
      fl-a", at a higher epoch.
-8. **One data plane per node:** `node.sh up` on fl-a refuses.
+8. **One data plane per node,** with fl-a's data-plane container stopped (`crictl stop`):
+   `node.sh up`, `ublk.sh up` and `replica.sh up` on fl-a refuse, and no unit starts.
 9. **The units' `down`s,** with `make csi-test` `KEEP=1` on fl-a: `make node-down` and
    `make ublk-down` on fl-a refuse, and the test pod's volume stays attached.
 10. **Token files:** after `make vol-attach` with the unit (fl-c), the token file is 0600. It
