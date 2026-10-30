@@ -186,3 +186,7 @@ These are settled. Each line gives the choice, then the reason.
 - **Attaches outside Kubernetes during an upgrade** (`node.sh`, `make vol-attach`) are not
   stopped. The bounded wait and the re-check catch most; the rest is a crash risk the lab
   accepts.
+
+## Review
+
+- **The review loop ended with only Lows,** all fixed in the last revision.
