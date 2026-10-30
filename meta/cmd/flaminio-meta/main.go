@@ -12,6 +12,8 @@
 //	flaminio-meta [--server host:7400] move <volume> <chunk> <from> <to>
 //	flaminio-meta [--server host:7400] drain <node> [timeout]     (default 30m; waits until done)
 //	flaminio-meta [--server host:7400] undrain <node>
+//	flaminio-meta [--server host:7400] tombstones [node]     (default: every registered node)
+//	flaminio-meta [--server host:7400] --trust-domain <td> confirm <volume> <node> --replicas-deleted
 //
 // Sizes take K, M, G and T suffixes (powers of 1024).
 //
@@ -19,20 +21,31 @@
 // callers, whose SPIFFE IDs must be in --trust-domain. --token-key signs capability tokens.
 // --etcd-cert/--etcd-key/--etcd-ca authenticate it to etcd. --insecure turns all of that off,
 // for development only. The client takes --cert, --key and --ca.
+//
+// confirm records that node holds no replica of volume any more, as node's own agent (its
+// certificate, in --trust-domain); --replicas-deleted asserts it. Its only supported entry point
+// is `lab.sh vol-confirm`, which checks on the node first, never a command typed or taken from
+// shell history. A wrong confirmation lets the id be created again while the node still holds
+// replicas: the new volume then serves the old one's data there, or is deposed by them
+// (docs/issues/14).
 package main
 
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -61,7 +74,7 @@ func main() {
 		}
 		return
 	}
-	if err := client(os.Args[1:]); err != nil {
+	if err := client(os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintln(os.Stderr, "flaminio-meta:", err)
 		os.Exit(1)
 	}
@@ -197,17 +210,121 @@ func argOr(args []string, i int, def string) string {
 	return def
 }
 
-func client(args []string) error {
-	fs := flag.NewFlagSet("flaminio-meta", flag.ExitOnError)
+// usage is the client's usage text; the doc comment has every command's arguments.
+const usage = `usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete|volumes|move|drain|undrain|tombstones|confirm [args]
+  confirm <volume> <node> --replicas-deleted: only through lab.sh vol-confirm, which checks on the
+  node first; never typed by hand or taken from shell history. A node confirmed while it still
+  holds replicas keeps them, and a volume created again with that name serves their data there,
+  or is deposed by them (docs/issues/14).`
+
+// replicasDeleted is confirm's acknowledgement: the caller asserts that every replica of the
+// volume on the node is deleted.
+const replicasDeleted = "--replicas-deleted"
+
+// confirmArgs reads confirm's arguments: exactly two positionals, the volume and the node, and
+// the exact token --replicas-deleted once, before or after them. Anything else is refused.
+func confirmArgs(args []string) (volume, node string, err error) {
+	refuse := func(format string, a ...any) (string, string, error) {
+		return "", "", fmt.Errorf("confirm <volume> <node> %s: %s. %s asserts that every replica of the volume on the node is deleted: lab.sh vol-confirm checks that first, and is the only supported way to confirm",
+			replicasDeleted, fmt.Sprintf(format, a...), replicasDeleted)
+	}
+	var pos []string
+	tokens := 0
+	for _, a := range args {
+		switch {
+		case a == replicasDeleted:
+			tokens++
+		case strings.HasPrefix(a, "-"):
+			return refuse("unknown argument %q", a)
+		default:
+			pos = append(pos, a)
+		}
+	}
+	if tokens != 1 || len(pos) != 2 {
+		return refuse("%d positional arguments and %d %s, want 2 and 1", len(pos), tokens, replicasDeleted)
+	}
+	return pos[0], pos[1], nil
+}
+
+// agentIdentity is the identity in the client certificate, which must be node's agent in
+// trustDomain: the leaf (the file's first certificate, as tls.LoadX509KeyPair loads it) with
+// exactly one URI SAN, read as pki.PeerIdentity reads a peer's. It is checked before any call.
+func agentIdentity(files pki.Files, trustDomain, node string) (pki.Identity, error) {
+	fail := func(format string, a ...any) (pki.Identity, error) {
+		return pki.Identity{}, fmt.Errorf("confirm for %s: %s: only %s's own agent confirms, through lab.sh vol-confirm",
+			node, fmt.Sprintf(format, a...), node)
+	}
+	if trustDomain == "" {
+		return fail("no --trust-domain")
+	}
+	if files.Cert == "" {
+		return fail("no client certificate (--cert)")
+	}
+	pair, err := tls.LoadX509KeyPair(files.Cert, files.Key)
+	if err != nil {
+		return fail("%v", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return fail("%v", err)
+	}
+	if len(leaf.URIs) != 1 {
+		return fail("the certificate has %d URI SANs, want 1", len(leaf.URIs))
+	}
+	id, err := pki.ParseID(leaf.URIs[0].String())
+	if err != nil {
+		return fail("%v", err)
+	}
+	if id.TrustDomain != trustDomain {
+		return fail("%s is in trust domain %q, want %q", id, id.TrustDomain, trustDomain)
+	}
+	if id.Admin != "" || id.Component != "agent" || id.Node != node {
+		return fail("the certificate is %s", id)
+	}
+	return id, nil
+}
+
+// pendingFor returns the tombstone of volume in a node's listing, if it lists it.
+func pendingFor(l *metav1.ListTombstonesResponse, volume string) *metav1.Tombstone {
+	for _, t := range l.GetTombstones() {
+		if t.GetVolume() == volume {
+			return t
+		}
+	}
+	return nil
+}
+
+func client(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("flaminio-meta", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, usage)
+		fs.PrintDefaults()
+	}
 	server := fs.String("server", "127.0.0.1:7400", "metadata service address")
 	var files pki.Files
 	fs.StringVar(&files.Cert, "cert", "", "client certificate (none: plain-text connection)")
 	fs.StringVar(&files.Key, "key", "", "client key")
 	fs.StringVar(&files.CA, "ca", "", "CA bundle for the server's certificate")
-	_ = fs.Parse(args)
+	trustDomain := fs.String("trust-domain", "", "trust domain of the client's identity (confirm only)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	args = fs.Args()
 	if len(args) == 0 {
-		return fmt.Errorf("usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete|volumes|move|drain|undrain [args]")
+		return errors.New(usage)
+	}
+	// confirm refuses before any call: its arguments, then the caller's identity.
+	var volume, node string
+	var identity pki.Identity
+	if args[0] == "confirm" {
+		var err error
+		if volume, node, err = confirmArgs(args[1:]); err != nil {
+			return err
+		}
+		if identity, err = agentIdentity(files, *trustDomain, node); err != nil {
+			return err
+		}
 	}
 	creds := insecure.NewCredentials()
 	if files.Cert != "" {
@@ -315,7 +432,7 @@ func client(args []string) error {
 		if err = need(1); err == nil {
 			start := time.Now()
 			err = drain.Run(ctx, c, args[1], 5*time.Second, func(p drain.Progress) {
-				fmt.Fprintf(os.Stderr, "%4.0fs %s: %s\n", time.Since(start).Seconds(), args[1], p)
+				fmt.Fprintf(stderr, "%4.0fs %s: %s\n", time.Since(start).Seconds(), args[1], p)
 			})
 			out = &metav1.DrainNodeResponse{}
 		}
@@ -323,6 +440,56 @@ func client(args []string) error {
 		if err = need(1); err == nil {
 			out, err = c.DrainNode(ctx, &metav1.DrainNodeRequest{Node: args[1], Draining: false})
 		}
+	case "tombstones":
+		// One node's, or every registered node's, each tombstone once.
+		var nodes []string
+		if len(args) > 1 {
+			nodes = []string{args[1]}
+		} else {
+			var l *metav1.ListNodesResponse
+			if l, err = c.ListNodes(ctx, &metav1.ListNodesRequest{}); err != nil {
+				break
+			}
+			for _, n := range l.GetNodes() {
+				nodes = append(nodes, n.GetId())
+			}
+		}
+		all := &metav1.ListTombstonesResponse{}
+		seen := map[string]bool{}
+		for _, n := range nodes {
+			var l *metav1.ListTombstonesResponse
+			if l, err = c.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: n}); err != nil {
+				break
+			}
+			for _, t := range l.GetTombstones() {
+				if !seen[t.GetVolume()] {
+					seen[t.GetVolume()] = true
+					all.Tombstones = append(all.Tombstones, t)
+				}
+			}
+		}
+		slices.SortFunc(all.Tombstones, func(a, b *metav1.Tombstone) int { return strings.Compare(a.GetVolume(), b.GetVolume()) })
+		out = all
+	case "confirm":
+		// Read first: confirm only what the read shows pending for the node. The service's
+		// empty answer cannot say more, so what is printed comes from the read.
+		var l *metav1.ListTombstonesResponse
+		if l, err = c.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: node}); err != nil {
+			break
+		}
+		t := pendingFor(l, volume)
+		if t == nil {
+			fmt.Fprintf(stderr, "%s: %s is not pending for %s: nothing to confirm\n", identity, volume, node)
+			out = &metav1.Tombstone{}
+			break
+		}
+		fmt.Fprintf(stderr, "%s: confirming %s for %s: tombstone nodes %v, pending %v\n",
+			identity, volume, node, t.GetNodes(), t.GetPending())
+		if _, err = c.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: volume, Node: node}); err != nil {
+			break
+		}
+		t.Pending = slices.DeleteFunc(t.Pending, func(n string) bool { return n == node })
+		out = t
 	default:
 		err = fmt.Errorf("unknown command %q", args[0])
 	}
@@ -337,6 +504,6 @@ func client(args []string) error {
 	if json.Unmarshal(b, &pretty) == nil {
 		b, _ = json.MarshalIndent(pretty, "", "  ")
 	}
-	fmt.Println(string(b))
+	fmt.Fprintln(stdout, string(b))
 	return nil
 }

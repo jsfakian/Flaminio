@@ -23,7 +23,7 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 | 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator | [#17](https://github.com/jsfakian/Flaminio/issues/17) |
 | 12 | Zero-copy local reads after an attach | With `--zero-copy`, local reads that waited for reconciliation fail with EINVAL, and the target drops the local replica for 3 s each time | Before the chaos run (step 8) | [#5](https://github.com/jsfakian/Flaminio/issues/5) |
 | 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) | [#13](https://github.com/jsfakian/Flaminio/issues/13) |
-| 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; a data node without one (fl-c) keeps the replicas, and the volume id stays taken | With the node agent (step 6) | [#14](https://github.com/jsfakian/Flaminio/issues/14) |
+| 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; for a data node without one (fl-c), an operator confirms by hand (`lab.sh vol-confirm`) | With the node agent (step 6) | [#14](https://github.com/jsfakian/Flaminio/issues/14) |
 
 ## 1. Read performance
 
@@ -258,6 +258,24 @@ Only the CSI node plugin sweeps tombstones (item 8). A data node without one, su
 the lab, never confirms: its replicas of deleted volumes stay, and the volume ids stay taken.
 
 **Steps:**
-1. **The sweep moves into the node agent** (step 6), which runs on every data node.
-2. Until then, an administrator can confirm a deletion for a node that is gone for good
-   (`ConfirmDeletion` accepts administrators); `metactl` needs a command for it.
+1. **The sweep moves into the node agent** (step 6), which runs on every data node. Then no data
+   node is without a sweep, and `vol-confirm` goes.
+2. **Done (docs/issues/14): confirming by hand, for fl-c.**
+   - `flaminio-meta tombstones [node]` lists them; `flaminio-meta confirm` confirms one volume for
+     one node, as that node's own agent only, with `--replicas-deleted`.
+   - `lab.sh vol-confirm` checks on the node that nothing sweeps there and that its replicas are
+     deleted, then confirms: the only supported way to confirm by hand.
+   - The harness deletes a volume's replicas on every data node, never confirms, and stops when
+     the volume is pending for fl-c. The metadata service logs every new confirmation.
+   - *Lab:* to be recorded.
+3. **Later** (docs/issues/14, decisions):
+   - a tombstone's incarnation, given by the listing and required by the confirmation, so that a
+     confirmation cannot land on a later deletion of the same name;
+   - confirming for a node gone for good: an administrator could confirm for any stopped node,
+     which still holds its replicas;
+   - a lab-wide lock: two harness runs at once can delete each other's replicas;
+   - the token key and the etcd client certificate on the metadata members only: fl-c holds them
+     today;
+   - `meta-smoke`, the resync check and the CSI controller's deletions keep leaving tombstones
+     pending for fl-c until step 1;
+   - creating a volume again under the same name is issue #30's; replicas no record names, #13's.

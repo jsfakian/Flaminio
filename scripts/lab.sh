@@ -498,13 +498,18 @@ cmd_etcd() {
     done
 }
 
+# Builds flaminio-meta for Linux here, into $LOCAL_STATE_DIR/bin.
+meta_build() {
+    log "building flaminio-meta for linux/amd64"
+    (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$LOCAL_STATE_DIR/bin/flaminio-meta" ./meta/cmd/flaminio-meta)
+}
+
 # meta up|down|status [VM selector, default cluster]: builds flaminio-meta for Linux here, and
 # runs it on each VM against the whole etcd cluster.
 cmd_meta() {
     local action=${1:-status} vm bin="$LOCAL_STATE_DIR/bin/flaminio-meta"
     if [[ $action == up ]]; then
-        log "building flaminio-meta for linux/amd64"
-        (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$bin" ./meta/cmd/flaminio-meta)
+        meta_build
     fi
     for vm in $(vms_of "${2:-cluster}"); do
         case "$action" in
@@ -685,7 +690,8 @@ cmd_node() {
     done
 }
 
-# vol create|attach VM|show: the test volume, as the lab administrator.
+# vol create|attach VM|detach VM|show|delete: the test volume, as the lab administrator. delete
+# deletes its replicas too, and waits for its tombstone to go (delete_volume).
 cmd_vol() {
     local out vm tok
     case "${1:-show}" in
@@ -700,7 +706,7 @@ cmd_vol() {
             local other
             for other in $(vms_of all); do
                 [[ $other == "$vm" ]] && continue
-                ENV_VARS="VOLUME=$VOL" run_on_vm "$other" "$SCRIPTS/guest/node.sh" detach 2>/dev/null || true
+                ENV_VARS="VOLUME=$VOL" run_on_vm "$other" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
             done
             out=$(metactl "$VM_A" "$VM_A" attach "$VOL" "$vm")
             tok=$(jq -r .token <<<"$out")
@@ -708,11 +714,11 @@ cmd_vol() {
             ENV_VARS="VOLUME=$VOL TOKEN=$tok" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" attach
             ;;
         detach)
-            ENV_VARS="VOLUME=$VOL" run_on_vm "$(vms_of "${2:-a}")" "$SCRIPTS/guest/node.sh" detach
+            ENV_VARS="VOLUME=$VOL" run_on_vm "$(vms_of "${2:-a}")" "$SCRIPTS/guest/node.sh" detach >/dev/null
             ;;
         delete)
-            metactl "$VM_A" "$VM_A" delete "$VOL" >/dev/null
-            log "deleted $VOL from the metadata service"
+            RERUN="make vol-delete" delete_volume "$VOL"
+            log "deleted $VOL, and its replicas on every data node"
             ;;
         show)
             metactl "$VM_A" "$VM_A" get "$VOL" | jq -r '"epoch \(.volume.epoch), target \(.volume.target)",
@@ -839,7 +845,7 @@ cmd_partition() {
     probe "$VM_A" stop writer
     probe "$VM_A" log reader >"$LOCAL_STATE_DIR/partition-reader.log"
     probe "$VM_A" log writer >"$LOCAL_STATE_DIR/partition-writer.log"
-    ENV_VARS="VOLUME=$VOL" run_on_vm "$VM_A" "$SCRIPTS/guest/node.sh" detach || true
+    ENV_VARS="VOLUME=$VOL" run_on_vm "$VM_A" "$SCRIPTS/guest/node.sh" detach >/dev/null || true
 
     # Reads on fl-a: none started after the lease ran out (fl-a's clock) may succeed.
     awk -v t="$t_cut" -v l="$lease" '
@@ -1069,7 +1075,7 @@ render_csi_placeholder() {
 release_lab_volume() {
     local vm
     for vm in $(vms_of all); do
-        ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach 2>/dev/null || true
+        ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
     done
 }
 
@@ -1269,7 +1275,7 @@ cmd_drain_test() {
     log "$VM_C served every byte from its own replicas"
 
     log "restoring: nodes back, target on $VM_A, replicas moved from $VM_C back to $VM_B"
-    ENV_VARS="VOLUME=$VOL" run_on_vm "$VM_C" "$SCRIPTS/guest/node.sh" detach || true
+    ENV_VARS="VOLUME=$VOL" run_on_vm "$VM_C" "$SCRIPTS/guest/node.sh" detach >/dev/null || true
     cmd_node up a
     cmd_node up b
     metactl "$VM_A" "$VM_A" undrain "$VM_B" >/dev/null
@@ -1598,6 +1604,194 @@ bench_summary() {
         }' "$1"
 }
 
+# --- Deleting volumes, and confirming a deletion by hand (docs/issues/14) ---
+
+# Every data node: the data VMs, and fl-c once it is created.
+data_vms() {
+    if [[ -f $LOCAL_STATE_DIR/$VM_C/created ]]; then echo "$(vms_of all) $VM_C"; else vms_of all; fi
+}
+
+# The SHA-256 of stdin, in hex, on Linux or macOS.
+sha256() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1; }
+
+# Stops with ssh's 255, a lost connection, so that a campaign resumes: lost VM.
+lost() {
+    if [[ $1 == "$VM_C" && -f $LOCAL_STATE_DIR/$VM_C/created ]]; then
+        warn "lost the connection to $1: its VM may be off"
+    else
+        warn "lost the connection to $1"
+    fi
+    exit 255
+}
+
+# Runs metactl as the lab administrator on fl-a: its output in META_OUT, its errors in META_ERR,
+# its status returned (255: ssh lost its connection).
+meta_try() {
+    local err rc=0
+    err=$(mktemp)
+    META_OUT=$(metactl "$VM_A" "$VM_A" "$@" 2>"$err") || rc=$?
+    META_ERR=$(<"$err")
+    rm -f "$err"
+    return "$rc"
+}
+
+# A failed metactl call: meta_failed WHAT ERRORS. A flaminio-meta older than the command asks for
+# make meta-up.
+meta_failed() {
+    [[ $2 != *"unknown command"* ]] || die "$1: the flaminio-meta on $VM_A does not have it: make meta-up"
+    die "$1: $2"
+}
+
+# detach_all VOLUME: detaches VOLUME on every data node, and prints those whose node is not
+# running.
+detach_all() {
+    local vol=$1 vm out rc
+    for vm in $(data_vms); do
+        rc=0
+        out=$(ENV_VARS="VOLUME=$vol" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach) || rc=$?
+        case "$rc $out" in
+            "0 detached" | "0 not attached") ;;
+            "3 not running") echo "$vm" ;;
+            255*) lost "$vm" ;;
+            *) die "detach $vol on $vm: ${out:-exit $rc}" ;;
+        esac
+    done
+}
+
+# detached_everywhere VOLUME: VOLUME is attached on no data node, and no stopped node's data plane
+# still runs.
+detached_everywhere() {
+    local vol=$1 vm out rc
+    for vm in $(data_vms); do
+        rc=0
+        out=$(ENV_VARS="VOLUME=$vol" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach) || rc=$?
+        case "$rc $out" in
+            "0 not attached") ;;
+            "3 not running")
+                rc=0
+                out=$(vssh "$vm" "pgrep -x flaminio-io || true") || rc=$?
+                ((rc != 255)) || lost "$vm"
+                ((rc == 0)) || die "$vm: looking for flaminio-io failed (exit $rc)"
+                [[ -z $out ]] || die "$vm: flaminio-node is not running, but flaminio-io is (${out//$'\n'/ }): stop it first"
+                ;;
+            "0 detached") die "$vol was attached on $vm: whatever attaches it must stop first" ;;
+            255*) lost "$vm" ;;
+            *) die "detach $vol on $vm: ${out:-exit $rc}" ;;
+        esac
+    done
+}
+
+# delete_volume VOLUME [FORMAT_NODE]: deletes VOLUME, then its replicas on every data node, and
+# waits for its tombstone to go (docs/issues/14, S5). It never confirms a deletion: the CSI node
+# plugins of fl-a and fl-b do, and an operator, through vol-confirm, for a node without a sweep
+# (fl-c). A stopped node is started first, so that its replicas are deleted too: FORMAT_NODE (the
+# campaign's node, which the campaign formats anyway) with its store formatted, any other as it
+# is. Callers run it before stopping or formatting a node: a stopped node's sweep cannot delete.
+# It waits TOMBSTONE_WAIT seconds (120) for the sweeps. It exits 255 when ssh loses its
+# connection (a campaign resumes), 1 on any other stop; RERUN is the command to run again after
+# a confirmation by hand.
+delete_volume() {
+    local vol=$1 format=${2:-} stopped vm out rc start pending="" node
+    # Detached everywhere, before the metadata service forgets where it is attached.
+    stopped=$(detach_all "$vol")
+    rc=0
+    meta_try delete "$vol" || rc=$?
+    ((rc != 255)) || lost "$VM_A"
+    ((rc == 0)) || [[ $META_ERR == *"code = NotFound"* ]] || meta_failed "delete $vol" "$META_ERR"
+    for vm in $stopped; do
+        log "$vm: its node is not running; starting it, to delete $vol's replicas there"
+        if [[ $vm == "$format" ]]; then
+            FORMAT=1 cmd_node up "$vm" >/dev/null
+        elif [[ $vm == "$VM_C" ]]; then
+            FORMAT=0 ensure_node_c
+        else
+            FORMAT=0 cmd_node up "$vm" >/dev/null
+        fi
+    done
+    # The id may have been created again meanwhile: its replicas are not this volume's.
+    rc=0
+    meta_try get "$vol" || rc=$?
+    ((rc != 255)) || lost "$VM_A"
+    ((rc != 0)) || die "$vol exists again (created meanwhile): its replicas are left as they are"
+    [[ $META_ERR == *"code = NotFound"* ]] || meta_failed "get $vol" "$META_ERR"
+    for vm in $(data_vms); do
+        rc=0
+        out=$(ENV_VARS="VOLUME=$vol" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" delete) || rc=$?
+        ((rc != 255)) || lost "$vm"
+        [[ $rc == 0 && $out =~ ^deleted\ [0-9]+$ ]] || die "deleting $vol's replicas on $vm: ${out:-exit $rc}"
+        log "$vm: ${out#deleted } replicas of $vol deleted"
+    done
+    # The sweeps of fl-a and fl-b confirm; a node without one stops it at once.
+    start=$SECONDS
+    while true; do
+        rc=0
+        meta_try tombstones || rc=$?
+        if ((rc == 0)); then
+            pending=$(jq -r --arg v "$vol" '[.tombstones // [] | .[] | select(.volume == $v) | .pending // [] | .[]] | join(" ")' <<<"$META_OUT")
+            [[ -n $pending ]] || {
+                log "$vol deleted: no tombstone left"
+                return 0
+            }
+            for node in $pending; do
+                [[ " $(vms_of all) " != *" $node "* ]] || continue
+                [[ $node == "$VM_C" ]] || die "$vol is pending for $node, which is not a data node with a sweep: no procedure applies"
+                die "$vol is pending for $node, which has no sweep: waiting cannot help. Its replicas there are deleted: confirm by hand, then run the interrupted command again:
+    scripts/lab.sh vol-confirm $vol $node
+    ${RERUN:-the interrupted command}"
+            done
+        elif [[ $META_ERR == *"unknown command"* ]]; then
+            meta_failed tombstones "$META_ERR"
+        fi
+        ((SECONDS - start < ${TOMBSTONE_WAIT:-120})) || break
+        sleep 5
+    done
+    ((rc != 255)) || lost "$VM_A"
+    die "$vol still pending for ${pending:-(unknown: the last listing failed)} after ${TOMBSTONE_WAIT:-120} s: are the CSI node plugins running? (make csi-deploy)"
+}
+
+# vol-confirm VOLUME NODE: confirms VOLUME's deletion for NODE, a data node without a sweep (fl-c),
+# by hand, as NODE's agent, once its replicas there are deleted (docs/issues/14, S7). It is the
+# only supported way to confirm by hand, run by an operator, with no campaign or vol command
+# running. It checks, in this order, and confirms nothing before its last step:
+#   1. NODE is one data node, not a metadata cluster member;
+#   2. NODE's tombstones list VOLUME (else there is nothing to do);
+#   3. nothing on NODE can sweep: no CSI plugin, agent or Kubernetes agent (confirm.sh check);
+#   4. VOLUME is attached nowhere, and no stopped node's data plane still runs;
+#   5. NODE's data plane is its flaminio-node unit, on the disk the claim policy calls ours; then
+#      NODE's replicas of VOLUME are deleted (confirm.sh delete);
+#   6. VOLUME is still attached nowhere;
+#   7. a second delete finds none, and NODE's agent confirms (confirm.sh confirm).
+cmd_vol_confirm() {
+    (($# == 2)) || die "usage: vol-confirm VOLUME NODE"
+    local vol=$1 node bin="$LOCAL_STATE_DIR/bin/flaminio-meta" here there env out
+    [[ $vol =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || die "'$vol' is not a volume id"
+    node=$(vms_of "$2")
+    [[ $node != *" "* ]] || die "vol-confirm confirms for one node, not $2 ($node)"
+    [[ " $(vms_of cluster) " != *" $node "* ]] ||
+        die "$node is a metadata cluster member: vol-confirm is for a data node without a sweep ($VM_C)"
+    meta_build
+    here=$(sha256 <"$bin")
+    there=$(vssh "$node" "sha256sum /usr/local/bin/flaminio-meta 2>/dev/null | cut -d' ' -f1")
+    if [[ $here != "$there" ]]; then
+        log "$node: installing flaminio-meta"
+        vssh "$node" 'f=$(mktemp) && cat >"$f" && sudo install -m 755 "$f" /usr/local/bin/flaminio-meta; rc=$?; rm -f "$f"; exit $rc' <"$bin"
+    fi
+    env="VOLUME=$vol NODE=$node META=$(vmvar "$VM_A" WG):$META_PORT TRUST_DOMAIN=$TRUST_DOMAIN"
+    out=$(ENV_VARS=$env run_on_vm "$node" "$SCRIPTS/guest/confirm.sh" check)
+    if [[ $out == "not listed" ]]; then
+        log "$node's tombstones do not list $vol: nothing done"
+        return 0
+    fi
+    [[ $out == listed ]] || die "confirm.sh check on $node: $out"
+    detach_all "$vol" >/dev/null
+    detached_everywhere "$vol"
+    out=$(ENV_VARS=$env run_on_vm "$node" "$SCRIPTS/guest/confirm.sh" delete)
+    log "$node: ${out#deleted } replicas of $vol deleted"
+    detached_everywhere "$vol"
+    out=$(ENV_VARS=$env run_on_vm "$node" "$SCRIPTS/guest/confirm.sh" confirm)
+    log "confirmed $vol for $node: $(jq -c . <<<"$out")"
+}
+
 # --- Writes, by the rules of docs/performance-plan.md (W1–W3) ---
 
 # W1: the empty state, before every write run. The data disk is discarded in the guest (QEMU
@@ -1610,7 +1804,7 @@ write_reset() {
     # A connection lost mid-run can leave fio running in the VM.
     vssh "$node" "sudo pkill -x fio; while pgrep -x fio >/dev/null; do sleep 1; done" || true
     ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
-    delete_wbench
+    delete_wbench "$node"
     cmd_node down "$(vms_of "$node")" >/dev/null
     run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" discard 2>/dev/null
     ENV_VARS="IMAGE=$LIBVIRT_POOL_PATH/$node-data.img" run_on_host "$host" "$SCRIPTS/host/reset-disk.sh" reset
@@ -1620,26 +1814,24 @@ write_reset() {
     return 0
 }
 
-# Detaches wbench wherever it is attached, deletes it from the metadata service, then its
-# replicas from every data node: a volume's replicas outlive its metadata, and a new wbench
-# (epoch 1 again) would be deposed by old replicas fenced at a later epoch.
-delete_wbench() {
-    local vm
-    for vm in $(vms_of all) "$VM_C"; do
-        ENV_VARS="VOLUME=wbench" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
-    done
-    metactl "$VM_A" "$VM_A" delete wbench >/dev/null 2>&1 || true
-    for vm in $(vms_of all) "$VM_C"; do
-        ENV_VARS="VOLUME=wbench" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" delete >/dev/null
-    done
-}
+# wbench deleted, with its replicas on every data node (delete_volume, NODE formatted if it is
+# stopped): a volume's replicas outlive its metadata, and a new wbench (epoch 1 again) would be
+# deposed by old replicas fenced at a later epoch.
+delete_wbench() { delete_volume wbench "$1"; }
 
 # A freshly formatted store on NODE, and a new 16 GiB volume wbench (RF replicas, one on NODE)
-# attached there.
+# attached there. Placement drops a preferred node that is not alive: wbench is created once
+# NODE's heartbeat is in, and every chunk must have a replica there.
 write_volume() {
-    local node=$1 rf=$2
+    local node=$1 rf=$2 out start=$SECONDS
     FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
-    metactl "$VM_A" "$VM_A" create wbench 16G "$rf" 1 256M "$node" >/dev/null
+    until metactl "$VM_A" "$VM_A" nodes | jq -e --arg n "$node" 'any(.nodes // [] | .[]; .id == $n and .alive)' >/dev/null; do
+        ((SECONDS - start < 60)) || die "$node is not alive in the metadata service 60 s after its node started"
+        sleep 2
+    done
+    out=$(metactl "$VM_A" "$VM_A" create wbench 16G "$rf" 1 256M "$node")
+    jq -e --arg n "$node" 'all(.volume.chunks[]; .replicas | index($n))' <<<"$out" >/dev/null ||
+        die "wbench has chunks without a replica on $node: $(jq -c '[.volume.chunks[].replicas | join("+")] | unique' <<<"$out")"
     attach_wbench "$node"
 }
 
@@ -1709,7 +1901,7 @@ write_whole() {
     local node=$1 side=$2 rf=$3
     if [[ $side == flaminio ]]; then
         ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
-        delete_wbench
+        delete_wbench "$node"
         cmd_node down "$(vms_of "$node")" >/dev/null
     fi
     run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" whole
@@ -1757,8 +1949,9 @@ steady_mean() {
 
 # W2–W3: NODE (fl-b), RF (1: the volume on NODE's own disk, against raw O_DSYNC; 2: a second
 # replica elsewhere), REPS (3), IDLE (300 s), ROUND (60 s), MAX_ROUNDS (12), JOBS (a regex over
-# the job names), QUEUES (ublk queues, 1), NUMJOBS (fio jobs on both sides, 1). NODE's replicas
-# of other volumes move away first and come back after.
+# the job names), QUEUES (ublk queues, 1), NUMJOBS (fio jobs on both sides, 1). NODE's disk is
+# formatted at every reset: a volume other than wbench and $VOL with a replica there stops the
+# campaign at its start, and $VOL is deleted (write_start).
 cmd_bench_writes() {
     local node rf=${RF:-1} reps=${REPS:-3} round=${ROUND:-60} max=${MAX_ROUNDS:-12} filter=${JOBS:-.}
     local queues=${QUEUES:-1} jobs=${NUMJOBS:-1}
@@ -1767,17 +1960,9 @@ cmd_bench_writes() {
     dir=${RESUME:-$LOCAL_STATE_DIR/bench/writes-rf$rf-q$queues-jobs$jobs-$(date +%Y%m%dT%H%M%S)}
     mkdir -p "$dir"
     raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)
-    # The write campaign reformats NODE's disk: drop $VOL rather than draining (a drain can
-    # stall when the only other replicas are remote and resync does not finish).
-    if metactl "$VM_A" "$VM_A" get "$VOL" >/dev/null 2>&1; then
-        log "removing $VOL before the write campaign (NODE's disk will be reset)"
-        ENV_VARS="VOLUME=$VOL" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
-        metactl "$VM_A" "$VM_A" delete "$VOL" >/dev/null 2>&1 || true
-    fi
-    local vm
-    for vm in $(vms_of all) "$VM_C"; do
-        ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" delete >/dev/null 2>&1 || true
-    done
+    # What to run again after confirming a deletion by hand (delete_volume).
+    local RERUN="RESUME=$dir make bench-writes (with the same settings)"
+    write_start "$node"
     metactl "$VM_A" "$VM_A" undrain "$node" >/dev/null 2>&1 || true
     # QUEUES reaches write_volume → node_env for every Flaminio reset in this campaign.
     export QUEUES=$queues
@@ -1861,17 +2046,54 @@ cmd_bench_writes() {
         return
     fi
 
-    log "restoring $node: a clean store, and $VOL's replicas moved back"
-    delete_wbench
+    write_restore "$node"
+    log "results in $dir"
+}
+
+# The campaign's start (docs/issues/14, S6), before its first reset: NODE's disk is formatted at
+# every reset, so a volume other than wbench and $VOL with a replica on NODE, or moving to or
+# from it, stops the campaign, named, before anything is removed. Then $VOL, wherever it is, is
+# deleted with its replicas, rather than drained (a drain can stall when the only other replicas
+# are remote and resync does not finish). A volume being created or deleted is not listed: the
+# check holds at the start only.
+write_start() {
+    local node=$1 id rc found=0 on=() ids
+    rc=0
+    meta_try volumes || rc=$?
+    ((rc != 255)) || lost "$VM_A"
+    ((rc == 0)) || meta_failed volumes "$META_ERR"
+    ids=$(jq -r '.ids // [] | .[]' <<<"$META_OUT")
+    for id in $ids; do
+        rc=0
+        meta_try get "$id" || rc=$?
+        ((rc != 255)) || lost "$VM_A"
+        if ((rc != 0)); then
+            [[ $META_ERR == *"code = NotFound"* ]] && continue # deleted since the listing
+            meta_failed "get $id" "$META_ERR"
+        fi
+        if [[ $id == "$VOL" ]]; then
+            found=1
+        elif [[ $id != wbench ]] &&
+            jq -e --arg n "$node" 'any(.volume.chunks[]; (.replicas // []) + [.movingFrom, .movingTo] | index($n))' \
+                <<<"$META_OUT" >/dev/null; then
+            on+=("$id")
+        fi
+    done
+    ((${#on[@]} == 0)) ||
+        die "$node holds replicas of ${on[*]}, and the campaign formats its disk: move them away (metactl drain) or delete them first"
+    if ((found)); then
+        log "removing $VOL before the write campaign ($node's disk will be reset)"
+        delete_volume "$VOL" "$node"
+    fi
+}
+
+# After the campaign: a clean store on NODE.
+write_restore() {
+    local node=$1
+    log "restoring $node: a clean store"
+    delete_wbench "$node"
     cmd_node down "$(vms_of "$node")" >/dev/null
     FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
-    local other
-    for other in $(vms_of all) "$VM_C"; do
-        [[ $other == "$node" || $(chunks_on "$other") == 0 ]] && continue
-        [[ $other == "$VM_A" ]] && continue # the target's node keeps its replicas
-        metactl "$VM_A" "$VM_A" drain "$other" >/dev/null && metactl "$VM_A" "$VM_A" undrain "$other" >/dev/null
-    done
-    log "results in $dir"
 }
 
 # Per job: medians over the repetitions of the fresh and steady values, Flaminio's share of raw
@@ -1933,7 +2155,11 @@ usage: scripts/lab.sh COMMAND [a|b|w|all|cluster]   (all: the data VMs a and b; 
   meta ACTION [VM]  metadata service (default: all three): up | down | status
   meta-smoke   end-to-end metadata check: etcd member loss, and refusal of unauthenticated callers
   node ACTION [VM]  phase-1 nodes (replicas only): up (FORMAT=1 reformats) | down | status
-  vol ACTION   the test volume \$VOL: create | attach VM (that node becomes its target) | show | delete
+  vol ACTION   the test volume \$VOL: create | attach VM (that node becomes its target) | show | delete (its
+               replicas too, on every data node; waits for its tombstone to go)
+  vol-confirm VOLUME NODE  confirm VOLUME's deletion for NODE, a data node without a sweep ($VM_C), after
+               checking on NODE that nothing sweeps there and that its replicas are deleted: the
+               only supported way to confirm by hand
   node-fault   verified writes while $VM_B's node restarts; ISR restored; failover to $VM_B verified
   k8s ACTION   k3s: up (server on $VM_W, agents on a and b) | down | status | smoke | kubeconfig | tunnel | uninstall
   kubectl ARGS kubectl on $VM_W
@@ -1987,6 +2213,7 @@ case "$cmd" in
     pki) cmd_pki "$@" ;;
     node) cmd_node "$@" ;;
     vol) cmd_vol "$@" ;;
+    vol-confirm) cmd_vol_confirm "$@" ;;
     node-fault) cmd_node_fault ;;
     partition) cmd_partition ;;
     bench-pod) cmd_bench_pod ;;

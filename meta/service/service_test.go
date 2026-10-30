@@ -1,9 +1,15 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
 	"math/rand/v2"
 	"net"
 	"slices"
@@ -14,7 +20,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
@@ -22,6 +30,7 @@ import (
 	"github.com/flaminio/flaminio/meta/domain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/kv/kvtest"
+	"github.com/flaminio/flaminio/pkg/pki"
 )
 
 const mib = 1 << 20
@@ -1121,6 +1130,154 @@ func TestGetVolumeOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
 		store.hook.Store(&hook)
 		if _, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
 			t.Fatalf("get of a volume deleted mid-call: %v", err)
+		}
+	})
+}
+
+// captureLog sends slog's default logger to a buffer for the test, and returns what it logged
+// as JSON records. The package's tests do not run in parallel, so no other test logs meanwhile.
+func captureLog(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(lockedWriter{&mu, &buf}, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []map[string]any
+		for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+			if len(line) == 0 {
+				continue
+			}
+			var rec map[string]any
+			if err := json.Unmarshal(line, &rec); err != nil {
+				t.Fatalf("log line %q: %v", line, err)
+			}
+			out = append(out, rec)
+		}
+		return out
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(b)
+}
+
+// confirmations returns the log's "deletion confirmed" records.
+func confirmations(records []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, r := range records {
+		if r["msg"] == "deletion confirmed" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// tombstone3 is a volume v, one chunk on nodes a, b and c (RF 3), deleted: its tombstone names
+// all three.
+func tombstone3(t *testing.T, s *Service) {
+	t.Helper()
+	addNodes(t, s, "a", "b", "c")
+	if _, err := create(s, "v", 1, 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteVolume(context.Background(), &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Each confirmation that newly confirms a node logs one line, for audit (docs/issues/14, S4):
+// the caller's identity, its address and certificate serial, the volume, the node, the nodes
+// still pending and the write's revision. A repeat, or a missing tombstone, logs nothing.
+func TestConfirmDeletionLogsOnce(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		tombstone3(t, s)
+		logged := captureLog(t)
+		cert := &x509.Certificate{SerialNumber: big.NewInt(0xbeef)}
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			Addr:     &net.TCPAddr{IP: net.IPv4(10, 77, 0, 4), Port: 40000},
+			AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}},
+		})
+		ctx = context.WithValue(ctx, identityKey{}, pki.Identity{TrustDomain: td, Node: "c", Component: "agent"})
+		for range 2 {
+			if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "c"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := confirmations(logged())
+		if len(got) != 1 {
+			t.Fatalf("%d lines for a confirmation and its repeat, want 1: %v", len(got), got)
+		}
+		l := got[0]
+		if l["caller"] != pki.NodeID(td, "c", "agent") || l["peer"] != "10.77.0.4:40000" || l["serial"] != "beef" ||
+			l["volume"] != "v" || l["node"] != "c" || fmt.Sprint(l["pending"]) != "[a b]" {
+			t.Fatalf("log line %v", l)
+		}
+		if rev, ok := l["revision"].(float64); !ok || rev <= 0 {
+			t.Fatalf("revision %v", l["revision"])
+		}
+
+		// Without authentication, the caller is "unauthenticated"; the last confirmation, which
+		// removes the tombstone, logs too, with nothing pending.
+		for _, n := range []string{"a", "b"} {
+			if _, err := s.ConfirmDeletion(context.Background(), &metav1.ConfirmDeletionRequest{Volume: "v", Node: n}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got = confirmations(logged())
+		if len(got) != 3 || got[1]["caller"] != "unauthenticated" || got[1]["peer"] != "" || got[1]["serial"] != "" ||
+			got[2]["pending"] != nil || got[2]["revision"].(float64) <= got[1]["revision"].(float64) {
+			t.Fatalf("log lines %v", got)
+		}
+		// The tombstone is gone: a confirmation succeeds, and logs nothing.
+		if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "c"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := confirmations(logged()); len(got) != 3 {
+			t.Fatalf("a confirmation of a missing tombstone logged: %v", got[3:])
+		}
+	})
+}
+
+// Two confirmations interleaved, the second between the first's read and its write: both count,
+// the first is written again after its read, and each logs once.
+func TestConfirmDeletionInterleavedLogsEachOnce(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		tombstone3(t, s)
+		logged := captureLog(t)
+		store.key = tombstoneKey("v")
+		hook := func() {
+			if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "b"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.txns.Store(0)
+		store.hook.Store(&hook)
+		if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := store.txns.Load(); got != 2 {
+			t.Fatalf("%d writes of the tombstone by the first confirmation, want 2: the first refused", got)
+		}
+		if tombstoned(t, s, "a", "v") || tombstoned(t, s, "b", "v") || !tombstoned(t, s, "c", "v") {
+			t.Fatal("both confirmations should count, and c stay pending")
+		}
+		got := confirmations(logged())
+		if len(got) != 2 || got[0]["node"] != "b" || fmt.Sprint(got[0]["pending"]) != "[a c]" ||
+			got[1]["node"] != "a" || fmt.Sprint(got[1]["pending"]) != "[c]" {
+			t.Fatalf("log lines %v", got)
 		}
 	})
 }
