@@ -81,7 +81,8 @@ kept; revisions start at the clock)".
 - `Claims` gains `first_epoch: u64`. `MAX_LEN` grows by 8.
 - **`verify`** checks the signature, then parses with Go's rules.
 - **`decode_unverified(tok)`** parses without the signature. It is behind a crate feature,
-  `unverified`, that only `flaminio-node` enables, for the local session (S6).
+  `unverified`, enabled only by `flaminio-node`, for the local session (S6), and by the fuzz
+  crate (`fuzz/src/lib.rs`), for its target.
 
 **`session::accept`** is unchanged: it compares volume, epoch and node. The first epoch rides in
 `Accepted.claims`.
@@ -91,7 +92,7 @@ kept; revisions start at the clock)".
 **`Store::delete_volume(uuid, below)`** (new, `flaminio-store`), shared with #13, which adds
 the volume's fence-only slot to it. It deletes, in one plan, every chunk of `uuid` whose fence
 is below `below` (`u64::MAX` for the tombstone's `delete VOLUME`), and returns how many.
-- **One commit:** the records are `ChunkDelete`s, 8 bytes each plus the record header. A plan
+- **One commit per batch, one in practice:** the records are `ChunkDelete`s, 8 bytes each plus the record header. A plan
   larger than one batch (`max_batch_bytes`, 4 MiB: over 100 000 chunks) is split in batches of
   whole chunks.
 - **`ReplicaService::delete_volume`** (`delete VOLUME`) uses it too, instead of one commit per
@@ -111,11 +112,9 @@ Then the geometry check finds no volume, so a new size or chunk size passes. The
 `vol_id` gives a new `VolumeId`, the core's `Hello` sets the fence, the placed chunks are
 created at the epoch, and the fence is durable before the reply.
 
-**The engine settles first.** `NetEvent::Hello` and the local `Hello` call `settle_local`, not
-only `flush_local`, when `ReplicaService::would_drop(&accepted)` (new: the same test, without
-the deletion) is true. That is what `DeleteReplicas` does before `delete VOLUME`.
-- **Why:** local commits in flight or staged for the old chunks land, and get their replies,
-  before the chunks go.
+**The store settles first.** The engine keeps `flush_local` before a `Hello`. `Store::guard`
+lands every commit in flight or staged before the drop's plan, so an old session's writes land
+before their chunks go; their replies go to old sessions.
 - **A zombie target:** `DeleteReplicas` refuses while the volume is attached here. The drop
   cannot: this node may still run a target of the earlier volume. That target is of an older
   epoch, so a newer one deposes it anyway. After the drop its local requests get "unknown
@@ -162,6 +161,11 @@ and the token holds it, signed. #15 replaces `decode_unverified` with `verify` (
   fails that session, and the chunk's ISR shrinks as for an unreachable replica.
 - **So nodes are upgraded before the metadata service** (the upgrade notes say so). Volumes
   created before the metadata service's upgrade keep version 1 tokens.
+- **A volume created by an old metadata instance** (during a rolling upgrade of the metadata
+  service, or after a downgrade) starts at epoch 0 again, below leftovers fenced near a
+  revision, and is deposed for good on nodes its name's tombstone did not name. So no volume is
+  created during a rolling upgrade of the metadata service, and a downgrade needs creation
+  quiesced (the upgrade notes say so).
 - **An old metadata service** rewriting a header at attach drops `first_epoch`: Go's
   `json.Unmarshal` ignores unknown fields. The epoch is kept, so S1 holds for later volumes.
 
@@ -194,8 +198,10 @@ in `token.rs`'s `go_compatible_vectors`, with the same bytes.
 - an interrupted creation (claim only) deleted, then created: above its claim.
 
 **Rewritten to take the epoch from the attach** (they assert absolute epochs):
-- `service_test.go`: the attach sequence (epochs 0 to 4), the ChangeIsr at epoch 1 (`:546`), the
-  move test (`:944`), and "epoch equals the number of attaches";
+- `service_test.go`: the attach sequence (epochs 0 to 4), the re-created volume (`:182`, which
+  now asserts an epoch above the old one), the ChangeIsr at epoch 1 (`:546`), the move test
+  (`:944`), and "epoch equals the number of attaches";
+- `control/csi/csi_test.go` (`:145`–`152`, `:256`, `:261`, `:286`: epochs against `kv.NewMem`);
 - `auth_test.go` (2 and 3);
 - `flaminio-metaclient/tests/interop.rs` (epoch 1 after the first attach, and its ChangeIsr at
   epoch 1), which `make contracts` runs through `meta-interop`;
@@ -272,7 +278,8 @@ token.
   --bump-revision 1000000000 --mark-compacted`. The bump must exceed the revisions made since the
   snapshot; 10^9 does for any plausible gap, and keeps epochs far below 2^53. A wiped etcd, with
   nodes keeping their data, is the same hazard: nodes must be wiped too.
-- **ARCHITECTURE §18 (upgrades):** nodes before the metadata service (S9).
+- **ARCHITECTURE §18 (upgrades):** nodes before the metadata service; no volume creation during
+  a rolling upgrade of the metadata service, nor during a downgrade (S9).
 - **docs/replication-protocol.md,** at `Hello`: S5's rule and why it keeps the volume's own
   chunks.
 - **`service.go`'s key comment:** the header's `first_epoch`.

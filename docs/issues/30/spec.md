@@ -45,9 +45,9 @@ volume's epoch to it; the first attach then takes the first epoch + 1.
 epoch, a node whose record of the volume is fenced below it holds only what earlier volumes of
 the name left.
 - **It deletes every chunk of the volume fenced below the first epoch,** placed here or not,
-  as the store records them, in one commit; only then does it forget the volume's fence and
-  sessions. A failed deletion fails the `Hello` and changes nothing else. The node's own
-  commits in flight land first. Then the `Hello` goes on as today: it creates
+  as the store records them, in one commit per batch (one in practice); only then does it forget the volume's fence
+  and sessions. A failed deletion fails the `Hello` and changes nothing else. Commits in flight
+  land first. Then the `Hello` goes on as today: it creates
   the placed chunks, empty, fences them at its epoch, and replies.
 - **The deletion is durable before the reply.** A crash or error during it leaves only chunks
   still fenced below the first epoch, which the next `Hello` deletes.
@@ -92,6 +92,10 @@ attach token too.
 - **An old metadata service** (a downgrade) drops the first epoch from headers it rewrites at
   attach. Those volumes then get today's tokens: their replicas are handled as today, but their
   epochs stay above the earlier volumes'.
+- **A volume created by an old metadata instance** (a rolling upgrade, or after a downgrade)
+  starts at epoch 0 again, and is deposed for good on nodes holding leftovers fenced near a
+  revision. So no volume is created during a rolling upgrade of the metadata service, and a
+  downgrade needs creation quiesced.
 
 ## The contract
 

@@ -38,7 +38,7 @@
   the target would need it from a new proto field.
 
 **D5. The local replica reads the first epoch from the attach token, decoded without its
-signature** (S6), by `decode_unverified`, behind a crate feature only the node enables.
+signature** (S6), by `decode_unverified`, behind a crate feature only the node and the fuzz crate enable.
 - **Why:** the local session has no `accept`, and the engine has no token key today. The token is
   the one place the first epoch is.
 - **The check that the token names the volume, this node and its current epoch** is needed for that value to be
@@ -46,13 +46,14 @@ signature** (S6), by `decode_unverified`, behind a crate feature only the node e
   the volume. It also refuses an old token at attach, which the issue asks for.
 - **#15** turns this into a verified check (its S12).
 
-**D6. The drop is `Store::delete_volume(uuid, below)`, decided from the store, in one commit**
+**D6. The drop is `Store::delete_volume(uuid, below)`, decided from the store, in one commit per batch**
 (S5). It is shared with #13, which adds the fence-only slot; `delete VOLUME` uses it too.
 - **From the store, not `vols`:** an error mid-drop then leaves nothing in memory out of step,
   and the next `Hello` finds what is left.
 - **One commit:** the drop runs on the engine thread; one commit per chunk would stall it.
-- **The engine settles first,** as `DeleteReplicas` does. Unlike it, the drop cannot refuse
-  while a target of the name runs here: that target is of an earlier volume, and is deposed.
+- **The store's settle orders it** (`Store::guard` lands commits in flight and staged); no
+  engine-level settle is added. Unlike `delete VOLUME`, the drop cannot refuse while a target
+  of the name runs here: that target is of an earlier volume, and is deposed.
 
 **D9. An attach with no token is refused** (S6). Without one the local replica has no first
 epoch, and would adopt leftovers silently. Only a local-only volume of an `--insecure`
@@ -87,7 +88,9 @@ them. Unchanged by this issue.
 
 **R5. A downgrade of the metadata service** drops `first_epoch` from headers it rewrites at
 attach. Those volumes then get version 1 tokens and keep their leftovers' data, as today; their
-epochs still start above every earlier volume's.
+epochs still start above every earlier volume's. Worse, a volume an old instance creates
+starts at epoch 0 and is deposed for good on nodes holding leftovers fenced near a revision:
+no creation during a rolling metadata upgrade, and downgrades only with creation quiesced.
 
 **R6. Mixed versions:** an old node refuses version 2 tokens, so a new volume's replica there is
 unreachable until the node is upgraded. It fails rather than adopt.
