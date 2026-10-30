@@ -129,9 +129,13 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   - the router purges the generation;
   - the arrivals counter is removed;
   - the device is deleted asynchronously (S10).
-  - **On a detach:** the fd is closed, and the entry goes.
-  - **On a deposition, or a stopped device:** the entry stays stopping, holding the fd, until a
-    `detach`.
+  - **When a detach was requested** (a flag on the entry, set by the socket), the device thread
+    itself closes the fd and ends the entry, whenever `run_target` returns. So a detach whose
+    answer timed out still frees the slot.
+  - **On a deposition, or a stopped device,** with no detach requested: the entry stays stopping,
+    holding the fd, until a `detach`.
+- **Node shutdown** does not join a device thread blocked in `kill_dev`. It exits, and the next
+  start's cleanup deletes the recorded devices (S10).
 - **Why mounting by path, then checking, is enough** (S9): while the node runs, ids are never
   reused, and the held fd keeps the gendisk and its minor alive. So between the check and the
   mount, the path can name only that device, or nothing.
@@ -142,8 +146,7 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   - the fast-read path (`try_fast_read`, `plan_fast_read`, `finish_fast_read`) takes it, and
     refuses a mismatch;
   - `Detach` with no target now gives `Detached` (`Engine::detach`).
-- **Stopping entries** are shown in `list`. One stopping for more than 5 minutes is logged while
-  it lasts.
+- **Stopping entries** are shown in `list`. One stopping for more than 5 minutes is logged once.
 
 ## S3: the engine thread
 
@@ -245,10 +248,12 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **An attach refused for its epoch** answers `error: VOLUME: epoch: <reason>` (S11).
 - **`detach`, by state:**
   - starting: `error: VOLUME is attaching`;
-  - running or stopping: it feeds the stop channel (the device thread ends the target first),
-    waits up to 30 s, as today, for `run_target` to return, closes the fd, and answers `ok`.
-    Past 30 s it answers `error: VOLUME: the device did not stop within 30 s`, and the entry
-    stays stopping;
+  - running, or stopping with no detach requested: it sets the entry's detach flag, and feeds
+    the stop channel if the device is still running (the device thread ends the target first);
+  - stopping with a detach already requested: it only waits;
+  - either way it waits up to 30 s, as today, for the entry to end, then answers `ok`. Past 30 s
+    it answers `error: VOLUME: the device did not stop within 30 s`. The device thread still ends
+    the entry when `run_target` returns;
   - no entry: `error: VOLUME is not attached here`, today's wording.
 
 ## S9: the CSI node plugin (`control/csi`)
@@ -314,9 +319,13 @@ list                             ->  ok limit N [VOLUME STATE ...]
   Then it deletes the device with `DEL_DEV_ASYNC`. Anything else is logged and left alone.
 - **`DEL_DEV_ASYNC`** is in Linux 6.9 and later. Centaur's 6.8 headers lack it, and the lab runs
   7.0.
-  - libublk's control handle deletes when dropped (`UblkCtrlInner::drop`). On 6.9 and later it is
-    built with `UBLK_DEV_F_DEL_DEV_ASYNC`. On an older kernel, which would only trace the failed
-    command, it is disowned, and the node deletes the device itself.
+  - libublk's control handle deletes when dropped (`UblkCtrlInner::drop`). The node reads the
+    kernel's release from `uname` at start. There is no feature bit for the command, and a
+    backport only takes the safe path.
+    - On 6.9 and later the handle is built with `UBLK_DEV_F_DEL_DEV_ASYNC`.
+    - On an older kernel, which would only trace the failed command, the handle is disowned, and
+      the node deletes the device itself, with `DEL_DEV` on a thread of its own.
+    - Centaur's 6.8 runs the disowned path in a test.
   - `flaminio-io del` uses `del_dev_async`.
   - On an older kernel, the synchronous `DEL_DEV` runs on a thread of its own.
 - **Scripts:**
@@ -406,8 +415,13 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - a gather deadline and an arrivals deadline, armed from another thread, fire on time;
   - asynchronous commits turn on with the first device and off after the last, and stay off
     under `--sync-commits`;
-  - **a detach with ops pending** on a target that cannot complete them (its ISR unreachable)
-    answers within 30 s. Its ops fail with `NotAttached`;
+  - **engine:** `Detach` with ops pending, on a target whose ISR is unreachable, fails them with
+    `NotAttached`;
+  - **`control.rs`, with a fake `kill_dev` that blocks:**
+    - the detach answers at 30 s, and the entry is stopping;
+    - when `kill_dev` returns, the device thread ends the entry, closes the fd, and frees the
+      slot;
+    - a second detach meanwhile only waits;
   - with 10 000 inputs queued and two threads taking the lock in a loop, the lock wait and the
     heartbeat lateness stay under 100 ms;
   - queue threads leave the inputs to the engine thread.
@@ -478,7 +492,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - writes: 4K QD1 at RF 1 and RF 2, with one raw run for both; and 1M QD8 at RF 1.
 - **RF 2 topology:** the 2026-10-17 campaign's. The target is on fl-b, with a replica of each
   chunk on fl-b and one on fl-a or fl-c. Only fl-b is reset.
-- **Time and wear:** as in decisions.md.
+- **Time:** reads under an hour; writes, 24 runs of about 25 minutes, about 10 hours. Wear: in
+  decisions.md.
 
 ## Risks
 

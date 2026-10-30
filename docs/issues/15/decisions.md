@@ -103,6 +103,7 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
 **Performance**
 - `bench-ab`: 3 repetitions, A and B alternating between repetitions, reads before writes.
   Jobs: reads QD1, QD32, 1M; writes 4K QD1 at RF 1 and RF 2 (one raw run for both), and 1M QD8.
+  Reads take under an hour; writes are 24 runs of about 25 minutes, about 10 hours.
   (F2, M6, Q8, U6)
 - Bounds relative to main's share of raw: reads 3%, writes 5%, and #10's 1M rule. One more
   repetition when 2 × spread exceeds the bound; then inconclusive, and the owner decides.
@@ -146,6 +147,11 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
   any volume is attached.
 - **A detach ends the target before `kill_dev`,** as today, so that a target stuck on its ISR
   cannot block the device's stop. The socket waits 30 s at most.
+- **A requested detach is recorded on the entry,** and the device thread ends the entry when
+  `run_target` returns, so a timed-out detach leaks nothing. Shutdown does not join a thread
+  blocked in `kill_dev`; startup cleanup takes its device.
+- **`DEL_DEV_ASYNC` is chosen by the kernel's release** (`uname`, 6.9 and later). Otherwise the
+  control handle is disowned.
 - **`bench-ab` runs each revision's own `node.sh`.** Main writes no records, and needs its
   `del --id`.
 - **The startup record:**
