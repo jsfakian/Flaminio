@@ -1689,8 +1689,8 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         );
     }
 
-    // Holding (docs/10): after a commit of four 1 MiB whole-cluster writes, the next group waits
-    // for the writes outstanding at the landing, four, not for its window (10 s here) nor for
+    // Holding (docs/issues/10): after a commit of four 1 MiB whole-cluster writes, the next group
+    // waits for the writes outstanding at the landing, four, not for its window (10 s here) nor for
     // 8 MiB. Their data goes to the disk as each is staged, with nothing in flight.
     engine.set_commit_target_bytes(8 << 20);
     engine.set_commit_gather(Duration::from_secs(10));
@@ -1784,8 +1784,8 @@ fn commits_in_flight_hold_writes_but_not_reads() {
 }
 
 /// An engine with asynchronous commits on a deferred device (commits complete on command), and
-/// volume "v" (16 MiB) attached, for the tests of held groups (docs/10). Built with the engine's
-/// defaults: the 8 MiB floor, so groups are held.
+/// volume "v" (16 MiB) attached, for the tests of held groups (docs/issues/10). Built with the
+/// engine's defaults: the 8 MiB floor, so groups are held.
 struct Holding {
     engine: Engine<flaminio_store::DeferredDevice>,
     rx: mpsc::Receiver<Input>,
@@ -1985,7 +1985,7 @@ impl Drop for Holding {
     }
 }
 
-/// Held groups (docs/10): what a default-built engine does with large writes, and every path
+/// Held groups (docs/issues/10): what a default-built engine does with large writes, and every path
 /// that settles the store with a group held.
 #[test]
 fn holding_staged_groups() {

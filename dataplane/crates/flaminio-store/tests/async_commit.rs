@@ -756,7 +756,7 @@ fn flush_coalesce_after_shared_flush_keeps_both() {
     assert_eq!(buf, expect);
 }
 
-/// A store that holds staged groups (docs/10): a group may start with nothing in flight, and
+/// A store that holds staged groups (docs/issues/10): a group may start with nothing in flight, and
 /// its commit starts only when the caller launches it.
 fn held_store(journal_mib: u64) -> Store<DeferredDevice> {
     let dev = MemDevice::new(DEVICE);

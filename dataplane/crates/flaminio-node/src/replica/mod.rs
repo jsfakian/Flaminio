@@ -468,7 +468,7 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// items it took; the rest wait, in order.
     pub fn stage(&mut self, items: &[(SessionRef, Frame)]) -> usize {
         // Behind a commit in flight; or, with hold_staged, with nothing in flight too: the
-        // writes start or join the held group (docs/10, S2).
+        // writes start or join the held group (docs/issues/10, S2).
         if self.flying.is_empty() && !self.hold_staged {
             return 0;
         }
@@ -620,7 +620,7 @@ impl<D: BlockDevice> ReplicaService<D> {
     ///
     /// A group whose items were all answered without a write (stale epochs, dropped sessions,
     /// store refusals) has nothing for the store to commit. With nothing in flight it is
-    /// answered now, behind a commit in flight at that commit's landing (docs/10, S5).
+    /// answered now, behind a commit in flight at that commit's landing (docs/issues/10, S5).
     pub fn launch(&mut self) -> bool {
         let Some(st) = &self.staged else {
             return false;
@@ -634,7 +634,7 @@ impl<D: BlockDevice> ReplicaService<D> {
             return true;
         }
         // A settle behind the engine's back would have started the store's group already,
-        // stranding this one (docs/10, S5).
+        // stranding this one (docs/issues/10, S5).
         debug_assert!(
             self.store.holds_group(),
             "the store lost the staged group's writes"

@@ -528,8 +528,8 @@ struct Shared {
     /// Per queue: what wakes its thread when another thread completes one of its operations.
     /// Queue 0's is the node's eventfd, which the network and metadata threads signal too.
     wakes: Vec<Arc<EventFd>>,
-    /// The engine holds staged groups (docs/10): large writes are handed over as soon as each
-    /// is copied in, and counted in `arrivals` meanwhile.
+    /// The engine holds staged groups (docs/issues/10): large writes are handed over as soon as
+    /// each is copied in, and counted in `arrivals` meanwhile.
     holding: bool,
     /// The store's cluster size, for telling large writes.
     cluster_size: u64,
@@ -537,7 +537,7 @@ struct Shared {
     arrivals: Arc<AtomicUsize>,
 }
 
-/// A large write being copied in (docs/10, S4): counted in the device's arrivals while it
+/// A large write being copied in (docs/issues/10, S4): counted in the device's arrivals while it
 /// lives, so that a commit waiting for writes to gather waits for it too. Dropped when the
 /// write is handed to the engine, or its copy failed, or its task stops.
 struct Arrival<'a>(&'a AtomicUsize);
@@ -566,7 +566,7 @@ struct EngineCtx {
     /// Writes whose data is still being copied into the staging area (zero copy). The pump
     /// waits for them, so that they join the same group commit as the writes before them.
     /// Large writes, while the engine holds groups, are not counted here but in arrivals: they
-    /// go to the engine one by one (docs/10, S3).
+    /// go to the engine one by one (docs/issues/10, S3).
     staging: Cell<u32>,
     /// Arms this queue's timer for the end of a commit's wait for writes to gather.
     gather: std::cell::OnceCell<smol::channel::Sender<Instant>>,
@@ -982,7 +982,7 @@ fn run_device(
     if let Some(mib) = c.commit_target_mib {
         engine.set_commit_target_bytes(mib << 20);
     }
-    // Read after every engine setting above (docs/10, S3). A new counter per device: a count
+    // Read after every engine setting above (docs/issues/10, S3). A new counter per device: a count
     // left by a device that stopped mid-copy cannot hold the next one's commits.
     let (holding, cluster_size) = (engine.holding(), engine.cluster_size());
     let arrivals = Arc::new(AtomicUsize::new(0));
@@ -1142,7 +1142,7 @@ fn serve_with(qid: u16, dev: &UblkDev, ctx: &EngineCtx, zero_copy: bool) -> Resu
         })
     };
     // A commit waiting for writes to gather: pump when its wait ends. A timeout per wait, each
-    // in its own task, so that a short wait never queues behind a long one (docs/10).
+    // in its own task, so that a short wait never queues behind a long one (docs/issues/10).
     let (gather_tx, gather_rx) = smol::channel::unbounded::<Instant>();
     let _ = ctx.gather.set(gather_tx);
     let _gather = {
@@ -1412,7 +1412,7 @@ async fn engine_io_task_zc(
                 sys::UBLK_IO_OP_WRITE if n <= st.slot_len() => {
                     // A large write, while the engine holds groups, goes to it as soon as its
                     // own data is copied in, and is counted in arrivals meanwhile. The others
-                    // wait for one another, which gathers them (docs/10, S3).
+                    // wait for one another, which gathers them (docs/issues/10, S3).
                     let large = ctx.shared.holding
                         && flaminio_store::large(ctx.shared.cluster_size, offset, len);
                     // The write's data, from the request's pages into the staging slot.

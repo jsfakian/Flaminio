@@ -438,7 +438,8 @@ pub fn covers_cluster(cluster_size: u64, offset: u64, len: u64) -> bool {
 }
 
 /// A large write: one that [`covers_cluster`] and is at least 64 KiB. The engine's commit waits
-/// and the frontend treat these apart (docs/10): stageable writes of smaller clusters are not.
+/// and the frontend treat these apart (docs/issues/10): stageable writes of smaller clusters are
+/// not.
 pub fn large(cluster_size: u64, offset: u64, len: u64) -> bool {
     len >= 64 << 10 && covers_cluster(cluster_size, offset, len)
 }
@@ -1037,7 +1038,8 @@ impl<D: BlockDevice> Store<D> {
             return None;
         }
         // Behind a commit in flight; or, with hold_staged, with nothing in flight too: the
-        // write starts or joins the held group, its commit started by the caller (docs/10, S2).
+        // write starts or joins the held group, its commit started by the caller (docs/issues/10,
+        // S2).
         if self.in_flight.is_empty() && !self.hold_staged {
             return None;
         }

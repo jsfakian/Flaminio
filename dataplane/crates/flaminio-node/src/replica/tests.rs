@@ -454,7 +454,7 @@ fn pipelined_commits_answer_in_order() {
 }
 
 /// A service whose commits stay in flight until the test completes them, holding staged groups
-/// (docs/10).
+/// (docs/issues/10).
 fn held_service() -> ReplicaService<DeferredDevice> {
     let store = Store::open(DeferredDevice::new(formatted()), StoreConfig::default()).unwrap();
     let mut s = ReplicaService::new(store);
@@ -523,7 +523,7 @@ fn a_held_group_whose_commit_cannot_start_is_answered_with_the_error() {
 fn a_staged_write_outside_its_chunk_is_refused_not_a_panic() {
     // A peer's whole-cluster write past the end of a chunk that has a mapping table: staging
     // must refuse it before touching the chunk's tables, from a current session or a fenced one
-    // (the security review of docs/10). It then goes the plain way, where it is refused too.
+    // (the security review of docs/issues/10). It then goes the plain way, where it is refused too.
     let mut s = held_service();
     let (old, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let (cur, _) = s.hello(&accepted(2, 2, &[0])).unwrap();

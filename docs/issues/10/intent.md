@@ -1,7 +1,7 @@
 # Issue #10: 1M sequential writes at about 70% of raw — intent
 
 [Issue #10](https://github.com/jsfakian/Flaminio/issues/10), follow-ups §1, the
-[performance plan](../performance-plan.md) (W4).
+[performance plan](../../performance-plan.md) (W4).
 
 ## Why
 

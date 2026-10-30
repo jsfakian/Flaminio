@@ -64,8 +64,8 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
       --commit-target-mib N
                            a commit of large writes starts once it holds N MiB, or the client's
                            writes outstanding at the last commit (default 8). Its staged group
-                           is held meanwhile, its data written at once (docs/10). 0: gather by
-                           count and time only, as before
+                           is held meanwhile, its data written at once (docs/issues/10). 0: gather
+                           by count and time only, as before
       --flush-coalesce N   up to N commits share one fdatasync (0/1: off; 2: partner with
                            staged early data; needs --commit-target-mib 0). Default 0
       --sync-commits       commits block the queue thread until durable (as before commits
