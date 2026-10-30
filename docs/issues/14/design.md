@@ -105,7 +105,8 @@ Callers run it before stopping or formatting a node (`write_reset`, `write_whole
 
 `cmd_bench_writes`, `write_volume`.
 - **Before the first reset, decided over every volume before any removal:** `metactl volumes`
-  (ids), then `get` of each (`NotFound`: gone meanwhile, skipped); a volume's nodes are its
+  (ids), then `get` of each (`NotFound`: gone meanwhile, skipped;
+  any other error: exit 1; ssh's 255: 255); a volume's nodes are its
   chunks' replicas, and a moving chunk's source and destination, as `replicaNodes`. Any volume
   other than wbench and `$VOL` on `NODE`: exit 1, naming them, nothing removed. Only then, if
   `$VOL` is on `NODE`, `delete_volume "$VOL" "$node"`. A volume being created or deleted is not
