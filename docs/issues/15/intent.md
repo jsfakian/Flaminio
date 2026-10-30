@@ -2,6 +2,8 @@
 
 [Issue #15](https://github.com/jsfakian/Flaminio/issues/15), follow-ups §5, the
 [performance plan](../../performance-plan.md) (R3, R4).
+Settled choices and accepted risks: [decisions](decisions.md). Depends on #10 and #30 (a
+volume created again starts above every earlier epoch of its name).
 
 ## Why
 
@@ -156,10 +158,7 @@ on the attached device's queue thread, for the zero-copy local read path. The co
 - **Attaching several volumes at startup:** `--attach` still takes one.
 - **One lock per volume in the CSI node plugin.** Its one lock stays. Attaches are taken one at a
   time by the data plane anyway.
-- **Accepted risks, left to the node agent's work (#12),** both gaps that predate this issue:
-  - **who may delete a volume's replicas** (`delete VOLUME`): a check against the metadata
-    service's tombstone;
-  - **an epoch run again after a restart:** root, through the socket, can start a target at the
-    epoch of one that died with the node. The replicas' fences refuse only lower epochs.
+- **Who may delete a volume's replicas** (a gap that predates this issue): an accepted risk,
+  left to the node agent's work (#12) (decisions.md).
 - **Hardening the control socket** (a gap that predates this issue): a read timeout, and a cap
   on connections. The socket is root-only, and #12 moves it.
