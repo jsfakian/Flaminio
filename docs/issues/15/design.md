@@ -333,6 +333,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
 
   Then it deletes the device as a detach does (step 2 above: `DEL_DEV_ASYNC` on 6.9 and later,
   `DEL_DEV` on a thread before), and removes the record on the same `Ok` or `ENODEV` rule.
+  It deletes only a device that `GET_DEV_INFO` reports dead. The node starts without waiting
+  for a `DEL_DEV` thread; a thread still blocked at exit leaves its record for the next start.
   - **A recorded device that is not yet dead** (`GET_DEV_INFO`'s state is not `UBLK_S_DEV_DEAD`),
     as after an exit with a device thread blocked in `kill_dev`, is checked again for up to 5 s.
     - Then it is logged as an error, and its record is kept for the next start.

@@ -202,3 +202,7 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
   - `bench-ab` builds each revision with `git archive` into its own path, and passes the binary
     through `node_env`.
 - **No token expiry is checked.** Tokens carry `issued_at` only, as for sessions today.
+
+## Review
+
+- **The review loop ended with only Lows,** all fixed in the last revision.
