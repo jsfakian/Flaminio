@@ -32,7 +32,9 @@ type Op struct {
 // limit, with room to spare.
 const MaxTxnOps = 120
 
-// KV is the storage interface.
+// KV is the storage interface. Its revisions only grow, across restarts too: a volume's first
+// epoch is the revision of the claim that created it, above every epoch an earlier volume of its
+// name reached, only while they do (docs/issues/30).
 type KV interface {
 	// Get returns a key, or ok=false if it does not exist.
 	Get(ctx context.Context, key string) (e Entry, ok bool, err error)

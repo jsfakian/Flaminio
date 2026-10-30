@@ -189,6 +189,25 @@ impl<D: BlockDevice> ReplicaService<D> {
             return Err("a placed chunk is beyond the volume".into());
         }
         let uuid = volume_uuid(&a.claims.volume);
+        let first = a.claims.first_epoch;
+        if first > 0 {
+            // Chunks of the name fenced below the volume's first epoch are an earlier volume's:
+            // every epoch the volume's sessions fence and create at is above it, and every epoch
+            // an earlier volume reached is below it (docs/issues/30, S5). The store decides, and
+            // lands the commits in flight first; memory changes only once it has succeeded, so a
+            // failure leaves the rest for the next Hello.
+            self.store
+                .delete_volume(uuid, first)
+                .map_err(|e| format!("delete an earlier volume's chunks: {e}"))?;
+            if let Some(v) = self.vols.get(&uuid)
+                && self.core.fenced(v.id) < first
+            {
+                // Its fence and sessions were an earlier volume's: they end here.
+                let id = v.id;
+                self.vols.remove(&uuid);
+                self.core.remove_volume(id);
+            }
+        }
         if let Some(v) = self.vols.get(&uuid)
             && (v.chunk_size != chunk_size || v.size != size)
         {
@@ -752,28 +771,10 @@ impl<D: BlockDevice> ReplicaService<D> {
         if let Some(v) = self.vols.remove(&uuid) {
             self.core.remove_volume(v.id);
         }
-        // Epoch higher than any target's fence (docs/followups.md §8).
-        let indices: Vec<u64> = self
-            .store
-            .chunks()
-            .into_iter()
-            .filter(|c| c.key.volume == uuid)
-            .map(|c| c.key.index)
-            .collect();
-        for index in &indices {
-            match self.store.delete_chunk(
-                ChunkKey {
-                    volume: uuid,
-                    index: *index,
-                },
-                u64::MAX,
-            ) {
-                Ok(()) => {}
-                Err(StoreError::NoSuchChunk(_)) => {}
-                Err(e) => return Err(format!("delete chunk {index}: {e}")),
-            }
-        }
-        Ok(indices.len())
+        // Below an epoch higher than any target's fence (docs/followups.md §8), in one commit.
+        self.store
+            .delete_volume(uuid, u64::MAX)
+            .map_err(|e| format!("delete chunks: {e}"))
     }
 
     /// The epoch the volume of session `s` is fenced at now.

@@ -129,7 +129,10 @@ func TestController(t *testing.T) {
 	_, err = create("pvc-2", 1<<30, map[string]string{"replicas": "1", "chunkSize": "64Mi", "csi.storage.k8s.io/pvc/name": "x"}, blockCap())
 	wantCode(t, "block, 1 replica, 64 MiB chunks", err, codes.OK)
 
-	// Publishing moves the target; publishing again to it changes nothing.
+	// Publishing moves the target; publishing again to it changes nothing. The volume's epochs
+	// start at its first epoch (docs/issues/30).
+	v0, _ := m.GetVolume(ctx, "pvc-1")
+	first := v0.Epoch
 	publish := func(node string) uint64 {
 		t.Helper()
 		r, err := c.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{VolumeId: "pvc-1", NodeId: node, VolumeCapability: mountCap("")})
@@ -142,14 +145,14 @@ func TestController(t *testing.T) {
 		}
 		return v.Epoch
 	}
-	if e := publish("a"); e != 1 {
-		t.Fatalf("first publish: epoch %d", e)
+	if e := publish("a"); e != first+1 {
+		t.Fatalf("first publish: epoch %d, first %d", e, first)
 	}
-	if e := publish("a"); e != 1 {
-		t.Fatalf("repeated publish: epoch %d", e)
+	if e := publish("a"); e != first+1 {
+		t.Fatalf("repeated publish: epoch %d, first %d", e, first)
 	}
-	if e := publish("b"); e != 2 {
-		t.Fatalf("publish elsewhere: epoch %d", e)
+	if e := publish("b"); e != first+2 {
+		t.Fatalf("publish elsewhere: epoch %d, first %d", e, first)
 	}
 	_, err = c.ControllerUnpublishVolume(ctx, &csi.ControllerUnpublishVolumeRequest{VolumeId: "pvc-1", NodeId: "b"})
 	wantCode(t, "unpublish", err, codes.OK)
@@ -227,10 +230,13 @@ func TestNode(t *testing.T) {
 	m := metaFixture(t)
 	ctx := context.Background()
 	c := &Controller{Meta: m}
+	first := map[string]uint64{} // each volume's first epoch (docs/issues/30)
 	for _, name := range []string{"pvc-1", "pvc-2"} {
 		if _, err := c.CreateVolume(ctx, &csi.CreateVolumeRequest{Name: name, VolumeCapabilities: []*csi.VolumeCapability{mountCap("")}}); err != nil {
 			t.Fatal(err)
 		}
+		v, _ := m.GetVolume(ctx, name)
+		first[name] = v.Epoch
 	}
 	dp := &fakeDataplane{}
 	mnt := &fakeMounter{fs: map[string]string{}, mounts: map[string]string{}}
@@ -253,12 +259,12 @@ func TestNode(t *testing.T) {
 	}
 	// Staging starts the target under a new epoch, formats the empty device and mounts it.
 	wantCode(t, "stage", stage("pvc-1"), codes.OK)
-	if dp.volume != "pvc-1" || epoch("pvc-1") != 2 || mnt.formats != 1 || mnt.mounts[staging] != "/dev/ublk-pvc-1" {
+	if dp.volume != "pvc-1" || epoch("pvc-1") != first["pvc-1"]+2 || mnt.formats != 1 || mnt.mounts[staging] != "/dev/ublk-pvc-1" {
 		t.Fatalf("after stage: dataplane %+v epoch %d mounter %+v", dp, epoch("pvc-1"), mnt)
 	}
 	// Staging again (a kubelet retry) changes nothing.
 	wantCode(t, "stage again", stage("pvc-1"), codes.OK)
-	if dp.tokens != 1 || epoch("pvc-1") != 2 || mnt.formats != 1 {
+	if dp.tokens != 1 || epoch("pvc-1") != first["pvc-1"]+2 || mnt.formats != 1 {
 		t.Fatalf("restage: dataplane %+v epoch %d formats %d", dp, epoch("pvc-1"), mnt.formats)
 	}
 	// One volume per node.
@@ -283,8 +289,8 @@ func TestNode(t *testing.T) {
 	// After a restart of the data plane, staging again starts the target under yet another
 	// epoch: never the one it had.
 	wantCode(t, "stage after a restart", stage("pvc-2"), codes.OK)
-	if epoch("pvc-2") != 2 {
-		t.Fatalf("pvc-2 epoch %d", epoch("pvc-2"))
+	if epoch("pvc-2") != first["pvc-2"]+2 {
+		t.Fatalf("pvc-2 epoch %d, first %d", epoch("pvc-2"), first["pvc-2"])
 	}
 
 	// A device with something else on it is never formatted.

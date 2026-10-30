@@ -165,6 +165,40 @@ fn fencing_rejects_old_epochs() {
     );
 }
 
+/// `delete_volume` deletes the volume's chunks fenced below the given epoch, in one commit, and
+/// nothing else (docs/issues/30, S5).
+#[test]
+fn delete_volume_deletes_the_chunks_fenced_below_an_epoch() {
+    let mut s = new_store(16);
+    let other = flaminio_store::ChunkKey {
+        volume: flaminio_format::Uuid([0xBB; 16]),
+        index: 0,
+    };
+    for (k, epoch) in [(0, 9), (1, 9), (2, 9)] {
+        s.create_chunk(key(k), CHUNK, 4 * CHUNK, epoch).unwrap();
+    }
+    s.create_chunk(other, CHUNK, CHUNK, 1).unwrap();
+    s.write(key(0), 0, &block(1, 0), 1, 9).unwrap();
+    s.create_chunk(key(3), CHUNK, 4 * CHUNK, 21).unwrap();
+    let flushes = s.device().flushes();
+    assert_eq!(s.delete_volume(key(0).volume, 20).unwrap(), 3);
+    assert_eq!(s.device().flushes() - flushes, 1, "one commit");
+    assert_eq!(
+        s.delete_volume(key(0).volume, 20).unwrap(),
+        0,
+        "nothing left"
+    );
+    let s = reopen(s);
+    let mut left: Vec<_> = s.chunks().iter().map(|c| c.key).collect();
+    left.sort_by_key(|k| (k.volume.0, k.index));
+    assert_eq!(
+        left,
+        vec![key(3), other],
+        "durable, and nothing else deleted"
+    );
+    s.fsck(false).unwrap();
+}
+
 #[test]
 fn deleted_space_is_reused_only_after_a_checkpoint() {
     let mut s = new_store(16);

@@ -14,7 +14,7 @@ use flaminio_format::meta::{
 use flaminio_format::page::{PAGE_PAYLOAD_LEN, PageType, new_page, payload_mut, seal};
 use flaminio_format::superblock::Superblock;
 use flaminio_net::frame::Frame;
-use flaminio_net::token::{MAX_LEN as TOKEN_MAX_LEN, TokenKey};
+use flaminio_net::token::{MAX_LEN as TOKEN_MAX_LEN, TokenKey, decode_unverified};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use std::sync::LazyLock;
 
@@ -140,14 +140,23 @@ pub fn repl_frame(data: &[u8]) {
 /// Capability tokens come from the network: verification must never panic. The input is verified
 /// as it is (the length and signature checks), then signed as a token body, so mutations also
 /// reach the claims parser behind the signature check, as the CRC repairs do for the on-disk
-/// targets.
+/// targets. The body is also signed as version 2 (the version byte set, docs/issues/30), so the
+/// first epoch's rules are reached from every input, and the input is decoded without its
+/// signature, as the target's own replica decodes its attach token.
 pub fn capability_token(data: &[u8]) {
     let _ = TOKEN_KEY.verify(data);
+    let _ = decode_unverified(data);
     // A body too long for any token is refused before its signature: not worth signing.
     if data.len() + SIGNATURE_LEN <= TOKEN_MAX_LEN {
         let mut token = data.to_vec();
         token.extend_from_slice(TOKEN_SIGNER.sign(data).as_ref());
         let _ = TOKEN_KEY.verify(&token);
+        if data.len() > 4 {
+            let mut v2 = data.to_vec();
+            v2[4] = 2;
+            v2.extend_from_slice(TOKEN_SIGNER.sign(&v2).as_ref());
+            let _ = TOKEN_KEY.verify(&v2);
+        }
     }
 }
 
@@ -261,6 +270,16 @@ mod regressions {
             .verify(&token)
             .expect("a signed token verifies");
         assert_eq!((claims.volume.as_str(), claims.epoch), ("vol1", 7));
+
+        // As version 2, with a first epoch below the epoch (docs/issues/30).
+        body[4] = 2;
+        body.extend_from_slice(&3u64.to_be_bytes());
+        let mut token = body.clone();
+        token.extend_from_slice(super::TOKEN_SIGNER.sign(&body).as_ref());
+        let claims = super::TOKEN_KEY
+            .verify(&token)
+            .expect("a signed version 2 token verifies");
+        assert_eq!((claims.epoch, claims.first_epoch), (7, 3));
     }
 
     /// fuzz/deny.toml copies the data plane's cargo-deny policy (plus the NCSA exception for

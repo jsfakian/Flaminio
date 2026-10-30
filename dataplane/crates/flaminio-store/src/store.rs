@@ -1201,6 +1201,59 @@ impl<D: BlockDevice> Store<D> {
         })
     }
 
+    /// Deletes every chunk replica of `volume` fenced below `below` (`u64::MAX`: all of them),
+    /// and returns how many. One commit per journal batch of whole chunks: one, unless the
+    /// volume has more chunks here than a batch holds (over 100 000 at the default size). A
+    /// crash between two leaves only chunks still fenced below `below`, for the next call
+    /// (docs/issues/30, S5).
+    pub fn delete_volume(
+        &mut self,
+        volume: flaminio_format::Uuid,
+        below: u64,
+    ) -> Result<usize, StoreError> {
+        self.guard(|s| {
+            let slots: Vec<u32> = s
+                .state
+                .chunks
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.as_ref()
+                        .is_some_and(|c| c.key.volume == volume && c.fenced_epoch < below)
+                })
+                .map(|(slot, _)| slot as u32)
+                .collect();
+            let mut rest = &slots[..];
+            while !rest.is_empty() {
+                let mut batch = BatchBuilder::new(s.config.max_batch_bytes);
+                let mut n = 0;
+                while n < rest.len() {
+                    match batch.push(&Record::ChunkDelete { slot: rest[n] }) {
+                        Ok(()) => n += 1,
+                        Err(FormatError::BatchFull) if n > 0 => break,
+                        Err(FormatError::BatchFull) => {
+                            return Err(StoreError::invalid(
+                                "a chunk deletion fits no journal batch",
+                            ));
+                        }
+                        Err(e) => return Err(StoreError::Format(e)),
+                    }
+                }
+                let (group, after) = rest.split_at(n);
+                s.run(|_| {
+                    Ok(Plan::records(
+                        group
+                            .iter()
+                            .map(|&slot| Record::ChunkDelete { slot })
+                            .collect(),
+                    ))
+                })?;
+                rest = after;
+            }
+            Ok(slots.len())
+        })
+    }
+
     /// Per-block CRC-32C of what a read of `[offset, offset+len)` returns, from map metadata
     /// only: no data is read from the device. Unwritten and zero blocks read as zeros, so they
     /// get the zero block's CRC, and replicas compare by content whatever their layout.

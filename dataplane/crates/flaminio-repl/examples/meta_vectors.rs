@@ -3,7 +3,9 @@
 //! Drives [`Metadata`] through random sequences of `Attach`, `ChangeIsr` (with replica-set
 //! changes for moves) and `MoveReplica`, valid and not,
 //! and prints one JSON object per line: the request and the reply. The Go metadata service
-//! replays them (`meta/domain`), so both implementations follow the same table.
+//! replays them (`meta/domain`), so both implementations follow the same table. A volume is
+//! created at a first epoch (docs/issues/30): 0 for one seed in four, as for a volume created
+//! before it was recorded, otherwise a large one, so stale epochs fall below it too.
 //!
 //! `cargo run -p flaminio-repl --example meta_vectors > ../meta/testdata/isr-vectors.jsonl`
 
@@ -60,12 +62,17 @@ fn main() {
                     .collect()
             })
             .collect();
+        let first = if seed % 4 == 0 {
+            0
+        } else {
+            r.range(1, 1 << 52)
+        };
         let mut m = Metadata::default();
-        m.create_volume(1, min_isr, 4, placement.clone());
+        m.create_volume(1, first, min_isr, 4, placement.clone());
         let pl: Vec<String> = placement.iter().map(|p| nodes(p.iter().copied())).collect();
         writeln!(
             out,
-            "{{\"op\":\"create\",\"min_isr\":{min_isr},\"placement\":[{}]}}",
+            "{{\"op\":\"create\",\"first_epoch\":{first},\"min_isr\":{min_isr},\"placement\":[{}]}}",
             pl.join(",")
         )
         .unwrap();

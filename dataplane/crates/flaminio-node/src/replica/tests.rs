@@ -76,6 +76,7 @@ fn accepted(epoch: u64, session: u64, chunks: &[u32]) -> Accepted {
             epoch,
             node: "fl-a".into(),
             issued_at: 0,
+            first_epoch: 0,
         },
         size: 4 * CHUNK,
         chunk_size: CHUNK,
@@ -451,4 +452,205 @@ fn pipelined_commits_answer_in_order() {
         blocks(&r[0]),
         [vec![1u8; 16], vec![2; 16], vec![3; 16]].concat()
     );
+}
+
+/// A session of a volume created at first epoch `first` (docs/issues/30): its token carries it.
+fn accepted_first(first: u64, epoch: u64, session: u64, chunks: &[u32]) -> Accepted {
+    let mut a = accepted(epoch, session, chunks);
+    a.claims.first_epoch = first;
+    a
+}
+
+/// The store's chunks of the volume: (index, fenced epoch), sorted.
+fn chunks_of<D: BlockDevice>(s: &ReplicaService<D>) -> Vec<(u64, u64)> {
+    let mut c: Vec<(u64, u64)> = s
+        .store()
+        .chunks()
+        .iter()
+        .map(|c| (c.key.index, c.fenced_epoch))
+        .collect();
+    c.sort();
+    c
+}
+
+/// An earlier volume of the name left chunks 0 and 3, fenced at 9, with data. A new volume's
+/// first Hello drops them all, placed here or not, and starts afresh (docs/issues/30, S5).
+#[test]
+fn a_hello_drops_an_earlier_volumes_chunks() {
+    let mut s = service();
+    let (old, _) = s.hello(&accepted(9, 1, &[0, 3])).unwrap();
+    let r = s.handle(&[
+        (old, write(2, 0, 0, &[7], 1)),
+        (old, write(3, 3, 0, &[8], 2)),
+    ]);
+    assert!(r.iter().all(|r| matches!(r, Reply::Send(Frame::Ok { .. }))));
+    let (new, reply) = s.hello(&accepted_first(20, 21, 2, &[0, 1])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    assert_eq!(chunks_of(&s), vec![(0, 21), (1, 21)], "chunk 3 is gone");
+    let r = s.handle(&[(new, read(4, 0, 0, 2)), (new, read(5, 1, 0, 2))]);
+    assert_eq!(blocks(&r[0]), vec![0, 0], "the old data is gone");
+    assert_eq!(blocks(&r[1]), vec![0, 0]);
+    assert_eq!(s.fenced_epoch(new), 21);
+}
+
+/// Without a first epoch, a leftover fenced above the epoch deposes the session, as before; a
+/// volume whose first epoch is above it drops it.
+#[test]
+fn a_leftover_fenced_above_the_epoch_is_dropped_by_a_first_epoch_above_it() {
+    let mut s = service();
+    let (old, _) = s.hello(&accepted(30, 1, &[0])).unwrap();
+    s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    let (_, reply) = s.hello(&accepted(21, 2, &[0])).unwrap();
+    assert_eq!(reply, Frame::Stale { req: 1, fenced: 30 });
+    let (new, reply) = s.hello(&accepted_first(40, 41, 3, &[0])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    assert_eq!(blocks(&s.handle(&[(new, read(4, 0, 0, 1))])[0]), vec![0]);
+}
+
+/// An earlier volume of another chunk size no longer refuses the Hello: it is dropped first.
+#[test]
+fn a_leftover_of_another_geometry_is_dropped() {
+    let mut s = service();
+    let mut old = accepted(9, 1, &[0]);
+    old.chunk_size = 2 * CHUNK;
+    s.hello(&old).unwrap();
+    let (_, reply) = s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    assert_eq!(chunks_of(&s), vec![(0, 21)]);
+    assert_eq!(s.store().chunks()[0].chunk_size, CHUNK);
+}
+
+/// A volume's own chunks are fenced above its first epoch: its next Hello, after a restart too,
+/// deletes nothing.
+#[test]
+fn a_volume_keeps_its_own_chunks() {
+    let mut s = service();
+    let (sess, _) = s.hello(&accepted_first(20, 21, 1, &[0])).unwrap();
+    s.handle(&[(sess, write(2, 0, 0, &[7], 1))]);
+    let mut s = restart(s);
+    let (sess, reply) = s.hello(&accepted_first(20, 22, 2, &[0])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    assert_eq!(chunks_of(&s), vec![(0, 22)]);
+    assert_eq!(blocks(&s.handle(&[(sess, read(3, 0, 0, 1))])[0]), vec![7]);
+}
+
+/// A volume without a first epoch (created before it was recorded) is handled as before.
+#[test]
+fn without_a_first_epoch_nothing_is_dropped() {
+    let mut s = service();
+    let (old, _) = s.hello(&accepted(9, 1, &[0, 3])).unwrap();
+    s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    let (sess, _) = s.hello(&accepted(10, 2, &[0])).unwrap();
+    assert_eq!(chunks_of(&s), vec![(0, 10), (3, 10)]);
+    assert_eq!(blocks(&s.handle(&[(sess, read(3, 0, 0, 1))])[0]), vec![7]);
+}
+
+/// The earlier volume's sessions end at the drop, and its tokens are stale.
+#[test]
+fn an_earlier_volumes_sessions_end_at_the_drop() {
+    let mut s = service();
+    let (old, _) = s.hello(&accepted(9, 1, &[0])).unwrap();
+    s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
+    let r = s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    assert!(
+        matches!(&r[0], Reply::Close(why) if why.contains("unknown volume")),
+        "{r:?}"
+    );
+    let (_, reply) = s.hello(&accepted(9, 3, &[0])).unwrap();
+    assert_eq!(reply, Frame::Stale { req: 1, fenced: 21 });
+}
+
+/// A drop whose commit fails fails the Hello and changes nothing in memory; once the store is
+/// reopened, the next Hello drops the chunks.
+#[test]
+fn a_failed_drop_leaves_the_chunks_for_the_next_hello() {
+    let mut s = deferred_service();
+    let (old, _) = s.hello(&accepted(9, 1, &[0, 3])).unwrap();
+    let uuid = volume_uuid("pvc-1");
+    let id = s.vols[&uuid].id;
+    s.store().device().fail_commit();
+    assert!(s.hello(&accepted_first(20, 21, 2, &[0])).is_err());
+    assert_eq!(s.vols[&uuid].id, id, "the volume is still known");
+    assert_eq!(s.vols[&uuid].chunks, BTreeSet::from([0, 3]));
+    assert_eq!(s.fenced_epoch(old), 9, "the core's fence is unchanged");
+
+    let dev = s.into_store().into_device().into_inner();
+    let mut s = ReplicaService::new(Store::open(dev, pipeline_config()).unwrap());
+    assert_eq!(chunks_of(&s), vec![(0, 9), (3, 9)]);
+    let (_, reply) = s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    assert_eq!(chunks_of(&s), vec![(0, 21)]);
+}
+
+/// A drop larger than one journal batch commits in several: a crash between two leaves only
+/// chunks fenced below the first epoch, which the next Hello drops.
+#[test]
+fn a_crash_between_two_batches_of_a_drop_leaves_the_rest_for_the_next_hello() {
+    // Enough chunk slots for more chunks than a 4 KiB batch deletes (252).
+    const N: u64 = 300;
+    let dev = MemDevice::new(32 << 30);
+    let opts = FormatOptions {
+        disk_uuid: Uuid([1; 16]),
+        cluster_uuid: Uuid::NIL,
+        format_nonce: 9,
+        created_unix_secs: 0,
+        layout: LayoutParams {
+            journal_size: Some(16 * MIB),
+            ..Default::default()
+        },
+        label: String::new(),
+    };
+    Store::format(&dev, &opts).unwrap();
+    let small = StoreConfig {
+        max_batch_bytes: 4096,
+        ..StoreConfig::default()
+    };
+    let mut store = Store::open(dev, small.clone()).unwrap();
+    let uuid = volume_uuid("pvc-1");
+    for i in 0..N {
+        let key = ChunkKey {
+            volume: uuid,
+            index: i,
+        };
+        store.create_chunk(key, CHUNK, N * CHUNK, 9).unwrap();
+    }
+    let mut s = ReplicaService::new(store);
+    let mut a = accepted_first(20, 21, 1, &[0]);
+    a.size = N * CHUNK;
+    // The first batch's write and flush land; the second batch's write fails.
+    s.store().device().fail_after(Some(2));
+    assert!(s.hello(&a).is_err());
+
+    let dev = s.into_store().into_device().crash_keeping(|_| false);
+    let mut s = ReplicaService::new(Store::open(dev, small).unwrap());
+    let left = chunks_of(&s);
+    assert!(
+        !left.is_empty() && (left.len() as u64) < N,
+        "{} chunks left of {N}",
+        left.len()
+    );
+    assert!(left.iter().all(|&(_, fenced)| fenced == 9));
+    let (_, reply) = s.hello(&a).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    assert_eq!(chunks_of(&s), vec![(0, 21)]);
+}
+
+/// The drop lands an earlier session's commit in flight, and one staged behind it, first: their
+/// writes are answered, then their chunks go.
+#[test]
+fn a_drop_lands_the_commits_in_flight_and_staged_first() {
+    let mut s = deferred_service();
+    let (old, _) = s.hello(&accepted(9, 1, &[0])).unwrap();
+    assert!(s.start(&[(old, write(2, 0, 0, &[1], 1))]).in_flight());
+    assert_eq!(s.stage(&[(old, write(3, 0, 64, &[2; 16], 2))]), 1);
+    let (new, reply) = s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    assert!(!s.store().device().in_flight());
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 2 })]));
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 3 })]));
+    assert!(!s.commit_in_flight());
+    assert_eq!(chunks_of(&s), vec![(0, 21)]);
+    let r = s.handle(&[(new, read(4, 0, 0, 1)), (new, read(5, 0, 64, 1))]);
+    assert_eq!(blocks(&r[0]), vec![0]);
+    assert_eq!(blocks(&r[1]), vec![0]);
 }

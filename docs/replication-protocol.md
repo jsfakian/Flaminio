@@ -48,6 +48,13 @@ A target talks to each replica node over a **session**: one ordered connection, 
   durably sets `fenced_epoch := epoch`, makes `(epoch, session)` the volume's current session,
   clears its resync filters, and replies with its uncertain set for every chunk of the volume it
   holds.
+- **A volume created again** (docs/issues/30): its token carries its first epoch, above every
+  epoch an earlier volume of the name reached. Before the fence check, a replica deletes every
+  chunk of the name fenced below the first epoch, in one durable commit, and forgets the volume's
+  fence and sessions if they were only those chunks'. What it deletes is an earlier volume's:
+  every chunk and fence a volume's own sessions make is at one of its epochs, above its first
+  epoch. So the new volume neither adopts the earlier one's data nor is deposed by its fences,
+  and the earlier volume's sessions there end.
 - **Every other request** carries `(epoch, session)`:
   - `epoch < fenced_epoch` gets `Stale`;
   - any other session that is not the current one is **dropped** without effect.

@@ -76,6 +76,29 @@ func TestMem(t *testing.T) {
 	}
 }
 
+// TestMemRevisionStartsAtClock checks that a restarted in-memory store starts above the one
+// before it (docs/issues/30, S2).
+func TestMemRevisionStartsAtClock(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0)
+	m := kv.NewMem(func() time.Time { return now })
+	rev, ok, err := m.TxnRev(ctx, nil, []kv.Op{{Key: "/a", Value: []byte("1")}})
+	if err != nil || !ok || rev <= now.UnixMicro() {
+		t.Fatalf("first revision %d %v %v, want above %d", rev, ok, err, now.UnixMicro())
+	}
+	for range 100 {
+		if rev, _, err = m.TxnRev(ctx, nil, []kv.Op{{Key: "/a", Value: []byte("2")}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = now.Add(time.Second)
+	m2 := kv.NewMem(func() time.Time { return now })
+	rev2, ok, err := m2.TxnRev(ctx, nil, []kv.Op{{Key: "/a", Value: []byte("1")}})
+	if err != nil || !ok || rev2 <= rev {
+		t.Fatalf("restarted store at revision %d %v %v, want above %d", rev2, ok, err, rev)
+	}
+}
+
 func TestEtcd(t *testing.T) {
 	e := kvtest.Etcd(t)
 	defer e.Close()

@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = { version = "0.4.10", optional = true }
 flaminio-format = { path = "../crates/flaminio-format" }
-flaminio-net = { path = "../crates/flaminio-net" }
+flaminio-net = { path = "../crates/flaminio-net", features = ["unverified"] }
 # Signs the capability_token harness's tokens, so its inputs get past the signature check.
 ring = "0.17.14"
 

@@ -81,8 +81,8 @@ func serve(args []string) error {
 	fs.StringVar(&etcdFiles.Cert, "etcd-cert", "", "client certificate for etcd")
 	fs.StringVar(&etcdFiles.Key, "etcd-key", "", "client key for etcd")
 	fs.StringVar(&etcdFiles.CA, "etcd-ca", "", "CA bundle for etcd's certificates")
-	insecureMode := fs.Bool("insecure", false, "no TLS, no authentication, no tokens: development only")
-	storeKind := fs.String("store", "etcd", "etcd, or memory (development and tests: nothing is kept)")
+	insecureMode := fs.Bool("insecure", false, "no TLS, no authentication, no tokens (so the data plane refuses its volumes): development only")
+	storeKind := fs.String("store", "etcd", "etcd, or memory (development and tests: nothing is kept; revisions start at the clock)")
 	_ = fs.Parse(args)
 
 	opts := service.Options{TTL: *ttl}
