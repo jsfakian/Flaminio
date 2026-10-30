@@ -39,11 +39,15 @@ Settled in plan review rounds 1–4. Reviewers treat these as settled.
   restart can create the chunk.
 - **A fence-only record keeps the fence after the last chunk** (a slot state, a journal record,
   incompatible bit 2): within one volume, an older target must stay refused after a restart.
+  It is an allocated slot everywhere, hidden only from chunk lookups: no code that treats an
+  empty slot as free has to learn about it. One per volume; the volume's next chunk takes it.
+- **Its deletion is #30's `Store::delete_volume(uuid, below)`:** the slot goes only when its
+  fence is below `below`.
 - **Fence holders are listed in the volume's header**, added at the first confirmation, so the
   tombstone deletes their records.
 - **"A volume created again starts above every earlier epoch" is issue #30's,** not #13's, and
-  so is the vectors' first epoch. #13 gives #30 `Store::delete_volume`, which frees fence-only
-  slots too.
+  so is the vectors' first epoch, and `Store::delete_volume(uuid, below)`, to which #13 adds the
+  fence-only slot.
 - **No path for copies no record names:** they are deleted by hand once in the lab; this change
   makes none, but in its rollout window.
 - **`ListReleases` scans every chunk record, at most 1024 per call, no cursor:** small for the
