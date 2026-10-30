@@ -42,13 +42,21 @@ disks to claim one.
   - attach with a token;
   - detach any target;
   - delete any replica not attached there;
-  - hold and release attaches;
   - read the status.
 
   These can reach it:
   - root on the host;
-  - pods in the namespaces exempt from Pod Security (`kube-system`, `flaminio-system`);
-  - anyone who may create a namespace or label one `privileged`.
+  - pods in the namespaces exempt from Pod Security (`kube-system`, `flaminio-system`), the
+    privileged CSI node plugin among them;
+  - anyone who may:
+    - create a namespace, or label one `privileged`;
+    - `exec` or `attach` into pods in `flaminio-system`;
+    - use `nodes/proxy`;
+    - update the two DaemonSets;
+    - create k3s `HelmChart` objects, which run as privileged jobs;
+    - create PersistentVolumes, which Pod Security does not check. A hostPath PV at
+      `/run/flaminio` mounts in any namespace. The CSI controller's service account
+      (`flaminio-csi-controller`) may create them.
 - **In the lab, the node is the cluster.** fl-a and fl-b run etcd and the metadata service
   besides the data plane. So the pod nodes hold `token.key`, and the `meta`, `meta-etcd` and
   `etcd` keys (`scripts/lab.sh`, `cmd_pki`), and on fl-a the administrator's key. A
@@ -56,13 +64,23 @@ disks to claim one.
   - mint capability tokens;
   - change the metadata;
   - read or write any volume.
+- **The k3s server token** is cluster-admin. Until this change, it was on the data nodes, in
+  the agents' environment. The agents now join with an agent token. Rotating the server token
+  is out of scope, so it stays exposed until it is rotated.
 - **More ways in, and around:**
   - **Host networking:** the pod shares the node's network, and holds port 7411 on it.
   - **The exempt namespaces:** whoever can create pods in `flaminio-system` or `kube-system`
     gets the node, and here the cluster.
   - **The failover controller's service account** may patch nodes (`deploy/csi/rbac.yaml`).
-    It can set or remove the pod-node label, taints, and the upgrade's annotation.
-  - **The image** is built on a data VM. A compromised data VM can poison it for every node.
+    It can set or remove the pod-node label and taints.
+  - **The image** is built on a data VM, with `flaminio-agent` built on the operator's machine.
+    A compromised data VM can poison it for every node.
+  - **The kubelet's credentials:** a compromised data plane can read them from the host. It can
+    then label its node `flaminio.io/witness=true`, which draws the CSI controller and the
+    failover controller, and their administrator identity. It already holds the cluster's keys
+    in this lab.
+  - **The preStop wait** is bypassed by a deleter who shortens the grace period. That is a
+    crash under the volume.
 - **Keeping the keys off the pod nodes** means running the metadata members on nodes that run
   no data plane. That is a follow-up, and it may block any use beyond the lab.
 - **Expected to be superseded** by an ADR for privilege separation, which also ships the data
