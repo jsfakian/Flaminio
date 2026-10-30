@@ -38,18 +38,20 @@ new volume with the same id.
    deletes wbench's replicas on fl-a, fl-b and fl-c through each node's control socket
    (`node.sh delete`): "a new wbench (epoch 1 again) would be deposed by old replicas fenced at a
    later epoch". `node.sh delete` succeeds without deleting anything when the node is not
-   running, and the harness discards its output. Nobody then confirms for fl-c.
+   running (it logs to stderr only), and the harness discards its output. Nobody then confirms
+   for fl-c.
 6. **A wrong confirmation is worse than a blocked id.** A node's store names a volume by a hash
    of its name alone (`volume_uuid`, `flaminio-node/src/lib.rs`), and a new target's `hello`
    creates only the chunks a replica lacks, keeping those it has (`replica/mod.rs`). Replicas of
    an old volume left on a node that was confirmed become the new volume's chunks there: it
    serves the old volume's data. Those fenced at a later epoch depose the new target instead.
+   Re-creation under the same name is issue #30's.
 
 ## What we want
 
 1. `flaminio-meta` commands to list tombstones and to confirm a deletion for a node. Confirming
-   needs an explicit acknowledgement that the node's replicas are deleted, or that it is gone
-   for good, and says what it is about to confirm.
+   needs the node's own agent and an explicit acknowledgement that its replicas are deleted,
+   and says what it is about to confirm.
 2. The lab harness deletes a volume's replicas on every data node and waits for its tombstone
    to go. It never confirms by itself. A tombstone left pending for fl-c stops it at once, with
    the procedure to confirm by hand.
@@ -71,8 +73,9 @@ new volume with the same id.
   incarnation field, given by the listing and required by the confirmation, would close that. It
   changes the API; spec S13 records it for later.
 - **The CSI sweep** stays as it is.
-- **Confirming without an administrator or the node's agent** for a node gone for good. There
-  is no way to remove a node today.
+- **Confirming for a node gone for good.** Only a node's own agent confirms in this step: an
+  administrator could confirm for any stopped node, which still holds its replicas, and a
+  liveness lease cannot tell the two apart. Spec S13 records it.
 - **Replicas no record names,** such as a completed move's source: issue #13.
 - **The other paths that delete volumes with replicas on fl-c:** `meta-smoke` (`smoke-*`),
   `scripts/checks/resync.sh` (`resync-*`), and the CSI controller's deletions of PVCs. Their ids
