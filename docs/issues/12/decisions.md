@@ -66,8 +66,11 @@ These are settled. Each line gives the choice, then the reason.
 - **`ok attaching VOLUME`** is told apart from an attached answer, whose second word starts
   with `/dev/`. An old CSI plugin answers `ResourceExhausted`, which kubelet retries. No volume
   is named `attaching` (`pvc-<uuid>`).
-- **SIGTERM is blocked in every thread and taken by a `sigwait` thread,** so no ublk control
-  command is interrupted.
+- **SIGTERM is blocked, and taken by a `sigwait` thread,** so no ublk control command is
+  interrupted.
+  - `install()` runs first in `node::main`, not in `main.rs`: the other subcommands, `serve`
+    among them, keep SIGTERM's default.
+  - Its test is a harness-less test binary, as libtest's threads would take the signal.
 - **`status --none` passes when no socket answers,** so a preStop hook does not wait 3600 s for
   a data plane that never came up.
 - **`k8s-down` and `k8s-uninstall` refuse only on an answer naming an attach,** and `FORCE=1`

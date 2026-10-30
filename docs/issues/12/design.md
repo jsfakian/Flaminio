@@ -75,8 +75,9 @@ images.
 
 **The tag is content-derived:** `docker.io/flaminio/dataplane:<first 16 hex digits>` of the
 sha256 of:
-- the binaries' sha256 sums;
+- each binary's base name and sha256;
 - the base's digest;
+- `PLATFORM_ARCH`;
 - `image.sh` itself.
 
 It is computed before the build, since the tarball's own digest is not known while its tag is
@@ -123,11 +124,16 @@ for the startup `--attach` and its retry thread (`ublk.rs`). In one acquisition 
 2. sets `Attaching(volume)`;
 3. then sends `Control::Attach`. If the send fails, it sets `None` again.
 
+It calls `wake()` after releasing the lock: `wake()` takes the engine sender's mutex
+(`ublk.rs`).
+
 **Only the main thread** moves `Attaching` on: to `Attached`, or to `None` on an error or a
 dropped request.
 - So the state stays `Attaching` after the caller's own limit has passed, until the main thread
   ends the attach.
-- The startup retry thread's `done()` stops on `Attached`. It retries from `None`.
+- **The startup retry thread:**
+  - a refusal because the state is `Attaching` is retried like a failed attempt;
+  - a refusal because it is `Attached` stops the thread, as `done()` does.
 - `detach`'s wait loop (`control.rs`) waits for `None`.
 
 **`status`:**
@@ -158,6 +164,8 @@ refuse.
 
 **`ublk.sh up`** refuses where the socket answers, or `/dev/ublkc0` already exists. Its unit is
 active before `serve` fails, so an active unit does not prove it owns the id.
+- **A device left by a killed `serve`:** when the unit is inactive and no socket answers, the
+  refusal prints `flaminio-io del --id 0` to run.
 - **Why:** both used to delete their id whatever owned it.
 - **The mount check misses binds:** `findmnt` does not see a raw block volume bind-mounted for
   a pod.
@@ -181,9 +189,14 @@ active before `serve` fails, so an active unit does not prove it owns the id.
   `AtomicBool` (below).
 - **`requested()`:** safe.
 
-**The handler.** `install()` runs first in `main`, before any thread starts.
-- It blocks SIGTERM in the process's signal mask, so every thread inherits the block.
-- A dedicated thread runs `sigwait` and sets the flag.
+**The handler.** `install()` runs first in `node::main`, before that subcommand starts any
+thread.
+- **Why not in `main.rs`:** `main.rs` dispatches `replica`, `digest`, `node`, `serve` and
+  `del`, and only `node` checks `should_exit`. `ublk.sh down` stops `serve` with
+  `systemctl stop`, so `serve` must keep SIGTERM's default action.
+- **The mask:** it blocks SIGTERM in the calling thread's mask, which threads started after it
+  inherit.
+- **The flag:** a dedicated thread runs `sigwait` and sets it.
 
 No thread is interrupted, so ublk control commands never see `EINTR` (libublk ignores
 `submit_and_wait`'s errors, `ctrl.rs`).
@@ -244,9 +257,10 @@ VolumeAttachment of `csi.flaminio.io` remains.
   - every ISR full, and `minIsr`;
   - the data-plane pod's UID and revision are those read at step 1.
 - **Delete:**
-  `kubectl delete --raw /api/v1/namespaces/flaminio-system/pods/POD -f body.json
+  `kubectl delete --raw /api/v1/namespaces/flaminio-system/pods/POD -f -
   --request-timeout=30s`.
-  - `body.json` is a `DeleteOptions` with `preconditions.uid`.
+  - Its body, on stdin, is a `DeleteOptions` with `preconditions.uid`. No temporary file is
+    left on fl-w.
   - A pod replaced since the re-check is not deleted.
 - **Then** it waits for a pod on the node at the newest revision to be Ready (300 s), then for
   `served_isr_full` (900 s). On a time-out, it reports whether the old pod is still
@@ -274,7 +288,12 @@ pinning.
 - it removes `K3S_TOKEN` from `/etc/systemd/system/k3s-agent.service.env`;
 - it restarts the agent when either changed.
 
-**Modes:** every configuration file is written with `install -m 600` under `umask 077`.
+**The token still crosses the ssh command line to the agents,** in `ENV_VARS`. It is visible in
+`ps` for a moment. sudo no longer logs it.
+
+**Modes:** `config.yaml` and `agent-token` are created 0600 before any secret is written:
+`sudo install -m 0600 /dev/null FILE`, then the write. Today's `sudo tee` creates them 0644
+(`k3s.sh`).
 
 **When the configuration changes:** `install_k3s` returns early while the right version runs.
 So `server` and `agent` compare the configuration they write with the old one, and restart k3s
@@ -329,9 +348,11 @@ when it differs. A restart of the service leaves the pods running.
   - `out-of-service` tolerated by the data plane, and not by the node plugin.
 
 **Rust:**
-- **`flaminio-uring`, `sigterm`:** after `install()`, in a test binary of its own (it changes
-  the process's mask), `kill(getpid(), SIGTERM)` makes `requested()` true, and the process
-  lives on.
+- **`flaminio-uring`, `tests/sigterm.rs`:** declared as `[[test]]` with `harness = false`.
+  - Its own `main` calls `install()` before anything else, so libtest's threads, which would
+    take the signal, are never started.
+  - It then sends `kill(getpid(), SIGTERM)`: `requested()` becomes true, and the process lives
+    on.
 - **`flaminio-io`, `should_exit`:** true only for SIGTERM requested with the state `None`.
   False for `Attaching` and for `Attached`, and true once the state goes back to `None`: an
   exit after the next detach.
