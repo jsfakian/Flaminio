@@ -160,18 +160,28 @@ apart by that word.
 - **Token files:** `up` with `ATTACH` writes them with `install -m 600`.
   - `detach` deletes `/run/flaminio/<VOLUME>.token`.
   - `down` deletes the file named by the unit's `--token`, read from its `ExecStart`. That is
-    `/run/flaminio/<ATTACH>.token`.
+    `/run/flaminio/<ATTACH>.token`. With no `--token`, or an unreadable unit, it deletes no
+    token file, and says so.
 - **The token** still travels on command lines, as today (decisions, accepted risks).
 
 **`node.sh down` and `ublk.sh down`** delete a ublk device only while their own unit is active,
 and only that unit's id (1 and 0). Where the socket answers but the unit is inactive, they
 refuse.
 
+**`node.sh status` prints one sentinel line** about the socket, which the lab's checks match
+exactly:
+- `socket: absent`: no socket answers;
+- `socket: none`: it answers `ok none`;
+- `socket: <the answer>`: otherwise.
+
 **The pod-node guard.** `node.sh up`, `ublk.sh up` and `replica.sh up` refuse on a pod node,
 whether or not its data plane answers.
-- **The test:** `sudo k3s crictl pods --name flaminio-dataplane -q` prints a pod. The pod's
-  sandbox stays while its container is stopped.
-- **Where k3s is absent** (fl-c), the test finds nothing.
+- **The test:** `sudo k3s crictl pods --state ready --name '^flaminio-dataplane-' -q` prints a
+  pod. A ready sandbox stays while its container is stopped. The NotReady sandboxes of a removed
+  DaemonSet do not count.
+- **A `crictl` error where k3s is installed,** such as k3s stopped while its shims keep the
+  containers running: they refuse, unless the socket check prints `socket: absent`.
+- **Where k3s is absent** (fl-c), the guard passes.
 
 **`ublk.sh up`** also refuses where the socket answers, or `/dev/ublkc0` already exists. Its unit is
 active before `serve` fails, so an active unit does not prove it owns the id.
@@ -225,9 +235,11 @@ deleted before its data plane is up does not wait 3600 s.
 
 **`make k8s-down` and `make k8s-uninstall`:**
 They ask each pod node over ssh, not through Kubernetes, which may be the thing that is down.
-They run `run_on_vm NODE node.sh status` against `/run/flaminio/node.sock`.
-- **An answer that names an attach,** attached or attaching: they refuse.
-- **No answer from the socket:** they proceed.
+They run `run_on_vm NODE node.sh status`.
+- **They proceed** only when ssh exits 0 and the output is exactly `socket: absent` or
+  `socket: none`.
+- **Anything else refuses:** an attach, an ssh failure (an unreachable VM, a timeout), or
+  empty output.
 - **`FORCE=1`** skips the check.
 
 **`make csi-undeploy`:** it deletes `flaminio-test` first. It then refuses while any
@@ -355,7 +367,10 @@ when it differs. A restart of the service leaves the pods running.
   - `Status` on `ok attaching v` gives an attach of `v` in progress;
   - `Status` on `ok attaching /dev/ublkb3` gives volume `attaching`, attached at
     `/dev/ublkb3`;
-  - `device`, and the raw-block `NodePublishVolume`, return `Unavailable` while attaching.
+  - `device`, and the raw-block `NodePublishVolume`, return `Unavailable` while attaching;
+  - **`Detach`** (`dataplane.go`) on `error: v is attaching` gives an error that
+    `NodeUnstageVolume` returns as `Unavailable`. On "is not attached here", it still
+    succeeds.
 - **`deploy/` (a new `deploy/manifests_test.go`):** renders `dataplane.yaml` and `driver.yaml`
   with placeholder values, and checks every field listed under "The DaemonSet" above:
   - `/run/flaminio` mounted only by `flaminio-dataplane` and `flaminio-csi-node`;
@@ -450,6 +465,8 @@ when it differs. A restart of the service leaves the pods running.
      - attached, it keeps serving, and exits after the volume's detach.
    - **Refusals:** `make k8s-down`, `make k8s-uninstall` and `make csi-undeploy`.
    - **With Kubernetes down:** k3s stopped on fl-w, `make k8s-down` still refuses.
+   - **An unreachable node:** with fl-b's ssh blocked, `make k8s-down` refuses, naming fl-b.
+   - **k3s stopped on fl-a,** its data plane still up: `node.sh up` on fl-a refuses.
 7. **A crash.**
    - **Setup:** `crictl stop -t 0` on the data-plane container, with the test pod on fl-a.
    - **The data plane:** fl-a is alive again. A few container restarts are allowed, as the

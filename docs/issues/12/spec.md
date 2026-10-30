@@ -72,9 +72,10 @@ Settled choices and accepted risks are in [decisions.md](decisions.md). The mech
   detach.
 - **The out-of-service mark:** the data-plane pod runs under it, so the failover controller can
   lift it. The CSI node plugin does not, so nothing is staged under the mark.
-- **Lab commands that would kill containers without warning** refuse while a pod node's socket,
-  asked from the host, reports an attach: stopping or uninstalling k3s, and undeploying the driver. Removing the test
-  namespace first is allowed.
+- **Lab commands that would kill containers without warning** refuse unless every pod node's
+  socket, asked from the host, reports nothing attached. They refuse too when a node cannot
+  be asked. This covers stopping or uninstalling k3s, and undeploying the driver. Removing the
+  test namespace first is allowed.
 - **The units' `down`** (`make node-down`, `make ublk-down`) never deletes a ublk device its own
   unit does not serve.
 

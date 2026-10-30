@@ -79,8 +79,12 @@ These are settled. Each line gives the choice, then the reason.
   - A dead data plane does not.
 - **`detach` while attaching answers an error,** which the plugin maps to `Unavailable`. It does
   not wait for the attach to end: that is simpler, and kubelet retries.
-- **The units' `up` refuse on a pod node by its pod sandbox** (`crictl pods`), not by the
+- **`k8s-down` and `k8s-uninstall` proceed only on an exact sentinel** (`socket: absent` or
+  `socket: none`) with ssh exiting 0. An ssh failure looks like silence, so silence refuses.
+- **The units' `up` refuse on a pod node by its ready pod sandbox** (`crictl pods`), not by the
   socket. A stopped data plane must still block them.
+  - Where k3s is installed, a `crictl` error refuses unless no socket answers. With k3s stopped,
+    the shims keep containers running.
 - **The units' `down` deletes only a device its own active unit serves,** and refuses where the
   socket answers. They used to delete ids 1 and 0 whatever owned them.
 - **The kernel checks are those of ADR 0003,** `io_uring_disabled` must be 0 included. The ADR
