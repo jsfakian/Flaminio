@@ -38,6 +38,14 @@ first, and do not redo or re-litigate approved stages.
   earlier issues' documents before writing (`docs/issues/9/`, `docs/issues/10/`), and
   match their structure, terseness and numbering (spec rules S1, S2, …; a
   `## Tests` section listing store / engine / node / sim / lab checks).
+- **Decision log:** `docs/issues/<n>/decisions.md`: every choice settled
+  during the reviews (what, why, which finding raised it) and every accepted
+  risk. Reviewers get it and treat its entries as out of bounds unless the code
+  proves one wrong. A fix that adds a mechanism records why here.
+- **Spec budget:** the spec states behaviour and guarantees in about 150 lines
+  at most: no file:line facts, exit codes, flag spellings or test vectors —
+  those go in the design. When a fix would grow the spec past the budget, cut
+  something first.
 - **Results** (when the spec has measurements):
   `docs/benchmarks/<date>-<slug>.md`, with the data, scripts and command
   lines that produced it in `docs/benchmarks/data/<date>-<slug>/`; the
@@ -118,8 +126,11 @@ and security loops alike). After each round from the 5th on:
 
 ### 4. Code and security review loop
 
-Each round, run **two fresh reviewers in parallel** against `<base>..HEAD` in
-the issue's checkout, each given the spec and design paths:
+Each round, run **two fresh reviewers in parallel**, each given the spec,
+design and decision log paths: round 1 and the last round against
+`<base>..HEAD` in the issue's checkout, the rounds between against the fix
+commits since the previous round (delta reviews, as in the plan review loop),
+with the same 5-finding cap:
 - **Code review:** correctness against the spec rules, races and ordering,
   crash consistency, error paths, resource leaks and hangs, test coverage of
   every rule, simplification.
@@ -169,10 +180,29 @@ rule and "Done when" passes (or the user accepted what does not):
 
 Used at both gates: on intent and spec before the spec gate, and as the
 design review loop (with the design checks below) before the design gate.
-Each round, run **two fresh reviewers in parallel** (new subagents every
-round, so no round anchors on an earlier verdict). Give each the documents'
-paths, the issue, and the checkout; tell it to verify every claim against the
-code, not to trust the documents:
+
+**Who reviews:**
+- **Spec rounds:** one fresh reviewer per round, covering both the code and
+  the security checks below.
+- **Design rounds:** two fresh reviewers in parallel, one for each.
+- New subagents every round, so no round anchors on an earlier verdict.
+
+**What each round reviews:**
+- **Round 1, and the last round before a gate:** the whole plan.
+- **Every other round is a delta review:** the diff since the previous round
+  (`git diff` of the plan), a check that each earlier finding is fixed, and
+  anything the fix broke. It does not re-audit unchanged text.
+- Every reviewer gets the documents' paths, the issue, the checkout, the
+  decision log (its entries are settled), and the instruction to verify claims
+  against the code rather than trust the documents.
+
+**What a reviewer reports:**
+- **At most 5 findings**, most severe first, each Medium or worse with
+  evidence (file:line) and a fix.
+- **Lows and Nits:** a short list after them.
+- The checklists below say where to look; they are not quotas.
+
+**Checklists:**
 - **Plan code review:** facts (every file, function, number and behaviour
   claimed is what the code does); whether the rules achieve the issue's
   "Done when"; missed cases (concurrency, ordering, restarts and crashes,
@@ -203,10 +233,15 @@ code, not to trust the documents:
   order; changes to authorization, fencing or epochs; resources a party can
   exhaust; and whether the design's tests exercise those paths.
 
-Not clear → fix the documents for every Low-or-worse finding (or record in
-the document why a finding does not apply), and run a new round with fresh
-reviewers on the result. Keep a short log per round: findings by severity,
-and what changed.
+Not clear → fix the documents for every Low-or-worse finding, **cutting
+before adding**: prefer removing a rule or mechanism to guarding it. Record in
+the decision log each choice made, each accepted risk, and why a finding does
+not apply. Then run a new round on the result. Keep a short log per round:
+findings by severity, and what changed.
+
+**Shared root causes:** when the same root cause shows up in several issues'
+reviews, fix it once, in an issue of its own that the others depend on,
+instead of patching it in each plan.
 
 The loop runs until clear, or, from the 5th round on, until only Lows and
 Nits are left (**Severity**); those are listed and the gate goes ahead.
