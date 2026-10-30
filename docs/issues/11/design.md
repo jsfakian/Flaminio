@@ -18,7 +18,9 @@ to the front: the chunks in reverse order, each chunk's pieces in reverse, so th
 with the lowest chunk's first piece.
 - **`progress`** calls it after its loop over the chunks, before `send_meta` and `pump`;
 - **`on_reply`'s `Scope::Chunk` path** calls it after its single `advance_chunk`, before `pump`;
-- **`depose`** clears it. `pump` `debug_assert`s it is empty on entry.
+- **`depose`** clears it, and also every chunk's `locks` and the test-only list of fast reads
+  (below): a deposed target starts nothing, and `try_fast_read` refuses on it. `pump`
+  `debug_assert`s `newly_fenced` is empty on entry.
 
 Between the loop and `queue_newly_fenced`, nothing reads the queue: `advance_chunk` sets phases,
 sends `Settle` and `Mapped`, and proposes ISR changes. So the only difference from today is the
@@ -155,7 +157,7 @@ id and send time for this. `fail_peer` is unchanged.
   - each chunk's `locks` are exactly the extents of its locked `reads`, its `writes`, and its
     fast reads not yet finished (a `cfg(test)` list, added to in `try_fast_read` and taken from
     in `finish_fast_read`);
-  - on a deposed target, all of it empty and `bulk` 0.
+  - on a deposed target, all of it empty, every chunk's `locks` included, and `bulk` 0.
 
   It runs in every target test, and in the simulator under `cargo test`, debug and release.
 - **Stats** (`cfg(test)`, on the target): pumps that took the waited path; those with a resync
@@ -266,12 +268,12 @@ sits behind other work in queue order.
 | S2 | `with_nothing_waited_requests_go_in_queue_order` (a hand-written list: digests from chunk 0, a later-fenced chunk's ahead, a copy at the front) |
 | S3.2 | `a_read_on_a_middle_chunk_reconciles_it_first` (chunk 2 of 5, queued before the fence completes); `a_write_moves_its_chunk_ahead`; `waited_chunks_go_in_wait_order` (and `max_bulk` 2: both under way); `two_pieces_go_in_submission_order`; `repairs_of_a_chunk_not_waited_wait` |
 | S3.1, S3.3 | `waited_work_and_a_resync_alternate` (`max_bulk` 1, the waited chunk serves); `one_resync_item_in_flight_while_a_chunk_is_waited` (`max_bulk` 4, all four slots free in one pump) |
-| S3.4 | `a_chunk_stuck_fencing_caps_no_resync` (chunk 0 on [1, 2, 3] resyncing 3; chunk 1 on [1, 4], `min_isr` 2, node 4 down) |
+| S3.4 | `a_chunk_stuck_fencing_caps_no_resync` (chunk 0 on [1, 2, 3] resyncing 3; chunk 1 on [1, 4], `min_isr` 2. `with_chunks` waits until the target serves, so node 4 goes down after that, and the target restarts) |
 | S3, S7 | `resyncs_progress_while_a_member_flaps` (many chunks waited, periodic session failures) |
 | last start | `the_last_start_resets_when_nothing_is_waited` |
 | S4 | `aborted_rounds_leave_the_queue`; `every_client_operation_is_tried_with_every_slot_taken` |
 | S5 | `a_waited_read_returns_the_repaired_value`; `a_write_then_a_read_keep_their_order_while_waited` (and across a session failure); `fast_reads_wait_for_the_chunk_and_queued_operations`; `client_starts_match_todays_pump`; `overlapping_client_operations_start_in_queue_order` |
-| S6 | `a_waited_chunk_takes_the_next_free_slot` (`max_bulk` 4); `a_chunk_fenced_first_and_waited_goes_before_one_fenced_later` (chunks on [1, 2] and [1, 3], node 3's `Hello` held); `a_chunk_fenced_late_takes_the_next_free_slot` (the same placement, the other chunk's digests differing: its repairs go to the front behind the late chunk's digest, and today ahead of it); `a_waited_chunk_goes_ahead_of_repairs_queued_before_it`; `a_waited_digest_that_cannot_start_holds_nothing` |
+| S6 | `a_waited_chunk_takes_the_next_free_slot` (`max_bulk` 4); `a_chunk_fenced_first_and_waited_goes_before_one_fenced_later` (chunks on [1, 2] and [1, 3], node 3's `Hello` held, `max_bulk` 1); `a_chunk_fenced_late_takes_the_next_free_slot` (the same placement, `max_bulk` 1, the other chunk's digests differing: its repairs, queued at the front, start after the late chunk's digest; today, before it); `a_waited_chunk_goes_ahead_of_repairs_queued_before_it`; `a_waited_digest_that_cannot_start_holds_nothing` |
 | S8 | `a_digest_sent_again_does_not_pass_a_waited_chunk` (another chunk's digest fails in flight and goes to the front; `min_isr` = ISR size) |
 | S9 | `deposition_fails_waiting_operations`; the existing tests, unchanged |
 | fix | `a_digest_reply_of_the_wrong_length_frees_its_slot`; `a_reply_of_the_wrong_type_requeues_its_request` (a digest; a client read with an overlapping write queued behind it, which still starts after it); `a_copy_reply_of_the_wrong_type_frees_its_slot_once` (a copy, then a discard: released once, nothing re-queued, the resync aborted); `a_mapped_reply_of_the_wrong_type_aborts_the_round` |
@@ -279,9 +281,12 @@ sits behind other work in queue order.
 
 **`client_starts_match_todays_pump`:** 1 000 cases from the simulator's `Rng`. Two benches built
 the same way, one with `today_pump`, several chunks, some restarted so that they reconcile, every
-reconciliation reply held so that no phase changes. In half the cases a serving chunk resyncs,
-and its copy, discard and resync-digest replies are delivered, so slots free and the selection
-keeps acting; in the others `max_bulk` is the queue's length. The same random calls on both:
+reconciliation reply held so that no phase changes. In half the cases chunk 0 serves and
+resyncs, `max_bulk` is the reconciliation items plus 2, and its copy, discard and resync-digest
+replies are delivered, so slots free and the selection keeps acting. The holds are by named
+predicates that test the chunk (a `Digest` or `Read` of a chunk other than 0): a resync digest
+and a reconciliation digest are the same request to the same node. In the other half `max_bulk`
+is the queue's length. The same random calls on both:
 client reads and writes on random chunks and extents, overlapping, and fast reads. The client
 operations sent (reads and writes with a client, in order) and every `try_fast_read` answer must
 be equal.

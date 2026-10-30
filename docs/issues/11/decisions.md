@@ -66,6 +66,8 @@ Settled during the spec and design reviews. Each line: the choice, and why.
   `cfg(test)` check that the selection leaves serving chunks' locks and open sessions as they
   were:** the simulator never queues overlapping operations.
 - **The accounting check covers locks too:** the new pump starts work out of queue order.
+- **`depose` clears every chunk's locks and the fast-read list:** the lock check holds once
+  deposed; a deposed target starts nothing.
 - **The bench places chunks per chunk:** chunks fenced at different times need different nodes.
 - **The side-by-side test picks its runs by the `submit` count, not the pump's stats:** the
   pump under test does not decide which runs it is compared on.
