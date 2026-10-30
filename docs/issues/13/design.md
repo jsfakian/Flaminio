@@ -64,7 +64,8 @@ cannot change either after the listing (docs/issues/8, S3).
 - **`flaminio-agent sweep`** (`control/cmd/flaminio-agent`, logic in `control/agent/sweep.go`):
   the `sweep` certificate, the metadata endpoints, the control socket. It takes `flock` on
   `/run/flaminio-agent/lock`, non-blocking; held elsewhere, it exits 1. The directory, which the
-  CSI pod does not mount, is made if missing (`mkdir`, 0700), then checked with `lstat` (a
+  CSI pod does not mount, is made if missing (`mkdir`, 0700, not `MkdirAll`: a missing `/run` is
+  an error), then checked with `lstat` (a
   root-owned 0700 directory, not a link) before the file is opened with `O_NOFOLLOW`.
 - **The loop,** every 5 s: tombstones (`ListTombstones`, `delete VOLUME`, `ConfirmDeletion`), then
   releases. One step at a time; tombstone confirmations only between steps.
@@ -153,12 +154,16 @@ timeout it answers that the request may have begun; the agent confirms nothing f
   - replay refuses a `ChunkCreate` onto it, but for its own volume (below);
   - the checkpoint writes its state-4 header, not a free one;
   - opening the store loads state-4 headers into `chunks[s]`.
-- **Hidden from chunk lookups:** `by_key` and `chunks()` leave it out, so `ReplicaService::new`
-  does not recover a 0-block chunk 0; `fences()` lists it. `fence()` raises it, and counts it in
-  its highest and lowest.
+- **Hidden from chunk lookups:** opening the store does not add a state-4 slot to `by_key`;
+  `chunks()` filters fence-only slots out of `chunks.iter().flatten()`. So `ReplicaService::new`
+  does not recover a 0-block chunk 0; `fences()` lists them. `fence()` raises them, and counts
+  them in its highest and lowest.
+- **Replay:** a `ChunkDelete` of a fence-only slot frees it without touching `by_key`. A
+  `ChunkCreate` onto a fence-only slot of its own volume is allowed although the slot is taken,
+  and the new chunk keeps the higher of the two fences.
 - **One per volume:** a `ChunkCreate` of a volume that has a fence-only slot takes that slot
-  (`open_volume`'s first creation, a `BeginResync`'s), at its fence or above. Opening a store
-  that has two for a volume keeps the higher fence and frees the other.
+  (`open_volume`'s first creation, a `BeginResync`'s), at its fence or above. So a volume never
+  has two.
 - **Incompatible feature bit 2 (value 4)** (§3): set in the superblock before the first
   `FenceOnly` commits. `KNOWN_FEATURES_INCOMPAT` gains it. Bit 1 stays reserved for authenticated
   checksums, so `superblock.rs`'s unknown-bit test (value 2) stands. §3's "reserved for later"
@@ -267,7 +272,8 @@ released, not a fence holder, no tombstone pending for it). The format document.
   the chunk in the fence-only slot. Crash atomicity of the last delete. A checkpoint, then a
   restart, keeps the slot. Another volume's creation does not take it. `delete VOLUME` frees it,
   and it stays free after a restart. A `Hello` with a first epoch above 0 keeps it; one of a later
-  volume of the name (#30) drops it. Two for a volume at open: the higher kept. An old binary
+  volume of the name (#30) drops it. Replay of a `ChunkCreate` onto it, and of a `ChunkDelete` of
+  it. An old binary
   refuses bit 2. `inspect` counts fence-only slots.
 - **S8** (`flaminio-io`): `list` shows chunk slots and fence-only slots by hash; the socket is
   0600, root's.
