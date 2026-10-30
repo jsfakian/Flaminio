@@ -151,9 +151,13 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
   - `first_id` counts the recorded ids, is at least 0, and `--id -1` sets no floor.
 - **Lock order:** the registry, then the engine. The arrivals counters live in the engine.
 - **The device thread's failures** (`add_device`, `start_dev`, `START_LIMIT`) each answer the
-  attach, send `Detach`, remove the record, and end the entry. After a `start_dev` failure, a
-  stop flag and each queue's eventfd make the queue threads drop their rings, and the device is
-  deleted once all have exited.
+  attach, send `Detach`, remove the record, and end the entry.
+  - **Before a queue's loop:** fallible setup moves before `run_target` where it can. A queue that
+    still fails tells `start_dev`: by `notify_buffer_registration_complete(true)` without zero
+    copy, and by a `START_LIMIT` watchdog with zero copy. If the watchdog cannot end `START_DEV`,
+    the node aborts.
+  - **After `run_target` returns `Err`:** a stop flag and each queue's eventfd end the queue
+    loops. Exits are counted by drop guards, and the device is deleted once all are counted.
 - **A late-started device** reached running after the socket had answered its attach as timed
   out. It stays running, and counts against the limit.
 - **`pending_delete`** clears only when a delete finishes, even after a store error that does not

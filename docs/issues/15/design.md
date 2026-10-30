@@ -98,13 +98,25 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   with the reason. It sends `Input::Detach { volume, generation }`, removes the record, and
   ends the entry.
   - **`add_device` fails:** there is no device.
-  - **`run_target` returns `Err` before the callback** (`start_dev` failed). Its queue threads
-    were spawned and are not joined, and some may not have sent their FETCH yet, so deleting
-    the device alone does not end them.
-    - The thread sets a stop flag in `Shared`, and signals each queue's own eventfd.
-    - Each `q_fn` sees the flag, leaves its loop and drops its ring, which cancels a late FETCH.
-      It counts its exit in `Shared`.
-    - The thread waits for every exit, then deletes the device.
+  - **A queue that fails before its loop.** `start_dev` waits for every queue, so it must be
+    told:
+    - **Setup moves out:** per-queue setup that can fail and need not be on the queue's thread,
+      such as the staging, is done before `run_target`. What stays is the task ring and
+      `UblkQueue::new`.
+    - **Without zero copy:** a failure there calls `dev.notify_buffer_registration_complete(true)`.
+      `start_dev` then returns `EPERM`, and `run_target` returns `Err`.
+    - **With zero copy,** the kernel waits for every tag's FETCH. A watchdog, armed for
+      `START_LIMIT` before `run_target`, stops and deletes the device if the callback has not
+      run by then. The zero-copy test on Linux 7.0 shows whether that ends `START_DEV`. If it
+      does not, a queue failing before its loop panics, and the node aborts (S5).
+  - **`run_target` returns `Err` before the callback.** Some queue threads may be in their loop,
+    and are not joined.
+    - The device thread sets a stop flag in `Shared`, and signals each queue's own eventfd.
+      `is_done` is true once the flag is set.
+    - Each queue closure counts its exit with a drop guard. The count means it left its loop: its
+      ring and the device's character device go when the thread exits.
+    - The thread waits until the count reaches the returned `dev_info.nr_hw_queues` × the I/O
+      threads per queue, then deletes the device.
   - **Step 1's `START_LIMIT` runs out:** the callback stops the device itself, and returns.
     No fd was opened.
 - **A late-started device** is one whose attach the socket had already answered as timed out
@@ -243,8 +255,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - an attach that times out: `DeadlineExceeded`;
   - starting: `Unavailable`;
   - stopping: `FailedPrecondition`;
-  - an attach refused for its epoch (`: epoch:`, S11): `FailedPrecondition`. Kubelet's retry reuses the publish
-    context, so only a new `ControllerPublishVolume` recovers.
+  - an attach refused for its epoch (S11): `FailedPrecondition`. Kubelet's retry reuses the
+    publish context, so only a new `ControllerPublishVolume` recovers.
 - **The identity check** (`NodeStageVolume`, `NodePublishVolume`):
   1. `status VOLUME`;
   2. open the path, and `fstat` it: a block device, of that `major:minor`. The fd stays open
@@ -273,10 +285,12 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **The record:** `/run/flaminio/ublk/<id>`.
   - **Before `ADD_DEV`:** it is written with `O_EXCL`, holding the volume, the instance and the
     generation. If it already exists, that id is skipped.
-  - **After `ADD_DEV`:** it is replaced atomically, by a temporary file and a rename, with the
+  - **After `ADD_DEV`:** it is replaced atomically, by `.<id>.tmp` in the same directory and a
+    rename, with the
     `dev_info` that `ADD_DEV` returned. The kernel rewrites the flags, caps `nr_hw_queues` and
     `queue_depth`, and sets the owner, so only the returned `dev_info` can be compared later.
-  - It is removed on any `ADD_DEV` failure, and after the device's delete.
+  - It is removed on any `ADD_DEV` failure, and after the device's delete. The `first_id` scan
+    ignores `.tmp` files, and the cleanup removes them.
   - The CSI pod mounts `/run/flaminio` (#12's plan).
   - libublk's `/run/ublksrvd/<id>.json` goes with `run_target`'s own `stop_dev`. Only a crash
     leaves it, and the cleanup removes it.
@@ -310,7 +324,8 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - at or below the fence, including `u64::MAX` after a delete;
   - `claims.epoch` is not the volume's epoch.
 
-  The CSI node plugin matches `: epoch:`, and maps it to `FailedPrecondition` (S9).
+  The CSI node plugin matches the exact prefix `error: <requested volume>: epoch: `, not a
+  substring, and maps it to `FailedPrecondition` (S9).
 - **Refused epochs:**
   - one in `ran_epochs`, which is kept for the run;
   - one at or below the local replica's durable fence for the volume (`ReplicaCore`, recovered
@@ -404,7 +419,7 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **S9** (Go):
   - name validation; `list` and its fallback; `MaxVolumesPerNode` 1, or an error;
   - `ResourceExhausted` on `limit:`, `DeadlineExceeded` on an attach's timeout, and
-    `FailedPrecondition` on each of the three `: epoch:` answers;
+    `FailedPrecondition` on each of the three epoch answers, and not on another volume's;
   - starting gives `Unavailable`, stopping `FailedPrecondition`;
   - an older plugin's parse of the new `status`;
   - **`HostMounter`** (Linux, root, loop devices): a mismatch at the open, at the second status,
@@ -415,8 +430,9 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - a live device of another ublk server is left;
   - a record left by a failed `ADD_DEV` is gone, and one whose device is gone (`ENODEV`) is
     removed;
-  - forced `set_params` and `mlock` failures make `start_dev` fail: every queue thread exits, then
-    the device is deleted. This runs on the lab's kernel, and on the synchronous-delete fallback;
+  - **a forced failure before a queue's loop,** without and with zero copy, and a forced
+    `set_params` failure: `run_target` returns, every queue's exit is counted, then the device is
+    deleted. This runs on the lab's kernel, and on the synchronous-delete fallback;
   - a device thread's three failures (`add_device`, `start_dev`, `START_LIMIT`) each answer the
     attach, and end the entry;
   - **raw block:** a raw block pod's volume; then the data plane is killed, the CSI node plugin
