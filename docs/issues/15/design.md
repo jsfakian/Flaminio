@@ -125,17 +125,23 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
 - **A late-started device** is one whose attach the socket had already answered as timed out
   (#6, S2) when it reached running. It stays running, counts against the limit, and the caller's
   retry finds it through `status VOLUME`.
-- **After `run_target` returns:**
-  - the router purges the generation;
-  - the arrivals counter is removed;
-  - the device is deleted asynchronously (S10).
-  - **When a detach was requested** (a flag on the entry, set by the socket), the device thread
-    itself closes the fd and ends the entry, whenever `run_target` returns. So a detach whose
-    answer timed out still frees the slot.
-  - **On a deposition, or a stopped device,** with no detach requested: the entry stays stopping,
-    holding the fd, until a `detach`.
-- **Node shutdown** does not join a device thread blocked in `kill_dev`. It exits, and the next
-  start's cleanup deletes the recorded devices (S10).
+- **After `run_target` returns,** in this order:
+  1. the router purges the generation, and the arrivals counter is removed;
+  2. the device is deleted asynchronously (S10). The kernel has the command once it returns, and
+     ends the device at its last close, whether or not the process lives;
+  3. so the record can then go;
+  4. last, under the entry's lock, which also covers its state and its detach flag:
+     - flag set: the thread closes the fd and ends the entry;
+     - flag clear (a deposition, or a device that stopped on its own): it marks the entry
+       stopped, and keeps the fd.
+- **A detach, under the same lock:**
+  - on a stopped entry, it closes the fd and ends the entry itself;
+  - otherwise it sets the flag.
+
+  Neither side can miss the other.
+- **Node shutdown** ends with `process::exit`, as returning from `main` would wait for a device
+  thread blocked in `kill_dev`. The kernel stops such a device after the exit. The next start's
+  cleanup takes it (S10).
 - **Why mounting by path, then checking, is enough** (S9): while the node runs, ids are never
   reused, and the held fd keeps the gendisk and its minor alive. So between the check and the
   mount, the path can name only that device, or nothing.
@@ -248,12 +254,12 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **An attach refused for its epoch** answers `error: VOLUME: epoch: <reason>` (S11).
 - **`detach`, by state:**
   - starting: `error: VOLUME is attaching`;
-  - running, or stopping with no detach requested: it sets the entry's detach flag, and feeds
-    the stop channel if the device is still running (the device thread ends the target first);
-  - stopping with a detach already requested: it only waits;
-  - either way it waits up to 30 s, as today, for the entry to end, then answers `ok`. Past 30 s
-    it answers `error: VOLUME: the device did not stop within 30 s`. The device thread still ends
-    the entry when `run_target` returns;
+  - running or stopping: it takes the entry's generation, acts under the entry's lock (S2), and
+    feeds the stop channel if the device is still running (the device thread ends the target
+    first);
+  - it waits up to 30 s, as today, for that generation's entry to end, then answers `ok`. It
+    never waits on a newer entry of the volume. Past 30 s it answers `error: VOLUME: the device
+    did not stop within 30 s`, and the device thread still ends the entry later;
   - no entry: `error: VOLUME is not attached here`, today's wording.
 
 ## S9: the CSI node plugin (`control/csi`)
@@ -316,18 +322,22 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - A record without `dev_info`, from a crash between `ADD_DEV` and the rename, is logged and
     left alone.
 
-  Then it deletes the device with `DEL_DEV_ASYNC`. Anything else is logged and left alone.
+  Then it deletes the device with `DEL_DEV_ASYNC`.
+  - **A recorded device that is not yet dead,** as after an exit with a device thread blocked in
+    `kill_dev`, is checked again for up to 5 s. Then it is logged as an error, and its record is
+    kept for the next start.
+  - Anything else is logged and left alone.
 - **`DEL_DEV_ASYNC`** is in Linux 6.9 and later. Centaur's 6.8 headers lack it, and the lab runs
   7.0.
-  - libublk's control handle deletes when dropped (`UblkCtrlInner::drop`). The node reads the
-    kernel's release from `uname` at start. There is no feature bit for the command, and a
-    backport only takes the safe path.
+  - libublk's control handle deletes when dropped (`UblkCtrlInner::drop`). The node parses the
+    major and minor of the kernel's release from `uname` at start. A parse failure takes the
+    disowned path. There is no feature bit for the command, and a backport only takes the safe
+    path.
     - On 6.9 and later the handle is built with `UBLK_DEV_F_DEL_DEV_ASYNC`.
     - On an older kernel, which would only trace the failed command, the handle is disowned, and
       the node deletes the device itself, with `DEL_DEV` on a thread of its own.
     - Centaur's 6.8 runs the disowned path in a test.
   - `flaminio-io del` uses `del_dev_async`.
-  - On an older kernel, the synchronous `DEL_DEV` runs on a thread of its own.
 - **Scripts:**
   - `node.sh down` stops the unit, then deletes the recorded devices. A build without records,
     such as main in `bench-ab`, keeps today's `del --id` before the stop: `bench-ab` runs each
@@ -422,6 +432,11 @@ list                             ->  ok limit N [VOLUME STATE ...]
     - when `kill_dev` returns, the device thread ends the entry, closes the fd, and frees the
       slot;
     - a second detach meanwhile only waits;
+    - **the interleaving:** a detach that takes the lock just before, and just after, the device
+      thread's last step. Either way, the entry ends once;
+    - a detach waiting on generation G answers once G ends, even when a new entry of the volume
+      starts meanwhile;
+    - a recorded device that is not dead: it is checked again, then kept and logged;
   - with 10 000 inputs queued and two threads taking the lock in a loop, the lock wait and the
     heartbeat lateness stay under 100 ms;
   - queue threads leave the inputs to the engine thread.

@@ -147,11 +147,15 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
   any volume is attached.
 - **A detach ends the target before `kill_dev`,** as today, so that a target stuck on its ISR
   cannot block the device's stop. The socket waits 30 s at most.
-- **A requested detach is recorded on the entry,** and the device thread ends the entry when
-  `run_target` returns, so a timed-out detach leaks nothing. Shutdown does not join a thread
-  blocked in `kill_dev`; startup cleanup takes its device.
-- **`DEL_DEV_ASYNC` is chosen by the kernel's release** (`uname`, 6.9 and later). Otherwise the
-  control handle is disowned.
+- **One lock per entry covers its state and its detach flag.** The device thread's last step
+  ends the entry if a detach was requested, or else marks it stopped. A detach ends a stopped
+  entry itself, and otherwise sets the flag. A timed-out detach leaks nothing, and a detach
+  waits only on the generation it found.
+- **Shutdown uses `process::exit`,** and does not join a thread blocked in `kill_dev`. Startup
+  cleanup retries a recorded device that is not yet dead for a few seconds, then keeps its
+  record and logs it.
+- **`DEL_DEV_ASYNC` is chosen by the kernel's release** (`uname`'s major and minor, 6.9 and
+  later). Otherwise, or if it cannot be parsed, the control handle is disowned.
 - **`bench-ab` runs each revision's own `node.sh`.** Main writes no records, and needs its
   `del --id`.
 - **The startup record:**
