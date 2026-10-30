@@ -70,7 +70,7 @@ and that the client retries (`meta/kv/etcd.go`) finds the node confirmed: no lin
   The socket path is a variable passed to `python3` as an argument (`sudo` resets the
   environment).
 - **Callers that do not redirect stdout** get `>/dev/null`: `cmd_vol` (attach, detach),
-  `node_fault`'s detach, the CSI cleanup's, the drain test's, and `scripts/checks/reconcile.sh`.
+  `cmd_partition`'s detach, the CSI cleanup's, the drain test's, and `scripts/checks/reconcile.sh`.
 
 ## delete_volume (S5)
 
@@ -98,7 +98,8 @@ removal pass the campaign's node; `vol delete` passes none. In order:
    time-out: exit 255 if the last poll failed with 255, else 1, naming the pending nodes and
    `make csi-deploy`.
 
-ssh's 255 from any step exits 255. `unknown command` from `metactl`: exit 1 with `make meta-up`.
+ssh's 255 from any step exits 255; when it was fl-c's and fl-c's `created` flag exists, the
+message says fl-c's VM may be off. `unknown command` from `metactl`: exit 1 with `make meta-up`.
 Callers run it before stopping or formatting a node (`write_reset`, `write_whole`, the restore).
 
 ## The campaign (S6)
@@ -109,9 +110,9 @@ Callers run it before stopping or formatting a node (`write_reset`, `write_whole
   any other error: exit 1; ssh's 255: 255); a volume's nodes are its
   chunks' replicas, and a moving chunk's source and destination, as `replicaNodes`. Any volume
   other than wbench and `$VOL` on `NODE`: exit 1, naming them, nothing removed. Only then, if
-  `$VOL` is on `NODE`, `delete_volume "$VOL" "$node"`. A volume being created or deleted is not
-  listed (`ListVolumes`); the check holds at the campaign's start only (decisions, accepted
-  risks).
+  `get` finds `$VOL`, wherever it is, `delete_volume "$VOL" "$node"`, as today. A volume being
+  created or deleted is not listed (`ListVolumes`); the check holds at the campaign's start only
+  (decisions, accepted risks).
 - **`write_volume`:** after `node up`, it polls `ListNodes` until `NODE` is alive (bounded),
   creates wbench, and checks every chunk has a replica on `NODE`; else exit 1.
 - **The restore's drain loop** (`$VOL`'s replicas moved back) goes, with its comment, and the
@@ -124,8 +125,10 @@ Callers run it before stopping or formatting a node (`write_reset`, `write_whole
 on the node, as subcommands of one guest script, `scripts/guest/confirm.sh`, which takes the
 paths of `flaminio-meta`, `flaminio-agent` and the disk tool (`agent.sh`'s,
 `~/flaminio/dataplane/target/release/flaminio-disk`) as variables, and confirms as the node's
-agent (`/etc/flaminio/pki/agent.crt`). The workstation passes `TRUST_DOMAIN` (`ENV_VARS`), and
-`confirm.sh` passes `--trust-domain "$TRUST_DOMAIN"` to `confirm`.
+agent. The workstation passes, in `ENV_VARS`, `META=$(vmvar "$VM_A" WG):$META_PORT` and
+`TRUST_DOMAIN`; `confirm.sh` runs `/usr/local/bin/flaminio-meta` (where step 2 installs it) with
+`--server "$META" --cert /etc/flaminio/pki/agent.crt --key /etc/flaminio/pki/agent.key --ca
+/etc/flaminio/pki/ca.crt`, and `confirm` also with `--trust-domain "$TRUST_DOMAIN"`.
 1. **Workstation:** `vms_of <node>` must give exactly one VM, not in `vms_of cluster`; it is
    used for every later step. Else exit 1, before anything is installed.
 2. **Workstation:** builds `flaminio-meta` as `meta up` does; installs it on the node when its
@@ -137,7 +140,8 @@ agent (`/etc/flaminio/pki/agent.crt`). The workstation passes `TRUST_DOMAIN` (`E
 4. **Workstation:** `node.sh detach` on every data node, then again: the second round must
    answer only `not attached` or `not running`, and where `not running`, no `flaminio-io`
    process runs.
-5. **`confirm.sh delete`** (node): `flaminio-node` is active, and exactly one `flaminio-io`
+5. **`confirm.sh delete`** (node): `flaminio-node` is active (else it stops, naming `make
+   node-up VM=c`), and exactly one `flaminio-io`
    process runs, whose PID is the unit's `MainPID`: no stray process holds the control socket.
    `flaminio-agent disks`, as root, without `--serial`, with the disk tool: exactly one `ours`
    disk, whose `readlink -f` is the running unit's `--device` (`systemctl show flaminio-node`).
@@ -151,8 +155,8 @@ Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
 
 ## The one-time cleanup (S8)
 
-`make meta-up`; then `vol-confirm <volume> fl-c` for each volume `tombstones fl-c` lists; then
-`metactl tombstones` lists none.
+`make meta-up`; fl-c's node started (`make node-up VM=c`); then `vol-confirm <volume> fl-c` for
+each volume `tombstones fl-c` lists; then `metactl tombstones` lists none.
 
 ## Tests
 
@@ -168,7 +172,8 @@ Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
     another trust domain; an empty `--trust-domain`; a certificate file with the leaf second;
   - as the node's agent: the token before and after the positionals; stdout and stderr as
     above; the last confirmation frees the id; again, an unknown volume, a node not on the
-    tombstone: `{}`, exit 0, no `ConfirmDeletion`.
+    tombstone: `{}`, exit 0, no `ConfirmDeletion`;
+  - the usage text names `lab.sh vol-confirm`.
 - **S3** (`auth_test.go`): an administrator lists and confirms for any node; `io` may not
   confirm.
 - **S4** (`service_test.go`): the log line's fields, with the identity and the peer set in the
@@ -183,7 +188,7 @@ Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
     fake socket server: each status line and exit, for its answer, an inactive unit, an error;
   - `confirm.sh`: `common.sh` prepended, `pgrep` and `systemctl` stubbed, fakes at the given
     paths, a fake socket answering the deletes: each check's stop; `confirm` gets
-    `--trust-domain` with `TRUST_DOMAIN`;
+    `--trust-domain` with `TRUST_DOMAIN`, and `--server`, `--cert`, `--key` and `--ca` as above;
     the unit inactive, no `flaminio-io`, two, one whose PID is not `MainPID`; the disk check
     with none, two, the wrong one, a symlink to the right one; the second delete finding 1;
     `confirm` printing `{}`;
@@ -203,7 +208,8 @@ Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
       `unknown command`: the hint;
     - the campaign's start: `NODE` stopped, `$VOL` listed before another volume X, both on
       `NODE` (X through a moving chunk too): exit 1 naming X, no `FORMAT=1` start, no delete;
-      only `$VOL` on `NODE`: removed; a listed id whose `get` answers `NotFound`: skipped;
+      only `$VOL` on `NODE`: removed; `$VOL` existing, not on `NODE`: removed too; a listed id
+      whose `get` answers `NotFound`: skipped;
     - the restore: no `drain` or `undrain` call;
     - `write_volume`: creates only once `NODE` is alive; a chunk without a replica there: stop;
     - `vol-confirm`: `c`, `fl-c` accepted; `a`, `all`, `cluster`, `fl-w` refused before any

@@ -96,7 +96,8 @@ order, and otherwise confirms nothing:
 
 **S8. The stale tombstones, once,** by an operator, before the lab check, recorded in the PR:
 `vol-confirm` for every tombstone pending for fl-c (wbench, volb, and the one-off `smoke-*` and
-`resync-*` volumes), after the new `flaminio-meta` is deployed. Then none is left.
+`resync-*` volumes), after the new `flaminio-meta` is deployed and fl-c's node started. Then
+none is left.
 
 **S9. Unchanged.**
 - The service's rules and the API, comments included.

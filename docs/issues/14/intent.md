@@ -38,8 +38,8 @@ new volume with the same id.
    deletes wbench's replicas on fl-a, fl-b and fl-c through each node's control socket
    (`node.sh delete`): "a new wbench (epoch 1 again) would be deposed by old replicas fenced at a
    later epoch". `node.sh delete` succeeds without deleting anything when the node is not
-   running (it logs to stderr only), and the harness discards its output. Nobody then confirms
-   for fl-c.
+   running (it returns at once, logging nothing), and the harness discards its output. Nobody
+   then confirms for fl-c.
 6. **A wrong confirmation is worse than a blocked id.** A node's store names a volume by a hash
    of its name alone (`volume_uuid`, `flaminio-node/src/lib.rs`), and a new target's `hello`
    creates only the chunks a replica lacks, keeping those it has (`replica/mod.rs`). Replicas of
