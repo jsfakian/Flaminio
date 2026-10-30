@@ -14,7 +14,6 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
 - **`Node`** (new, `ublk.rs`) holds the engine, behind the same `Mutex`. With it:
   - the registry;
   - the router;
-  - the arrivals counters;
   - the instance;
   - the generation and op counters.
 - **The engine thread** (new) alone owns the input receiver. Queue threads' `pump_with` no longer
@@ -22,6 +21,9 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
 - **The main thread** takes attaches in turn (S1, below). Each attach that succeeds gets a device
   thread.
 - **`Shared`** keeps only a device's own state: its queues' wakes, its staging, its generation.
+- **Lock order:** the registry, then the engine. No thread takes the registry while it holds the
+  engine. The arrivals counters live in the engine (`Engine::add_arrivals`, `remove_arrivals`),
+  so `Engine::arrivals()` reads them under its own lock.
 
 **The router** (`Node::route`), called by whichever thread took the outputs:
 - `Done`, `LocalRead` and `Piece` go by op id to the waiting tag, through the table of op →
@@ -72,8 +74,9 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
     - every recorded id;
     - `--id`, less one;
 
-    plus one.
-  - **Later ids** only increase. An `EEXIST` from `ADD_DEV` moves to the next.
+    plus one, and at least 0. `--id -1`, the default, sets no floor.
+  - **Later ids** only increase. An `EEXIST` from `ADD_DEV`, or a record that already exists
+    (`O_EXCL`, S10), moves to the next.
   - `add_device`'s retry of its own id goes, and `--id`'s usage text says how ids are chosen.
 - **Generations and the instance:** from `Node`'s counters. The instance is a `u64` from
   `ring::rand::SystemRandom`, and `ring` is added to `flaminio-io`'s dependencies.
@@ -84,12 +87,25 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
   2. opens it `O_RDONLY`, without `O_EXCL`, and `fstat`s it. The entry keeps the fd and its
      `major:minor`;
   3. turns the entry running, and answers the attach;
-  4. blocks on the entry's stop channel, which three things feed:
+  4. blocks on the entry's stop channel, which three things feed. Its receiver is in a `Mutex`,
+     as the callback must be `Send + Sync + 'static`, like `ready_reply` today:
      - a `detach`;
      - the routed `Deposed`;
      - any queue closure returning;
   5. then runs `kill_dev`, and returns, so that `run_target` joins the queues and stops the
      device.
+- **Failures:** in each case the device thread answers the attach, if it is still waiting,
+  with the reason. It sends `Input::Detach { volume, generation }`, removes the record, and
+  ends the entry.
+  - **`add_device` fails:** there is no device.
+  - **`run_target` returns `Err` before the callback** (`start_dev` failed): its queue threads
+    were spawned and are not joined. The thread deletes the device asynchronously, which aborts
+    the queues, so they end with `QueueIsDown`. It logs them.
+  - **Step 1's `START_LIMIT` runs out:** the callback stops the device itself, and returns.
+    No fd was opened.
+- **A late-started device** is one whose attach the socket had already answered as timed out
+  (#6, S2) when it reached running. It stays running, counts against the limit, and the caller's
+  retry finds it through `status VOLUME`.
 - **After `run_target` returns:**
   - the router purges the generation;
   - the arrivals counter is removed;
@@ -173,13 +189,16 @@ Spec rules S1–S13 ([spec](spec.md)); settled choices in [decisions](decisions.
 - **Each engine turn** runs a step, after `settle_local`. `k` is sized so that 4 TiB (16 384
   chunks of 256 MiB) ends within 50 s.
 - **`pending_delete`:** while a volume is in it, the engine refuses its `Hello` and its `Attach`.
-  It is cleared when the delete ends, or on a store error.
+  It is cleared only when a delete finishes.
+  - A store error stops the delete, and leaves the volume in the set. Errors that do not poison
+    the store, such as `OutOfSpace` on the delete's commit, are among them.
+  - After a restart, the fence at `u64::MAX` refuses the same.
 - **A second `delete`** answers `error: VOLUME: a delete is under way`. The socket's 50 s ends the
   answer, not the delete.
 - **Crash ordering:**
   - **The fence comes first.** Its record is durable before any chunk is forgotten or deleted.
     So a restart in the middle finds every remaining chunk fenced at `u64::MAX`.
-  - **What that refuses:** every `Hello` and attach, at any epoch. A volume made again at a newer
+  - **What that refuses:** every `Hello` and attach, at any epoch below `u64::MAX`. A volume made again at a newer
     epoch (#30) cannot adopt these chunks.
   - **A later `delete`** ends the work.
   - **Today:** `delete_chunk` passes `u64::MAX` only to its epoch check, and writes no `Fence`.
@@ -210,9 +229,13 @@ list                             ->  ok limit N [VOLUME STATE ...]
 
 - **`NodeGetInfo`:** from `list`. A usage line from the data plane gives 1. Kubelet reads it when
   the plugin registers, so the plugin is restarted after the limit changes.
-- **`device`:** asks `status VOLUME`, and calls `Attach` when there is no entry. An attach that
-  times out gives `DeadlineExceeded`, and one refused as starting gives `Unavailable`, not
-  `Internal` (`node.go`, `device`). So kubelet retries, or unstages.
+- **`device`:** asks `status VOLUME`, and calls `Attach` when there is no entry. The plugin maps
+  its failures (`node.go`, `device`), not to `Internal`, so kubelet retries or unstages:
+  - an attach that times out: `DeadlineExceeded`;
+  - starting: `Unavailable`;
+  - stopping: `FailedPrecondition`;
+  - an attach refused for its epoch: `FailedPrecondition`. Kubelet's retry reuses the publish
+    context, so only a new `ControllerPublishVolume` recovers.
 - **The identity check** (`NodeStageVolume`, `NodePublishVolume`):
   1. `status VOLUME`;
   2. open the path, and `fstat` it: a block device, of that `major:minor`. The fd stays open
@@ -238,8 +261,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
 
 ## S10: crash and restart
 
-- **The record:** `/run/flaminio/ublk/<id>` holds the volume, the instance and the generation.
-  - It is written with `O_EXCL` before `ADD_DEV`.
+- **The record:** `/run/flaminio/ublk/<id>` holds the volume, the instance, the generation, and
+  `ADD_DEV`'s `dev_info`: flags, `nr_hw_queues`, `queue_depth`, `max_io_buf_bytes` and the
+  owner's uid.
+  - It is written with `O_EXCL` before `ADD_DEV`. If it already exists, that id is skipped.
   - It is removed on any `ADD_DEV` failure, and after the device's delete.
   - The CSI pod mounts `/run/flaminio` (#12's plan).
   - libublk's `/run/ublksrvd/<id>.json` goes with `run_target`'s own `stop_dev`. Only a crash
@@ -247,8 +272,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **At start:** for each record that parses, the node checks with `GET_DEV_INFO`:
   - the state is `UBLK_S_DEV_DEAD`;
   - there is no `UBLK_F_USER_RECOVERY`;
-  - the device's flags match those of the node that recorded it. The flags alone do not
-    identify Flaminio, as they are 0 without zero copy.
+  - every recorded `dev_info` field matches. The flags alone do not identify Flaminio, as they
+    are 0 without zero copy.
+
+  A record whose `GET_DEV_INFO` gives `ENODEV` is removed.
 
   Then it deletes the device with `DEL_DEV_ASYNC`. Anything else is logged and left alone.
 - **`DEL_DEV_ASYNC`** is in Linux 6.9 and later. Centaur's 6.8 headers lack it, and the lab runs
@@ -282,8 +309,11 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **`make multi-vol`** (new, `lab.sh`):
   1. creates `VOL2` beside `VOL`;
   2. attaches both on fl-a;
-  3. runs `write-load.sh` on both, with `DEV`, a seed and a 1 s fio log each. `write-load.sh`
-     takes `SEED`, `LOG` and `RUNTIME`;
+  3. runs `write-load.sh` on both, with `DEV`, a seed and a 1 s fio log each.
+     - `write-load.sh` takes `SEED`, `SIZE` and `LOG`, and writes its JSON next to `LOG`, not to
+       the shared `/tmp/write-verify.json`.
+     - Its length is set by `SIZE`, not by a runtime, so that the verify phase reads back
+       everything written;
   4. checks that neither log has an empty second;
   5. greps the node's log for S3's maxima, and records each volume's p99.
 - **Depose-one,** in the same target: `metactl attach VOL fl-b` while `VOL2`'s fio runs on
@@ -291,8 +321,13 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - `VOL`'s fl-a entry turns stopping, and `VOL2`'s fio must be clean.
   - The check then detaches `VOL` on fl-a itself, not through `cmd_vol attach`, which first
     detaches elsewhere.
-- **`make node-fault`** takes `VOL`. With `OTHER=VOL2`, it keeps that volume attached on fl-a and
-  under `write-load.sh` throughout, and checks it too. `make node-fault-both` runs it for each.
+- **`make node-fault`** takes `VOL`.
+  - With `OTHER=VOL2`, that volume is attached on fl-a, and under its own `write-load.sh`, through
+    fl-b's stop and restart. Its load must end, and verify, before the failover's `cmd_node down
+    a`, which ends its device too.
+  - So `OTHER` is checked through fl-b's restart only.
+  - `make node-fault-both` runs it twice, the volumes swapped, so that each one also goes through
+    the failover.
 - **The scripts with `/dev/ublkb1`** take the path from the attach: `node-fault`, `drain-test`,
   `chaos`, `partition`, `bench-reads`, `bench-writes`.
 
@@ -339,13 +374,16 @@ list                             ->  ok limit N [VOLUME STATE ...]
   - many chunks while two volumes are attached: their writes wait at most a turn and a commit;
   - a `Hello` and an `Attach` between turns are refused;
   - a second delete gets its answer;
+  - an `OutOfSpace` on a delete's commit, in the run, leaves the volume refused, and a later
+    delete finishes it;
   - **a crash after `begin_delete`:** after the restart, a `Hello` and an `Attach` at E + 1 are
     refused, and a new delete completes (store crash images).
 - **S8:** `status` with none, one, and three running and one starting; `status VOLUME`, `detach`
   and `list` in each state.
 - **S9** (Go):
   - name validation; `list` and its fallback; `MaxVolumesPerNode` 1, or an error;
-  - `ResourceExhausted` on `limit:`, `DeadlineExceeded` on an attach's timeout;
+  - `ResourceExhausted` on `limit:`, `DeadlineExceeded` on an attach's timeout, and
+    `FailedPrecondition` on an epoch refusal;
   - starting gives `Unavailable`, stopping `FailedPrecondition`;
   - an older plugin's parse of the new `status`;
   - **`HostMounter`** (Linux, root, loop devices): a mismatch at the open, at the second status,
@@ -354,7 +392,10 @@ list                             ->  ok limit N [VOLUME STATE ...]
 - **S10** (lab VM):
   - a restart with two volumes: the recorded leftovers are deleted;
   - a live device of another ublk server is left;
-  - a record left by a failed `ADD_DEV` is gone;
+  - a record left by a failed `ADD_DEV` is gone, and one whose device is gone (`ENODEV`) is
+    removed;
+  - a device thread's three failures (`add_device`, `start_dev`, `START_LIMIT`) each answer the
+    attach, and end the entry;
   - **raw block:** a raw block pod's volume; then the data plane is killed, the CSI node plugin
     restarted, and another volume attached. The stale bind's `rdev` is not the new device's.
 - **S11** (engine):

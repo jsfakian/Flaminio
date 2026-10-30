@@ -47,9 +47,9 @@ reason, and where it came from: rounds 1–4, prefixed F, M, Q and U; "author" f
 - A random instance id per run, of 64 bits or more. (M3, Q nit)
 - Deletion of a device is never synchronous. Where the kernel lacks the asynchronous delete, the
   synchronous one runs outside every lock. (Q2)
-- Startup deletes only recorded, dead devices with Flaminio's flags and without user recovery,
-  never by pid. Records are written before the device is added, and removed with the device's
-  libublk JSON after the delete. (M4, Q3, U Low)
+- Startup deletes only recorded, dead devices whose recorded dev_info matches, without user
+  recovery, never by pid. Records are written before the device is added, and removed after the
+  delete; a crash's leftover libublk JSON goes with them. (M4, Q3, U Low)
 - Stopping entries hold a slot, an fd and a thread until the CSI's detach. They are listed and
   logged when old. Root's detach is the remedy. (security Low 8, U Low)
 
@@ -143,9 +143,24 @@ Rounds Q7 and U4, and the full review; "still deleting" timeouts were cut.
   `cmd_vol attach`, which takes a new token.
 - **The startup `--attach`** takes the socket's reserve-and-token path.
 - **The startup record:**
-  - written `O_EXCL`, and removed on any `ADD_DEV` failure;
-  - matched by the instance and `dev_info`, not by the flags, which are 0 without zero copy;
-  - `first_id` counts the recorded ids.
+  - written `O_EXCL`, so an id whose record exists is skipped; removed on any `ADD_DEV` failure,
+    and when `GET_DEV_INFO` gives `ENODEV`;
+  - holds `ADD_DEV`'s `dev_info` (flags, queues, depth, I/O size, owner), all compared at
+    cleanup;
+  - `first_id` counts the recorded ids, is at least 0, and `--id -1` sets no floor.
+- **Lock order:** the registry, then the engine. The arrivals counters live in the engine.
+- **The device thread's failures** (`add_device`, `start_dev`, `START_LIMIT`) each answer the
+  attach, send `Detach`, remove the record, and end the entry.
+- **A late-started device** reached running after the socket had answered its attach as timed
+  out. It stays running, and counts against the limit.
+- **`pending_delete`** clears only when a delete finishes, even after a store error that does not
+  poison the store.
+- **The CSI node plugin maps an epoch refusal to `FailedPrecondition`.** Recovering takes a new
+  `ControllerPublishVolume`.
+- **`write-load.sh`** runs by size, not by runtime, so that its verify reads back everything
+  written, and keeps one output per run.
+- **`node-fault` with `OTHER`** checks the other volume through fl-b's restart only. Running it
+  with the volumes swapped covers both failovers.
 - **The CSI node plugin:**
   - it keeps step 2's fd open through `mkfs`, the mount and the check;
   - an attach's timeout is `DeadlineExceeded`, and a starting entry `Unavailable`, not

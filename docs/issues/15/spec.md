@@ -125,7 +125,8 @@ Terms:
 **S10. Crash and restart.**
 - **Every device ends with the process.** Each volume is attached again under a new epoch, or
   fails over.
-- **At start, the node deletes only its own leftovers:** recorded, dead, with Flaminio's flags.
+- **At start, the node deletes only its own leftovers:** recorded, dead, and matching what it
+  recorded.
   Others are never touched.
 - **The attach at startup** takes one volume, and retries while that volume is not attached.
 - **The store's recovery is unchanged.**
