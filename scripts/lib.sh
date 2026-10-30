@@ -218,8 +218,8 @@ wait_for() {
     done
 }
 
-# The span the raw jobs of bench-reads read (docs/9): a span of the volume's size, from where its
-# data starts on the node's disk, as the guest step `bench-reads.sh range` found it.
+# The span the raw jobs of bench-reads read (docs/issues/9): a span of the volume's size, from where
+# its data starts on the node's disk, as the guest step `bench-reads.sh range` found it.
 #   bench_reference SPAN FIRST END TOTAL DISK_BYTES
 # SPAN is the volume's size (16G); FIRST and END the range in GiB; TOTAL the bytes the traced
 # read took from the disk. Prints "OFFSET LENGTH" in GiB, or stops when the range cannot stand

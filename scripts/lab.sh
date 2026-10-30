@@ -1461,9 +1461,9 @@ drive_temp() {
 
 # MODE=zero-copy|verify, NODE (fl-b), REPS (3), RUNTIME (30): the volume VOL (vol1) on NODE
 # against NODE's raw data disk where the volume's data is: a span of the volume's size, from the
-# start of the range a traced read of the volume found (docs/9). FILL=1 writes the volume again
-# first. The node runs with QUEUES ublk queues (1) and POLL_US of polling (0); fio runs NUMJOBS
-# jobs (1) on both sides.
+# start of the range a traced read of the volume found (docs/issues/9). FILL=1 writes the volume
+# again first. The node runs with QUEUES ublk queues (1) and POLL_US of polling (0); fio runs
+# NUMJOBS jobs (1) on both sides.
 cmd_bench_reads() {
     local node mode=${MODE:-zero-copy} reps=${REPS:-3} runtime=${RUNTIME:-30} span size
     local dir raw zc=0 r spec name rw bs qd side dev off jspan row t0 t1 since

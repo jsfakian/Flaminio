@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Runs every dataplane cargo-fuzz target for FUZZ_SECONDS each (follow-ups §6, docs/4/spec.md),
-# with its committed regression inputs as a second corpus directory, which libFuzzer reads but
-# never writes. Every target runs even after one fails; the script fails at the end, naming them.
-# Installs the nightly toolchain (NIGHTLY, default nightly) and cargo-fuzz when missing.
+# Runs every dataplane cargo-fuzz target for FUZZ_SECONDS each (follow-ups §6,
+# docs/issues/4/spec.md), with its committed regression inputs as a second corpus directory, which
+# libFuzzer reads but never writes. Every target runs even after one fails; the script fails at the
+# end, naming them. Installs the nightly toolchain (NIGHTLY, default nightly) and cargo-fuzz when
+# missing.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"

@@ -102,7 +102,7 @@ the read"). The frontends answer it with EIO, as they answer every error except 
 
 ```rust
 /// The client read `req`, sent to `from` at `epoch` on `session`, failed there without a
-/// reply (a local read, docs/5). It is sent again to another ISR member, and `from` stays a
+/// reply (a local read, docs/issues/5). It is sent again to another ISR member, and `from` stays a
 /// member.
 pub fn on_read_failed(&mut self, now: Time, from: NodeId, epoch: Epoch, session: u64, req: u64)
 ```

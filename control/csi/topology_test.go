@@ -32,7 +32,7 @@ func TestTopologyFromKube(t *testing.T) {
 }
 
 // The topology sync waits for the data plane's registration, then adds its labels and keeps
-// whatever address the data plane registered (docs/7).
+// whatever address the data plane registered (docs/issues/7).
 func TestRegisterTopologyKeepsTheDataPlanesAddress(t *testing.T) {
 	ctx := context.Background()
 	m := metaFixture(t)

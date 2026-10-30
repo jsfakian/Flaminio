@@ -735,7 +735,7 @@ fn direct_reads_from_the_local_replica() {
 }
 
 /// The request timeout of the hand-driven engines: a failed local read must be answered well
-/// within it, not after it (docs/5).
+/// within it, not after it (docs/issues/5).
 fn request_timeout() -> Duration {
     Duration::from_micros(Timing::default().request_timeout)
 }
@@ -820,7 +820,7 @@ fn fail_local_read(
     engine.local_read_done(Instant::now(), &lr, None, false);
 }
 
-/// A failed local read on a single-replica volume ends at once, with an error (docs/5), not
+/// A failed local read on a single-replica volume ends at once, with an error (docs/issues/5), not
 /// after the request timeout, and the local replica stays in the ISR.
 #[test]
 fn a_failed_local_read_on_the_only_replica_fails_at_once() {
@@ -869,8 +869,8 @@ fn a_failed_local_read_on_the_only_replica_fails_at_once() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A failed local read on a replicated volume is read from the other replica at once (docs/5),
-/// and the local replica stays in the ISR.
+/// A failed local read on a replicated volume is read from the other replica at once
+/// (docs/issues/5), and the local replica stays in the ISR.
 #[test]
 fn a_failed_local_read_is_read_from_the_other_replica() {
     let dir = std::env::temp_dir().join(format!("flaminio-failed-two-{}", std::process::id()));
@@ -927,7 +927,7 @@ fn a_failed_local_read_is_read_from_the_other_replica() {
 
 /// A failed local read reported after its target was deposed and replaced is ignored, even
 /// when the new target's read in flight has the same session and request numbers: that read
-/// completes, from one local read, well within the request timeout (docs/5). Requests are
+/// completes, from one local read, well within the request timeout (docs/issues/5). Requests are
 /// numbered from 1 by each target, so the old target sends a few more before its read, and the
 /// new one reads until its read gets the same number.
 #[test]
@@ -1042,8 +1042,8 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
 
 /// A local read that fails because a newer target fenced the replica meanwhile is answered
 /// `Stale`, which deposes the target, rather than sent to another member or ended as
-/// unreadable (docs/5). fl-b becomes the volume's target at epoch 2 and fences fl-a's replica
-/// while fl-a's target, at epoch 1, has a local read in flight. fl-a's target neither
+/// unreadable (docs/issues/5). fl-b becomes the volume's target at epoch 2 and fences fl-a's
+/// replica while fl-a's target, at epoch 1, has a local read in flight. fl-a's target neither
 /// heartbeats nor refreshes during the test, so the failed read is what tells it.
 #[test]
 fn a_local_read_failed_by_a_fence_deposes_the_target() {
@@ -1161,7 +1161,7 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
 
 /// An attach dropped before the metadata service answered (its frontend gave up waiting) must
 /// leave nothing behind: its late answers, data or failures, neither start a target nor touch a
-/// new attach of the volume (docs/6, S3). The metadata answers wait in the engine's input
+/// new attach of the volume (docs/issues/6, S3). The metadata answers wait in the engine's input
 /// channel until the test hands them over, so they can come late, or be swapped for failures.
 enum Late {
     /// Hand the answers over after the detach, then attach again.
@@ -1344,7 +1344,7 @@ fn late_failures_of_a_dropped_attach_leave_a_new_attach_alone() {
 }
 
 /// A registration the metadata service refuses (contended, or unreachable at start) is sent
-/// again, heartbeats or not, and so is one the service lost (docs/7): the node does not stay
+/// again, heartbeats or not, and so is one the service lost (docs/issues/7): the node does not stay
 /// unregistered, and never live, until a restart.
 #[test]
 fn a_refused_or_lost_registration_is_sent_again() {

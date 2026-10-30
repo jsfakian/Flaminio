@@ -510,7 +510,7 @@ struct Shared {
     /// The store's device, for the local reads the tag tasks perform, and its path, for logs.
     fd: RawFd,
     device: String,
-    /// A zero-copy read was copied through the staging area, and logged (docs/5): once per
+    /// A zero-copy read was copied through the staging area, and logged (docs/issues/5): once per
     /// device, as a line per read would flood the log under a workload misaligned on purpose.
     staged: AtomicBool,
     /// Op id → the waiting tag task's queue and channel.
@@ -688,12 +688,12 @@ pub enum Control {
         token: Vec<u8>,
         reply: mpsc::Sender<String>,
         /// When the caller stops waiting. The node skips a request that it would begin after
-        /// it, and bounds the attach's steps by it (docs/6, S2).
+        /// it, and bounds the attach's steps by it (docs/issues/6, S2).
         deadline: Instant,
     },
 }
 
-/// How long an attach waits for the metadata service to answer the target's start (docs/6).
+/// How long an attach waits for the metadata service to answer the target's start (docs/issues/6).
 pub(crate) const METADATA_LIMIT: Duration = Duration::from_secs(30);
 /// How long adding the ublk device is retried while a previous device with its id goes away.
 pub(crate) const ADD_DEVICE_LIMIT: Duration = Duration::from_secs(10);
@@ -744,7 +744,7 @@ pub fn serve_node(
         let (first, mut answer) = request(&volume, &token);
         ctl_tx.send(first).expect("own channel");
         // Nobody else retries an attach at startup: after a cluster restart, the metadata
-        // service may take a while to answer, or refuse connections (docs/6). A failure is
+        // service may take a while to answer, or refuse connections (docs/issues/6). A failure is
         // tried again every 5 s for up to 5 minutes, while the node has no other volume.
         let (ctl, attached) = (ctl_tx.clone(), attached.clone());
         thread::spawn(move || {
@@ -796,7 +796,7 @@ pub fn serve_node(
                     volume,
                     token,
                     // The target's start and adding the device end by then: the rest is left
-                    // for starting the device (docs/6).
+                    // for starting the device (docs/issues/6).
                     steps_by: deadline.checked_sub(START_LIMIT).unwrap_or(deadline),
                 };
                 let result = if Instant::now() >= request.steps_by {
@@ -865,7 +865,7 @@ fn attach_and_serve(
             }
             _ => {
                 // Drop the attach in the engine: an answer that comes later must not start a
-                // target that no device serves (docs/6, S3).
+                // target that no device serves (docs/issues/6, S3).
                 parts.engine.handle(
                     Instant::now(),
                     Input::Detach {
@@ -1289,7 +1289,7 @@ async fn engine_io_task(
 /// Reads one piece from the local store into the tag's buffer, on this ring, as the MVP's
 /// reads did: the engine plans it, the device reads run while the event loop keeps going, and
 /// the checksums are verified at the end. A mismatch is planned and read once more before the
-/// read counts as failed, which makes the target read it from another ISR member (docs/5).
+/// read counts as failed, which makes the target read it from another ISR member (docs/issues/5).
 async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx, lr: LocalRead) {
     let (at, n) = (lr.at, lr.len);
     for attempt in 0..2 {
@@ -1485,7 +1485,7 @@ async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCt
 /// Carries out a planned read with zero copy: the device reads land in the request's pages at
 /// `at`, and the plan's zero-filled ranges are copied in from the tag's staging slot. A device
 /// read the disk refuses with EINVAL, because the request's pages are not aligned for direct
-/// I/O on it, is done again through the staging slot (docs/5, S1).
+/// I/O on it, is done again through the staging slot (docs/issues/5, S1).
 async fn zc_read_plan(
     q: &UblkQueue<'_>,
     tag: u16,

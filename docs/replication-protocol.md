@@ -101,7 +101,7 @@ being removed may already be out of the metadata service's ISR, so a new target 
 it (§6). Under this rule, an old target only ever reads from members of the metadata service's
 current ISR.
 
-**Failed local reads** (`Target::on_read_failed`, docs/5). The data plane reads the local
+**Failed local reads** (`Target::on_read_failed`, docs/issues/5). The data plane reads the local
 replica's store itself, so a local read can fail with no reply: a device read error, or a
 checksum mismatch. The data plane then reports the failure at once.
 - **The read is sent again** to another read source, ahead of the reads queued after it.

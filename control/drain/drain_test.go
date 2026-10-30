@@ -184,7 +184,7 @@ func v2Moved(t *testing.T, c metav1.MetadataServiceClient, p Progress) {
 }
 
 // A volume deleted after a step listed it, before the step's move of its chunk: the step skips
-// it, without counting it, and goes on to the next volume, instead of failing (docs/8).
+// it, without counting it, and goes on to the next volume, instead of failing (docs/issues/8).
 func TestDrainSkipsAVolumeDeletedBeforeItsMove(t *testing.T) {
 	var svc *service.Service
 	c, s := client(t, deleteBefore(&svc, t, func(req any) bool {

@@ -678,7 +678,7 @@ func register(ctx context.Context, s *Service, id, addr string, labels map[strin
 }
 
 // Two registrations of a node that interleave, one between the other's read and write, keep
-// both their labels (docs/7): with no record yet, and with one.
+// both their labels (docs/issues/7): with no record yet, and with one.
 func TestRegisterNodeInterleavedKeepsLabels(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -717,7 +717,7 @@ func TestRegisterNodeInterleavedKeepsLabels(t *testing.T) {
 }
 
 // Twenty registrations of a node at once, each with its own label, all succeed and leave every
-// label (docs/7).
+// label (docs/issues/7).
 func TestRegisterNodeConcurrentKeepsLabels(t *testing.T) {
 	stores(t, func(t *testing.T, s *Service) {
 		ctx := context.Background()
@@ -778,7 +778,7 @@ func TestRegisterNodeOverwritesAnUnparseableRecord(t *testing.T) {
 }
 
 // A registration without an address adds its labels and keeps the stored address, so the CSI
-// node plugin cannot put back an old one; a node not registered yet is refused (docs/7).
+// node plugin cannot put back an old one; a node not registered yet is refused (docs/issues/7).
 func TestRegisterNodeWithoutAnAddressKeepsTheStoredOne(t *testing.T) {
 	stores(t, func(t *testing.T, s *Service) {
 		ctx := context.Background()
@@ -854,7 +854,7 @@ func tombstoned(t *testing.T, s *Service, node, volume string) bool {
 }
 
 // A move recorded after DeleteVolume read the header, before it marked it, is in the chunks it
-// lists, so the move's destination is on the tombstone (docs/8).
+// lists, so the move's destination is on the tombstone (docs/issues/8).
 func TestDeleteVolumeSeesAMoveBeforeItMarks(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -876,7 +876,7 @@ func TestDeleteVolumeSeesAMoveBeforeItMarks(t *testing.T) {
 }
 
 // Once DeleteVolume has marked the header, a move is refused: the volume is gone for it, so the
-// chunks it lists stay current (docs/8).
+// chunks it lists stay current (docs/issues/8).
 func TestDeleteVolumeFencesMoves(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -915,7 +915,7 @@ func TestDeleteVolumeDuringAMove(t *testing.T) {
 }
 
 // An attach between a move's read and its write makes the move read again: two writes, the
-// first refused on the header (docs/8).
+// first refused on the header (docs/issues/8).
 func TestMoveReplicaAfterAnAttachReadsAgain(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -947,7 +947,7 @@ func TestMoveReplicaAfterAnAttachReadsAgain(t *testing.T) {
 	})
 }
 
-// A volume deleted between a move's read and its write gets no move (docs/8).
+// A volume deleted between a move's read and its write gets no move (docs/issues/8).
 func TestMoveReplicaAfterADeletionFails(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -975,7 +975,7 @@ func TestMoveReplicaAfterADeletionFails(t *testing.T) {
 }
 
 // A deletion interrupted after marking the header leaves a volume that no operation sees but
-// DeleteVolume, which finishes it (docs/8).
+// DeleteVolume, which finishes it (docs/issues/8).
 func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -1014,9 +1014,9 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 }
 
 // A deletion during a creation stops the creation: it adds no chunk after the deletion's listing,
-// and does not bring the volume back by clearing the deletion's mark (docs/8). The deletion runs
-// after the creation's first batch of chunk records (120), so it lists them and tombstones their
-// nodes, and the creation's second batch is refused.
+// and does not bring the volume back by clearing the deletion's mark (docs/issues/8). The deletion
+// runs after the creation's first batch of chunk records (120), so it lists them and tombstones
+// their nodes, and the creation's second batch is refused.
 func TestDeleteVolumeDuringItsCreation(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -1045,7 +1045,7 @@ func TestDeleteVolumeDuringItsCreation(t *testing.T) {
 }
 
 // A volume deleted between a move's read of its header and of the chunk: NotFound, as for any
-// operation on a deleted volume, not a missing chunk (docs/8).
+// operation on a deleted volume, not a missing chunk (docs/issues/8).
 func TestMoveReplicaOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -1064,7 +1064,7 @@ func TestMoveReplicaOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
 }
 
 // A volume whose header does not parse can still be deleted: no move or ISR change can commit
-// against it, so it needs no mark (docs/8).
+// against it, so it needs no mark (docs/issues/8).
 func TestDeleteVolumeWithADamagedHeader(t *testing.T) {
 	backends(t, func(t *testing.T, store kv.KV) {
 		ctx := context.Background()
@@ -1089,7 +1089,7 @@ func TestDeleteVolumeWithADamagedHeader(t *testing.T) {
 }
 
 // A deletion whose chunk records were left behind (deleteChunks failed after its commit) has them
-// cleared by its retry, which then answers NotFound (docs/8).
+// cleared by its retry, which then answers NotFound (docs/issues/8).
 func TestDeleteVolumeRetryClearsLeftoverChunks(t *testing.T) {
 	backends(t, func(t *testing.T, store kv.KV) {
 		ctx := context.Background()
@@ -1107,7 +1107,7 @@ func TestDeleteVolumeRetryClearsLeftoverChunks(t *testing.T) {
 }
 
 // A volume deleted between GetVolume's read of its header and of its chunks: NotFound, as for any
-// deleted volume, not a chunk-count mismatch (docs/8).
+// deleted volume, not a chunk-count mismatch (docs/issues/8).
 func TestGetVolumeOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
