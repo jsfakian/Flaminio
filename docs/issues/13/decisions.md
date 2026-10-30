@@ -80,8 +80,9 @@ Settled in plan review rounds 1–4. Reviewers treat these as settled.
 - **A root caller of `delete-chunks` can skip the grace:** it can make the drop's proposer fail
   its session early, not lose data. A request outliving its agent cannot act after a later
   confirmation (one per volume).
-- **Fence-only slots draw from `chunk_slots`:** exhausted, a last-chunk deletion fails and is
-  retried.
+- **Fence-only slots draw from `chunk_slots`,** one per volume and node until the tombstone: the
+  last chunk's record reuses that chunk's slot, so it never fails; new chunks may find fewer.
+- **Each chunk deletion settles the commits in flight:** one commit's stall per chunk.
 - **A target of a deleted volume still running** can create chunks on a node that never held it:
   the incarnation follow-up.
 - **The listing reads every chunk record every 5 s per node:** an index by node is a follow-up.

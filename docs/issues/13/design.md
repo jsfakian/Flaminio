@@ -63,8 +63,9 @@ cannot change either after the listing (docs/issues/8, S3).
 
 - **`flaminio-agent sweep`** (`control/cmd/flaminio-agent`, logic in `control/agent/sweep.go`):
   the `sweep` certificate, the metadata endpoints, the control socket. It takes `flock` on
-  `/run/flaminio-agent/lock` (directory 0700, which the CSI pod does not mount; opened with
-  `O_NOFOLLOW`), non-blocking; held elsewhere, it exits 1.
+  `/run/flaminio-agent/lock`, non-blocking; held elsewhere, it exits 1. The directory, which the
+  CSI pod does not mount, is checked with `lstat` (a root-owned 0700 directory, not a link)
+  before the file is opened with `O_NOFOLLOW`.
 - **The loop,** every 5 s: tombstones (`ListTombstones`, `delete VOLUME`, `ConfirmDeletion`), then
   releases. One step at a time; tombstone confirmations only between steps.
 - **The grace:** `first map[(volume, chunk)]time` (monotonic). Each sweep drops keys it did not
@@ -83,29 +84,34 @@ cannot change either after the listing (docs/issues/8, S3).
 **The command** (`flaminio-io/src/control.rs`): `delete-chunks VOLUME CHUNK...`, at most 119
 chunks, under the socket's 64 KiB line. It sends `Input::DeleteChunks{volume, chunks, deadline,
 reply}`; the deadline is the socket's limit, as an attach's (docs/issues/6). On the socket's
-timeout it answers that the request will not begin.
+timeout it answers that the request may have begun; the agent confirms nothing for it.
 
 **The engine** (`flaminio-node/src/engine.rs`):
 1. **One per volume:** a `delete-chunks` for a volume with one pending (waiting for its
-   `GetVolume`, or queued) is refused at once. So a request left by an agent that died cannot be
-   joined by the next agent's, which would confirm and let the chunk move back while the old one
-   still waits. **Not begun by the deadline:** dropped. Begun: `Call::GetVolume` (a `MetaWait`,
-   as attach's), bounded by the deadline.
+   `GetVolume`, or with chunks queued, until its last chunk or its deadline) is refused at once.
+   That is the guarantee: once a request has read the records, no per-chunk check would stop a
+   chunk moved back in the same epoch, so nothing may confirm meanwhile. The next agent's request
+   is refused, so it does not confirm; only a later one runs, with a fresh read. **Not begun by
+   the deadline:** dropped. Begun: `Call::GetVolume` (a `MetaWait`, as attach's), bounded by the
+   deadline.
 2. **The answer:** `NotFound` or none in time: nothing deleted. Otherwise keep `E` (the volume's
    epoch) and the chunks whose record has this node in `released`, and not in `replicas`,
    `moving_from` or `moving_to`. The others are refused.
-3. **One chunk per engine turn,** so replication I/O goes on. Before each: the deadline; no local
-   target's view places the chunk here; `core.fenced(vol) <= E`; no `delete VOLUME` of the
-   volume since (it cancels queued chunks). Any failing: that chunk and the rest refused.
-4. **The deletion,** in the same engine turn as the check: settle local I/O (only this chunk's
-   reads and writes); `Store::delete_chunk_keep_fence(key)`; `core.remove_chunk`; drop it from
-   `vols[uuid].chunks`. No fence argument: check and deletion share the turn, so nothing raises
-   the fence between them.
+3. **One chunk per engine turn,** so replication I/O goes on; `next_wakeup` returns now while
+   chunks are queued. Before each: the deadline; no local target's view places the chunk here;
+   `core.fenced(vol) <= E`; no `ReplicaService::delete_volume` of the volume since (a tombstone's
+   `delete VOLUME`, or #30's drop: either cancels the queue). Any failing: that chunk and the rest
+   refused.
+4. **The deletion,** in the same engine turn as the check: `Store::delete_chunk_keep_fence(key)`
+   (its `guard` settles every commit in flight first: one commit's stall per chunk, accepted);
+   `core.remove_chunk`; drop it from `vols[uuid].chunks`. No fence argument: check and deletion
+   share the turn, so nothing raises the fence between them.
 
 **The store** (`flaminio-store`):
 - **`delete_chunk_keep_fence(key)`:** one batch: `ChunkDelete`, and when it is the volume's last
   chunk, `FenceOnly` at its fence.
-- **`delete_volume(uuid)`:** one batch freeing the volume's chunks and its fence-only slot. The
+- **`delete_volume(uuid)`:** one batch, a `ChunkDelete` for each of the volume's chunk slots and
+  for its fence-only slot. The
   tombstone's `delete VOLUME` (`ReplicaService::delete_volume`) and #30's drop of leftovers use
   it; today's loop over `chunks()` by `ChunkKey` cannot reach a fence-only slot.
 - **`fences()`:** the fence-only slots, for recovery (`ReplicaService::new`) and `list`.
@@ -126,8 +132,10 @@ timeout it answers that the request will not begin.
   `Fence` at `epoch`, in one batch. A `Hello` whose batch exceeds `max_batch_bytes` (4 MiB: about
   65 000 creations of 64 B) is refused.
 - **On failure** (out of space, I/O, too large): the volume's whole core state (fence, session,
-  chunks, filters) is snapshotted before the `Hello` and restored, and the chunks added to `vols`
-  are removed. The `Hello` is refused.
+  chunks, filters) is snapshotted after #30's drop of leftovers (which commits first, and stays)
+  and restored; the chunks added to `vols` are removed, and so are the `vols` and core entries
+  made for a new `VolumeId` (`vol_id`, the core's `entry().or_default()`). The `Hello` is
+  refused.
 
 ## The fence-only record (S10)
 
@@ -137,6 +145,12 @@ timeout it answers that the request will not begin.
 - **Journal record 9, `FenceOnly`:** `slot u32`, reserved u32, `volume_uuid [16]`, `epoch u64`;
   not optional (§6.3). `Fence` (3) raises fence-only slots of its volume too. `ChunkCreate` may
   take a fence-only slot of its volume, at its fence or above: that supersedes it.
+- **Freeing it:** `ChunkDelete` (2) on a state-4 slot frees the slot; it has no clusters or pages
+  to free. Replay does the same. §6.3 says so.
+- **In memory** (`flaminio-store`, `state.rs`): fence-only slots live in their own map by volume,
+  apart from `chunks` and `by_key`. `chunks()` excludes them, so `ReplicaService::new` does not
+  recover a 0-block chunk 0; `fences()` lists them. `fence()` raises them, and its stale check
+  counts them.
 - **Incompatible feature bit 2 (value 4)** (§3): set in the superblock before the first
   `FenceOnly` commits. `KNOWN_FEATURES_INCOMPAT` gains it. Bit 1 stays reserved for authenticated
   checksums, so `superblock.rs`'s unknown-bit test (value 2) stands. §3's "reserved for later"
@@ -144,18 +158,19 @@ timeout it answers that the request will not begin.
 - **Recovery:** a fence-only slot sets the core's fence for its volume, with no chunk.
 - **Slots:** one per volume and node until `Store::delete_volume` frees it. They come out of
   `chunk_slots` (at least 64, sized for 2× overcommit); `flaminio-disk inspect` counts them apart
-  from chunk slots in use. A store whose slots are exhausted refuses new chunks as today, and a
-  last-chunk deletion then fails, retried by the agent.
+  from chunk slots in use. The last chunk's `FenceOnly` takes the slot its `ChunkDelete` frees,
+  in the same batch, so it never fails for want of a slot.
 
 ## Crash and ordering arguments
 
 - **Release vs move:** one key; each compares it (S2).
 - **Deletion vs confirmation:** the only confirmer is the node's one agent (`flock`, `sweep`),
-  and it confirms after `delete-chunks` answers. Between the data plane's read and its deletion,
-  the release cannot be confirmed, so the chunk cannot be moved back.
+  and it confirms after `delete-chunks` answers; while a request is pending, a second for the
+  volume is refused, so no agent confirms meanwhile. Between the data plane's read and its last
+  deletion, the release stays, so the chunk cannot be moved back.
 - **A delete outliving its answer:** a new volume of the name (#30) or any newer attach fences
-  above `E`, and a tombstone's `delete VOLUME` cancels it; the per-chunk check and the store's
-  epoch check catch both.
+  above `E`, and a `delete_volume` of the volume cancels the queue; the per-chunk check catches
+  both.
 - **The drop's proposer:** learns within `meta_timeout` (2 s) or its next `refresh` (2 s); its
   requests time out after `request_timeout` (3 s) (`Timing`, `types.rs`). The 10 s grace exceeds
   the 7 s. If it reconnects with its stale view anyway, its `Hello` is at the fence and creates
@@ -180,7 +195,8 @@ timeout it answers that the request will not begin.
 - **`leastLoaded`** also excludes the chunk's `GetReleased()`.
 - **No candidate because only released nodes remain:** the chunk counts as waiting, instead of
   `stepVolume`'s "no node to move to" error, which stays for other causes.
-- **`Progress.Released`:** releases held for the node, shown by `String()`.
+- **`Progress`:** `Released`, releases held for the node; `WaitingRelease`, its chunks waiting
+  because the only candidates are released nodes. Both shown by `String()`.
 
 ## Rollout (S13, S14)
 
@@ -225,13 +241,17 @@ released, not a fence holder, no tombstone pending for it). The format document.
 - **S7** (`flaminio-node`, `flaminio-io`): refused for a chunk not in `released`, in `replicas` or
   `moving`, placed by a local view; over 119; `NotFound`; no answer in time. A delete held past
   its deadline never runs. **A delete held while the volume is deleted and created again:** it
-  deletes nothing of the new volume. **A held request, a second one refused, the release
-  confirmed, the chunk moved back:** the held one deletes nothing. The other chunks and the fence
-  stay. **I/O during a 119-chunk delete:** reads and writes of the volume's other chunks complete
-  between deletions.
+  deletes nothing of the new volume. **A request held at its `GetVolume` wait, a second one
+  refused, the release confirmed, the chunk moved back:** the held one reads the record and
+  deletes nothing. **A request past its read, chunks queued:** a second one is refused until its
+  last chunk or its deadline, then runs with a fresh read (no confirmation out of band meanwhile).
+  The other chunks and the fence stay. **I/O during a 119-chunk delete:** reads and writes of
+  the volume's other chunks complete between deletions. **With no other I/O,** the queue still
+  drains, one chunk per turn.
 - **S9:** a `Hello` at the fence creates nothing; above, it creates; a fresh attach over a
   placed, missing chunk creates it. A failed or too large store write leaves the core state
-  (fence, session, chunks, filters) and `vols` as before. Crash at every point of `open_volume`.
+  (fence, session, chunks, filters) and `vols` as before (#30's drop, already committed,
+  excepted), with no entry left for a new volume. Crash at every point of `open_volume`.
   The stale view: drop committed, answer lost, grace passed, session blip, copy deleted,
   reconnect: not created, reads go elsewhere, no client error.
 - **S10** (`flaminio-store`, `flaminio-format`, `flaminio-node`): last chunk deleted, restart: a
