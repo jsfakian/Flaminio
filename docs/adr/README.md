@@ -12,3 +12,4 @@ its consequences. An ADR's status is one of **Proposed**, **Accepted**, **Supers
 | [0004](0004-target-environments.md) | Bare metal first, then edge, then cloud | Accepted |
 | [0005](0005-replica-confirmed-leases.md) | Replica-confirmed I/O leases | Accepted |
 | [0006](0006-edge-two-node-degraded-writes.md) | 2-node edge sites keep writing on a single copy | Accepted |
+| [0007](0007-privileged-data-plane-pod.md) | A privileged data-plane pod, until privilege separation | Proposed |
