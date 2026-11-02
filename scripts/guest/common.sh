@@ -16,14 +16,17 @@ data_disk() {
 }
 
 # Sends one command to the node's control socket and prints the answer. The socket's path goes to
-# python3 as an argument: sudo resets the environment.
+# python3 as an argument: sudo resets the environment. CONTROL_SOCKET overrides it only under
+# FLAMINIO_SCRIPT_TEST=1 (scripts/tools/node-scripts-test.sh).
 control() {
+    local sock=/run/flaminio/node.sock
+    [[ ${FLAMINIO_SCRIPT_TEST:-0} != 1 ]] || sock=${CONTROL_SOCKET:-$sock}
     sudo python3 -c 'import socket, sys
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(180)
 s.connect(sys.argv[2])
 s.sendall((sys.argv[1] + "\n").encode())
-print(s.makefile().readline().strip())' "$1" "${CONTROL_SOCKET:-/run/flaminio/node.sock}"
+print(s.makefile().readline().strip())' "$1" "$sock"
 }
 
 export PATH="$HOME/.cargo/bin:$PATH"

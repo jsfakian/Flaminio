@@ -115,7 +115,7 @@ guest() {
     shift
     cat "$guest/common.sh" "$guest/$script" >"$t/script"
     rc=0
-    out=$(env PATH="$t/bin:$PATH" STATE="$s" CONTROL_SOCKET="$t/sock" VOLUME="${vol-v}" NODE="${node-fl-c}" META=10.77.0.1:7400 \
+    out=$(env PATH="$t/bin:$PATH" STATE="$s" FLAMINIO_SCRIPT_TEST="${testmode-1}" CONTROL_SOCKET="$t/sock" VOLUME="${vol-v}" NODE="${node-fl-c}" META=10.77.0.1:7400 \
         TRUST_DOMAIN=lab META_BIN="$t/bin/fake-meta" AGENT_BIN="$t/bin/fake-agent" DISK_TOOL=/x/flaminio-disk \
         bash "$t/script" "$@" 2>"$t/err") || rc=$?
 }
@@ -208,6 +208,32 @@ logged "confirm, the wrong disk ours" meta.log confirm no
 fresh && echo "ok 0 replicas deleted" >"$s/answers" && echo '{}' >"$s/confirmed" && guest confirm.sh confirm &&
     want "confirm, confirmed by another caller" 1 ""
 fresh && guest confirm.sh && want "no step" 1 ""
+fresh && echo "not json" >"$s/tombstones" && guest confirm.sh check && want "check, an unreadable listing" 1 ""
+# A sweep that starts between check and confirm refuses the confirmation.
+fresh && echo "ok 0 replicas deleted" >"$s/answers" && echo 4343 >"$s/pgrep.flaminio-csi" && guest confirm.sh confirm &&
+    want "confirm, a CSI plugin since the check" 1 ""
+logged "confirm, a CSI plugin since the check" meta.log confirm no
+logged "confirm, a CSI plugin since the check" socket.log . no
+fresh && echo "ok 0 replicas deleted" >"$s/answers" && echo enabled >"$s/k3s-agent.enabled" && guest confirm.sh confirm &&
+    want "confirm, k3s-agent enabled since the check" 1 ""
+logged "confirm, k3s-agent enabled since the check" meta.log confirm no
+# The overrides of the paths and the socket hold only under FLAMINIO_SCRIPT_TEST=1.
+for step in check delete confirm; do
+    fresh && testmode="" guest confirm.sh "$step"
+    logged "$step, overrides without the switch" meta.log . no
+    logged "$step, overrides without the switch" agent.log . no
+    logged "$step, overrides without the switch" socket.log . no
+done
+fresh && testmode="" guest node.sh delete && want "node.sh delete, CONTROL_SOCKET without the switch" 1 ""
+logged "node.sh delete, CONTROL_SOCKET without the switch" socket.log . no
+# node.sh: VOLUME is an id.
+for bad in "v x" "v;id" "v
+detach w"; do
+    for step in detach delete; do
+        fresh && vol=$bad guest node.sh "$step" && want "node.sh $step, the volume '$bad'" 1 ""
+        logged "node.sh $step, the volume '$bad'" socket.log . no
+    done
+done
 # Ids only: VOLUME and NODE reach commands and the control socket's line.
 for bad in "v;id" "v x" "-v" "v
 delete w" "$(printf "v%.0s" $(seq 129))"; do

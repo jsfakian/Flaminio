@@ -98,8 +98,14 @@ running() {
     exit 3
 }
 
-detach() {
+# VOLUME goes into the control socket's line: ids only (domain.ValidID).
+volume_id() {
     : "${VOLUME:?}"
+    [[ $VOLUME =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || die "'$VOLUME' is not a volume id"
+}
+
+detach() {
+    volume_id
     running
     local answer
     answer=$(control "detach $VOLUME")
@@ -112,7 +118,7 @@ detach() {
 
 # Deletes this node's replicas of VOLUME (already deleted from the metadata service).
 delete() {
-    : "${VOLUME:?}"
+    volume_id
     running
     local answer
     answer=$(control "delete $VOLUME")

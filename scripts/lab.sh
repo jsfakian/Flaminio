@@ -693,7 +693,7 @@ cmd_node() {
 # vol create|attach VM|detach VM|show|delete: the test volume, as the lab administrator. delete
 # deletes its replicas too, and waits for its tombstone to go (delete_volume).
 cmd_vol() {
-    local out vm tok
+    local out vm tok rc
     case "${1:-show}" in
         create)
             out=$(metactl "$VM_A" "$VM_A" create "$VOL" "$VOL_SIZE" 2 1 "$VOL_CHUNK")
@@ -714,7 +714,11 @@ cmd_vol() {
             ENV_VARS="VOLUME=$VOL TOKEN=$tok" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" attach
             ;;
         detach)
-            ENV_VARS="VOLUME=$VOL" run_on_vm "$(vms_of "${2:-a}")" "$SCRIPTS/guest/node.sh" detach >/dev/null
+            vm=$(vms_of "${2:-a}")
+            rc=0
+            out=$(ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach) || rc=$?
+            ((rc != 255)) || lost "$vm"
+            [[ $rc == 0 && ($out == detached || $out == "not attached") ]] || die "$vm: ${out:-exit $rc}"
             ;;
         delete)
             RERUN="make vol-delete" delete_volume "$VOL"
@@ -1201,8 +1205,11 @@ csi_failover() {
 cmd_agent() {
     local action=${1:-disks} vm bin="$LOCAL_STATE_DIR/bin/flaminio-agent"
     vm=$(vms_of "${2:-c}")
-    (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$bin" ./control/cmd/flaminio-agent)
-    vssh "$vm" 'f=$(mktemp) && cat >"$f" && sudo install -m 755 "$f" /usr/local/bin/flaminio-agent; rc=$?; rm -f "$f"; exit $rc' <"$bin"
+    # Returns on a failure: callers may run it where errexit is off.
+    (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$bin" ./control/cmd/flaminio-agent) ||
+        return
+    vssh "$vm" 'f=$(mktemp) && cat >"$f" && sudo install -m 755 "$f" /usr/local/bin/flaminio-agent; rc=$?; rm -f "$f"; exit $rc' <"$bin" ||
+        return
     run_on_vm "$vm" "$SCRIPTS/guest/agent.sh" "$action"
 }
 
@@ -1232,7 +1239,11 @@ ensure_node_c() {
     vssh "$VM_C" "systemctl is-active --quiet flaminio-node" || rc=$?
     ((rc != 255)) || lost "$VM_C"
     if ((rc != 0)); then
-        dev=$(cmd_agent claim c | tail -1)
+        dev=$(cmd_agent claim c | tail -1) || {
+            rc=$?
+            ((rc != 255)) || lost "$VM_C"
+            die "claiming $VM_C's disk failed (exit $rc)"
+        }
         [[ $dev == /dev/* ]] || die "the node agent claimed no disk on $VM_C"
         ENV_VARS="$(node_env "$VM_C") DEVICE=$dev" run_on_vm "$VM_C" "$SCRIPTS/guest/node.sh" up
     fi
@@ -1614,6 +1625,9 @@ data_vms() {
     if [[ -f $LOCAL_STATE_DIR/$VM_C/created ]]; then echo "$(vms_of all) $VM_C"; else vms_of all; fi
 }
 
+# A volume or node id (domain.ValidID): ids go into remote commands and control socket lines.
+valid_id() { [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; }
+
 # The SHA-256 of stdin, in hex, on Linux or macOS.
 sha256() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1; }
 
@@ -1695,6 +1709,7 @@ detached_everywhere() {
 # a confirmation by hand.
 delete_volume() {
     local vol=$1 format=${2:-} stopped vm out rc start pending="" node
+    valid_id "$vol" || die "'$vol' is not a volume id"
     # Detached everywhere, before the metadata service forgets where it is attached.
     stopped=$(detach_all "$vol")
     rc=0
@@ -1733,7 +1748,8 @@ delete_volume() {
         rc=0
         meta_try tombstones || rc=$?
         if ((rc == 0)); then
-            pending=$(jq -r --arg v "$vol" '[.tombstones // [] | .[] | select(.volume == $v) | .pending // [] | .[]] | join(" ")' <<<"$META_OUT")
+            pending=$(jq -r --arg v "$vol" '[.tombstones // [] | .[] | select(.volume == $v) | .pending // [] | .[]] | join(" ")' <<<"$META_OUT") ||
+                die "reading the tombstones, waiting for $vol's to go, failed"
             [[ -n $pending ]] || {
                 log "$vol deleted: no tombstone left"
                 return 0
@@ -1745,7 +1761,8 @@ delete_volume() {
     scripts/lab.sh vol-confirm $vol $node
     ${RERUN:-the interrupted command}"
             done
-        elif [[ $META_ERR == *"unknown command"* ]]; then
+        elif ((rc != 255)) && [[ $META_ERR != *"code = Unavailable"* ]]; then
+            # Only a lost connection or a brief Unavailable (an etcd election) is retried.
             meta_failed tombstones "$META_ERR"
         fi
         ((SECONDS - start < ${TOMBSTONE_WAIT:-120})) || break
@@ -1771,7 +1788,7 @@ delete_volume() {
 cmd_vol_confirm() {
     (($# == 2)) || die "usage: vol-confirm VOLUME NODE"
     local vol=$1 node bin="$LOCAL_STATE_DIR/bin/flaminio-meta" here there env out
-    [[ $vol =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || die "'$vol' is not a volume id"
+    valid_id "$vol" || die "'$vol' is not a volume id"
     node=$(vms_of "$2")
     [[ $node != *" "* ]] || die "vol-confirm confirms for one node, not $2 ($node)"
     [[ " $(vms_of cluster) " != *" $node "* ]] ||
@@ -1806,6 +1823,8 @@ cmd_vol_confirm() {
 # punches holes in the image), the host trims its filesystem and preallocates the image again,
 # then everything rests for IDLE seconds and the caches are dropped. For Flaminio, the store is
 # then formatted and a fresh 16 GiB volume created (RF replicas, one on NODE) and attached.
+# Every reset formats NODE's store and starts it again (write_volume), even after a raw run: so
+# wbench is deleted first, while NODE still holds its replicas, and nothing else may be there.
 write_reset() {
     local node=$1 side=$2 rf=$3 host
     host=$(vmvar "$node" HOST)
