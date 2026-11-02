@@ -18,7 +18,7 @@ extract() {
         index($0, f) == 1 { on = 1; print; if ($0 ~ /}$/) on = 0; next }
         on { print; if ($0 == "}") on = 0 }' "$SCRIPTS/lab.sh"
 }
-for f in valid_id cmd_vol data_vms sha256 lost meta_try meta_failed detach_all detached_everywhere delete_volume cmd_vol_confirm \
+for f in valid_id transient cmd_vol data_vms sha256 lost meta_try meta_failed detach_all detached_everywhere delete_volume cmd_vol_confirm \
     delete_wbench write_volume write_start write_restore write_reset write_whole; do
     # shellcheck source=/dev/null
     source <(extract "$f")
@@ -332,6 +332,14 @@ run "a lost connection at a listing, then gone" 0 'record vol1 "[\"fl-a\"]"; pri
 run "the sweeps never confirm: time-out" 1 'record vol1 "[\"fl-a\"]"; echo "pending fl-a" >"$w/polls"; delete_volume vol1'
 said "pending for fl-a after 1 s"
 said "make csi-deploy"
+for code in DeadlineExceeded Canceled; do
+    run "a listing that fails with $code, then gone" 0 'record vol1 "[\"fl-a\"]"; printf "error '"$code"'\ngone\n" >"$w/polls"; delete_volume vol1'
+    run "an alive poll that fails with $code, then alive" 0 'echo '"$code"' >"$w/nodes-errs"; write_volume fl-b 1'
+    called "attach_wbench fl-b"
+done
+run "an alive poll that fails with Internal: stops" 1 'echo Internal >"$w/nodes-errs"; write_volume fl-b 1'
+said "code = Internal"
+called "metactl create" no
 run "a listing that fails otherwise: stops at once" 1 'record vol1 "[\"fl-a\"]"; printf "error Internal\ngone\n" >"$w/polls"; delete_volume vol1'
 said "code = Internal"
 [[ $(grep -c "metactl tombstones" "$w/calls") == 1 ]] || {

@@ -1631,6 +1631,12 @@ valid_id() { [[ $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; }
 # The SHA-256 of stdin, in hex, on Linux or macOS.
 sha256() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1; }
 
+# A metadata service error that passes, as control/csi/meta.go retries it: Unavailable (an etcd
+# election), DeadlineExceeded, Canceled. transient ERRORS.
+transient() {
+    [[ $1 == *"code = Unavailable"* || $1 == *"code = DeadlineExceeded"* || $1 == *"code = Canceled"* ]]
+}
+
 # Stops with ssh's 255, a lost connection, so that a campaign resumes: lost VM.
 lost() {
     if [[ $1 == "$VM_C" && -f $LOCAL_STATE_DIR/$VM_C/created ]]; then
@@ -1761,8 +1767,8 @@ delete_volume() {
     scripts/lab.sh vol-confirm $vol $node
     ${RERUN:-the interrupted command}"
             done
-        elif ((rc != 255)) && [[ $META_ERR != *"code = Unavailable"* ]]; then
-            # Only a lost connection or a brief Unavailable (an etcd election) is retried.
+        elif ((rc != 255)) && ! transient "$META_ERR"; then
+            # Only a lost connection or a transient error is retried.
             meta_failed tombstones "$META_ERR"
         fi
         ((SECONDS - start < ${TOMBSTONE_WAIT:-120})) || break
@@ -1855,12 +1861,12 @@ write_volume() {
         rc=0
         meta_try nodes || rc=$?
         ((rc != 255)) || lost "$VM_A"
-        # A brief Unavailable (an etcd election) is retried within the wait; anything else stops.
+        # A transient error is retried within the wait; anything else stops.
         if ((rc == 0)); then
             jq -e --arg n "$node" 'any(.nodes // [] | .[]; .id == $n and .alive)' <<<"$META_OUT" >/dev/null || rc=$?
             ((rc == 0)) && break
             ((rc == 1)) || die "reading the nodes failed (jq exit $rc)"
-        elif [[ $META_ERR != *"code = Unavailable"* ]]; then
+        elif ! transient "$META_ERR"; then
             meta_failed nodes "$META_ERR"
         fi
         ((SECONDS - start < 60)) || die "$node is not alive in the metadata service 60 s after its node started"
