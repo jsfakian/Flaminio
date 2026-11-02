@@ -1228,9 +1228,12 @@ cmd_data_node_up() {
 # Replica nodes on fl-c too, if it exists (it is started like the others, never reformatted).
 ensure_node_c() {
     [[ -f $LOCAL_STATE_DIR/$VM_C/created ]] || die "no $VM_C: make data-node-up"
-    if ! vssh "$VM_C" "systemctl is-active --quiet flaminio-node"; then
-        local dev
+    local rc=0 dev
+    vssh "$VM_C" "systemctl is-active --quiet flaminio-node" || rc=$?
+    ((rc != 255)) || lost "$VM_C"
+    if ((rc != 0)); then
         dev=$(cmd_agent claim c | tail -1)
+        [[ $dev == /dev/* ]] || die "the node agent claimed no disk on $VM_C"
         ENV_VARS="$(node_env "$VM_C") DEVICE=$dev" run_on_vm "$VM_C" "$SCRIPTS/guest/node.sh" up
     fi
 }
@@ -1700,13 +1703,16 @@ delete_volume() {
     ((rc == 0)) || [[ $META_ERR == *"code = NotFound"* ]] || meta_failed "delete $vol" "$META_ERR"
     for vm in $stopped; do
         log "$vm: its node is not running; starting it, to delete $vol's replicas there"
+        rc=0
         if [[ $vm == "$format" ]]; then
-            FORMAT=1 cmd_node up "$vm" >/dev/null
+            FORMAT=1 cmd_node up "$vm" >/dev/null || rc=$?
         elif [[ $vm == "$VM_C" ]]; then
-            FORMAT=0 ensure_node_c
+            FORMAT=0 ensure_node_c || rc=$?
         else
-            FORMAT=0 cmd_node up "$vm" >/dev/null
+            FORMAT=0 cmd_node up "$vm" >/dev/null || rc=$?
         fi
+        ((rc != 255)) || lost "$vm"
+        ((rc == 0)) || die "starting $vm's node failed (exit $rc): fix it, then run again: ${RERUN:-the interrupted command}"
     done
     # The id may have been created again meanwhile: its replicas are not this volume's.
     rc=0
@@ -1746,6 +1752,7 @@ delete_volume() {
         sleep 5
     done
     ((rc != 255)) || lost "$VM_A"
+    ((rc == 0)) || warn "the last listing of the tombstones failed: $META_ERR"
     die "$vol still pending for ${pending:-(unknown: the last listing failed)} after ${TOMBSTONE_WAIT:-120} s: are the CSI node plugins running? (make csi-deploy)"
 }
 
@@ -1769,6 +1776,7 @@ cmd_vol_confirm() {
     [[ $node != *" "* ]] || die "vol-confirm confirms for one node, not $2 ($node)"
     [[ " $(vms_of cluster) " != *" $node "* ]] ||
         die "$node is a metadata cluster member: vol-confirm is for a data node without a sweep ($VM_C)"
+    [[ " $(data_vms) " == *" $node "* ]] || die "$node is not a data node (make data-node-up)"
     meta_build
     here=$(sha256 <"$bin")
     there=$(vssh "$node" "sha256sum /usr/local/bin/flaminio-meta 2>/dev/null | cut -d' ' -f1")
@@ -1803,7 +1811,6 @@ write_reset() {
     host=$(vmvar "$node" HOST)
     # A connection lost mid-run can leave fio running in the VM.
     vssh "$node" "sudo pkill -x fio; while pgrep -x fio >/dev/null; do sleep 1; done" || true
-    ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
     delete_wbench "$node"
     cmd_node down "$(vms_of "$node")" >/dev/null
     run_on_vm "$node" "$SCRIPTS/guest/bench-writes.sh" discard 2>/dev/null
@@ -1823,9 +1830,14 @@ delete_wbench() { delete_volume wbench "$1"; }
 # attached there. Placement drops a preferred node that is not alive: wbench is created once
 # NODE's heartbeat is in, and every chunk must have a replica there.
 write_volume() {
-    local node=$1 rf=$2 out start=$SECONDS
+    local node=$1 rf=$2 out rc start=$SECONDS
     FORMAT=1 cmd_node up "$(vms_of "$node")" >/dev/null
-    until metactl "$VM_A" "$VM_A" nodes | jq -e --arg n "$node" 'any(.nodes // [] | .[]; .id == $n and .alive)' >/dev/null; do
+    while true; do
+        rc=0
+        meta_try nodes || rc=$?
+        ((rc != 255)) || lost "$VM_A"
+        ((rc == 0)) || meta_failed nodes "$META_ERR"
+        jq -e --arg n "$node" 'any(.nodes // [] | .[]; .id == $n and .alive)' <<<"$META_OUT" >/dev/null && break
         ((SECONDS - start < 60)) || die "$node is not alive in the metadata service 60 s after its node started"
         sleep 2
     done
@@ -1900,7 +1912,6 @@ cmd_bench_writes_retrying() {
 write_whole() {
     local node=$1 side=$2 rf=$3
     if [[ $side == flaminio ]]; then
-        ENV_VARS="VOLUME=wbench" run_on_vm "$node" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
         delete_wbench "$node"
         cmd_node down "$(vms_of "$node")" >/dev/null
     fi
@@ -2073,10 +2084,15 @@ write_start() {
         fi
         if [[ $id == "$VOL" ]]; then
             found=1
-        elif [[ $id != wbench ]] &&
+        elif [[ $id != wbench ]]; then
+            rc=0
             jq -e --arg n "$node" 'any(.volume.chunks[]; (.replicas // []) + [.movingFrom, .movingTo] | index($n))' \
-                <<<"$META_OUT" >/dev/null; then
-            on+=("$id")
+                <<<"$META_OUT" >/dev/null || rc=$?
+            case $rc in
+                0) on+=("$id") ;;
+                1) ;;
+                *) die "reading $id's record failed (jq exit $rc)" ;;
+            esac
         fi
     done
     ((${#on[@]} == 0)) ||

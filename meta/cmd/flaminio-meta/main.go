@@ -249,6 +249,7 @@ func confirmArgs(args []string) (volume, node string, err error) {
 // agentIdentity is the identity in the client certificate, which must be node's agent in
 // trustDomain: the leaf (the file's first certificate, as tls.LoadX509KeyPair loads it) with
 // exactly one URI SAN, read as pki.PeerIdentity reads a peer's. It is checked before any call.
+// Its validity dates and its chain to the CA are left to the server, which verifies both.
 func agentIdentity(files pki.Files, trustDomain, node string) (pki.Identity, error) {
 	fail := func(format string, a ...any) (pki.Identity, error) {
 		return pki.Identity{}, fmt.Errorf("confirm for %s: %s: only %s's own agent confirms, through lab.sh vol-confirm",

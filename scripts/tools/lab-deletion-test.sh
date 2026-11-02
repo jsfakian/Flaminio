@@ -13,12 +13,15 @@ export LOCAL_STATE_DIR=$t/lab
 # shellcheck source=../lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 # The functions under test: lab.sh runs commands when sourced.
-for f in data_vms sha256 lost meta_try meta_failed detach_all detached_everywhere delete_volume cmd_vol_confirm \
-    delete_wbench write_volume write_start write_restore; do
-    # shellcheck source=/dev/null
-    source <(awk -v f="$f() {" '
+extract() {
+    awk -v f="$1() {" '
         index($0, f) == 1 { on = 1; print; if ($0 ~ /}$/) on = 0; next }
-        on { print; if ($0 == "}") on = 0 }' "$SCRIPTS/lab.sh")
+        on { print; if ($0 == "}") on = 0 }' "$SCRIPTS/lab.sh"
+}
+for f in data_vms sha256 lost meta_try meta_failed detach_all detached_everywhere delete_volume cmd_vol_confirm \
+    delete_wbench write_volume write_start write_restore write_reset write_whole; do
+    # shellcheck source=/dev/null
+    source <(extract "$f")
     declare -F "$f" >/dev/null || {
         echo "FAIL: $f not found in lab.sh"
         exit 1
@@ -86,6 +89,7 @@ vssh() {
     case "$*" in
         *"pgrep -x flaminio-io"*) cat "$w/io/$vm" 2>/dev/null || true ;;
         *sha256sum*) cat "$w/remote-hash" 2>/dev/null || true ;;
+        *"is-active --quiet flaminio-node"*) [[ -e $w/c-active ]] || return 3 ;;
         *"install -m 755"*)
             cat >/dev/null
             rec "install $vm"
@@ -96,6 +100,7 @@ vssh() {
 metactl() {
     shift 2
     rec "metactl $*"
+    [[ ! -e $w/lost/$VM_A ]] || return 255
     case "$1" in
         delete)
             if [[ -e $w/delete-err ]]; then
@@ -168,6 +173,11 @@ ensure_node_c() {
     rm -f "$w/down/$VM_C"
 }
 attach_wbench() { rec "attach_wbench $1"; }
+# ensure_node_c's own (the real one, in its cases), and write_reset's.
+cmd_agent() { cat "$w/claim" 2>/dev/null || echo /dev/vdb; }
+node_env() { echo "NODE=$1"; }
+run_on_host() { rec "run_on_host $*"; }
+host_drop_caches() { :; }
 meta_build() {
     rec "meta_build"
     mkdir -p "$LOCAL_STATE_DIR/bin"
@@ -266,8 +276,19 @@ called "FORMAT=1" no
 run "fl-c stopped during vol delete: started as it is" 0 'record vol1 "[\"fl-c\"]"; touch "$w/down/fl-c"; delete_volume vol1'
 called "ensure_node_c FORMAT=0"
 called "FORMAT=1" no
-run "a failed start" 1 'record vol1 "[\"fl-a\"]"; touch "$w/down/fl-a" "$w/start-fails"; delete_volume vol1'
+run "a failed start" 1 'record vol1 "[\"fl-a\"]"; touch "$w/down/fl-a" "$w/start-fails"; RERUN="make vol-delete" delete_volume vol1'
 called "node.sh delete" no
+said "starting fl-a's node failed \(exit 1\): fix it, then run again: make vol-delete"
+run "fl-c's start, a lost connection: 255" 255 \
+    'source <(extract ensure_node_c); touch "$w/lost/fl-c"; ensure_node_c'
+called "node.sh up" no
+run "fl-c's start, no disk claimed" 1 'source <(extract ensure_node_c); echo "error" >"$w/claim"; ensure_node_c'
+said "claimed no disk"
+called "node.sh up" no
+run "fl-c's start" 0 'source <(extract ensure_node_c); ensure_node_c'
+called "run_on_vm fl-c node.sh up"
+run "fl-c's node running" 0 'source <(extract ensure_node_c); touch "$w/c-active"; ensure_node_c'
+called "node.sh up" no
 run "the volume found again before the clean" 1 'record vol1 "[\"fl-a\"]"; touch "$w/recreate"; delete_volume vol1'
 called "node.sh delete" no
 said "exists again"
@@ -292,6 +313,8 @@ run "a lost connection at a listing, then gone" 0 'record vol1 "[\"fl-a\"]"; pri
 run "the sweeps never confirm: time-out" 1 'record vol1 "[\"fl-a\"]"; echo "pending fl-a" >"$w/polls"; delete_volume vol1'
 said "pending for fl-a after 1 s"
 said "make csi-deploy"
+run "time-out after a failed listing: its error" 1 'record vol1 "[\"fl-a\"]"; printf "pending fl-a\nfail 1\n" >"$w/polls"; delete_volume vol1'
+said "the last listing of the tombstones failed: .*code = Unavailable"
 run "time-out after a lost connection: 255" 255 'record vol1 "[\"fl-a\"]"; printf "pending fl-a\nfail 255\n" >"$w/polls"; delete_volume vol1'
 run "an older flaminio-meta" 1 'record vol1 "[\"fl-a\"]"; echo unknown >"$w/polls"; delete_volume vol1'
 said "make meta-up"
@@ -331,6 +354,8 @@ run "wbench created once the campaign's node is alive" 0 'echo 2 >"$w/alive-afte
     failed=1
 }
 called "attach_wbench fl-b"
+run "a lost connection at the alive poll: 255" 255 'touch "$w/lost/fl-a"; write_volume fl-b 1'
+called "metactl create" no
 run "the campaign's node never alive" 1 'echo 1000 >"$w/alive-after"; write_volume fl-b 1'
 called "metactl create" no
 run "a chunk without a replica on the campaign's node" 1 \
@@ -367,6 +392,25 @@ called "confirm.sh delete"
 called "confirm.sh confirm" no
 run "vol-confirm, a lost connection" 255 'touch "$w/lost/fl-b"; cmd_vol_confirm v c'
 called "confirm.sh delete|confirm.sh confirm" no
+
+run "a record jq cannot read: stops" 1 'echo "not json" >"$w/meta/x"; echo x >"$w/volumes"; write_start fl-b'
+said "reading x's record failed"
+# The resets delete wbench as the campaign's: a stopped campaign node starts formatted.
+for step in "write_reset fl-b raw 1" "write_whole fl-b flaminio 1"; do
+    run "$step: the campaign's node, stopped" 0 'record wbench "[\"fl-b\"]"; touch "$w/down/fl-b"; '"$step"
+    [[ $(grep -m1 "cmd_node up fl-b" "$w/calls") == "cmd_node up fl-b FORMAT=1" ]] || {
+        echo "FAIL: $what: the first start of fl-b is not formatted: $(grep -m1 "cmd_node up fl-b" "$w/calls")"
+        failed=1
+    }
+done
+# Ids that are not ids go nowhere.
+for vol in "v;id" "v x" "" "-v" "$(printf "v%.0s" $(seq 129))"; do
+    run "vol-confirm '${vol:0:12}': refused" 1 'cmd_vol_confirm "'"$vol"'" c'
+    called "meta_build|install|confirm.sh|node.sh" no
+done
+run "vol-confirm, fl-c not created" 1 'rm "$LOCAL_STATE_DIR/fl-c/created"; cmd_vol_confirm v c'
+said "not a data node"
+called "meta_build|install|confirm.sh|node.sh" no
 
 ((failed == 0)) || exit 1
 echo "lab-deletion-test: ok"

@@ -115,7 +115,7 @@ guest() {
     shift
     cat "$guest/common.sh" "$guest/$script" >"$t/script"
     rc=0
-    out=$(env PATH="$t/bin:$PATH" STATE="$s" CONTROL_SOCKET="$t/sock" VOLUME=v NODE=fl-c META=10.77.0.1:7400 \
+    out=$(env PATH="$t/bin:$PATH" STATE="$s" CONTROL_SOCKET="$t/sock" VOLUME="${vol-v}" NODE="${node-fl-c}" META=10.77.0.1:7400 \
         TRUST_DOMAIN=lab META_BIN="$t/bin/fake-meta" AGENT_BIN="$t/bin/fake-agent" DISK_TOOL=/x/flaminio-disk \
         bash "$t/script" "$@" 2>"$t/err") || rc=$?
 }
@@ -208,6 +208,17 @@ logged "confirm, the wrong disk ours" meta.log confirm no
 fresh && echo "ok 0 replicas deleted" >"$s/answers" && echo '{}' >"$s/confirmed" && guest confirm.sh confirm &&
     want "confirm, confirmed by another caller" 1 ""
 fresh && guest confirm.sh && want "no step" 1 ""
+# Ids only: VOLUME and NODE reach commands and the control socket's line.
+for bad in "v;id" "v x" "-v" "v
+delete w" "$(printf "v%.0s" $(seq 129))"; do
+    for step in check delete confirm; do
+        fresh && vol=$bad guest confirm.sh "$step" && want "$step, the volume '${bad:0:12}'" 1 ""
+        logged "$step, the volume '${bad:0:12}'" meta.log . no
+        logged "$step, the volume '${bad:0:12}'" socket.log . no
+        fresh && node=$bad guest confirm.sh "$step" && want "$step, the node '${bad:0:12}'" 1 ""
+        logged "$step, the node '${bad:0:12}'" meta.log . no
+    done
+done
 
 ((failed == 0)) || exit 1
 echo "node-scripts-test: ok"

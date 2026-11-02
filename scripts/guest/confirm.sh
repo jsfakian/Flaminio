@@ -4,7 +4,8 @@
 # agent. Never run them otherwise.
 # Usage: confirm.sh check | delete | confirm
 #   VOLUME, NODE (this node), META (a metadata service, address:port), TRUST_DOMAIN; META_BIN,
-#   AGENT_BIN and DISK_TOOL are the paths of flaminio-meta, flaminio-agent and flaminio-disk
+#   AGENT_BIN and DISK_TOOL override the paths of flaminio-meta, flaminio-agent and
+#   flaminio-disk, for tests only (scripts/tools/node-scripts-test.sh)
 #   check    prints "listed" when the node's tombstones list VOLUME, after checking that
 #            nothing on the node can sweep (no CSI plugin, agent or Kubernetes agent), or
 #            "not listed": nothing to do
@@ -14,6 +15,9 @@
 #            prints the tombstone as read, less this node
 # Any other outcome stops, with exit 1.
 : "${VOLUME:?}" "${NODE:?}" "${META:?}" "${TRUST_DOMAIN:?}"
+# Both go into commands and the control socket's line: ids only (domain.ValidID).
+id='^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$'
+[[ $VOLUME =~ $id && $NODE =~ $id ]] || die "'$VOLUME' or '$NODE' is not an id"
 meta_bin=${META_BIN:-/usr/local/bin/flaminio-meta}
 agent_bin=${AGENT_BIN:-/usr/local/bin/flaminio-agent}
 disk_tool=${DISK_TOOL:-$HOME/flaminio/dataplane/target/release/flaminio-disk}
