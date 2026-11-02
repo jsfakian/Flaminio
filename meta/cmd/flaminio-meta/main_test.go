@@ -362,9 +362,11 @@ func TestConfirmAsTheNodesAgent(t *testing.T) {
 // The usage text names lab.sh vol-confirm; -h and a bad flag fail.
 func TestUsage(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if err := client(nil, &out, &errOut); err == nil || !strings.Contains(err.Error(), "lab.sh vol-confirm") {
-		t.Fatalf("usage: %v", err)
+	if err := client(nil, &out, &errOut); err == nil || !strings.Contains(errOut.String(), "lab.sh vol-confirm") ||
+		!strings.Contains(errOut.String(), "keeps them") {
+		t.Fatalf("usage: %v, %q", err, errOut.String())
 	}
+	errOut.Reset()
 	if err := client([]string{"-h"}, &out, &errOut); err == nil || !strings.Contains(errOut.String(), "lab.sh vol-confirm") {
 		t.Fatalf("-h: %v, %q", err, errOut.String())
 	}

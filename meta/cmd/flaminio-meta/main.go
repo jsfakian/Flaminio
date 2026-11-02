@@ -313,7 +313,8 @@ func client(args []string, stdout, stderr io.Writer) error {
 	}
 	args = fs.Args()
 	if len(args) == 0 {
-		return errors.New(usage)
+		fs.Usage()
+		return errors.New("no command")
 	}
 	// confirm refuses before any call: its arguments, then the caller's identity.
 	var volume, node string
