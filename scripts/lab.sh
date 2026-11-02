@@ -1836,8 +1836,14 @@ write_volume() {
         rc=0
         meta_try nodes || rc=$?
         ((rc != 255)) || lost "$VM_A"
-        ((rc == 0)) || meta_failed nodes "$META_ERR"
-        jq -e --arg n "$node" 'any(.nodes // [] | .[]; .id == $n and .alive)' <<<"$META_OUT" >/dev/null && break
+        # A brief Unavailable (an etcd election) is retried within the wait; anything else stops.
+        if ((rc == 0)); then
+            jq -e --arg n "$node" 'any(.nodes // [] | .[]; .id == $n and .alive)' <<<"$META_OUT" >/dev/null || rc=$?
+            ((rc == 0)) && break
+            ((rc == 1)) || die "reading the nodes failed (jq exit $rc)"
+        elif [[ $META_ERR != *"code = Unavailable"* ]]; then
+            meta_failed nodes "$META_ERR"
+        fi
         ((SECONDS - start < 60)) || die "$node is not alive in the metadata service 60 s after its node started"
         sleep 2
     done

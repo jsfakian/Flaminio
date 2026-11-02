@@ -146,7 +146,15 @@ metactl() {
             esac
             ;;
         nodes)
-            local polls
+            local polls e
+            # $w/nodes-errs: an error code per poll, before any answer.
+            e=$(head -1 "$w/nodes-errs" 2>/dev/null || true)
+            if [[ -n $e ]]; then
+                tail -n +2 "$w/nodes-errs" >"$w/nodes-errs.next" && mv "$w/nodes-errs.next" "$w/nodes-errs"
+                [[ $e == bad-json ]] && { echo "not json"; return 0; }
+                echo "flaminio-meta: rpc error: code = $e desc = x" >&2
+                return 1
+            fi
             polls=$(($(cat "$w/nodes-polls" 2>/dev/null || echo 0) + 1))
             echo "$polls" >"$w/nodes-polls"
             if ((polls > $(cat "$w/alive-after" 2>/dev/null || echo 0))); then
@@ -355,6 +363,17 @@ run "wbench created once the campaign's node is alive" 0 'echo 2 >"$w/alive-afte
 }
 called "attach_wbench fl-b"
 run "a lost connection at the alive poll: 255" 255 'touch "$w/lost/fl-a"; write_volume fl-b 1'
+called "metactl create" no
+run "an Unavailable alive poll, then alive" 0 'printf "Unavailable\nUnavailable\n" >"$w/nodes-errs"; write_volume fl-b 1'
+called "attach_wbench fl-b"
+run "another error at the alive poll: stops at once" 1 'echo PermissionDenied >"$w/nodes-errs"; write_volume fl-b 1'
+said "code = PermissionDenied"
+[[ $(grep -c "metactl nodes" "$w/calls") == 1 ]] || {
+    echo "FAIL: $what: polled again after the error"
+    failed=1
+}
+run "an unreadable alive poll: stops" 1 'echo bad-json >"$w/nodes-errs"; write_volume fl-b 1'
+said "reading the nodes failed"
 called "metactl create" no
 run "the campaign's node never alive" 1 'echo 1000 >"$w/alive-after"; write_volume fl-b 1'
 called "metactl create" no
