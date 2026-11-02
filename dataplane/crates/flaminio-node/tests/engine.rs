@@ -1792,6 +1792,7 @@ struct Holding {
     dir: std::path::PathBuf,
     buf: Vec<u8>,
     arrivals: Arc<std::sync::atomic::AtomicUsize>,
+    model: Arc<Mutex<Model>>,
 }
 
 impl Holding {
@@ -1862,6 +1863,7 @@ impl Holding {
             dir,
             buf: vec![0u8; MIB as usize],
             arrivals,
+            model,
         };
         h.engine.handle(
             Instant::now(),
@@ -2244,4 +2246,72 @@ fn holding_staged_groups() {
     );
     h.reads_back(92, 13 * MIB, MIB);
     h.reads_back(93, 14 * MIB + MIB / 2, 4096);
+}
+
+/// The attach path's Hello (a target opening its local replica's session) fences the store,
+/// which settles it: a held group starts first, and its writes are answered once durable, not
+/// before and not stranded (docs/issues/10, S5).
+#[test]
+fn an_attach_settles_a_held_group() {
+    let mut h = Holding::new("holding-attach");
+    h.engine.set_commit_gather(Duration::from_millis(1));
+    h.write(1, 0, MIB);
+    while !h.in_flight() {
+        h.idle(1);
+    }
+    h.acked(1..=1); // a landing of one: the next wait's target is 1
+    h.engine.set_commit_gather(Duration::from_secs(10));
+    h.write(2, 0, MIB);
+    h.write(3, MIB, MIB);
+    h.idle(3);
+    h.acked(2..=3); // target 2 next
+    h.write(4, 0, MIB);
+    h.idle(3);
+    assert!(!h.in_flight(), "write 4: held");
+
+    // Attaching a second volume: its target says Hello to the local replica.
+    {
+        let mut m = h.model.lock().unwrap();
+        let mut w = m.volume.clone().unwrap();
+        w.id = "w".into();
+        m.volume = Some(w);
+    }
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    h.engine.handle(
+        Instant::now(),
+        Input::Attach {
+            volume: "w".into(),
+            token: token(&signer, "w", 1, "fl-a"),
+        },
+    );
+    // The test completes no commit: write 4 is durable only if the Hello's settle waited for it.
+    let (mut attached, mut acked) = (false, false);
+    for _ in 0..5_000 {
+        let got = h.run(1, &|o| {
+            matches!(o, Output::Attached { .. } | Output::Done { op: 4, .. })
+        });
+        for o in got {
+            match o {
+                Output::Attached { volume, .. } => {
+                    assert_eq!(volume, "w");
+                    attached = true;
+                }
+                Output::Done { result, .. } => {
+                    assert!(result.is_ok(), "write 4: {result:?}");
+                    assert!(!h.in_flight(), "write 4 answered once durable");
+                    acked = true;
+                }
+                _ => {}
+            }
+        }
+        if attached && acked {
+            break;
+        }
+    }
+    assert!(attached, "w attached");
+    assert!(acked, "the held write answered, not stranded");
+    h.reads_back(4, 0, MIB);
+    h.write(5, MIB, MIB);
+    h.acked(5..=5);
+    h.reads_back(5, MIB, MIB);
 }
