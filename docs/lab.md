@@ -228,6 +228,11 @@ campaign of RF 1 on fl-b never stops for fl-c. One that places wbench or vol1 on
 its start when a volume other than wbench and vol1 has a replica on its node, whose disk every
 reset formats.
 
+fl-c counts as a data node only when the checkout that runs the lab has `.lab/fl-c/created`,
+which `make data-node-up` writes. A new checkout or worktree of a lab where fl-c exists needs it
+written by hand (`mkdir -p .lab/fl-c && touch .lab/fl-c/created`): without it, deletions skip
+fl-c, and `vol-confirm` refuses it.
+
 **`lab.sh vol-confirm VOLUME NODE`,** run with no campaign or `vol` command running, confirms
 only when all of these hold, checked in this order:
 1. NODE is one data node, not a metadata cluster member;

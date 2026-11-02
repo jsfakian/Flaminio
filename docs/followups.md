@@ -267,7 +267,21 @@ the lab, never confirms: its replicas of deleted volumes stay, and the volume id
      deleted, then confirms: the only supported way to confirm by hand.
    - The harness deletes a volume's replicas on every data node, never confirms, and stops when
      the volume is pending for fl-c. The metadata service logs every new confirmation.
-   - *Lab:* to be recorded.
+   - *Lab, 2026-11-02:*
+     - The one-time cleanup: `vol-confirm` freed wbench and volb, each pending for fl-c only
+       since 2026-10-30; no tombstone was left, and the service logged both confirmations with
+       fl-c's agent identity, address and certificate serial.
+     - A campaign of RF 1 on fl-b, one job, two repetitions, from fl-b's node stopped: every
+       reset deleted wbench and its replicas (fl-b started formatted when stopped) and left no
+       tombstone.
+     - A campaign whose `$VOL` (volb) was on fl-c stopped at its start with the procedure;
+       after `vol-confirm`, the same command with `RESUME` went on and finished.
+     - `vol delete` and `vol create` of volb, twice: each deletion stopped pending for fl-c,
+       and completed after `vol-confirm`; volb exists (RF 2, not written).
+     - A volume written on fl-c (1 GiB) with fl-c's node stopped: the deletion started the
+       node, deleted its 4 replicas, then stopped; `vol-confirm` refused while the node was
+       down, and confirmed once it ran.
+     - fl-c holds about 136 chunk replicas that no volume record names: older leftovers, #13's.
 3. **Later** (docs/issues/14, decisions):
    - a tombstone's incarnation, given by the listing and required by the confirmation, so that a
      confirmation cannot land on a later deletion of the same name;
