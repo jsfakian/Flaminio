@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
@@ -640,6 +642,7 @@ func (s *Service) ConfirmDeletion(ctx context.Context, r *metav1.ConfirmDeletion
 		if t.Confirmed == nil {
 			t.Confirmed = map[string]bool{}
 		}
+		already := t.Confirmed[r.GetNode()]
 		t.Confirmed[r.GetNode()] = true
 		var op kv.Op
 		if len(t.pending()) == 0 {
@@ -648,15 +651,39 @@ func (s *Service) ConfirmDeletion(ctx context.Context, r *metav1.ConfirmDeletion
 			b, _ := json.Marshal(t)
 			op = kv.Op{Key: e.Key, Value: b}
 		}
-		ok, err = s.kv.Txn(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{op})
+		rev, ok, err := s.kv.TxnRev(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{op})
 		if err != nil {
 			return nil, errStatus(err)
 		}
 		if ok {
+			if !already {
+				logConfirmation(ctx, r.GetVolume(), r.GetNode(), t.pending(), rev)
+			}
 			return &metav1.ConfirmDeletionResponse{}, nil
 		}
 	}
 	return nil, status.Error(codes.Aborted, "too much contention")
+}
+
+// logConfirmation records a confirmation that newly confirmed a node, for audit after the fact
+// (docs/issues/14, S4): the caller, where it called from and with which certificate, and the
+// write's revision. A confirmation is what lets a deleted volume's id be created again.
+func logConfirmation(ctx context.Context, volume, node string, pending []string, rev int64) {
+	caller := "unauthenticated"
+	if id, ok := callerOf(ctx); ok {
+		caller = id.String()
+	}
+	var addr, serial string
+	if p, ok := peer.FromContext(ctx); ok {
+		if p.Addr != nil {
+			addr = p.Addr.String()
+		}
+		if t, ok := p.AuthInfo.(credentials.TLSInfo); ok && len(t.State.PeerCertificates) > 0 {
+			serial = t.State.PeerCertificates[0].SerialNumber.Text(16)
+		}
+	}
+	slog.Info("deletion confirmed", "caller", caller, "peer", addr, "serial", serial,
+		"volume", volume, "node", node, "pending", pending, "revision", rev)
 }
 
 func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.AttachResponse, error) {

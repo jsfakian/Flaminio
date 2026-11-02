@@ -195,6 +195,64 @@ move it, and waits for its next attach.
 A drained node's chunks stay on its disk until replica garbage collection exists
 ([follow-ups](followups.md) item 8).
 
+### Deleting volumes, and fl-c's tombstones
+
+```bash
+make meta-up                              # flaminio-meta with the tombstones and confirm commands
+make vol-delete                           # vol1, and its replicas on every data node
+scripts/lab.sh vol-confirm wbench fl-c    # confirm a deletion for fl-c by hand, after checks there
+```
+
+A deleted volume leaves a tombstone that names the nodes its chunks were on. Each of them
+confirms once it has deleted its replicas; the last confirmation removes the tombstone, and until
+then the volume's id cannot be created again. There is exactly one confirmer per node:
+- **fl-a and fl-b:** the CSI node plugin's sweep (`make csi-deploy`), every 5 s;
+- **fl-c,** which is not a Kubernetes node: an operator, through `lab.sh vol-confirm`, the only
+  supported way to confirm by hand.
+
+The harness never confirms. `make vol-delete`, and the write campaign's deletions (wbench at
+every reset, vol1 at its start):
+1. detach the volume on every data node, and delete it from the metadata service;
+2. start every data node that is not running, and delete the volume's replicas on each. The
+   campaign's node starts with its store formatted (the campaign formats it anyway); any other
+   node as it is;
+3. stop at once when the volume is pending for fl-c, with the procedure: `vol-confirm`, then the
+   interrupted command again (`RESUME=<dir> make bench-writes`, or `make vol-delete`);
+4. otherwise wait, at most `TOMBSTONE_WAIT` seconds (120), for the sweeps to remove the
+   tombstone.
+
+So they need the new `flaminio-meta` (`make meta-up`), fl-c's node (`make data-node-up` once,
+then `make node-up VM=c`), and the CSI node plugins on fl-a and fl-b (`make csi-deploy`). A
+campaign of RF 1 on fl-b never stops for fl-c. One that places wbench or vol1 on fl-c (RF 2, or
+`NODE=c`) stops at every deletion until an operator runs `vol-confirm`. A campaign also stops at
+its start when a volume other than wbench and vol1 has a replica on its node, whose disk every
+reset formats.
+
+fl-c counts as a data node only when the checkout that runs the lab has `.lab/fl-c/created`,
+which `make data-node-up` writes. A new checkout or worktree of a lab where fl-c exists needs it
+written by hand (`mkdir -p .lab/fl-c && touch .lab/fl-c/created`): without it, deletions skip
+fl-c, and `vol-confirm` refuses it.
+
+**`lab.sh vol-confirm VOLUME NODE`,** run with no campaign or `vol` command running, confirms
+only when all of these hold, checked in this order:
+1. NODE is one data node, not a metadata cluster member;
+2. NODE's tombstones list the volume (otherwise there is nothing to do);
+3. nothing on NODE can sweep: no CSI plugin, no node agent, no k3s;
+4. the volume is attached nowhere, and no stopped node's data plane still runs;
+5. NODE's data plane is its `flaminio-node` unit, on the disk the claim policy calls ours; then
+   its replicas of the volume are deleted;
+6. the volume is still attached nowhere, and a second delete finds no replica;
+7. NODE's own agent confirms, and finds the volume still pending.
+
+A wrong confirmation is worse than a blocked id: a node confirmed while it still holds replicas
+keeps them, and a volume created again with that name serves their data there, or is deposed by
+them ([#30](https://github.com/jsfakian/Flaminio/issues/30)).
+
+`flaminio-meta tombstones [node]` lists the tombstones pending for one node, or for every
+registered node. `flaminio-meta confirm VOLUME NODE --replicas-deleted` is `vol-confirm`'s last
+step: it refuses any caller but NODE's own agent, before any call. The metadata service logs
+every new confirmation: who, from where, with which certificate.
+
 ### Partition test (step 5)
 
 ```bash
