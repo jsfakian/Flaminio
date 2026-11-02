@@ -1658,6 +1658,19 @@ meta_try() {
     return "$rc"
 }
 
+# meta_try, retrying a transient error for at most 30 s.
+meta_retry() {
+    local rc start=$SECONDS
+    while true; do
+        rc=0
+        meta_try "$@" || rc=$?
+        if ((rc == 0 || rc == 255)) || ! transient "$META_ERR" || ((SECONDS - start >= 30)); then
+            return "$rc"
+        fi
+        sleep 2
+    done
+}
+
 # A failed metactl call: meta_failed WHAT ERRORS. A flaminio-meta older than the command asks for
 # make meta-up.
 meta_failed() {
@@ -1719,7 +1732,7 @@ delete_volume() {
     # Detached everywhere, before the metadata service forgets where it is attached.
     stopped=$(detach_all "$vol")
     rc=0
-    meta_try delete "$vol" || rc=$?
+    meta_retry delete "$vol" || rc=$?
     ((rc != 255)) || lost "$VM_A"
     ((rc == 0)) || [[ $META_ERR == *"code = NotFound"* ]] || meta_failed "delete $vol" "$META_ERR"
     for vm in $stopped; do
@@ -1737,7 +1750,7 @@ delete_volume() {
     done
     # The id may have been created again meanwhile: its replicas are not this volume's.
     rc=0
-    meta_try get "$vol" || rc=$?
+    meta_retry get "$vol" || rc=$?
     ((rc != 255)) || lost "$VM_A"
     ((rc != 0)) || die "$vol exists again (created meanwhile): its replicas are left as they are"
     [[ $META_ERR == *"code = NotFound"* ]] || meta_failed "get $vol" "$META_ERR"
@@ -1793,7 +1806,7 @@ delete_volume() {
 #   7. a second delete finds none, and NODE's agent confirms (confirm.sh confirm).
 cmd_vol_confirm() {
     (($# == 2)) || die "usage: vol-confirm VOLUME NODE"
-    local vol=$1 node bin="$LOCAL_STATE_DIR/bin/flaminio-meta" here there env out
+    local vol=$1 node bin="$LOCAL_STATE_DIR/bin/flaminio-meta" here there env out rc
     valid_id "$vol" || die "'$vol' is not a volume id"
     node=$(vms_of "$2")
     [[ $node != *" "* ]] || die "vol-confirm confirms for one node, not $2 ($node)"
@@ -1819,7 +1832,13 @@ cmd_vol_confirm() {
     out=$(ENV_VARS=$env run_on_vm "$node" "$SCRIPTS/guest/confirm.sh" delete)
     log "$node: ${out#deleted } replicas of $vol deleted"
     detached_everywhere "$vol"
-    out=$(ENV_VARS=$env run_on_vm "$node" "$SCRIPTS/guest/confirm.sh" confirm)
+    rc=0
+    out=$(ENV_VARS=$env run_on_vm "$node" "$SCRIPTS/guest/confirm.sh" confirm) || rc=$?
+    if ((rc == 255)); then
+        warn "$node may or may not have confirmed $vol: run vol-confirm again"
+        lost "$node"
+    fi
+    ((rc == 0)) || die "confirm.sh confirm on $node failed (exit $rc)"
     log "confirmed $vol for $node: $(jq -c . <<<"$out")"
 }
 
@@ -2101,13 +2120,13 @@ cmd_bench_writes() {
 write_start() {
     local node=$1 id rc found=0 on=() ids
     rc=0
-    meta_try volumes || rc=$?
+    meta_retry volumes || rc=$?
     ((rc != 255)) || lost "$VM_A"
     ((rc == 0)) || meta_failed volumes "$META_ERR"
     ids=$(jq -r '.ids // [] | .[]' <<<"$META_OUT")
     for id in $ids; do
         rc=0
-        meta_try get "$id" || rc=$?
+        meta_retry get "$id" || rc=$?
         ((rc != 255)) || lost "$VM_A"
         if ((rc != 0)); then
             [[ $META_ERR == *"code = NotFound"* ]] && continue # deleted since the listing

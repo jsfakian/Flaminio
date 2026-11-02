@@ -18,7 +18,7 @@ extract() {
         index($0, f) == 1 { on = 1; print; if ($0 ~ /}$/) on = 0; next }
         on { print; if ($0 == "}") on = 0 }' "$SCRIPTS/lab.sh"
 }
-for f in valid_id transient cmd_vol data_vms sha256 lost meta_try meta_failed detach_all detached_everywhere delete_volume cmd_vol_confirm \
+for f in valid_id transient cmd_vol data_vms sha256 lost meta_try meta_retry meta_failed detach_all detached_everywhere delete_volume cmd_vol_confirm \
     delete_wbench write_volume write_start write_restore write_reset write_whole; do
     # shellcheck source=/dev/null
     source <(extract "$f")
@@ -27,7 +27,8 @@ for f in valid_id transient cmd_vol data_vms sha256 lost meta_try meta_failed de
         exit 1
     }
 done
-export TOMBSTONE_WAIT=1 VOL=vol1
+# Above the real time a case takes, below a fake sleep (5 s): two polls, then the time-out.
+export TOMBSTONE_WAIT=3 VOL=vol1
 failed=0
 n=0
 
@@ -77,7 +78,9 @@ run_on_vm() {
             [[ ! -e $w/reattach ]] || echo "$vol" >"$w/attached/$VM_A"
             echo "deleted 2"
             ;;
-        "confirm.sh confirm") echo '{"volume":"v","nodes":["fl-a","fl-c"],"pending":["fl-a"]}' ;;
+        "confirm.sh confirm")
+            [[ ! -e $w/confirm-lost ]] || return 255
+            echo '{"volume":"v","nodes":["fl-a","fl-c"],"pending":["fl-a"]}' ;;
     esac
 }
 
@@ -103,6 +106,11 @@ metactl() {
     [[ ! -e $w/lost/$VM_A ]] || return 255
     case "$1" in
         delete)
+            if [[ -e $w/delete-transient ]]; then
+                rm "$w/delete-transient"
+                echo "flaminio-meta: rpc error: code = DeadlineExceeded" >&2
+                return 1
+            fi
             if [[ -e $w/delete-err ]]; then
                 cat "$w/delete-err" >&2
                 return 1
@@ -330,7 +338,7 @@ said "vol-confirm" no
 run "a failed listing, then gone" 0 'record vol1 "[\"fl-a\"]"; printf "fail 1\ngone\n" >"$w/polls"; delete_volume vol1'
 run "a lost connection at a listing, then gone" 0 'record vol1 "[\"fl-a\"]"; printf "fail 255\ngone\n" >"$w/polls"; delete_volume vol1'
 run "the sweeps never confirm: time-out" 1 'record vol1 "[\"fl-a\"]"; echo "pending fl-a" >"$w/polls"; delete_volume vol1'
-said "pending for fl-a after 1 s"
+said "pending for fl-a after 3 s"
 said "make csi-deploy"
 for code in DeadlineExceeded Canceled; do
     run "a listing that fails with $code, then gone" 0 'record vol1 "[\"fl-a\"]"; printf "error '"$code"'\ngone\n" >"$w/polls"; delete_volume vol1'
@@ -440,7 +448,7 @@ called "confirm.sh delete|confirm.sh confirm" no
 run "a record jq cannot read: stops" 1 'echo "not json" >"$w/meta/x"; echo x >"$w/volumes"; write_start fl-b'
 said "reading x's record failed"
 # The resets delete wbench as the campaign's: a stopped campaign node starts formatted.
-for step in "write_reset fl-b raw 1" "write_whole fl-b flaminio 1"; do
+for step in "write_reset fl-b raw 1" "write_whole fl-b flaminio 1" "write_restore fl-b"; do
     run "$step: the campaign's node, stopped" 0 'record wbench "[\"fl-b\"]"; touch "$w/down/fl-b"; '"$step"
     [[ $(grep -m1 "cmd_node up fl-b" "$w/calls") == "cmd_node up fl-b FORMAT=1" ]] || {
         echo "FAIL: $what: the first start of fl-b is not formatted: $(grep -m1 "cmd_node up fl-b" "$w/calls")"
@@ -452,6 +460,13 @@ for step in "write_reset fl-b raw 1" "write_whole fl-b flaminio 1"; do
         failed=1
     }
 done
+run "a metadata delete that fails with DeadlineExceeded once" 0 'record vol1 "[\"fl-a\"]"; touch "$w/delete-transient"; delete_volume vol1'
+[[ $(grep -c "metactl delete vol1" "$w/calls") == 2 ]] || {
+    echo "FAIL: $what: not retried"
+    failed=1
+}
+run "vol-confirm, lost during the confirmation" 255 'touch "$w/confirm-lost"; cmd_vol_confirm v c'
+said "may or may not have confirmed v: run vol-confirm again"
 # Ids that are not ids go nowhere, in any deletion.
 for vol in "v x" "v;id" "v
 id" ""; do

@@ -28,8 +28,9 @@ case "$*" in
     "is-active --quiet flaminio-node") [[ $(cat "$STATE/active") == active ]] ;;
     "show -p MainPID --value flaminio-node") cat "$STATE/mainpid" ;;
     "show -p ExecStart --value flaminio-node") cat "$STATE/execstart" ;;
-    "is-active "*) cat "$STATE/$2.active"; [[ $(cat "$STATE/$2.active") == active ]] ;;
-    "is-enabled "*) cat "$STATE/$2.enabled"; [[ $(cat "$STATE/$2.enabled") == enabled ]] ;;
+    "show -p "*" --value "*) cat "$STATE/$5.$3" ;;
+    # systemd 249: nothing on stdout for a missing unit (newer: not-found); not to be relied on.
+    "is-enabled "*) [[ $(cat "$STATE/$2.LoadState") != not-found ]] && cat "$STATE/$2.UnitFileState" ;;
     *) echo "systemctl stub: $*" >&2; exit 1 ;;
 esac
 STUB
@@ -51,6 +52,7 @@ cat >"$t/bin/fake-agent" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >>"$STATE/agent.log"
 cat "$STATE/disks"
+exit "$(cat "$STATE/agent.rc" 2>/dev/null || echo 0)"
 STUB
 chmod +x "$t/bin"/*
 
@@ -98,9 +100,11 @@ fresh() {
     ln -sf "$t/dev/vdb" "$t/dev/by-id"
     echo "{ path=/x/flaminio-io ; argv[]=/x/flaminio-io node --device $t/dev/vdb --node fl-c --id 1 ; ignore_errors=no }" >"$s/execstart"
     printf '%s ours       100.0 GiB  serial "flaminio-data" \n/dev/vda refused 20.0 GiB  serial "" mounted\n' "$t/dev/vdb" >"$s/disks"
+    # k3s and k3s-agent are not installed.
     for u in k3s k3s-agent; do
-        echo inactive >"$s/$u.active"
-        echo not-found >"$s/$u.enabled"
+        echo not-found >"$s/$u.LoadState"
+        echo inactive >"$s/$u.ActiveState"
+        : >"$s/$u.UnitFileState"
     done
     echo '{"tombstones":[{"volume":"v","nodes":["fl-a","fl-c"],"pending":["fl-a","fl-c"]}]}' >"$s/tombstones"
     echo 0 >"$s/tombstones.rc"
@@ -161,15 +165,29 @@ fresh && echo "ok" >"$s/answers" && guest node.sh delete && want "delete, an ans
 fresh && guest confirm.sh check && want "check" 0 listed
 logged "check" meta.log "$meta_flags tombstones fl-c$"
 logged "check" socket.log . no
-fresh && echo disabled >"$s/k3s.enabled" && guest confirm.sh check && want "check, k3s disabled" 0 listed
+# installed: loaded, inactive, with a unit file state.
+installed() {
+    echo loaded >"$s/$1.LoadState"
+    echo "$2" >"$s/$1.ActiveState"
+    echo "$3" >"$s/$1.UnitFileState"
+}
+fresh && installed k3s inactive disabled && guest confirm.sh check && want "check, k3s installed, disabled" 0 listed
+fresh && installed k3s-agent inactive masked && guest confirm.sh check && want "check, k3s-agent masked" 0 listed
+fresh && echo not-found >"$s/k3s.UnitFileState" && guest confirm.sh check && want "check, k3s missing, not-found" 0 listed
+fresh && installed k3s-agent inactive "" && guest confirm.sh check && want "check, k3s-agent of no file state" 1 ""
 fresh && echo '{}' >"$s/tombstones" && echo 4343 >"$s/pgrep.flaminio-csi" && guest confirm.sh check &&
     want "check, not listed (before the sweep checks)" 0 "not listed"
 fresh && echo 1 >"$s/tombstones.rc" && guest confirm.sh check && want "check, the listing fails" 1 ""
 fresh && echo 4343 >"$s/pgrep.flaminio-csi" && guest confirm.sh check && want "check, a CSI plugin" 1 ""
 fresh && echo 4343 >"$s/pgrep.flaminio-agent" && guest confirm.sh check && want "check, an agent" 1 ""
-fresh && echo active >"$s/k3s.active" && guest confirm.sh check && want "check, k3s active" 1 ""
-fresh && echo failed >"$s/k3s-agent.active" && guest confirm.sh check && want "check, k3s-agent failed" 1 ""
-fresh && echo enabled >"$s/k3s-agent.enabled" && guest confirm.sh check && want "check, k3s-agent enabled" 1 ""
+fresh && installed k3s active enabled && guest confirm.sh check && want "check, k3s active" 1 ""
+fresh && installed k3s-agent failed disabled && guest confirm.sh check && want "check, k3s-agent failed" 1 ""
+fresh && installed k3s-agent inactive enabled && guest confirm.sh check && want "check, k3s-agent enabled" 1 ""
+fresh && echo 1 >"$s/agent.rc" && guest confirm.sh delete && want "delete, listing the disks fails" 1 ""
+grep -q "listing fl-c's disks failed" "$t/err" || {
+    echo "FAIL: delete, listing the disks fails: $(tail -1 "$t/err")"
+    failed=1
+}
 
 # confirm.sh delete: the unit's data plane alone, on the disk that is ours; then the delete.
 fresh && guest confirm.sh delete && want "delete" 0 "deleted 2"
@@ -214,7 +232,7 @@ fresh && echo "ok 0 replicas deleted" >"$s/answers" && echo 4343 >"$s/pgrep.flam
     want "confirm, a CSI plugin since the check" 1 ""
 logged "confirm, a CSI plugin since the check" meta.log confirm no
 logged "confirm, a CSI plugin since the check" socket.log . no
-fresh && echo "ok 0 replicas deleted" >"$s/answers" && echo enabled >"$s/k3s-agent.enabled" && guest confirm.sh confirm &&
+fresh && echo "ok 0 replicas deleted" >"$s/answers" && installed k3s-agent inactive enabled && guest confirm.sh confirm &&
     want "confirm, k3s-agent enabled since the check" 1 ""
 logged "confirm, k3s-agent enabled since the check" meta.log confirm no
 # The overrides of the paths and the socket hold only under FLAMINIO_SCRIPT_TEST=1.

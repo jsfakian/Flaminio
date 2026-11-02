@@ -38,12 +38,15 @@ no_sweep() {
     for proc in flaminio-csi flaminio-agent; do
         ! pgrep -x "$proc" >/dev/null || die "$proc runs on $NODE: its sweep confirms; nothing to do by hand"
     done
+    # systemctl show, not is-enabled: for a missing unit, systemd 249's is-enabled prints nothing.
     for u in k3s k3s-agent; do
-        state=$(systemctl is-active "$u" 2>/dev/null || true)
+        state=$(systemctl show -p LoadState --value "$u") || die "systemctl show $u failed"
+        [[ $state != not-found ]] || continue
+        state=$(systemctl show -p ActiveState --value "$u")
         [[ $state == inactive ]] || die "$u is ${state:-in an unknown state} on $NODE: a Kubernetes node runs the CSI sweep"
-        state=$(systemctl is-enabled "$u" 2>/dev/null || true)
-        [[ $state == disabled || $state == not-found ]] ||
-            die "$u is ${state:-in an unknown state} (enabled) on $NODE: a Kubernetes node runs the CSI sweep"
+        state=$(systemctl show -p UnitFileState --value "$u")
+        [[ $state == disabled || $state == masked* ]] ||
+            die "$u's unit file is ${state:-in an unknown state} on $NODE, not disabled: a Kubernetes node runs the CSI sweep"
     done
 }
 
@@ -74,7 +77,8 @@ data_plane() {
         die "flaminio-io on $NODE: processes ${pids//$'\n'/ } (none if empty), the unit's $main: exactly the unit's must run"
     device=$(systemctl show -p ExecStart --value "$unit" | grep -o -- '--device [^ ;]*' | cut -d' ' -f2 || true)
     [[ -n $device ]] || die "flaminio-node on $NODE runs without --device"
-    ours=$(sudo "$agent_bin" disks --disk-tool "$disk_tool" | awk '$2 == "ours" {print $1}')
+    ours=$(sudo "$agent_bin" disks --disk-tool "$disk_tool" | awk '$2 == "ours" {print $1}') ||
+        die "listing $NODE's disks failed"
     [[ -n $ours && $ours != *$'\n'* ]] || die "the claim policy calls ${ours//$'\n'/ and } ours on $NODE (none if empty): want exactly one"
     a=$(readlink -f "$ours")
     b=$(readlink -f "$device")
