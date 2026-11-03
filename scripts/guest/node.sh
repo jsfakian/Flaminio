@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # A phase-1 node in a lab VM: flaminio-io node as the systemd service "flaminio-node".
-# Usage: node.sh up | down | status | attach | detach
+# Usage: node.sh up | down | status | attach | detach | delete
 #   up      NODE, LISTEN, META, TRUST_DOMAIN; FORMAT=1 reformats the data disk; DEVICE overrides
 #           the data disk (as the node agent claimed it); ZERO_COPY=1 serves local reads
 #           without copies (and without checksum verification)
 #   attach  VOLUME, TOKEN (base64 capability token): the running node becomes VOLUME's target,
 #           at /dev/ublkb1, through its control socket (no restart)
-#   detach  VOLUME
+#   detach  VOLUME; prints one line: "detached" or "not attached" (exit 0), "not running" (exit 3)
+#   delete  VOLUME; prints one line: "deleted <n>" (exit 0), "not running" (exit 3)
+# detach and delete stop with exit 1 on anything else; their log goes to stderr.
 bin="$HOME/flaminio/dataplane/target/release/flaminio-io"
 id=1
 dev=/dev/ublkb$id
@@ -71,16 +73,6 @@ up() {
     log "$(journal | grep -E 'store ready|target of|serving' | tail -3 | tr '\n' ' ')"
 }
 
-# Sends one command to the node's control socket and prints the answer.
-control() {
-    sudo python3 -c 'import socket, sys
-s = socket.socket(socket.AF_UNIX)
-s.settimeout(180)
-s.connect("/run/flaminio/node.sock")
-s.sendall((sys.argv[1] + "\n").encode())
-print(s.makefile().readline().strip())' "$1"
-}
-
 attach() {
     : "${VOLUME:?}" "${TOKEN:?}"
     systemctl is-active --quiet "$unit" || die "flaminio-node is not running"
@@ -99,21 +91,40 @@ attach() {
     log "attached $VOLUME: $path"
 }
 
-detach() {
+# A node that is not running: says so, and exits 3.
+running() {
+    systemctl is-active --quiet "$unit" && return
+    echo "not running"
+    exit 3
+}
+
+# VOLUME goes into the control socket's line: ids only (domain.ValidID).
+volume_id() {
     : "${VOLUME:?}"
+    [[ $VOLUME =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || die "'$VOLUME' is not a volume id"
+}
+
+detach() {
+    volume_id
+    running
     local answer
     answer=$(control "detach $VOLUME")
-    [[ $answer == ok* || $answer == *"not attached"* ]] || die "detach $VOLUME: $answer"
+    case $answer in
+        ok*) echo detached ;;
+        *"not attached"*) echo "not attached" ;;
+        *) die "detach $VOLUME: $answer" ;;
+    esac
 }
 
 # Deletes this node's replicas of VOLUME (already deleted from the metadata service).
 delete() {
-    : "${VOLUME:?}"
-    systemctl is-active --quiet "$unit" || return 0
+    volume_id
+    running
     local answer
     answer=$(control "delete $VOLUME")
-    [[ $answer == ok* ]] || die "delete $VOLUME: $answer"
+    [[ $answer =~ ^ok\ ([0-9]+)\ replicas\ deleted$ ]] || die "delete $VOLUME: $answer"
     log "$VOLUME: ${answer#ok }"
+    echo "deleted ${BASH_REMATCH[1]}"
 }
 
 status() {

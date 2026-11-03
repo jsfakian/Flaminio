@@ -87,6 +87,8 @@ lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellch
 	@if command -v shellcheck >/dev/null; then shellcheck -x $(SHELL_SCRIPTS) && echo "shellcheck: ok"; \
 	 else echo "shellcheck not installed (brew install shellcheck); skipped"; fi
 	@bash scripts/tools/bench-reference-test.sh
+	@bash scripts/tools/node-scripts-test.sh
+	@bash scripts/tools/lab-deletion-test.sh
 	$(ACTIONLINT)
 
 fmt: ## Format Rust and Go code
@@ -253,7 +255,7 @@ vol-attach: ## Attach the test volume to a node, which serves it at /dev/ublkb1 
 vol-show: ## The test volume: epoch, target, ISR per chunk
 	$(LAB) vol show
 
-vol-delete: ## Delete the test volume from the metadata service
+vol-delete: ## Delete the test volume, and its replicas on every data node; waits for its tombstone to go
 	$(LAB) vol delete
 
 node-fault: ## Verified writes while fl-b's node restarts; ISR restored; failover to fl-b verified

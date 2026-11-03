@@ -162,7 +162,8 @@ func TestAuthorization(t *testing.T) {
 	_, err = nodeB.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
 	expect("node reads", err, codes.OK)
 
-	// Tombstones: only that node's agent (or admin) lists and confirms for itself.
+	// Tombstones: a node's agent lists and confirms for itself, an administrator for any node
+	// (docs/issues/14, S3: flaminio-meta's confirm is narrower, the service's rules are not).
 	_, err = admin.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"})
 	expect("admin deletes", err, codes.OK)
 	_, err = agentB.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: "fl-a"})
@@ -173,10 +174,17 @@ func TestAuthorization(t *testing.T) {
 	expect("agent lists its tombstones", err, codes.OK)
 	_, err = agentB.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
 	expect("agent confirms for another node", err, codes.PermissionDenied)
+	_, err = nodeA.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
+	expect("data plane confirms its deletion", err, codes.PermissionDenied)
 	_, err = agentA.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
 	expect("agent confirms its deletion", err, codes.OK)
-	_, err = agentB.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-b"})
-	expect("agent confirms the other replica", err, codes.OK)
+	listed, err := admin.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: "fl-b"})
+	expect("admin lists a node's tombstones", err, codes.OK)
+	if len(listed.GetTombstones()) != 1 || listed.GetTombstones()[0].GetVolume() != "v" {
+		t.Fatalf("admin's listing for fl-b: %v", listed)
+	}
+	_, err = admin.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-b"})
+	expect("admin confirms for a node", err, codes.OK)
 
 	// Recreate for the ISR checks below.
 	_, err = admin.CreateVolume(ctx, req)

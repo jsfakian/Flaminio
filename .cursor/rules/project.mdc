@@ -1,0 +1,19 @@
+---
+description: Flaminio project rules and the issue pipeline
+alwaysApply: true
+---
+
+# Flaminio
+
+Read `AGENTS.md` first: code map, commands, principles. Accepted ADRs in
+`docs/adr/` are binding.
+
+Issue pipeline: `issue-to-spec` → human approves the spec →
+`spec-to-design` → human approves the design → `ship-spec` (unattended up
+to a draft pull request; lab checks on request). The skills and agents
+under `.cursor/` are thin pointers to `.claude/skills/` and
+`.claude/agents/`, the one source. Conventions: `docs/issues/README.md`.
+
+Lab targets (`make deploy`, `make bench-*`, `make chaos`, …) use the
+shared lab VMs; some take hours and reformat disks. Never run them unless
+asked.
