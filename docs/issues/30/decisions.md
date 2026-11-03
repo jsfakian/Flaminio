@@ -1,5 +1,11 @@
 # Issue #30: a volume created again starts above every earlier epoch — decisions
 
+## Approvals
+
+- **Spec and design:** approved before implementation started (plan 7548371 and f8def04,
+  implementation fb99440, 2026-10-30); recorded 2026-11-03, when the review moved to the new
+  pipeline.
+
 ## Choices
 
 **D1. The first epoch is the revision of the claim** (S1).
