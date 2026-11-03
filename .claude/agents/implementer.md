@@ -24,8 +24,9 @@ don't improvise a message, frame, record or flag. The other side may be
 built against the same contract concurrently.
 
 **Fixing review findings** (ship-spec's review loop): skip the process
-below. Read the findings; fix exactly what each points at with the
-smallest change; touch nothing else. Prefer removing a rule or mechanism
+below. Read the findings, Lows included; fix exactly what each points at
+with the smallest change, and add a regression test for each that fails
+without the fix; touch nothing else. Prefer removing a rule or mechanism
 to guarding it. If you're confident a finding is wrong, say so plainly in
 your summary instead of ignoring it.
 

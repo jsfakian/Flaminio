@@ -2,9 +2,9 @@
 name: ship-issue
 description: >-
   Run the full pipeline for one GitHub issue end to end: issue-to-spec
-  (human approval) -> spec-to-design (human approval) -> ship-spec
-  (implementation, looped code+security review until clean, tests,
-  conformance, draft PR). Use when asked to fully resolve, ship, or "just
+  (spec review loop, human approval) -> spec-to-design (design review
+  loop, human approval) -> ship-spec (implementation and tests, code and
+  security review loop until clear, conformance, draft PR). Use when asked to fully resolve, ship, or "just
   fix" an issue, not merely draft its spec or design.
 ---
 

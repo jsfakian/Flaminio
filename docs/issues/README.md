@@ -10,15 +10,18 @@ docs/issues/<n>/
   design.md     # designer: how each rule is built, contracts, tests, lab, risks
   decisions.md  # approvals, settled choices and accepted risks; reviewers take them as given
   units.md      # ship-spec: the implementation units, only for a change too large for one agent
-  report.md     # ship-spec: review rounds, tests, conformance, lab checks
+  report.md     # every loop's review rounds; tests, conformance, lab checks
 ```
 
 ## Pipeline
 
-`/issue-to-spec <n>` → human approves `spec.md` → `/spec-to-design <n>` → human approves
-`design.md` → `/ship-spec <n>` implements it (one agent, or Rust and Go in parallel), runs a
-code- and security-review loop on the whole change (fix and review again until clean, at most 3
-rounds), the tests and a final conformance check, then opens a **draft** pull request. Lab
+`/issue-to-spec <n>` (with a spec review loop) → human approves `spec.md` →
+`/spec-to-design <n>` (with a design review loop on the whole plan) → human approves
+`design.md` → `/ship-spec <n>` implements it with its tests (one agent, or Rust and Go in
+parallel), runs a code- and security-review loop until clear and a final conformance check,
+then opens a **draft** pull request. Every loop fixes every finding of Low severity or worse;
+after round 1, each round reviews only the files the last fix changed. The loops' rules:
+[`.claude/skills/ship-issue/review-loop.md`](../../.claude/skills/ship-issue/review-loop.md). Lab
 checks, which need the shared lab and can take hours, run later on request
 (`/ship-spec <n> lab`); their results go into the pull request, which is then marked ready.
 `/ship-issue <n>` runs the whole thing, stopping at the same two approvals.
