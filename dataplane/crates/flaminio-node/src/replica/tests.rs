@@ -357,6 +357,16 @@ fn delete_volume_after_restart_clears_store_chunks() {
     assert!(s.store().chunks().is_empty());
 }
 
+/// `delete VOLUME` deletes every chunk of the name, even one fenced at the highest epoch.
+#[test]
+fn delete_volume_deletes_a_chunk_fenced_at_the_highest_epoch() {
+    let mut s = service();
+    s.hello(&accepted(u64::MAX, 1, &[0])).unwrap();
+    assert_eq!(chunks_of(&s), vec![(0, u64::MAX)]);
+    assert_eq!(s.delete_volume("pvc-1"), Ok(1));
+    assert!(s.store().chunks().is_empty());
+}
+
 #[test]
 fn staged_writes_are_answered_after_their_own_commit() {
     let mut s = deferred_service();
@@ -558,6 +568,24 @@ fn an_earlier_volumes_sessions_end_at_the_drop() {
     );
     let (_, reply) = s.hello(&accepted(9, 3, &[0])).unwrap();
     assert_eq!(reply, Frame::Stale { req: 1, fenced: 21 });
+}
+
+/// An earlier volume that had a first epoch too: once the new volume has fenced here, its token
+/// (version 2) is stale, and its Hello drops nothing of the new volume.
+#[test]
+fn an_earlier_volumes_version_2_token_is_stale_and_drops_nothing() {
+    let mut s = service();
+    let (old, _) = s.hello(&accepted_first(5, 9, 1, &[0])).unwrap();
+    let r = s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    assert_eq!(r, vec![Reply::Send(Frame::Ok { req: 2 })]);
+    let (new, reply) = s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    let r = s.handle(&[(new, write(3, 0, 0, &[8], 1))]);
+    assert_eq!(r, vec![Reply::Send(Frame::Ok { req: 3 })]);
+    let (_, reply) = s.hello(&accepted_first(5, 9, 3, &[0])).unwrap();
+    assert_eq!(reply, Frame::Stale { req: 1, fenced: 21 });
+    assert_eq!(chunks_of(&s), vec![(0, 21)]);
+    assert_eq!(blocks(&s.handle(&[(new, read(4, 0, 0, 1))])[0]), vec![8]);
 }
 
 /// A drop whose commit fails fails the Hello and changes nothing in memory; once the store is

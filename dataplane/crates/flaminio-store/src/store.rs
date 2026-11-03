@@ -1201,15 +1201,15 @@ impl<D: BlockDevice> Store<D> {
         })
     }
 
-    /// Deletes every chunk replica of `volume` fenced below `below` (`u64::MAX`: all of them),
-    /// and returns how many. One commit per journal batch of whole chunks: one, unless the
-    /// volume has more chunks here than a batch holds (over 100 000 at the default size). A
-    /// crash between two leaves only chunks still fenced below `below`, for the next call
+    /// Deletes every chunk replica of `volume` fenced below `below` (`None`: all of them), and
+    /// returns how many. One commit per journal batch of whole chunks: one, unless the volume
+    /// has more chunks here than a batch holds (over 100 000 at the default size). A crash
+    /// between two leaves only chunks still fenced below `below`, for the next call
     /// (docs/issues/30, S5).
     pub fn delete_volume(
         &mut self,
         volume: flaminio_format::Uuid,
-        below: u64,
+        below: Option<u64>,
     ) -> Result<usize, StoreError> {
         self.guard(|s| {
             let slots: Vec<u32> = s
@@ -1218,8 +1218,9 @@ impl<D: BlockDevice> Store<D> {
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.as_ref()
-                        .is_some_and(|c| c.key.volume == volume && c.fenced_epoch < below)
+                    c.as_ref().is_some_and(|c| {
+                        c.key.volume == volume && below.is_none_or(|b| c.fenced_epoch < b)
+                    })
                 })
                 .map(|(slot, _)| slot as u32)
                 .collect();

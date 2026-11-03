@@ -72,6 +72,32 @@ development service no longer starts below the volumes nodes still hold.
 command should do. It is a recorded procedure (design, Tests), with the Rust engine test as the
 repeatable version.
 
+**D10. The drop has no simulator check** (code review 1). The simulator (`make sim`) models
+the protocol core in `flaminio-repl`: targets, replicas' fences and sessions, the metadata
+service. The drop works on the store's chunk records, at a replica's `Hello`, in `flaminio-node`,
+outside that model. It is covered by the replica service's tests (`replica/tests.rs`: the drop,
+a leftover above the epoch, another geometry, a volume's own chunks, no first epoch, the earlier
+volume's sessions and its version 1 and 2 tokens, a failed drop, a crash between two batches,
+commits in flight) and the engine's (`a_volume_created_again_neither_adopts_nor_is_deposed`,
+`a_drop_under_a_target_of_the_earlier_volume_fails_its_io`).
+
+**D11. S9 has no test** (code review 1). It describes what old binaries do with the new tokens
+and headers: an old node, an old metadata service. Neither can be built in the tree, so neither
+can be tested here. R5 and R6 accept those risks, and ARCHITECTURE §18 orders the upgrade
+(nodes first, no creation during a rolling upgrade or downgrade of the metadata service).
+
+**D12. Every `Hello` with a first epoch runs the drop,** even when the volume is known here
+fenced at or above it (code review 1). Skipping it then is not clearly sound: the core's fence
+is the highest of the volume's chunks after a restart, and a chunk is created and the volume
+fenced in separate commits. A crash between the two, in a session without a first epoch (a
+version 1 token, after a downgrade: R5), leaves a chunk fenced below the first epoch beside one
+above it, which only the drop finds. The drop also lands the commits in flight first (S5). Its
+cost is a scan of the chunk slots, in memory.
+
+**D13. `Store::delete_volume` takes `Option<u64>`,** `None` for every chunk (code review 1).
+With `u64::MAX` for "all", a chunk fenced at `u64::MAX` was kept and `delete VOLUME` still
+answered success, so its tombstone was confirmed.
+
 ## Accepted risks
 
 **R1. Old tokens on nodes the new volume has not reached** (S8). They open sessions there,
@@ -109,3 +135,9 @@ made up, with any first epoch, for its own local replica. Root controls that rep
 
 **R9. A zombie target's local I/O fails at the drop** (D6), with "unknown volume" rather than
 `Stale`. It is of an earlier volume, deposed either way.
+
+**R10. A drop that fails after its first batch** with an error that does not poison the store
+(code review 1) has deleted some chunks while the replica's memory (`vols`, the core) still
+names them, until the next `Hello` finishes the drop and forgets the volume. Requests to those
+chunks fail meanwhile. A batch is at most a quarter of the journal, and a drop needs more than
+one only past 100 000 chunks of the name on one disk: practically unreachable.

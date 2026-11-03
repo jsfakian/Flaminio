@@ -1867,6 +1867,11 @@ fn a_volume_created_again_neither_adopts_nor_is_deposed() {
         assert!(attach_result(&a, tok).is_err(), "{what} token accepted");
     }
     let new = token_first(&signer, "v", 1001, "fl-a", 1000);
+    // A token that does not decode: the right one with an unknown version.
+    let mut garbled = new.clone();
+    garbled[4] = 9;
+    let why = attach_result(&a, garbled).unwrap_err();
+    assert!(why.contains("invalid capability token"), "{why}");
     assert_eq!(attach_result(&a, new), Ok(1001));
     for (op, off) in [(10, 0), (11, CHUNK)] {
         let got = a

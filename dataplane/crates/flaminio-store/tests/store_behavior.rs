@@ -166,7 +166,8 @@ fn fencing_rejects_old_epochs() {
 }
 
 /// `delete_volume` deletes the volume's chunks fenced below the given epoch, in one commit, and
-/// nothing else (docs/issues/30, S5).
+/// nothing else (docs/issues/30, S5). Without an epoch it deletes all of them, even one fenced at
+/// `u64::MAX`.
 #[test]
 fn delete_volume_deletes_the_chunks_fenced_below_an_epoch() {
     let mut s = new_store(16);
@@ -179,16 +180,16 @@ fn delete_volume_deletes_the_chunks_fenced_below_an_epoch() {
     }
     s.create_chunk(other, CHUNK, CHUNK, 1).unwrap();
     s.write(key(0), 0, &block(1, 0), 1, 9).unwrap();
-    s.create_chunk(key(3), CHUNK, 4 * CHUNK, 21).unwrap();
+    s.create_chunk(key(3), CHUNK, 4 * CHUNK, u64::MAX).unwrap();
     let flushes = s.device().flushes();
-    assert_eq!(s.delete_volume(key(0).volume, 20).unwrap(), 3);
+    assert_eq!(s.delete_volume(key(0).volume, Some(20)).unwrap(), 3);
     assert_eq!(s.device().flushes() - flushes, 1, "one commit");
     assert_eq!(
-        s.delete_volume(key(0).volume, 20).unwrap(),
+        s.delete_volume(key(0).volume, Some(20)).unwrap(),
         0,
         "nothing left"
     );
-    let s = reopen(s);
+    let mut s = reopen(s);
     let mut left: Vec<_> = s.chunks().iter().map(|c| c.key).collect();
     left.sort_by_key(|k| (k.volume.0, k.index));
     assert_eq!(
@@ -196,6 +197,14 @@ fn delete_volume_deletes_the_chunks_fenced_below_an_epoch() {
         vec![key(3), other],
         "durable, and nothing else deleted"
     );
+    assert_eq!(
+        s.delete_volume(key(0).volume, None).unwrap(),
+        1,
+        "all of them, whatever their fence"
+    );
+    let s = reopen(s);
+    let left: Vec<_> = s.chunks().iter().map(|c| c.key).collect();
+    assert_eq!(left, vec![other]);
     s.fsck(false).unwrap();
 }
 

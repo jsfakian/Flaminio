@@ -617,6 +617,7 @@ cmd_meta_smoke() {
     # The volume's epochs start at its first epoch, the revision of its claim (docs/issues/30).
     local first
     first=$(jq -r .volume.epoch <<<"$out")
+    [[ $first =~ ^[0-9]+$ ]] || die "the created volume has no epoch: $out"
     if jq -e --arg w "$VM_W" '[.volume.chunks[].replicas[]] | index($w)' <<<"$out" >/dev/null; then
         die "a replica was placed on the witness $VM_W"
     fi

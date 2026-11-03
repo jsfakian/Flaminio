@@ -197,7 +197,7 @@ impl<D: BlockDevice> ReplicaService<D> {
             // lands the commits in flight first; memory changes only once it has succeeded, so a
             // failure leaves the rest for the next Hello.
             self.store
-                .delete_volume(uuid, first)
+                .delete_volume(uuid, Some(first))
                 .map_err(|e| format!("delete an earlier volume's chunks: {e}"))?;
             if let Some(v) = self.vols.get(&uuid)
                 && self.core.fenced(v.id) < first
@@ -771,9 +771,9 @@ impl<D: BlockDevice> ReplicaService<D> {
         if let Some(v) = self.vols.remove(&uuid) {
             self.core.remove_volume(v.id);
         }
-        // Below an epoch higher than any target's fence (docs/followups.md §8), in one commit.
+        // Every chunk, whatever its fence.
         self.store
-            .delete_volume(uuid, u64::MAX)
+            .delete_volume(uuid, None)
             .map_err(|e| format!("delete chunks: {e}"))
     }
 

@@ -91,7 +91,8 @@ kept; revisions start at the clock)".
 
 **`Store::delete_volume(uuid, below)`** (new, `flaminio-store`), shared with #13, which adds
 the volume's fence-only slot to it. It deletes, in one plan, every chunk of `uuid` whose fence
-is below `below` (`u64::MAX` for the tombstone's `delete VOLUME`), and returns how many.
+is below `below` (`None`: every chunk, for the tombstone's `delete VOLUME`), and returns how
+many.
 - **One commit per batch, one in practice:** the records are `ChunkDelete`s, 8 bytes each plus the record header. A plan
   larger than one batch (`max_batch_bytes`, 4 MiB: over 100 000 chunks) is split in batches of
   whole chunks.
@@ -100,7 +101,7 @@ is below `below` (`u64::MAX` for the tombstone's `delete VOLUME`), and returns h
 
 **`ReplicaService::hello`** (`flaminio-node/src/replica/mod.rs`), right after the chunk-range
 checks and the `uuid`, before the geometry check, when the token's `first` is above 0:
-1. **The store decides:** `store.delete_volume(uuid, first)`. Not `vols` or the core, which a
+1. **The store decides:** `store.delete_volume(uuid, Some(first))`. Not `vols` or the core, which a
    failed drop could leave out of step with the store.
 2. **Only if it succeeds,** and the core's fence for the volume is below `first` (it was
    fenced only by chunks now deleted, or by chunks moved away), the volume is forgotten: removed
@@ -134,8 +135,10 @@ before their chunks go; their replies go to old sessions.
 order and a crash loses a suffix. So after a crash, the store holds chunks fenced below `first`
 (dropped by the next `Hello`), or new chunks fenced above it, never a mix that the drop misses.
 
-**The cost:** one scan of the store's chunk slots and one commit, once per node and volume
-created again. A `Hello` without a drop costs a comparison.
+**The cost:** a drop is one scan of the store's chunk slots and one commit, once per node and
+volume created again. Every `Hello` of a volume with a first epoch scans the slots and lands the
+commits in flight, even when nothing is below it (decisions D12); a `Hello` without a first
+epoch costs a comparison.
 
 ## The target's own replica (S6)
 

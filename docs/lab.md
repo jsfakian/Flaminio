@@ -119,10 +119,11 @@ make meta-smoke      # register nodes, create and attach a volume, lose one then
 `make meta-smoke` (2026-10-09):
 1. Registers the three nodes, with fl-w as a witness.
 2. Creates a 1 GiB volume (RF 2, 256 MiB chunks), with every replica on fl-a and fl-b.
-3. Attaches it through fl-b's service (epoch 1).
-4. Stops etcd on fl-w and attaches again: it works (epoch 2).
+3. Attaches it through fl-b's service (epoch first+1; a volume starts at its first epoch, the
+   revision of its claim: #30).
+4. Stops etcd on fl-w and attaches again: it works (epoch first+2).
 5. Stops etcd on fl-b as well: the service refuses, without quorum.
-6. Restarts both members: the state is intact (epoch 2).
+6. Restarts both members: the state is intact (epoch first+2).
 7. Checks refusals:
    - a plain-text client;
    - a node identity creating a volume;
@@ -245,8 +246,10 @@ only when all of these hold, checked in this order:
 7. NODE's own agent confirms, and finds the volume still pending.
 
 A wrong confirmation is worse than a blocked id: a node confirmed while it still holds replicas
-keeps them, and a volume created again with that name serves their data there, or is deposed by
-them ([#30](https://github.com/jsfakian/Flaminio/issues/30)).
+keeps them. A volume created again with that name drops them at its first session there
+([#30](https://github.com/jsfakian/Flaminio/issues/30)); until then they hold space, and the old
+volume's tokens still open sessions on them. A volume created by an old metadata service (a
+rolling upgrade, a downgrade) is still deposed by them.
 
 `flaminio-meta tombstones [node]` lists the tombstones pending for one node, or for every
 registered node. `flaminio-meta confirm VOLUME NODE --replicas-deleted` is `vol-confirm`'s last
