@@ -91,11 +91,11 @@ kept; revisions start at the clock)".
 
 **`Store::delete_volume(uuid, below)`** (new, `flaminio-store`), shared with #13, which adds
 the volume's fence-only slot to it. It deletes, in one plan, every chunk of `uuid` whose fence
-is below `below` (`None`: every chunk, for the tombstone's `delete VOLUME`), and returns how
-many.
-- **One commit per batch, one in practice:** the records are `ChunkDelete`s, 8 bytes each plus the record header. A plan
-  larger than one batch (`max_batch_bytes`, 4 MiB: over 100 000 chunks) is split in batches of
-  whole chunks.
+is below `below` (`None`: every chunk, for the tombstone's `delete VOLUME`; D13), and returns
+how many.
+- **One commit per batch, one in practice:** the records are `ChunkDelete`s, 8 bytes each plus
+  the record header. A plan larger than one batch (`max_batch_bytes`, 4 MiB: over 100 000
+  chunks) is split in batches of whole chunks.
 - **`ReplicaService::delete_volume`** (`delete VOLUME`) uses it too, instead of one commit per
   chunk.
 
