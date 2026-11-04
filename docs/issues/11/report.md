@@ -42,7 +42,7 @@ passed, 24 ignored (run by `make sim`).
 | S7 | pass | `waited_work_and_a_resync_alternate`, `resyncs_progress_while_a_member_flaps` |
 | S8 | pass | `a_digest_sent_again_does_not_pass_a_waited_chunk` |
 | S9 | pass | `deposition_fails_waiting_operations`, `deposition_ends_reads_waiting_to_go_again` |
-| S10 | lab, pending | `scripts/checks/reconcile.sh` |
+| S10 | pass (lab, 2026-11-04) | `scripts/checks/reconcile.sh`, [results](../../benchmarks/2026-11-04-reconcile-order.md) |
 | S11 | pass | `a_dropped_replicas_ack_does_not_count_after_it_rejoins`, the two late-ack tests, sim `catches_keep_dropped_acks` |
 
 ## Conformance
@@ -73,10 +73,21 @@ Open review findings: none
 
 ## Lab
 
-The design's "Measurement", on `vol1`, `NODE=fl-a`, without zero copy:
-- three runs each of `FIRST_CHUNK=0` and `FIRST_CHUNK=32`, with main's binaries: pending
-- the same with the branch's binaries: pending
-- results in `docs/benchmarks/` and the follow-ups §2 update: pending
+The design's "Measurement", 2026-11-04, on `vol1`, `NODE=fl-a`, without zero copy: done, every
+run passed the check. Results: [docs/benchmarks/2026-11-04-reconcile-order.md](../../benchmarks/2026-11-04-reconcile-order.md).
+
+| | main (e8b6d01) | branch (5833375) |
+|---|---|---|
+| First read, `FIRST_CHUNK=0` | 0.200–0.237 s (6 runs) | 0.125–0.168 s (3 runs) |
+| First read, `FIRST_CHUNK=32` | 0.191–0.267 s (6 runs) | 0.138–0.155 s (3 runs) |
+| Device ready | 0.093–0.163 s | 0.106–0.144 s |
+
+- **Chunk 0 first** (expected well under today's 0.21–0.25 s): pass.
+- **Chunk 32 first** (expected its own digests and what was in flight, not half the chunks):
+  pass, 0.03–0.04 s after the device is ready (main: 0.08–0.12 s).
+- Follow-ups §2 updated. Main has six runs: the first branch deploy did not rebuild (file
+  times), so those three runs used main's binaries; the branch was then rerun with a verified
+  rebuild.
 
 ## ADRs
 

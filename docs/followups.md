@@ -72,9 +72,11 @@ new target copies them all.
    - The lab found two bugs on the way: unwritten blocks without a digest counted as differing
      from written zeros (a restart rewrote about 12 GiB of zeros onto fl-c), and repair-sized
      digest requests (256 blocks) kept the first read at 5–8 s.
-   - Left: reconciliation queues a volume's chunks last to first, so chunk 0 is reconciled
-     last. At about 1 s for 16 GiB this matters only for much larger volumes; fixing it
-     reorders the simulator's runs, so the mutation seeds need searching again.
+   - Reconciliation order ✅ ([issue #11](https://github.com/jsfakian/Flaminio/issues/11)):
+     chunks fenced together are reconciled from chunk 0 up, and a chunk a client waits on goes
+     first. *Lab, 2026-11-04:* the first read after restarting both replicas of `vol1` waited
+     0.13–0.17 s for chunk 0 and 0.14–0.16 s for chunk 32 (main: 0.20–0.24 and 0.19–0.27 s);
+     see [the results](benchmarks/2026-11-04-reconcile-order.md).
 2. **Persisting the uncertain set at checkpoints** (a format v1 compat feature), so a restart
    reports only what was really uncertain. Optional once item 1 is in.
 
