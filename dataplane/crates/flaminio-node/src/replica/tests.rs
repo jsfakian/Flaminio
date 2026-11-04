@@ -452,3 +452,91 @@ fn pipelined_commits_answer_in_order() {
         [vec![1u8; 16], vec![2; 16], vec![3; 16]].concat()
     );
 }
+
+/// A service whose commits stay in flight until the test completes them, holding staged groups
+/// (docs/issues/10).
+fn held_service() -> ReplicaService<DeferredDevice> {
+    let store = Store::open(DeferredDevice::new(formatted()), StoreConfig::default()).unwrap();
+    let mut s = ReplicaService::new(store);
+    s.set_hold_staged(true);
+    s
+}
+
+#[test]
+fn holding_stages_with_nothing_in_flight() {
+    let mut s = held_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    assert!(!s.commit_in_flight());
+    assert_eq!(
+        s.stage(&[(sess, write(2, 0, 0, &[1; 16], 1))]),
+        1,
+        "a whole cluster"
+    );
+    assert!(!s.store().device().in_flight(), "held: no commit yet");
+    assert!(s.launch());
+    assert!(s.poll(false).is_none());
+    assert_eq!(
+        s.store().device().pending_writes(),
+        1,
+        "its batch only: the data was written when it was staged"
+    );
+    s.store().device().complete();
+    assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 2 })]));
+    let r = s.handle(&[(sess, read(3, 0, 0, 16))]);
+    assert_eq!(blocks(&r[0]), vec![1u8; 16]);
+}
+
+#[test]
+fn a_held_group_with_no_writes_is_answered() {
+    let mut s = held_service();
+    let (old, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    s.hello(&accepted(2, 2, &[0])).unwrap();
+    // The old session's write is answered by the replica (fenced), not written: the group has
+    // nothing for the store, and nothing in flight would ever land to answer it.
+    assert_eq!(s.stage(&[(old, write(2, 0, 0, &[1; 16], 1))]), 1);
+    assert!(s.launch(), "answered without a commit");
+    assert!(!s.store().device().in_flight());
+    let r = s.poll(false).expect("answered");
+    assert_eq!(r.len(), 1);
+    assert_ne!(r[0], Reply::Send(Frame::Ok { req: 2 }), "{:?}", r[0]);
+    assert!(!s.commit_in_flight());
+}
+
+#[test]
+fn a_held_group_whose_commit_cannot_start_is_answered_with_the_error() {
+    let mut s = held_service();
+    let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    // The commit ahead fails: the store is poisoned, and the held group cannot start.
+    s.store().device().fail_commit();
+    let r = s.poll(false).expect("the failed commit answered");
+    assert_ne!(r[0], Reply::Send(Frame::Ok { req: 2 }));
+    assert!(s.launch(), "the held group is answered, not stranded");
+    let r = s.poll(false).expect("answered with the error");
+    assert_eq!(r.len(), 1);
+    assert_ne!(r[0], Reply::Send(Frame::Ok { req: 3 }), "{:?}", r[0]);
+    assert!(!s.commit_in_flight());
+}
+
+#[test]
+fn a_staged_write_outside_its_chunk_is_refused_not_a_panic() {
+    // A peer's whole-cluster write past the end of a chunk that has a mapping table: staging
+    // must refuse it before touching the chunk's tables, from a current session or a fenced one
+    // (the security review of docs/issues/10). It then goes the plain way, where it is refused too.
+    let mut s = held_service();
+    let (old, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
+    let (cur, _) = s.hello(&accepted(2, 2, &[0])).unwrap();
+    assert!(s.start(&[(cur, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    s.store().device().complete();
+    assert!(s.poll(false).is_some());
+    for (sess, req) in [(cur, 3), (old, 4)] {
+        let w = write(req, 0, BLOCKS * 64, &[2; 16], 2);
+        assert_eq!(s.stage(&[(sess, w.clone())]), 0, "session of request {req}");
+        let r = s.handle(&[(sess, w)]);
+        assert_ne!(r[0], Reply::Send(Frame::Ok { req }), "{:?}", r[0]);
+    }
+    assert!(!s.commit_in_flight());
+    let r = s.handle(&[(cur, read(5, 0, 0, 16))]);
+    assert_eq!(blocks(&r[0]), vec![1u8; 16], "the chunk is intact");
+}

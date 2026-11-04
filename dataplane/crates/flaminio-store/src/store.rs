@@ -429,6 +429,21 @@ fn read_pair<D: BlockDevice + ?Sized>(
     )
 }
 
+/// True if `len` bytes at `offset` cover at least one whole cluster of `cluster_size` bytes:
+/// the shape a write needs to be staged (its redirect-on-write data written before its
+/// commit starts). The same at a chunk offset as at a volume offset, as chunks are a whole
+/// number of clusters.
+pub fn covers_cluster(cluster_size: u64, offset: u64, len: u64) -> bool {
+    len > 0 && offset.div_ceil(cluster_size) * cluster_size + cluster_size <= offset + len
+}
+
+/// A large write: one that [`covers_cluster`] and is at least 64 KiB. The engine's commit waits
+/// and the frontend treat these apart (docs/issues/10): stageable writes of smaller clusters are
+/// not.
+pub fn large(cluster_size: u64, offset: u64, len: u64) -> bool {
+    len >= 64 << 10 && covers_cluster(cluster_size, offset, len)
+}
+
 impl<D: BlockDevice> Store<D> {
     /// Formats `dev` (spec §2), flushing between the three phases of the plan.
     pub fn format(dev: &D, options: &FormatOptions) -> Result<Superblock, StoreError> {
@@ -1022,16 +1037,26 @@ impl<D: BlockDevice> Store<D> {
         if self.poisoned || len == 0 {
             return None;
         }
-        // Normally a commit must be in flight. With hold_staged, append to an existing staged
-        // group after that commit landed (growing toward a byte floor).
-        if self.in_flight.is_empty() && !(self.hold_staged && self.staged.is_some()) {
+        // Behind a commit in flight; or, with hold_staged, with nothing in flight too: the
+        // write starts or joins the held group, its commit started by the caller (docs/issues/10,
+        // S2).
+        if self.in_flight.is_empty() && !self.hold_staged {
             return None;
         }
         let slot = self.state.slot_of(key).ok()?;
+        // `check_io`'s range rule first: what follows indexes the chunk's tables. A write
+        // outside the chunk is not staged, and the plain path refuses it.
+        let size = self.state.chunk(slot).chunk_size;
+        if !offset.is_multiple_of(BLOCK_SIZE_U64)
+            || !len.is_multiple_of(BLOCK_SIZE_U64)
+            || offset.checked_add(len).is_none_or(|end| end > size)
+        {
+            return None;
+        }
         let cs = self.state.cluster_size();
         let clusters = offset / cs..=(offset + len - 1) / cs;
-        if offset.div_ceil(cs) * cs + cs > offset + len {
-            return None; // no whole cluster
+        if !covers_cluster(cs, offset, len) {
+            return None;
         }
         let staged = self.staged.as_ref();
         let busy = |x: u64| {
@@ -1537,6 +1562,21 @@ impl<D: BlockDevice> Store<D> {
             Ok(results)
         })
         .map(Some)
+    }
+
+    /// The data cluster size, in bytes.
+    pub fn cluster_size(&self) -> u64 {
+        self.state.cluster_size()
+    }
+
+    /// True while a staged group waits for its commit to start ([`Self::launch_staged`]).
+    pub fn holds_group(&self) -> bool {
+        self.staged.is_some()
+    }
+
+    /// True when several commits may be in flight at once (pipelined commits).
+    pub fn pipelined(&self) -> bool {
+        self.pipeline_depth() > 1
     }
 
     /// True from [`Self::start_write_batch`] returning [`Started::InFlight`] until

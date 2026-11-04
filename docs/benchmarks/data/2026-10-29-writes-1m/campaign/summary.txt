@@ -1,0 +1,9 @@
+job                   side           fresh     steady   share   disk WA  drive WA
+randwrite-4k-qd1      raw              147        467       -      1.00      1.10
+randwrite-4k-qd1      flaminio         140        416     89%      3.36      1.03
+write-1m-qd8          raw             1368       1748       -      1.00      1.00
+write-1m-qd8          flaminio         569        935     53%      1.00      1.00
+randrw-70-30-4k-qd32  raw             7468      23834       -      1.00      1.01
+randrw-70-30-4k-qd32  flaminio        6334      25963    108%      2.25      1.00
+randwrite-4k-qd32     raw             3739   unsteady       -      1.00      1.01
+randwrite-4k-qd32     flaminio        3122      10357       -      2.22      1.00

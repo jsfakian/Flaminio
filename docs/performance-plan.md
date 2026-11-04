@@ -8,7 +8,7 @@ Two parts:
 Both start with the same measurement rules (below), because a percentage of raw only means
 something if both sides were measured the same way.
 
-## Status (2026-10-29)
+## Status (2026-11-04)
 
 R0–R6 are done ([results](benchmarks/2026-10-10-reads-r1-r6.md)), and issue #9's QD1 work
 ([results](benchmarks/2026-10-29-reads-qd1-queues.md)). Measured on fl-b at 4 vCPUs, caches
@@ -127,6 +127,23 @@ per ~4 MiB of overlapped commit.
 ([results](benchmarks/2026-10-21-writes-flush-coalesce.md)). Sharing one `fdatasync` across
 two overlapped commits **regressed** single-stream 1M (696 → 511 MiB/s). 4K QD32 stayed
 ~10.6k. Default stays off (`0`).
+
+**After #10 (2026-11-04):** staged groups held by default, with an 8 MiB floor
+([results](benchmarks/2026-10-29-writes-1m-floor.md)). Full campaign, 3 repetitions. 36
+integrity checks, all clean.
+
+| Write job, O_DSYNC, RF 1 | Raw | W4.2 | **#10** | Share of raw |
+|---|---:|---:|---:|---:|
+| 4K random, QD1 | 467 IOPS | 396 | **416** | **89%** |
+| 4K random, QD32 | unsteady | 9 847 | **10 357** | – |
+| 70/30 random, 4K QD32 | 23 834 IOPS | 26 317 | **25 963** | **108%** |
+| 1M sequential, QD8 | 1 748 MiB/s (1 043–1 054 across the disk) | 701 | **935** | **89%** (91–93% interleaved) |
+
+**Where writes stand against the plan's bound** (≥ 80% of raw O_DSYNC): **met.**
+- **QD1, the mixed job and 1M** against raw. 1M is up 33% on W4.2: in the traced profile its
+  commits carry 7.9 MiB, against raw's 7.6 per flush.
+- **QD32:** raw did not reach steady state, so it is judged against W4.2 (124% of raw then):
+  within 10%.
 
 ## 1. Where reads stood before (fl-b, NVMe, 2026-10-09)
 
@@ -436,6 +453,17 @@ Only with trustworthy numbers from W1–W3, in order of the likely gain:
    ([results](benchmarks/2026-10-21-writes-commit-target.md)):* `--commit-target-mib` byte
    gather floor (and held staging). Flat or worse on 1M; **off by default**. A different
    commit shape is still needed for ≥ ~80% of across-disk raw.
+
+   *Done (2026-11-04), issue #10 ([results](benchmarks/2026-10-29-writes-1m-floor.md)):*
+   - **Why the floor fell short:** the returning writes waited unwritten, the queue waited
+     for every copy, and the window ran out with 13–14 of 16 requests.
+   - **Holding is on by default, with an 8 MiB floor.** A stageable write is staged with
+     nothing in flight; a large write reaches the engine once its own data is copied in; a
+     large-write wait holds while large writes are being copied in, up to 8 ms more.
+   - **Traced profile:** commits carry 7.9 MiB, 1M at 102–114% of raw.
+   - **Full campaign:** 1M at 935 MiB/s, up 33% from 701; 89–93% of raw written across the
+     disk, measured interleaved. 4K QD1, 4K QD32 and the 70/30 mix within 10% of W4.2.
+     Integrity clean.
 
 ## 5. Order, and what is needed
 
