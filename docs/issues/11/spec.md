@@ -140,8 +140,21 @@ chunk's items first. What is sent again is unchanged:
 seeds after the search below. The follow-ups, §2: the "Left" item done; the uncertain set's
 persistence stays item 2.
 
+**S11. A dropped replica's acknowledgements are forgotten.** When a chunk's replica list drops a
+node (a move or a removal commits), the chunk's writes in flight forget that node's
+acknowledgements and sends. If the node comes back as a new replica, a write counts as on it
+only once the new replica holds it: acknowledged by it, or copied by its resync. A write is
+never completed on an acknowledgement from a replica that no longer exists. Already broken on
+main; the new order reaches it (simulator seed 1 183 196: `replicas diverge`). Added at
+implementation, approved 2026-11-04.
+
 ## Tests
 
+- **S11:** a target test where a move drops a replica that has acknowledged a write still
+  waiting on another member, and the node rejoins before the write completes: the new replica
+  gets the block, and the write completes only once it holds it. A simulator check with an
+  injected bug that keeps the dropped replica's acknowledgements; seed 1 183 196 passes with no
+  bug injected.
 - **Target** (`flaminio-repl`, `target.rs` tests). The bench, today one settled chunk with only
   the target's own replica's replies held, gains: several chunks; a replica restart, so that
   whole chunks are uncertain; replies held back from any node. With `max_bulk` 1 unless said:

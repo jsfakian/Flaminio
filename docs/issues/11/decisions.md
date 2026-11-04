@@ -18,6 +18,10 @@ Settled during the spec and design reviews. Each line: the choice, and why.
   chunks. The unit tests pin the order down; the rest cost more than they check.
 - **Serving reconciled blocks of a chunk early, preempting work in flight, the bulk limit and
   the digest and repair sizes stay as they are:** not needed for the issue.
+- **A dropped replica's acknowledgements are forgotten (S11), fixed here:** pre-existing on
+  main, found by the fencing search (seed 1 183 196, `replicas diverge` with no switch on). It
+  breaks durability on every in-sync replica, and #11's own search reaches it, so #11 cannot
+  ship around it. Chosen by the user at implementation, 2026-11-04, over a separate issue.
 - **The mismatched-reply leak in `on_reply` and `on_digest` is fixed here:** pre-existing, but a
   dead digest would keep a chunk waited, and resyncs capped, for the target's life.
 

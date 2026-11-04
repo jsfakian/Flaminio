@@ -140,6 +140,25 @@ under its id and send time, before they call `fail_peer`, which then handles it 
 in id order, re-queued at the front as any work sent again (S8). `on_digest` gains the request's
 id and send time for this. `fail_peer` is unchanged.
 
+## A dropped replica's acknowledgements (S11)
+
+**Today:** `adopt_replicas` (`target.rs`) clears a removed node's `dirty`, `removing` and resync,
+but not the `acked` and `sent` sets of the chunk's writes in flight. When the node rejoins as a
+new replica, `drive_resync` takes a write as already on it, the copy skips the block, the new
+replica's uncertain set never names it, and the write completes. Seed 1 183 196 of the fencing
+search ends in `replicas diverge` with no switch on.
+
+**The change:** in `adopt_replicas`, for each removed node, every write of the chunk forgets it:
+`w.acked.remove(r)` and `w.sent.remove(r)`. A write's completion and `drive_resync`'s view then
+count only replicas in the list.
+
+**Test-only:** `Bugs::keep_dropped_acks` skips the change. The simulator check
+`catches_keep_dropped_acks` (ignored, `make sim`, budget 20 000; its hint from the search, with
+seed 1 183 196 tried first) must catch it with `replicas diverge`. A target test,
+`a_dropped_replicas_ack_does_not_count_after_it_rejoins`, builds the scenario: a write
+acknowledged by node A's replica and waiting on node B, a move dropping A, A added back, B's
+acknowledgement delivered; the new A replica gets the block before the write completes.
+
 ## Test-only parts
 
 - **Today's pump, as a switch:** `Bugs::today_pump` (`target.rs`, `cfg(test)`): `pump` always
@@ -276,6 +295,7 @@ sits behind other work in queue order.
 | S6 | `a_waited_chunk_takes_the_next_free_slot` (`max_bulk` 4); `a_chunk_fenced_first_and_waited_goes_before_one_fenced_later` (chunks A on [1, 2] and B on [1, 3], node 3's `Hello` held and node 2's digest replies for A held until it is delivered, `max_bulk` 1, `set_max_digest(1)`: A has several digest pieces, and its later ones sit behind B's digest, pushed to the front when B is fenced); `a_chunk_fenced_late_takes_the_next_free_slot` (the same placement, `max_bulk` 1, A's digests differing; node 2's digest reply is held until node 3's `Hello` is delivered, so A's repairs are queued at the front only then: they start after B's digest; today, before it); `a_waited_chunk_goes_ahead_of_repairs_queued_before_it`; `a_waited_digest_that_cannot_start_holds_nothing` |
 | S8 | `a_digest_sent_again_does_not_pass_a_waited_chunk` (another chunk's digest fails in flight and goes to the front; `min_isr` = ISR size) |
 | S9 | `deposition_fails_waiting_operations`; the existing tests, unchanged |
+| S11 | `a_dropped_replicas_ack_does_not_count_after_it_rejoins`; `catches_keep_dropped_acks` (sim) |
 | fix | `a_digest_reply_of_the_wrong_length_frees_its_slot`; `a_reply_of_the_wrong_type_requeues_its_request` (a digest; a client read with an overlapping write queued behind it, which still starts after it); `a_copy_reply_of_the_wrong_type_frees_its_slot_once` (a copy, then a discard: released once, nothing re-queued, the resync aborted); `a_mapped_reply_of_the_wrong_type_aborts_the_round` |
 | all | `check_accounting` after every call; the teardown |
 
