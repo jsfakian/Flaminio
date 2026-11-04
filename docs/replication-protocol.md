@@ -191,6 +191,12 @@ A new target starts from `Attach`, which bumps the epoch. For each chunk:
    the union already agreed, because their last write completed.
    - A member removed from the ISR while reconciliation is still running may not have been
      compared. Its dirty set for the later resync is the whole chunk, not only writes in flight.
+   - **Order** (docs/issues/11). The digests of chunks fenced together are queued from the
+     lowest chunk up, ahead of earlier work. While a client operation waits on a chunk that does
+     not serve yet, each free slot of the target's bulk work (4 in the data plane) goes first to
+     the waited chunks' digests and repairs, in the order clients first waited on them, with at
+     most one resync item in flight beside them; with no chunk waited, the queue goes in its
+     order. Client operations keep their submission order either way.
 4. **Serve.** The chunk is ready.
 
 **When no wait is needed.** If every ISR member answers, the chunk serves as soon as it is
@@ -316,7 +322,8 @@ order, from a seed. A seed reproduces a run exactly. Each run has two phases:
 
 - **Chaos.** Each run picks:
   - its topology: 3–4 nodes, RF 2–3, `minInSyncReplicas` from 1 to RF, 1–2 chunks of 2–6
-    blocks;
+    blocks (3–8 chunks in the campaign with more chunks, where clients wait on chunks still
+    reconciling, §6 step 3);
   - operations of 1–3 blocks, and repairs and copies of 1–3 blocks;
   - its timing: lease 2–6 s, clock rates up to 10% apart;
   - its client pace, and a read share of 50, 80 or 95%;
@@ -354,36 +361,45 @@ seed to stumble on them:
 - a failover while an ISR removal is committed but its reply has not reached the old target.
 
 **Mutation checks:** each rule has a test-only switch that breaks it, and a test asserts that
-the simulator then fails:
+the simulator then fails. Only a failure that breaks linearizability or convergence counts, and
+only on a seed that passes with no switch on: a seed that fails clean is a bug, and fails the
+check at once. Other failures (liveness) are passed over and counted. First catches, searched
+on 2026-11-04 (docs/issues/11):
 
-| Broken rule | Caught by (first failing seed) |
-|---|---|
-| Acknowledge once a removal is proposed, not committed (§4) | seed 49 |
-| Accept requests from an old session (§3) | seed 16 |
-| No reconciliation after failover (§6) | seed 1 |
-| Trust digests from a single ISR member (§6) | seed 1 |
-| Reconciliation writes prune uncertain sets (§6) | seed 104 |
-| Settling before the repairs are done (§6) | seed 145 |
-| No lease check on reads (§5) | seed 276, split-brain scenario |
-| No takeover wait (§6) | seed 75, split-brain scenario |
-| Reads from a member being removed (§5) | removal-in-flight scenario |
-| Joiner counts for leases and writes only once committed (§5, §7) | seed 49 |
-| Removed member's dirty set omits writes in flight (§7) | seed 7 |
-| No resync filter on the replica (§7) | seed 112 |
-| A move's destination joins the ISR without a resync (§7, moves) | seed 2 |
-| A move drops its source before the destination is in the ISR (§7, moves) | seed 3 |
-| Fast reads without the lease check (§5, fast reads) | seed 276; split-brain scenario |
-| Fast reads without the membership check (§5, fast reads) | seed 18962 |
-| Fast reads without the fencing check at completion (§5, fast reads) | seed 3626767: a slow device read must straddle a complete takeover |
+| Broken rule | Caught by (first failing seed) | With 3–8 chunks |
+|---|---|---|
+| Acknowledge once a removal is proposed, not committed (§4) | seed 49 | |
+| Accept requests from an old session (§3) | seed 40 | |
+| No reconciliation after failover (§6) | seed 1 | seed 1 |
+| Trust digests from a single ISR member (§6) | seed 1 | seed 1 |
+| Reconciliation writes prune uncertain sets (§6) | seed 104 | |
+| Settling before the repairs are done (§6) | seed 211 | seed 21 |
+| No lease check on reads (§5) | seed 561, split-brain scenario | |
+| No takeover wait (§6) | seed 75, split-brain scenario | |
+| Reads from a member being removed (§5) | removal-in-flight scenario | |
+| Joiner counts for leases and writes only once committed (§5, §7) | seed 49 | |
+| Removed member's dirty set omits writes in flight (§7) | seed 7 | seed 7 |
+| No resync filter on the replica (§7) | seed 163 | seed 335 |
+| A move's destination joins the ISR without a resync (§7, moves) | seed 2 | seed 2 |
+| A move drops its source before the destination is in the ISR (§7, moves) | seed 3 | |
+| Fast reads without the lease check (§5, fast reads) | seed 561; split-brain scenario | |
+| Fast reads without the membership check (§5, fast reads) | seed 18962 | |
+| Fast reads without the fencing check at completion (§5, fast reads) | seed 103223: a slow device read must straddle a complete takeover | |
 
 The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
 and 60 000 for reconciliation pruning, early settling and fast reads without the membership
 check. That bug is rare by nature: the target must die between
-two repairs that are usually sent together.
+two repairs that are usually sent together. The fencing check tries its seed only, and fails if
+it no longer catches. A one-chunk seed moves only if the order of the target's work with no
+chunk waited changes (§6 step 3), which a test pins down: then the order is the bug.
+`scripts/dev/mutation-search.sh CHECK END [JOBS]` finds a check's first catch in `[0, END)`,
+split over every core.
 
 **Commands:**
-- `make test` runs the unit tests, the scenarios and a 200-seed campaign;
-- `make sim` runs 20 000 seeds plus every mutation check, in release, in about a minute;
+- `make test` runs the unit tests, the scenarios, a 200-seed campaign and 200 seeds of the
+  campaign with more chunks;
+- `make sim` runs 20 000 seeds plus every mutation check, and 2 000 seeds of the campaign with
+  more chunks, in release;
 - `cargo run --release -p flaminio-repl --example sim -- <first> <count>` runs any range of
   seeds;
 - `FLAMINIO_SIM_TRACE=chunk,block` prints every message, ISR change and failover touching

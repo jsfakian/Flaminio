@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Lab check for follow-ups §2: restart every replica of VOL, attach it on NODE, and time the
-# first read and a read of one block in every chunk. Fails if the first read waits longer than
-# LIMIT seconds. Takes VOL over: it is detached everywhere first and left attached on NODE.
+# first read and a read of one block in every chunk. The first read is of chunk FIRST_CHUNK's first
+# block (default 0); then one block of every other chunk, from 0 up. Fails if the first read waits
+# longer than LIMIT seconds. Takes VOL over: it is detached everywhere first and left attached on NODE.
 # Also (docs/issues/5): reads across a chunk boundary into a buffer aligned only to 4 bytes, and
 # fails if NODE's node logged a failed local read or a request timeout, or, with zero copy, never
 # copied a read through its staging area. NODE must hold a replica of VOL.
-#   ZERO_COPY=1 VOL=vol1 NODE=fl-a LIMIT=5 scripts/checks/reconcile.sh
+#   ZERO_COPY=1 VOL=vol1 NODE=fl-a LIMIT=5 FIRST_CHUNK=32 scripts/checks/reconcile.sh
 set -euo pipefail
 # shellcheck source=../lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -15,11 +16,14 @@ source <(sed -n '/^metactl()/,/^}/p;/^etcd_endpoints()/,/^}/p;/^meta_endpoints()
 VOL=${VOL:-vol1}
 NODE=${NODE:-$VM_A}
 LIMIT=${LIMIT:-5}
+FIRST_CHUNK=${FIRST_CHUNK:-0}
+[[ $FIRST_CHUNK =~ ^[0-9]+$ ]] || die "FIRST_CHUNK must be a chunk number: '$FIRST_CHUNK'"
 
 info=$(metactl "$VM_A" "$VM_A" get "$VOL")
 mapfile -t replicas < <(jq -r '[.volume.chunks[].replicas[]] | unique | .[]' <<<"$info")
 chunks=$(jq '.volume.chunks | length' <<<"$info")
 chunk_bytes=$(jq -r '.volume.chunkBytes' <<<"$info")
+((FIRST_CHUNK < chunks)) || die "FIRST_CHUNK $FIRST_CHUNK: $VOL has $chunks chunks"
 [[ " ${replicas[*]} " == *" $NODE "* ]] || die "$NODE holds no replica of $VOL: no read would be local"
 # The chunks after the first with a replica on NODE, for the misaligned read's probe.
 local_chunks=$(jq -r --arg n "$NODE" \
@@ -34,7 +38,7 @@ for vm in "${replicas[@]}"; do run_on_vm "$vm" "$SCRIPTS/guest/node.sh" down; do
 for vm in "${replicas[@]}"; do ENV_VARS=$(node_env "$vm") run_on_vm "$vm" "$SCRIPTS/guest/node.sh" up; done
 
 # Timed on NODE itself, so the SSH round trips do not count.
-vssh "$NODE" "VOLUME=$VOL NODE=$NODE META=$(vmvar "$NODE" WG):$META_PORT CHUNKS=$chunks CHUNK_BYTES=$chunk_bytes LOCAL_CHUNKS='$local_chunks' bash -s" <<'EOF' | tee /dev/stderr | awk -v limit="$LIMIT" '
+vssh "$NODE" "VOLUME=$VOL NODE=$NODE META=$(vmvar "$NODE" WG):$META_PORT CHUNKS=$chunks CHUNK_BYTES=$chunk_bytes FIRST_CHUNK=$FIRST_CHUNK LOCAL_CHUNKS='$local_chunks' bash -s" <<'EOF' | tee /dev/stderr | awk -v limit="$LIMIT" '
     /^first read/ { first = $(NF - 1) }
     END { if (first == "" || first > limit) { print "first read over the limit of " limit " s"; exit 1 } }'
 set -euo pipefail
@@ -62,8 +66,9 @@ answer=$(control "attach $VOLUME $tok")
 path=${answer#ok }
 for _ in $(seq 100); do [[ -b $path ]] && break; sleep 0.1; done
 echo "device $path ready: $(since "$t0") s"
-read_block "$path" 0
-echo "first read (block 0): $(since "$t0") s"
+first=$((FIRST_CHUNK * CHUNK_BYTES / 4096))
+read_block "$path" "$first"
+echo "first read (chunk $FIRST_CHUNK, block $first): $(since "$t0") s"
 # A direct read into a buffer 4 bytes past a page boundary, which the ublk device accepts and
 # the disk under the store does not (docs/issues/5). It reads the two blocks around the start of a
 # local chunk with data, so the plan has device reads, the second piece at a non-zero offset;
@@ -90,7 +95,9 @@ if read(at, 4, 2 * block) != read(at, 0, 2 * block):
     sys.exit(f"probe: a misaligned read across chunks {c - 1} and {c} returned other data")
 print(f"misaligned read across chunks {c - 1} and {c}: the same data")
 PY
-for ((c = 1; c < CHUNKS; c++)); do read_block "$path" $((c * CHUNK_BYTES / 4096)); done
+for ((c = 0; c < CHUNKS; c++)); do
+    ((c == FIRST_CHUNK)) || read_block "$path" $((c * CHUNK_BYTES / 4096))
+done
 echo "one block of every chunk: $(since "$t0") s"
 # What the node logged since the attach, once journald has taken in everything logged so far.
 sudo journalctl --sync

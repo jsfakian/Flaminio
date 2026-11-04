@@ -209,19 +209,155 @@ fn scenario_removal_in_flight_catches_reads_from_removing() {
     assert!(err.contains("not linearizable"), "{err}");
 }
 
-/// Runs seeds with a bug until one fails. Returns the failing seed and the failure.
-fn find_failure(bugs: Bugs, max_seeds: u64) -> Option<(u64, String)> {
-    let first = std::env::var("FLAMINIO_MUTATION_FIRST")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    (first..first + max_seeds).find_map(|seed| {
-        Sim::new(seed, Config::random(seed))
-            .with_bugs(bugs)
+/// A configuration for each seed.
+type Configure = fn(u64) -> Config;
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name).ok().and_then(|v| v.parse().ok())
+}
+
+/// Whether this run is a search (`scripts/dev/mutation-search.sh`): `FLAMINIO_MUTATION_FIRST`
+/// set.
+fn searching() -> bool {
+    env_u64("FLAMINIO_MUTATION_FIRST").is_some()
+}
+
+/// Runs `seed` with `bugs`. A failure that is a catch (`not linearizable`, `replicas
+/// diverge`) is returned; one of another class (`liveness:`, `event storm`) is counted in
+/// `skipped` and passed over. Every failing seed must pass with no bug on: one that does not is
+/// a bug in the protocol or the simulator, not a catch, and panics.
+fn try_seed(bugs: Bugs, config: Configure, seed: u64, skipped: &mut Vec<u64>) -> Option<String> {
+    let err = Sim::new(seed, config(seed)).with_bugs(bugs).run().err()?;
+    if let Err(clean) = Sim::new(seed, config(seed)).run() {
+        panic!(
+            "seed {seed} fails with no bug on: fix it first.\nwith the bug: {}\nwith none: {clean}",
+            err.lines().next().unwrap_or("")
+        );
+    }
+    if err.contains("not linearizable") || err.contains("replicas diverge") {
+        Some(err)
+    } else {
+        skipped.push(seed);
+        None
+    }
+}
+
+/// Runs seeds with a bug until one is caught, and prints the result. Without
+/// `FLAMINIO_MUTATION_FIRST`, from seed 0 over `budget` (`FLAMINIO_MUTATION_SEEDS` overrides
+/// it), and a bug not caught fails the test. With it, from that seed over
+/// `FLAMINIO_MUTATION_SEEDS` (default `budget`), and the test passes either way: a search.
+fn find_failure(name: &str, bugs: Bugs, config: Configure, budget: u64) {
+    let first = env_u64("FLAMINIO_MUTATION_FIRST").unwrap_or(0);
+    let seeds = first..first + env_u64("FLAMINIO_MUTATION_SEEDS").unwrap_or(budget);
+    let mut skipped = Vec::new();
+    let found = seeds
+        .clone()
+        .find_map(|seed| try_seed(bugs, config, seed, &mut skipped).map(|e| (seed, e)));
+    let skipped = match skipped.first() {
+        Some(s) => format!(
+            " ({} other failures passed over, the first at seed {s})",
+            skipped.len()
+        ),
+        None => String::new(),
+    };
+    match found {
+        Some((seed, err)) => eprintln!(
+            "{name}: caught at seed {seed}: {}{skipped}",
+            err.lines().next().unwrap_or("")
+        ),
+        None if searching() => eprintln!(
+            "{name}: searched [{}, {}): no catch{skipped}",
+            seeds.start, seeds.end
+        ),
+        None => panic!(
+            "{name}: the simulator did not catch this bug in [{}, {}){skipped}",
+            seeds.start, seeds.end
+        ),
+    }
+}
+
+/// [`Config::random`] with 3 to 8 chunks: chunks fenced and reconciled at different times, and
+/// clients waiting on some of them (docs/issues/11).
+fn more_chunks(seed: u64) -> Config {
+    let mut c = Config::random(seed);
+    c.chunks = 3 + (seed % 6) as u32;
+    c
+}
+
+fn campaign_more_chunks(seeds: std::ops::Range<u64>) {
+    let (mut runs, mut with_resync) = (0, 0);
+    for seed in seeds {
+        let r = Sim::new(seed, more_chunks(seed))
             .run()
-            .err()
-            .map(|e| (seed, e))
-    })
+            .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        runs += 1;
+        if r.waited_pumps_with_resync > 0 {
+            with_resync += 1;
+        }
+    }
+    eprintln!("{runs} runs, {with_resync} with a resync item queued while a chunk was waited");
+}
+
+#[test]
+fn campaign_with_more_chunks() {
+    campaign_more_chunks(seeds());
+}
+
+#[test]
+#[ignore = "slow in debug builds: run with `make sim`"]
+fn campaign_with_more_chunks_in_release() {
+    campaign_more_chunks(0..2_000);
+}
+
+/// The pump with today's switch on gives the same runs wherever no chunk is ever waited
+/// (docs/issues/11, S2): one-chunk runs, and runs with no client operation submitted while its
+/// chunk was not `Ready`.
+#[test]
+fn todays_pump_gives_the_same_runs() {
+    let configs: [Configure; 2] = [Config::random, more_chunks];
+    let zeroed = |r: &Report| {
+        let mut r = r.clone();
+        r.waited_pumps = 0;
+        r.waited_pumps_with_resync = 0;
+        r.waiting_submits = 0;
+        format!("{r:?}")
+    };
+    let (mut compared, mut waited) = (0, 0);
+    for config in configs {
+        for seed in seeds() {
+            let cfg = config(seed);
+            let chunks = cfg.chunks;
+            let (new, new_history) = Sim::new(seed, cfg.clone()).run_with_history();
+            let (today, today_history) = Sim::new(seed, cfg)
+                .with_bugs(target(|b| b.today_pump = true))
+                .run_with_history();
+            if let Ok(r) = &new {
+                assert!(
+                    r.waiting_submits > 0 || r.waited_pumps == 0,
+                    "seed {seed}: waited pumps with no client operation waiting: {r:?}"
+                );
+                if r.waited_pumps > 0 {
+                    waited += 1;
+                }
+            }
+            // Picked by today's run: the pump under test does not decide.
+            let must_match = chunks == 1 || today.as_ref().is_ok_and(|r| r.waiting_submits == 0);
+            if !must_match {
+                continue;
+            }
+            compared += 1;
+            assert!(
+                new_history == today_history,
+                "seed {seed} ({chunks} chunks): the histories differ"
+            );
+            match (&new, &today) {
+                (Ok(a), Ok(b)) => assert_eq!(zeroed(a), zeroed(b), "seed {seed}: the reports"),
+                (Err(a), Err(b)) => assert_eq!(a, b, "seed {seed}: the errors"),
+                _ => panic!("seed {seed}: {new:?} with the new pump, {today:?} with today's"),
+            }
+        }
+    }
+    eprintln!("{compared} runs compared, {waited} with waited pumps");
 }
 
 fn target(f: impl FnOnce(&mut crate::target::Bugs)) -> Bugs {
@@ -237,27 +373,21 @@ fn replica(f: impl FnOnce(&mut crate::replica::Bugs)) -> Bugs {
 }
 
 // Each mutation test runs seeds until the bug shows, up to a budget (`FLAMINIO_MUTATION_SEEDS`
-// overrides it). The rarest need thousands of seeds, so these run in release builds only:
-// `make sim`.
+// overrides it), on `Config::random` unless given a configuration. The rarest need thousands of
+// seeds, so these run in release builds only: `make sim`. `scripts/dev/mutation-search.sh`
+// finds each one's first catch.
 macro_rules! mutation {
     ($name:ident, $bugs:expr) => {
         mutation!($name, $bugs, 20_000);
     };
     ($name:ident, $bugs:expr, $budget:expr) => {
+        mutation!($name, $bugs, $budget, Config::random);
+    };
+    ($name:ident, $bugs:expr, $budget:expr, $config:expr) => {
         #[test]
         #[ignore = "slow in debug builds: run with `make sim`"]
         fn $name() {
-            let budget = std::env::var("FLAMINIO_MUTATION_SEEDS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or($budget);
-            let found = find_failure($bugs, budget);
-            let (seed, err) = found.expect("the simulator did not catch this bug");
-            eprintln!(
-                "{}: caught at seed {seed}: {}",
-                stringify!($name),
-                err.lines().next().unwrap_or("")
-            );
+            find_failure(stringify!($name), $bugs, $config, $budget);
         }
     };
 }
@@ -314,33 +444,76 @@ mutation!(
     target(|b| b.fast_read_no_lease = true)
 );
 // Rare too: a move must drop and re-add the local replica during one slow device read. First
-// caught at seed 18962 (2026-10-28).
+// caught at seed 18962 (2026-10-28; searched again from seed 0 on 2026-11-04, docs/issues/11:
+// unchanged).
 mutation!(
     catches_fast_reads_from_a_replaced_replica,
     target(|b| b.fast_read_ignores_membership = true),
     60_000
 );
-// Digests reshuffled the schedule: the first catch moved from seed 70955 to 3626767.
-// Try that seed first so `make sim` stays fast; the budget still searches if it drifts.
+// The rarest: a slow device read must straddle a complete takeover. Searched from seed 0 on
+// 2026-11-04 (docs/issues/11): first caught at seed 103223, a two-chunk run that the order of
+// reconciliation (§6 step 3) made catch; the one-chunk seeds 1001529 and 3626767 catch as before.
+// `make sim` tries the hint only; a search (`FLAMINIO_MUTATION_FIRST`, with
+// `FLAMINIO_MUTATION_NO_HINT=1` to skip the hint) covers a range, as for the other checks.
 #[test]
 #[ignore = "slow in debug builds: run with `make sim`"]
 fn catches_fast_reads_across_a_fence() {
+    const NAME: &str = "catches_fast_reads_across_a_fence";
     let bugs = target(|b| b.fast_read_no_fence_check = true);
-    let budget = std::env::var("FLAMINIO_MUTATION_SEEDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4_000_000);
-    let hint = 3_626_767u64;
-    let found = [hint].into_iter().chain(0..budget).find_map(|seed| {
-        Sim::new(seed, Config::random(seed))
-            .with_bugs(bugs)
-            .run()
-            .err()
-            .map(|e| (seed, e))
-    });
-    let (seed, err) = found.expect("the simulator did not catch this bug");
-    eprintln!(
-        "catches_fast_reads_across_a_fence: caught at seed {seed}: {}",
-        err.lines().next().unwrap_or("")
-    );
+    let hint = 103_223u64;
+    let no_hint = searching() && std::env::var("FLAMINIO_MUTATION_NO_HINT").as_deref() == Ok("1");
+    if !no_hint {
+        let mut skipped = Vec::new();
+        if let Some(err) = try_seed(bugs, Config::random, hint, &mut skipped) {
+            eprintln!(
+                "{NAME}: caught at seed {hint}: {}",
+                err.lines().next().unwrap_or("")
+            );
+            return;
+        }
+        assert!(
+            searching(),
+            "{NAME}: the hint {hint} no longer catches: search again (docs/issues/11, the search)"
+        );
+    }
+    find_failure(NAME, bugs, Config::random, 4_000_000);
 }
+
+// The checks on the campaign with more chunks (docs/issues/11).
+mutation!(
+    catches_no_reconciliation_more_chunks,
+    target(|b| b.no_reconcile = true),
+    20_000,
+    more_chunks
+);
+mutation!(
+    catches_trust_single_digest_more_chunks,
+    target(|b| b.trust_single_digest = true),
+    20_000,
+    more_chunks
+);
+mutation!(
+    catches_early_settle_more_chunks,
+    target(|b| b.early_settle = true),
+    20_000,
+    more_chunks
+);
+mutation!(
+    catches_dirty_set_missing_inflight_more_chunks,
+    target(|b| b.no_dirty_inflight = true),
+    20_000,
+    more_chunks
+);
+mutation!(
+    catches_move_without_resync_more_chunks,
+    target(|b| b.move_without_resync = true),
+    20_000,
+    more_chunks
+);
+mutation!(
+    catches_copies_over_live_writes_more_chunks,
+    replica(|b| b.no_resync_filter = true),
+    20_000,
+    more_chunks
+);

@@ -91,6 +91,11 @@ Settled during the spec and design reviews. Each line: the choice, and why.
   that means S2 is broken, and the pump is fixed.
 - **The search merges by the lowest catch with every lower range searched in full; a range that
   ends otherwise stops the search:** a seed that fails clean is a bug to fix first.
+- **The fencing check's hint becomes 103 223, a two-chunk run (settled during implementation,
+  2026-11-04):** the search from seed 0 found it first; main does not catch it, the new order
+  does. 3 626 767 still catches, and so does the one-chunk seed 1 001 529, on main too: the
+  earlier search had not covered every lower seed. So S2 holds; the hint is simply no longer
+  pinned by it, and a pump change may move it (then search again).
 
 ## Lab
 

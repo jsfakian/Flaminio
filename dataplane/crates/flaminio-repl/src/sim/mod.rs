@@ -181,6 +181,12 @@ pub struct Report {
     pub events: u64,
     /// Client reads from a target's own replica that the run failed (docs/issues/5).
     pub failed_local_reads: u64,
+    /// The targets' pumps that took the waited path (docs/issues/11); 0 outside tests.
+    pub waited_pumps: u64,
+    /// Of those, the ones with a resync item queued; 0 outside tests.
+    pub waited_pumps_with_resync: u64,
+    /// Client operations submitted while their chunk was not `Ready`; 0 outside tests.
+    pub waiting_submits: u64,
 }
 
 /// Deliberate bugs to inject into every replica and target of a run.
@@ -454,6 +460,27 @@ impl Sim {
 
     /// Runs chaos, settles, reads every block and checks the run.
     pub fn run(mut self) -> Result<Report, String> {
+        self.run_mut()
+    }
+
+    /// The run, and its history's `Debug` text, to compare runs.
+    #[cfg(test)]
+    pub fn run_with_history(mut self) -> (Result<Report, String>, String) {
+        let r = self.run_mut();
+        (r, format!("{:?}", self.history))
+    }
+
+    /// Adds the stats of node `node`'s target, before it is replaced or dropped.
+    #[cfg(test)]
+    fn count_target(&mut self, node: NodeId) {
+        if let Some(t) = self.nodes[node as usize].target.as_ref() {
+            self.report.waited_pumps += t.stats.waited_pumps;
+            self.report.waited_pumps_with_resync += t.stats.waited_pumps_with_resync;
+            self.report.waiting_submits += t.stats.waiting_submits;
+        }
+    }
+
+    fn run_mut(&mut self) -> Result<Report, String> {
         self.at(self.cfg.chaos, Ev::EndChaos);
         if let Some(script) = self.script.clone() {
             for (t, a) in script {
@@ -511,7 +538,11 @@ impl Sim {
         self.report.ops = self.history.len();
         self.report.completed = self.history.iter().filter(|h| h.result.is_some()).count();
         self.report.final_epoch = self.meta.volume(VOL).expect("volume").epoch;
-        Ok(self.report)
+        #[cfg(test)]
+        for node in 0..self.cfg.nodes {
+            self.count_target(node);
+        }
+        Ok(self.report.clone())
     }
 
     fn fail(&self, what: &str) -> String {
@@ -787,6 +818,9 @@ impl Sim {
         if n.target.as_ref().is_some_and(|t| t.epoch() >= view.epoch) {
             return;
         }
+        #[cfg(test)]
+        self.count_target(node);
+        let n = &mut self.nodes[node as usize];
         // The previous target on this node goes away: its operations stay unanswered.
         n.client.clear();
         n.fast.clear();
@@ -1074,6 +1108,8 @@ impl Sim {
         if self.trace.is_some() {
             eprintln!("{:>10} crash node {node}", self.now);
         }
+        #[cfg(test)]
+        self.count_target(node);
         let n = &mut self.nodes[node as usize];
         n.up = false;
         n.inc += 1;
