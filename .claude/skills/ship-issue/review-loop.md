@@ -43,8 +43,8 @@ Low-or-worse finding is fixed and another round follows; Nits are fixed when fre
   `model: "sonnet"`, `effort: "medium"`; a `security-reviewer` on a safety-path change keeps
   the default model.
 - **The brief** gives the issue number, the checkout, the round and its focus, the diff range
-  (for a part of a split change, the part's paths too), in round 1 of the code loop the
-  `code-review` effort, the paths of `intent.md`, `spec.md`, `design.md` and `decisions.md`, and the earlier
+  (for a part of a split change, the part's paths too), the `code-review` effort (round 1
+  of the code loop), the paths of `intent.md`, `spec.md`, `design.md` and `decisions.md`, and the earlier
   findings. Don't paste documents the reviewer can read.
 
 ## Fixing a round
