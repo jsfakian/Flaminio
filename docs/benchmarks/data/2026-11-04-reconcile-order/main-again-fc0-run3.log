@@ -1,0 +1,6 @@
+device /dev/ublkb1 ready: 0.109 s
+first read (chunk 0, block 0): 0.200 s
+misaligned read across chunks 0 and 1: the same data
+one block of every chunk: 0.914 s
+no failed local read logged
+[1;34m==>[0m OK: the first read after restarting every replica of vol1 waited under 5 s, and no local read failed

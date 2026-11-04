@@ -7,7 +7,7 @@
 //! Operations cover an extent of one chunk; the caller splits I/O at chunk boundaries. `P` is
 //! the payload type (see [`crate::msg`]): the target only stores and forwards payloads.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Debug;
 
 use crate::extent::{Extent, ExtentSet};
@@ -91,6 +91,28 @@ pub struct Bugs {
     pub fast_read_no_fence_check: bool,
     /// Trust digests from a single ISR member and skip repair (must be caught by the checker).
     pub trust_single_digest: bool,
+    /// Not a bug: `pump` tries the queue in its order always, as before docs/issues/11, so that
+    /// runs can be compared with it (S2). The order of the digests queued by one progress pass
+    /// (S1) stays the new one.
+    pub today_pump: bool,
+    /// A chunk's writes in flight keep the acknowledgements of a replica its list drops, so a
+    /// node added back counts as holding them (S11).
+    pub keep_dropped_acks: bool,
+    /// Not a bug: each newly fenced chunk's digests go to the queue's front as it fences, as
+    /// before docs/issues/11, so the last chunk fenced in a progress pass goes first (S1).
+    pub today_queue_order: bool,
+}
+
+/// What the target counted, for the simulator's reports (docs/issues/11).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stats {
+    /// Pumps that took the waited path: a queued client operation waited on a chunk.
+    pub waited_pumps: u64,
+    /// Of those, the ones with a resync item queued.
+    pub waited_pumps_with_resync: u64,
+    /// Client operations submitted while their chunk was not `Ready`.
+    pub waiting_submits: u64,
 }
 
 /// A read admitted by [`Target::try_fast_read`]: carried out by the caller on the local
@@ -237,6 +259,29 @@ enum Work<P> {
     },
 }
 
+/// What kind of bulk work a queued item is, and whose (docs/issues/11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Client,
+    /// A digest or a repair of the chunk.
+    Reconcile(ChunkIdx),
+    /// A copy, a discard or a resync digest of the chunk's resync round.
+    Resync(ChunkIdx, u64),
+}
+
+impl<P> Work<P> {
+    /// The one place that sorts queued items by kind.
+    fn class(&self) -> Class {
+        match *self {
+            Work::Client { .. } => Class::Client,
+            Work::Digest { chunk, .. } | Work::Repair { chunk, .. } => Class::Reconcile(chunk),
+            Work::Copy { chunk, round, .. }
+            | Work::Discard { chunk, round, .. }
+            | Work::ResyncDigest { chunk, round, .. } => Class::Resync(chunk, round),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct DigestOp {
     chunk: ChunkIdx,
@@ -367,6 +412,18 @@ pub struct Target<P> {
     deposed: bool,
     out: Vec<Output<P>>,
     events: Vec<Event>,
+    /// Chunks fenced in the current progress pass, and their digests, for
+    /// [`Target::queue_newly_fenced`].
+    newly_fenced: Vec<(usize, Vec<Extent>)>,
+    /// Chunks not `Ready`. Phases only move forward, so it only falls.
+    unready: usize,
+    /// Whether the last slot given went to a waited chunk's item (S3).
+    last_waited: bool,
+    /// Fast reads admitted and not finished, for the accounting check.
+    #[cfg(test)]
+    fast_reads: Vec<(ChunkIdx, Extent)>,
+    #[cfg(test)]
+    pub stats: Stats,
     #[cfg(test)]
     pub bugs: Bugs,
 }
@@ -411,6 +468,7 @@ impl<P: Clone + Debug> Target<P> {
             .iter()
             .flat_map(|c| c.replicas.iter().map(|&n| (n, Peer::default())))
             .collect();
+        let chunks_len = chunks.len();
         let mut t = Self {
             node,
             vol,
@@ -443,10 +501,19 @@ impl<P: Clone + Debug> Target<P> {
             deposed: false,
             out: Vec::new(),
             events: Vec::new(),
+            newly_fenced: Vec::new(),
+            unready: chunks_len,
+            last_waited: false,
+            #[cfg(test)]
+            fast_reads: Vec::new(),
+            #[cfg(test)]
+            stats: Stats::default(),
             #[cfg(test)]
             bugs: Bugs::default(),
         };
-        t.tick(now);
+        t.tick_inner(now);
+        #[cfg(test)]
+        t.check_accounting();
         t
     }
 
@@ -581,6 +648,18 @@ impl<P: Clone + Debug> Target<P> {
     /// overlapping lock, and no client operation waits on an overlapping extent ahead of it.
     /// The read takes its blocks' lock until [`Target::finish_fast_read`].
     pub fn try_fast_read(&mut self, now: Time, chunk: ChunkIdx, ext: Extent) -> Option<FastRead> {
+        let fr = self.try_fast_read_inner(now, chunk, ext);
+        #[cfg(test)]
+        {
+            if fr.is_some() {
+                self.fast_reads.push((chunk, ext));
+            }
+            self.check_accounting();
+        }
+        fr
+    }
+
+    fn try_fast_read_inner(&mut self, now: Time, chunk: ChunkIdx, ext: Extent) -> Option<FastRead> {
         let i = chunk as usize;
         let c = self.chunks.get(i)?;
         if self.deposed
@@ -623,6 +702,22 @@ impl<P: Clone + Debug> Target<P> {
     /// same session throughout: then the read is linearized while all of that held. Otherwise
     /// the caller submits the read again, through the queue.
     pub fn finish_fast_read(&mut self, now: Time, fr: FastRead, ok: bool) -> bool {
+        #[cfg(test)]
+        if !self.deposed
+            && let Some(k) = self
+                .fast_reads
+                .iter()
+                .position(|&x| x == (fr.chunk, fr.ext))
+        {
+            self.fast_reads.remove(k);
+        }
+        let served = self.finish_fast_read_inner(now, fr, ok);
+        #[cfg(test)]
+        self.check_accounting();
+        served
+    }
+
+    fn finish_fast_read_inner(&mut self, now: Time, fr: FastRead, ok: bool) -> bool {
         if self.deposed {
             return false;
         }
@@ -644,12 +739,26 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Submits a client operation. Its result comes as an [`Output::Done`].
     pub fn submit(&mut self, now: Time, op: u64, kind: Op<P>) {
+        self.submit_inner(now, op, kind);
+        #[cfg(test)]
+        self.check_accounting();
+    }
+
+    fn submit_inner(&mut self, now: Time, op: u64, kind: Op<P>) {
         if self.deposed {
             self.out.push(Output::Done {
                 op,
                 result: OpResult::Failed,
             });
             return;
+        }
+        #[cfg(test)]
+        if self
+            .chunks
+            .get(kind.key().0 as usize)
+            .is_some_and(|c| c.phase != Phase::Ready)
+        {
+            self.stats.waiting_submits += 1;
         }
         self.queue.push_back(Work::Client { op, kind });
         // A new operation changes no chunk's state: only queued work can start.
@@ -690,6 +799,12 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Handles timeouts, reconnects, heartbeats and waits that are due at `now`.
     pub fn tick(&mut self, now: Time) {
+        self.tick_inner(now);
+        #[cfg(test)]
+        self.check_accounting();
+    }
+
+    fn tick_inner(&mut self, now: Time) {
         if self.deposed {
             return;
         }
@@ -766,6 +881,12 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Handles a reply from replica node `from`.
     pub fn on_reply(&mut self, now: Time, from: NodeId, m: &FromReplica<P>) {
+        self.on_reply_inner(now, from, m);
+        #[cfg(test)]
+        self.check_accounting();
+    }
+
+    fn on_reply_inner(&mut self, now: Time, from: NodeId, m: &FromReplica<P>) {
         if self.deposed || m.vol != self.vol || m.epoch != self.epoch {
             return;
         }
@@ -804,8 +925,17 @@ impl<P: Clone + Debug> Target<P> {
                     r.unacked.remove(&seq);
                 }
                 if let Some(w) = self.writes.get_mut(&seq) {
-                    w.acked.insert(from);
-                    self.check_write(seq);
+                    // An acknowledgement counts only for a send the write still records: the
+                    // sends to a replica its chunk's list dropped are forgotten, and a node
+                    // added back is sent the write again only on a new session (S11).
+                    #[cfg(test)]
+                    let counts = w.sent.contains(&from) || self.bugs.keep_dropped_acks;
+                    #[cfg(not(test))]
+                    let counts = w.sent.contains(&from);
+                    if counts {
+                        w.acked.insert(from);
+                        self.check_write(seq);
+                    }
                 }
                 // A completed write may finish the chunk's reconciliation or unblock a join.
                 scope = Scope::Chunk(chunk as usize);
@@ -817,7 +947,7 @@ impl<P: Clone + Debug> Target<P> {
             }
             (ReqKind::Digest { id }, Response::Digests(sums)) => {
                 let sums = sums.clone();
-                self.on_digest(now, from, id, sums);
+                self.on_digest(now, from, (m.req, sent_at), id, sums);
                 scope = Scope::All;
             }
             (ReqKind::Mapped { chunk, round }, Response::Mapped(exts)) => {
@@ -858,7 +988,10 @@ impl<P: Clone + Debug> Target<P> {
                 }
             }
             _ => {
-                // A reply that does not answer its request: treat the session as broken.
+                // A reply that does not answer its request: treat the session as broken. The
+                // request goes back in flight first, so that the session's failure handles it
+                // with the others.
+                self.put_back(from, m.req, sent_at, kind);
                 self.events.push(Event::SessionFailed {
                     node: from,
                     reason: "a reply did not answer its request",
@@ -884,6 +1017,20 @@ impl<P: Clone + Debug> Target<P> {
     /// to another ISR member, and `from` stays a member, its session open. A report that does not
     /// match a client read in flight is ignored, as a stray reply is: then it returns false.
     pub fn on_read_failed(
+        &mut self,
+        now: Time,
+        from: NodeId,
+        epoch: Epoch,
+        session: u64,
+        req: u64,
+    ) -> bool {
+        let failed = self.on_read_failed_inner(now, from, epoch, session, req);
+        #[cfg(test)]
+        self.check_accounting();
+        failed
+    }
+
+    fn on_read_failed_inner(
         &mut self,
         now: Time,
         from: NodeId,
@@ -932,6 +1079,12 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Handles the reply to metadata request `req`.
     pub fn on_meta(&mut self, now: Time, req: u64, reply: &MetaReply) {
+        self.on_meta_inner(now, req, reply);
+        #[cfg(test)]
+        self.check_accounting();
+    }
+
+    fn on_meta_inner(&mut self, now: Time, req: u64, reply: &MetaReply) {
         if self.deposed {
             return;
         }
@@ -994,6 +1147,22 @@ impl<P: Clone + Debug> Target<P> {
         self.meta_inflight = None;
         self.refresh_inflight = None;
         self.bulk = 0;
+        // A deposed target starts nothing: no lock is held for it, and fast reads are refused.
+        self.newly_fenced.clear();
+        self.last_waited = false;
+        for c in &mut self.chunks {
+            c.locks.clear();
+        }
+        #[cfg(test)]
+        self.fast_reads.clear();
+    }
+
+    /// Puts a request whose reply did not answer it back in flight on `to`'s session, before
+    /// that session fails (`fail_peer`).
+    fn put_back(&mut self, to: NodeId, req: u64, sent_at: Time, kind: ReqKind) {
+        if let Some(s) = self.peers.get_mut(&to).and_then(|p| p.session.as_mut()) {
+            s.inflight.insert(req, (sent_at, kind));
+        }
     }
 
     fn open_session(&mut self, now: Time, to: NodeId) {
@@ -1314,11 +1483,21 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Digests from one ISR member. When every member has answered, repair only the blocks
     /// where digests disagree (or skip repair entirely when they all match).
-    fn on_digest(&mut self, now: Time, from: NodeId, id: u64, sums: Vec<Option<u32>>) {
+    /// `req` is the reply's request and when it was sent.
+    fn on_digest(
+        &mut self,
+        now: Time,
+        from: NodeId,
+        req: (u64, Time),
+        id: u64,
+        sums: Vec<Option<u32>>,
+    ) {
         let Some(d) = self.digests.get_mut(&id) else {
             return;
         };
         if !d.need.contains(&from) || sums.len() != d.ext.len as usize {
+            // As in `on_reply`: back in flight, so that the session's failure sends it again.
+            self.put_back(from, req.0, req.1, ReqKind::Digest { id });
             self.events.push(Event::SessionFailed {
                 node: from,
                 reason: "a digest reply did not answer its request",
@@ -1703,9 +1882,281 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// Queues the digests of the chunks fenced in this progress pass ahead of what was queued
+    /// before, from the lowest chunk's first piece up (S1).
+    fn queue_newly_fenced(&mut self) {
+        for (i, pieces) in std::mem::take(&mut self.newly_fenced).into_iter().rev() {
+            for ext in pieces.into_iter().rev() {
+                self.queue.push_front(Work::Digest {
+                    chunk: i as ChunkIdx,
+                    ext,
+                });
+            }
+        }
+    }
+
     /// Starts whatever queued work can start. Client operations on overlapping extents start
-    /// in submission order; internal work (repairs, copies) is ordered by locks alone.
+    /// in submission order. While a queued client operation waits on a chunk that does not
+    /// serve, the free slots go first to that chunk's reconciliation, with at most one resync
+    /// item in flight beside it (docs/issues/11, S3); otherwise the queue is tried in its
+    /// order.
     fn pump(&mut self, now: Time) {
+        if self.deposed {
+            return;
+        }
+        self.queue_newly_fenced();
+        #[cfg(test)]
+        let in_order = self.unready == 0 || self.bugs.today_pump;
+        #[cfg(not(test))]
+        let in_order = self.unready == 0;
+        if in_order {
+            self.last_waited = false;
+            self.pump_in_order(now);
+            return;
+        }
+        // Pass 1: drop stale resync items, find the waited chunks in wait order, and note each
+        // bulk item's place.
+        let mut items: Vec<Option<Work<P>>> = std::mem::take(&mut self.queue)
+            .into_iter()
+            .map(Some)
+            .collect();
+        // Each waited chunk's wait rank.
+        let mut rank: HashMap<ChunkIdx, usize> = HashMap::new();
+        let mut reconcile_all: Vec<(usize, ChunkIdx)> = Vec::new();
+        let mut resync: Vec<usize> = Vec::new();
+        for (k, item) in items.iter_mut().enumerate() {
+            let Some(w) = item.as_ref() else {
+                continue;
+            };
+            match w.class() {
+                Class::Client => {
+                    let Work::Client { kind, .. } = w else {
+                        continue;
+                    };
+                    let chunk = kind.key().0;
+                    let serves = self
+                        .chunks
+                        .get(chunk as usize)
+                        .is_none_or(|c| c.phase == Phase::Ready);
+                    if !serves {
+                        let next = rank.len();
+                        rank.entry(chunk).or_insert(next);
+                    }
+                }
+                Class::Reconcile(chunk) => reconcile_all.push((k, chunk)),
+                Class::Resync(chunk, round) => {
+                    let live = self.chunks[chunk as usize]
+                        .resync
+                        .as_ref()
+                        .is_some_and(|r| r.round == round);
+                    if live {
+                        resync.push(k);
+                    } else {
+                        // As `try_start` does: the round was aborted or finished.
+                        *item = None;
+                    }
+                }
+            }
+        }
+        if rank.is_empty() {
+            self.last_waited = false;
+            self.queue = items.into_iter().flatten().collect();
+            self.pump_in_order(now);
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.stats.waited_pumps += 1;
+            if !resync.is_empty() {
+                self.stats.waited_pumps_with_resync += 1;
+            }
+        }
+        let is_waited = |c: ChunkIdx| rank.contains_key(&c);
+        // The waited chunks' items, chunk by chunk in wait order, and the others, each in
+        // queue order.
+        let mut by_rank: Vec<Vec<usize>> = vec![Vec::new(); rank.len()];
+        let mut reconcile: Vec<usize> = Vec::new();
+        for &(k, c) in &reconcile_all {
+            match rank.get(&c) {
+                Some(&r) => by_rank[r].push(k),
+                None => reconcile.push(k),
+            }
+        }
+        let waited: Vec<usize> = by_rank.concat();
+        // What is in flight, from the maps.
+        let mut resync_in_flight = self.digests.values().filter(|d| d.resync.is_some()).count()
+            + self
+                .reads
+                .values()
+                .filter(|r| matches!(r.purpose, ReadFor::Copy { .. }))
+                .count()
+            + self
+                .peers
+                .values()
+                .filter_map(|p| p.session.as_ref())
+                .flat_map(|s| s.inflight.values())
+                .filter(|(_, k)| matches!(k, ReqKind::Copy { .. } | ReqKind::Discard { .. }))
+                .count();
+        let mut waited_in_flight = self
+            .digests
+            .values()
+            .filter(|d| d.resync.is_none() && is_waited(d.chunk))
+            .count()
+            + self
+                .reads
+                .values()
+                .filter(|r| matches!(r.purpose, ReadFor::Repair) && is_waited(r.chunk))
+                .count()
+            + self
+                .writes
+                .values()
+                .filter(|w| w.client.is_none() && is_waited(w.chunk))
+                .count();
+        #[cfg(test)]
+        let before = self.client_view();
+        // The selection (S3): one start per round, while a slot is free.
+        let (mut wc, mut rc, mut cc) = (0, 0, 0);
+        while self.bulk < self.max_bulk {
+            if resync_in_flight == 0
+                && self.last_waited
+                && self.start_first(now, &mut items, &resync, &mut rc)
+            {
+                resync_in_flight += 1;
+                self.last_waited = false;
+                continue;
+            }
+            if self.start_first(now, &mut items, &waited, &mut wc) {
+                waited_in_flight += 1;
+                self.last_waited = true;
+                continue;
+            }
+            let started = if waited_in_flight > 0 {
+                if resync_in_flight == 0 && self.start_first(now, &mut items, &resync, &mut rc) {
+                    resync_in_flight += 1;
+                    true
+                } else {
+                    self.start_first(now, &mut items, &reconcile, &mut cc)
+                }
+            } else {
+                match self.start_merged(now, &mut items, (&resync, &mut rc), (&reconcile, &mut cc))
+                {
+                    Some(true) => {
+                        resync_in_flight += 1;
+                        true
+                    }
+                    Some(false) => true,
+                    None => false,
+                }
+            };
+            if !started {
+                break;
+            }
+            self.last_waited = false;
+        }
+        #[cfg(test)]
+        assert!(
+            before == self.client_view(),
+            "bulk starts changed what client operations depend on"
+        );
+        // Pass 2: every client operation, in queue order, as `pump_in_order` tries them.
+        debug_assert!(self.queue.is_empty(), "the selection queued work");
+        let mut blocked: BTreeMap<ChunkIdx, ExtentSet> = BTreeMap::new();
+        let mut keep = VecDeque::new();
+        for w in items.into_iter().flatten() {
+            if self.deposed {
+                return;
+            }
+            let Work::Client { kind, .. } = &w else {
+                keep.push_back(w);
+                continue;
+            };
+            let (c, x) = kind.key();
+            let behind = blocked.get(&c).is_some_and(|b| b.overlaps(&x));
+            if behind || !self.try_start(now, &w) {
+                blocked.entry(c).or_default().insert(x);
+                keep.push_back(w);
+            }
+        }
+        self.queue = keep;
+    }
+
+    /// Starts the first item of `list` from `cursor` on that starts, and moves the cursor past
+    /// every item tried: an item that does not start now cannot start later in the same pump.
+    fn start_first(
+        &mut self,
+        now: Time,
+        items: &mut [Option<Work<P>>],
+        list: &[usize],
+        cursor: &mut usize,
+    ) -> bool {
+        while let Some(&k) = list.get(*cursor) {
+            *cursor += 1;
+            if self.try_item(now, items, k) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Starts the first item that starts of two lists merged by queue index. Returns whether
+    /// it was one of the first list's, or `None` if nothing started.
+    fn start_merged(
+        &mut self,
+        now: Time,
+        items: &mut [Option<Work<P>>],
+        (a, ac): (&[usize], &mut usize),
+        (b, bc): (&[usize], &mut usize),
+    ) -> Option<bool> {
+        loop {
+            let first = match (a.get(*ac), b.get(*bc)) {
+                (None, None) => return None,
+                (Some(x), Some(y)) => x < y,
+                (x, _) => x.is_some(),
+            };
+            let k = if first {
+                *ac += 1;
+                a[*ac - 1]
+            } else {
+                *bc += 1;
+                b[*bc - 1]
+            };
+            if self.try_item(now, items, k) {
+                return Some(first);
+            }
+        }
+    }
+
+    /// Tries the queued item at index `k`; once started, it leaves the queue.
+    fn try_item(&mut self, now: Time, items: &mut [Option<Work<P>>], k: usize) -> bool {
+        let Some(w) = items[k].take() else {
+            return false;
+        };
+        if self.try_start(now, &w) {
+            return true;
+        }
+        items[k] = Some(w);
+        false
+    }
+
+    /// What client operations depend on, which bulk starts must leave as it is: the locks of
+    /// every serving chunk, and the open sessions.
+    #[cfg(test)]
+    fn client_view(&self) -> (Vec<Option<ExtentSet>>, Vec<(NodeId, u64)>) {
+        let locks = self
+            .chunks
+            .iter()
+            .map(|c| (c.phase == Phase::Ready).then(|| c.locks.clone()))
+            .collect();
+        let open = self
+            .peers
+            .iter()
+            .filter_map(|(&n, p)| p.session.as_ref().filter(|s| s.open).map(|s| (n, s.id)))
+            .collect();
+        (locks, open)
+    }
+
+    /// Tries the queue in its order: the pump before docs/issues/11, unchanged.
+    fn pump_in_order(&mut self, now: Time) {
         let mut blocked: BTreeMap<ChunkIdx, ExtentSet> = BTreeMap::new();
         let mut keep = VecDeque::new();
         while let Some(w) = self.queue.pop_front() {
@@ -1773,12 +2224,21 @@ impl<P: Clone + Debug> Target<P> {
                         } else {
                             pending
                         };
-                        // Digests first, then repairs only where ISR members disagree.
-                        for ext in pending.pieces(self.max_digest).into_iter().rev() {
-                            self.queue.push_front(Work::Digest {
-                                chunk: i as ChunkIdx,
-                                ext,
-                            });
+                        // Digests first, then repairs only where ISR members disagree. Queued
+                        // once the progress pass is over (`queue_newly_fenced`).
+                        let pieces = pending.pieces(self.max_digest);
+                        #[cfg(test)]
+                        if self.bugs.today_queue_order {
+                            for ext in pieces.iter().rev() {
+                                let chunk = i as ChunkIdx;
+                                self.queue.push_front(Work::Digest { chunk, ext: *ext });
+                            }
+                        } else if !pieces.is_empty() {
+                            self.newly_fenced.push((i, pieces));
+                        }
+                        #[cfg(not(test))]
+                        if !pieces.is_empty() {
+                            self.newly_fenced.push((i, pieces));
                         }
                         c.phase = Phase::Reconciling { pending };
                         #[cfg(test)]
@@ -1801,6 +2261,7 @@ impl<P: Clone + Debug> Target<P> {
             let c = &mut self.chunks[i];
             if matches!(&c.phase, Phase::Reconciling { pending } if pending.is_empty()) {
                 c.phase = Phase::Ready;
+                self.unready -= 1;
                 // The ISR agrees on everything older than this epoch now.
                 #[cfg(test)]
                 let settle = !self.bugs.early_settle;
@@ -2158,7 +2619,20 @@ impl<P: Clone + Debug> Target<P> {
             .copied()
             .filter(|n| !replicas.contains(n))
             .collect();
+        #[cfg(test)]
+        let forget = !self.bugs.keep_dropped_acks;
+        #[cfg(not(test))]
+        let forget = true;
         for r in &removed {
+            // A write counts as on a replica only while it exists: a node added back is a new
+            // replica, which holds the write once it acknowledges it or its resync copies it
+            // (S11).
+            if forget {
+                for w in self.writes.values_mut().filter(|w| w.chunk as usize == i) {
+                    w.acked.remove(r);
+                    w.sent.remove(r);
+                }
+            }
             c.dirty.remove(r);
             c.removing.remove(r);
             if c.resync.as_ref().is_some_and(|x| x.member == *r) {
@@ -2173,6 +2647,90 @@ impl<P: Clone + Debug> Target<P> {
                 e.insert(Peer::default());
                 self.open_session(now, n);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+impl<P: Clone + Debug> Target<P> {
+    /// Deposes the target, then checks it, as the `pub` methods do.
+    pub fn depose_checked(&mut self) {
+        self.depose();
+        self.check_accounting();
+    }
+
+    /// Checks that the slots, the requests in flight and the locks agree with the work in
+    /// flight (docs/issues/11). Run after every `pub` call that changes state.
+    pub fn check_accounting(&self) {
+        let requests = || {
+            self.peers.iter().flat_map(|(&n, p)| {
+                p.session
+                    .iter()
+                    .flat_map(move |s| s.inflight.values().map(move |&(_, k)| (n, k)))
+            })
+        };
+        let copies = requests()
+            .filter(|(_, k)| matches!(k, ReqKind::Copy { .. } | ReqKind::Discard { .. }))
+            .count();
+        let bulk = self.digests.len()
+            + self
+                .reads
+                .values()
+                .filter(|r| !matches!(r.purpose, ReadFor::Client { .. }))
+                .count()
+            + self.writes.values().filter(|w| w.client.is_none()).count()
+            + copies;
+        assert_eq!(self.bulk, bulk, "bulk slots: {}", self.describe());
+        for (&id, d) in &self.digests {
+            for n in d.need.iter().filter(|n| !d.got.contains_key(n)) {
+                assert!(
+                    requests()
+                        .any(|(m, k)| m == *n && matches!(k, ReqKind::Digest { id: x } if x == id)),
+                    "digest {id} awaits node {n}, with no request in flight: {}",
+                    self.describe()
+                );
+            }
+        }
+        for &id in self.reads.keys() {
+            assert!(
+                requests().any(|(_, k)| matches!(k, ReqKind::Read { id: x } if x == id)),
+                "read {id} with no request in flight: {}",
+                self.describe()
+            );
+        }
+        for (i, c) in self.chunks.iter().enumerate() {
+            let mut locks = ExtentSet::new();
+            for r in self.reads.values() {
+                if r.locked && r.chunk as usize == i {
+                    locks.insert(r.ext);
+                }
+            }
+            for w in self.writes.values() {
+                if w.chunk as usize == i {
+                    locks.insert(w.ext);
+                }
+            }
+            for &(fc, ext) in &self.fast_reads {
+                if fc as usize == i {
+                    locks.insert(ext);
+                }
+            }
+            assert_eq!(c.locks, locks, "chunk {i}'s locks: {}", self.describe());
+        }
+        if self.deposed {
+            assert!(
+                self.queue.is_empty()
+                    && self.reads.is_empty()
+                    && self.writes.is_empty()
+                    && self.digests.is_empty()
+                    && self.avoid.is_empty()
+                    && self.peers.is_empty()
+                    && self.newly_fenced.is_empty()
+                    && self.fast_reads.is_empty()
+                    && self.bulk == 0,
+                "a deposed target holds work: {}",
+                self.describe()
+            );
         }
     }
 }
@@ -2197,21 +2755,46 @@ fn digest_mismatch(ext: &Extent, got: &BTreeMap<NodeId, Vec<Option<u32>>>) -> Ex
 
 #[cfg(test)]
 mod tests {
-    //! A failed local read (docs/issues/5), against a target on node 1 whose messages to its
-    //! replicas and to the metadata service are delivered at once, unless a test holds them back.
+    //! The target against in-memory replicas and metadata, its messages delivered at once
+    //! unless a test holds them back: a failed local read (docs/issues/5), and the order of
+    //! bulk work (docs/issues/11).
     use super::*;
     use crate::meta::{MetaRequest, Metadata};
     use crate::msg::Request;
     use crate::replica::Replica;
+    use crate::sim::Rng;
     use crate::types::Value;
 
     const VOL: VolumeId = 1;
     const MS: Time = 1_000;
     const TARGET: NodeId = 1;
+    /// Blocks per chunk.
+    const BLOCKS: Block = 4;
 
     type Pred = fn(&ToReplica<Vec<Value>>) -> bool;
-    /// A request to the target's own replica, and the reply held back from the target.
-    type Held = (ToReplica<Vec<Value>>, FromReplica<Vec<Value>>);
+    /// A request to a node, and its reply, held back from the target.
+    type Held = (NodeId, ToReplica<Vec<Value>>, FromReplica<Vec<Value>>);
+
+    /// What the target started, read off the requests it sent: the chunk, and the first block
+    /// of the extent.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Start {
+        /// A reconciliation digest (sent to each ISR member, counted once).
+        Dg(ChunkIdx, Block),
+        /// A repair, at its read.
+        Rp(ChunkIdx, Block),
+        /// A resync digest (counted once).
+        Rs(ChunkIdx, Block),
+        /// A copy, at its read.
+        Cp(ChunkIdx, Block),
+        /// A discard.
+        Ds(ChunkIdx, Block),
+        /// A client read, at each send.
+        Rd(ChunkIdx, Block),
+        /// A client write (sent to each member, counted once).
+        Wr(ChunkIdx, Block),
+    }
+    use Start::*;
 
     struct Bench {
         now: Time,
@@ -2220,15 +2803,44 @@ mod tests {
         t: Target<Vec<Value>>,
         /// Nodes whose requests are dropped.
         down: BTreeSet<NodeId>,
-        /// Requests to the target's own replica whose replies are held back.
-        hold: Option<Pred>,
+        /// Requests to each node whose replies are held back.
+        hold: BTreeMap<NodeId, Pred>,
         held: Vec<Held>,
         /// Metadata requests are held back, unanswered.
         hold_meta: bool,
+        /// Metadata requests that match are held back, to be answered later (`release_meta`).
+        hold_meta_if: Option<fn(&MetaRequest) -> bool>,
+        held_meta: Vec<(u64, MetaRequest)>,
         /// Where each client read was sent, in order.
         reads_to: Vec<NodeId>,
         done: BTreeMap<u64, OpResult<Vec<Value>>>,
         next_op: u64,
+        /// Client operations submitted to the current target.
+        submitted: Vec<u64>,
+        /// What the current target started, in order.
+        log: Vec<Start>,
+        /// The client operation of each client read sent, and of each client write at its first
+        /// send, in order.
+        client_log: Vec<u64>,
+        seen_digests: BTreeSet<u64>,
+        seen_writes: BTreeSet<u64>,
+        /// The settings of the targets `restart` makes.
+        max_bulk: usize,
+        max_digest: Block,
+        max_io: Block,
+        today: bool,
+        /// The targets `restart` makes queue newly fenced digests as before (S1).
+        today_queue_order: bool,
+        /// The test deposes the target: the teardown does not drain it.
+        deposed_ok: bool,
+    }
+
+    fn is_any(_: &ToReplica<Vec<Value>>) -> bool {
+        true
+    }
+
+    fn is_hello(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Hello)
     }
 
     fn is_read(m: &ToReplica<Vec<Value>>) -> bool {
@@ -2239,25 +2851,77 @@ mod tests {
         matches!(m.body, Request::Write { .. })
     }
 
+    fn is_digest(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Digest { .. })
+    }
+
+    fn is_digest_or_write(m: &ToReplica<Vec<Value>>) -> bool {
+        is_digest(m) || is_write(m)
+    }
+
+    fn is_copy(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Copy { .. })
+    }
+
+    fn is_discard(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Discard { .. })
+    }
+
+    fn is_mapped(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Mapped { .. })
+    }
+
+    /// A resync's requests to its joiner.
+    fn is_resync(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(
+            m.body,
+            Request::BeginResync { .. }
+                | Request::Digest { .. }
+                | Request::Copy { .. }
+                | Request::Discard { .. }
+        )
+    }
+
+    /// A digest or a read of a chunk other than 0.
+    fn is_reconcile_off_chunk_0(m: &ToReplica<Vec<Value>>) -> bool {
+        matches!(m.body, Request::Digest { chunk, .. } | Request::Read { chunk, .. } if chunk != 0)
+    }
+
+    /// A reply of another type than `body`, which answers no request `body` answers.
+    fn wrong(body: &Response<Vec<Value>>) -> Response<Vec<Value>> {
+        match body {
+            Response::Ok => Response::Digests(Vec::new()),
+            _ => Response::Ok,
+        }
+    }
+
     impl Bench {
         /// A one-chunk volume of 4 blocks on `replicas`, attached on node 1, serving.
         fn new(replicas: &[NodeId], min_isr: usize) -> Self {
+            Self::with_chunks(&[replicas], min_isr)
+        }
+
+        /// A volume of 4-block chunks, chunk `i` on `placement[i]`, attached on node 1,
+        /// serving.
+        fn with_chunks(placement: &[&[NodeId]], min_isr: usize) -> Self {
             let mut meta = Metadata::default();
-            meta.create_volume(VOL, 0, min_isr, 4, vec![replicas.to_vec()]);
+            let lists = placement.iter().map(|p| p.to_vec()).collect();
+            meta.create_volume(VOL, 0, min_isr, BLOCKS, lists);
             let MetaReply::Applied { view, .. } = meta.handle(&MetaRequest::Attach {
                 vol: VOL,
                 node: TARGET,
             }) else {
                 panic!("attach refused");
             };
-            let replicas = replicas
-                .iter()
-                .map(|&n| {
-                    let mut r = Replica::with_chunk_size(4);
-                    r.create_chunk(VOL, 0, 4);
-                    (n, r)
-                })
-                .collect();
+            let mut replicas: BTreeMap<NodeId, Replica> = BTreeMap::new();
+            for (i, nodes) in placement.iter().enumerate() {
+                for &n in *nodes {
+                    replicas
+                        .entry(n)
+                        .or_insert_with(|| Replica::with_chunk_size(BLOCKS))
+                        .create_chunk(VOL, i as ChunkIdx, BLOCKS);
+                }
+            }
             let t = Target::new(TARGET, VOL, &view, Timing::default(), 4, 0);
             let mut b = Self {
                 now: 0,
@@ -2265,16 +2929,92 @@ mod tests {
                 replicas,
                 t,
                 down: BTreeSet::new(),
-                hold: None,
+                hold: BTreeMap::new(),
                 held: Vec::new(),
                 hold_meta: false,
+                hold_meta_if: None,
+                held_meta: Vec::new(),
                 reads_to: Vec::new(),
                 done: BTreeMap::new(),
                 next_op: 1,
+                submitted: Vec::new(),
+                log: Vec::new(),
+                client_log: Vec::new(),
+                seen_digests: BTreeSet::new(),
+                seen_writes: BTreeSet::new(),
+                max_bulk: DEFAULT_MAX_BULK,
+                max_digest: MAX_DIGEST_BLOCKS,
+                max_io: 4,
+                today: false,
+                today_queue_order: false,
+                deposed_ok: false,
             };
             b.run();
             b.until("serving", |b| b.t.is_settled());
             b
+        }
+
+        /// Restarts `node`'s replica, which then reports every block of its chunks as
+        /// uncertain, and attaches a new target, at the next epoch, with the bench's settings.
+        fn restart(&mut self, node: NodeId) {
+            self.replicas.get_mut(&node).expect("replica").restart();
+            let MetaReply::Applied { view, .. } = self.meta.handle(&MetaRequest::Attach {
+                vol: VOL,
+                node: TARGET,
+            }) else {
+                panic!("attach refused");
+            };
+            self.t = Target::new(TARGET, VOL, &view, Timing::default(), self.max_io, self.now);
+            self.t.set_max_bulk(self.max_bulk);
+            self.t.set_max_digest(self.max_digest);
+            self.t.bugs.today_pump = self.today;
+            self.t.bugs.today_queue_order = self.today_queue_order;
+            self.held.clear();
+            self.held_meta.clear();
+            self.submitted.clear();
+            self.log.clear();
+            self.client_log.clear();
+            self.seen_digests.clear();
+            self.seen_writes.clear();
+            self.run();
+        }
+
+        /// Takes `node` out of the chunk's ISR in the metadata, for the next target
+        /// (`restart`): it is then resynced.
+        fn out_of_isr(&mut self, chunk: ChunkIdx, node: NodeId) {
+            let v = self.meta.volume(VOL).expect("volume").clone();
+            let m = &v.chunks[chunk as usize];
+            let mut new_isr = m.isr.clone();
+            new_isr.remove(&node);
+            let reply = self.meta.handle(&MetaRequest::ChangeIsr {
+                vol: VOL,
+                epoch: v.epoch,
+                changes: vec![IsrChange {
+                    chunk,
+                    expected_ver: m.isr_ver,
+                    new_isr,
+                    new_replicas: None,
+                }],
+            });
+            assert!(
+                matches!(reply, MetaReply::Applied { .. }),
+                "ISR change refused"
+            );
+        }
+
+        /// Sets a block on one replica only, so that digests disagree.
+        fn diverge(&mut self, node: NodeId, chunk: ChunkIdx, block: Block, v: Value) {
+            self.replicas
+                .get_mut(&node)
+                .expect("replica")
+                .set_block(VOL, chunk, block, v);
+        }
+
+        /// Holds back the replies that match `p` from every node.
+        fn hold_all(&mut self, p: Pred) {
+            for &n in self.replicas.keys() {
+                self.hold.insert(n, p);
+            }
         }
 
         /// Delivers everything the target sends, and what that causes, until it is quiet.
@@ -2287,6 +3027,11 @@ mod tests {
                 for o in out {
                     match o {
                         Output::Send { to, msg } => self.send(to, msg),
+                        Output::Meta { req, body }
+                            if self.hold_meta_if.is_some_and(|p| p(&body)) =>
+                        {
+                            self.held_meta.push((req, body));
+                        }
                         Output::Meta { req, body } if !self.hold_meta => {
                             let reply = self.meta.handle(&body);
                             self.t.on_meta(self.now, req, &reply);
@@ -2304,17 +3049,78 @@ mod tests {
             if is_read(&msg) && self.t.client_read_of(to, msg.req).is_some() {
                 self.reads_to.push(to);
             }
+            self.record(to, &msg);
             if self.down.contains(&to) {
                 return;
             }
             let Some(reply) = self.replicas.get_mut(&to).expect("replica").handle(&msg) else {
                 return;
             };
-            if to == TARGET && self.hold.is_some_and(|p| p(&msg)) {
-                self.held.push((msg, reply));
+            if self.hold.get(&to).is_some_and(|p| p(&msg)) {
+                self.held.push((to, msg, reply));
             } else {
                 self.t.on_reply(self.now, to, &reply);
             }
+        }
+
+        /// Notes what the request starts, if anything, from the target's state as it sends it.
+        fn record(&mut self, to: NodeId, msg: &ToReplica<Vec<Value>>) {
+            let Some(kind) = self
+                .t
+                .peers
+                .get(&to)
+                .and_then(|p| p.session.as_ref())
+                .filter(|s| s.id == msg.session)
+                .and_then(|s| s.inflight.get(&msg.req))
+                .map(|&(_, k)| k)
+            else {
+                return;
+            };
+            let start = match (&msg.body, kind) {
+                (&Request::Digest { chunk, ext }, ReqKind::Digest { id }) => {
+                    if !self.seen_digests.insert(id) {
+                        return;
+                    }
+                    match self.t.digests.get(&id) {
+                        Some(d) if d.resync.is_some() => Rs(chunk, ext.start),
+                        Some(_) => Dg(chunk, ext.start),
+                        None => return,
+                    }
+                }
+                (&Request::Read { chunk, ext }, ReqKind::Read { id }) => {
+                    match self.t.reads.get(&id).map(|r| r.purpose) {
+                        Some(ReadFor::Client { op }) => {
+                            self.client_log.push(op);
+                            Rd(chunk, ext.start)
+                        }
+                        Some(ReadFor::Repair) => Rp(chunk, ext.start),
+                        Some(ReadFor::Copy { .. }) => Cp(chunk, ext.start),
+                        None => return,
+                    }
+                }
+                (&Request::Write { chunk, ext, .. }, ReqKind::Write { seq, .. }) => {
+                    let Some(op) = self.t.writes.get(&seq).and_then(|w| w.client) else {
+                        return;
+                    };
+                    if !self.seen_writes.insert(seq) {
+                        return;
+                    }
+                    self.client_log.push(op);
+                    Wr(chunk, ext.start)
+                }
+                (&Request::Discard { chunk, ext }, _) => Ds(chunk, ext.start),
+                _ => return,
+            };
+            self.log.push(start);
+        }
+
+        /// The starts so far must be `want`: the assertion the order tests rest on.
+        fn expect_starts(&self, want: &[Start]) {
+            assert!(
+                self.log == want,
+                "out of order: started {:?}, want {want:?}",
+                self.log
+            );
         }
 
         fn advance(&mut self, dt: Time) {
@@ -2337,45 +3143,172 @@ mod tests {
         fn submit(&mut self, op: Op<Vec<Value>>) -> u64 {
             let id = self.next_op;
             self.next_op += 1;
+            self.submitted.push(id);
             self.t.submit(self.now, id, op);
             self.run();
             id
         }
 
         fn write(&mut self, block: Block, v: Value) {
-            let op = self.submit(Op::Write {
-                chunk: 0,
-                ext: Extent::new(block, 1),
-                data: vec![v],
-            });
+            let op = self.write_at(0, block, v);
             assert_eq!(self.done.get(&op), Some(&OpResult::Written));
         }
 
         fn read(&mut self, block: Block) -> u64 {
+            self.read_at(0, block)
+        }
+
+        fn read_at(&mut self, chunk: ChunkIdx, block: Block) -> u64 {
             self.submit(Op::Read {
-                chunk: 0,
+                chunk,
                 ext: Extent::new(block, 1),
             })
         }
 
+        fn write_at(&mut self, chunk: ChunkIdx, block: Block, v: Value) -> u64 {
+            self.submit(Op::Write {
+                chunk,
+                ext: Extent::new(block, 1),
+                data: vec![v],
+            })
+        }
+
+        /// Delivers the held reply `i`.
+        fn deliver(&mut self, i: usize) {
+            let (to, _, reply) = self.held.remove(i);
+            self.t.on_reply(self.now, to, &reply);
+            self.run();
+        }
+
+        /// The first reply held from `node`, whose request matches `f`.
+        fn held_from(&self, node: NodeId, f: Pred) -> usize {
+            self.held
+                .iter()
+                .position(|(n, m, _)| *n == node && f(m))
+                .unwrap_or_else(|| panic!("no reply held from node {node}"))
+        }
+
+        /// Delivers the first reply held from `node`.
+        fn deliver_from(&mut self, node: NodeId) {
+            let i = self.held_from(node, is_any);
+            self.deliver(i);
+        }
+
+        /// Delivers the held reply `i` with a body of another type: a reply that does not
+        /// answer its request.
+        fn deliver_wrong(&mut self, i: usize) {
+            let body = wrong(&self.held[i].2.body);
+            self.deliver_as(i, body);
+        }
+
+        /// Delivers the held reply `i` with another body.
+        fn deliver_as(&mut self, i: usize, body: Response<Vec<Value>>) {
+            let (to, _, mut reply) = self.held.remove(i);
+            reply.body = body;
+            self.t.on_reply(self.now, to, &reply);
+            self.run();
+        }
+
         /// Reports the held reply `i` as a failed read.
         fn fail_held(&mut self, i: usize) {
-            let (msg, _) = self.held.remove(i);
+            let (to, msg, _) = self.held.remove(i);
             self.t
-                .on_read_failed(self.now, TARGET, msg.epoch, msg.session, msg.req);
+                .on_read_failed(self.now, to, msg.epoch, msg.session, msg.req);
             self.run();
         }
 
         fn isr(&self) -> BTreeSet<NodeId> {
             self.t.chunks[0].isr.clone()
         }
+
+        /// Answers the metadata requests held back, in order.
+        fn release_meta(&mut self) {
+            for (req, body) in std::mem::take(&mut self.held_meta) {
+                let reply = self.meta.handle(&body);
+                self.t.on_meta(self.now, req, &reply);
+                self.run();
+            }
+        }
+
+        fn request_move(&mut self, from: NodeId, to: NodeId) {
+            let reply = self.meta.handle(&MetaRequest::MoveReplica {
+                vol: VOL,
+                chunk: 0,
+                from,
+                to,
+            });
+            assert!(matches!(reply, MetaReply::Applied { .. }), "move refused");
+        }
+
+        /// Resync items in flight: resync digests, copies and discards.
+        fn resync_in_flight(&self) -> usize {
+            let t = &self.t;
+            let copies = t
+                .peers
+                .values()
+                .filter_map(|p| p.session.as_ref())
+                .flat_map(|s| s.inflight.values())
+                .filter(|(_, k)| matches!(k, ReqKind::Copy { .. } | ReqKind::Discard { .. }))
+                .count();
+            t.digests.values().filter(|d| d.resync.is_some()).count()
+                + t.reads
+                    .values()
+                    .filter(|r| matches!(r.purpose, ReadFor::Copy { .. }))
+                    .count()
+                + copies
+        }
+
+        fn serves(&self, chunk: ChunkIdx) -> bool {
+            self.t.chunks[chunk as usize].phase == Phase::Ready
+        }
+
+        /// Lets everything through, then ticks until the target is settled: every chunk
+        /// serves, every replica is in its ISR, and every operation is done.
+        fn drain(&mut self) {
+            self.down.clear();
+            self.hold.clear();
+            self.hold_meta = false;
+            self.hold_meta_if = None;
+            while !self.held.is_empty() {
+                self.deliver(0);
+            }
+            self.release_meta();
+            for _ in 0..6000 {
+                if self.t.is_settled() {
+                    break;
+                }
+                self.advance(10 * MS);
+            }
+            assert!(
+                self.t.is_settled(),
+                "not settled after 60 s of draining: {}",
+                self.t.describe()
+            );
+            for op in &self.submitted {
+                assert!(self.done.contains_key(op), "op {op} never done");
+            }
+        }
+    }
+
+    impl Drop for Bench {
+        fn drop(&mut self) {
+            if !std::thread::panicking() && !self.deposed_ok {
+                self.drain();
+            }
+        }
+    }
+
+    /// A metadata request that drops node 2's replica.
+    fn drops_node_2(m: &MetaRequest) -> bool {
+        matches!(m, MetaRequest::ChangeIsr { changes, .. }
+            if changes.iter().any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2))))
     }
 
     #[test]
     fn a_failed_local_read_is_answered_by_another_member() {
         let mut b = Bench::new(&[1, 2], 1);
         b.write(0, 42);
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
         assert_eq!((b.held.len(), b.done.get(&op)), (1, None));
         b.fail_held(0);
@@ -2386,7 +3319,7 @@ mod tests {
         assert!(b.t.session_of(TARGET).is_some());
         assert_eq!(b.t.avoid_len(), 0);
         // Only that read avoided it: the next one goes to the local replica again.
-        b.hold = None;
+        b.hold.clear();
         let next = b.read(0);
         assert_eq!(b.done.get(&next), Some(&OpResult::Read(vec![42])));
         assert_eq!(b.reads_to, [1, 2, 1]);
@@ -2396,7 +3329,7 @@ mod tests {
     fn a_read_sent_elsewhere_may_come_back_to_the_local_replica() {
         let mut b = Bench::new(&[1, 2], 1);
         b.write(0, 42);
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
         // Node 2 takes the read again but never answers; its session fails and it is removed.
         b.down.insert(2);
@@ -2407,7 +3340,7 @@ mod tests {
             0,
             "sent elsewhere, the read avoids nothing"
         );
-        b.hold = None;
+        b.hold.clear();
         b.until("read done", |b| b.done.contains_key(&op));
         // Not unreadable: the local replica, still a member, serves it.
         assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
@@ -2418,12 +3351,12 @@ mod tests {
     fn a_failed_read_goes_again_before_later_overlapping_reads() {
         let mut b = Bench::new(&[1, 2], 1);
         b.write(0, 42);
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let first = b.read(0);
         // Waits for the first read's lock.
         let second = b.read(0);
         assert_eq!(b.reads_to, [1]);
-        b.hold = None;
+        b.hold.clear();
         b.fail_held(0);
         assert_eq!(b.reads_to, [1, 2, 1]);
         assert_eq!(b.done.get(&first), Some(&OpResult::Read(vec![42])));
@@ -2434,7 +3367,7 @@ mod tests {
     fn a_read_that_failed_twice_on_the_only_member_is_unreadable() {
         let mut b = Bench::new(&[1], 1);
         b.write(0, 42);
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
         b.fail_held(0);
         // Tried once more on the only member.
@@ -2454,9 +3387,9 @@ mod tests {
     fn a_read_that_failed_once_on_the_only_member_is_served_there() {
         let mut b = Bench::new(&[1], 1);
         b.write(0, 42);
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
-        b.hold = None;
+        b.hold.clear();
         b.fail_held(0);
         assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
         assert_eq!(b.reads_to, [1, 1]);
@@ -2471,7 +3404,7 @@ mod tests {
         b.hold_meta = true;
         b.down.insert(2);
         b.until("removing node 2", |b| b.t.chunks[0].removing.contains(&2));
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
         assert_eq!(b.held.len(), 1, "the read went to the local replica");
         b.fail_held(0);
@@ -2494,9 +3427,9 @@ mod tests {
         b.hold_meta = true;
         b.down.insert(2);
         b.until("node 2's session down", |b| b.t.session_of(2).is_none());
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
-        b.hold = None;
+        b.hold.clear();
         b.fail_held(0);
         // Waits for node 2, until it is being removed: then back to the local replica.
         b.until("read done", |b| b.done.contains_key(&op));
@@ -2511,7 +3444,7 @@ mod tests {
         b.write(0, 42);
         b.down.insert(2);
         b.until("node 2's session down", |b| b.t.session_of(2).is_none());
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
         assert_eq!(b.held.len(), 1, "the read went to the local replica");
         b.fail_held(0);
@@ -2529,9 +3462,9 @@ mod tests {
     fn stray_failure_reports_are_ignored() {
         let mut b = Bench::new(&[1, 2], 1);
         b.write(0, 42);
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
-        let (msg, reply) = b.held.pop().expect("held read");
+        let (_, msg, reply) = b.held.pop().expect("held read");
         let (e, s, r) = (msg.epoch, msg.session, msg.req);
         for (epoch, session, req) in [(e + 1, s, r), (e, s + 1, r), (e, s, r + 1000)] {
             b.t.on_read_failed(b.now, TARGET, epoch, session, req);
@@ -2548,13 +3481,13 @@ mod tests {
         assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
 
         // A report for a request that is not a client read leaves it in flight.
-        b.hold = Some(is_write);
+        b.hold.insert(TARGET, is_write);
         let w = b.submit(Op::Write {
             chunk: 0,
             ext: Extent::new(1, 1),
             data: vec![7],
         });
-        let (msg, reply) = b.held.pop().expect("held write");
+        let (_, msg, reply) = b.held.pop().expect("held write");
         b.t.on_read_failed(b.now, TARGET, msg.epoch, msg.session, msg.req);
         b.run();
         assert_eq!(b.done.get(&w), None);
@@ -2563,18 +3496,149 @@ mod tests {
         assert_eq!(b.done.get(&w), Some(&OpResult::Written));
     }
 
+    /// S11: node 2's replica acknowledges a write that waits on node 1, a move drops it, and
+    /// node 2 comes back as a new replica. Its resync copies the block, but node 2 joins only
+    /// once the write has completed: its old acknowledgement does not count.
+    #[test]
+    fn a_dropped_replicas_ack_does_not_count_after_it_rejoins() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.replicas.insert(3, Replica::with_chunk_size(4));
+        // Node 3 joins; the drop of node 2 that follows is held back.
+        b.hold_meta_if = Some(drops_node_2);
+        b.request_move(2, 3);
+        b.until("node 3 in the ISR", |b| b.isr().contains(&3));
+        assert_eq!(b.held_meta.len(), 1, "the drop of node 2 is proposed");
+        // A write that nodes 2 and 3 acknowledge, and that waits on node 1.
+        b.hold.insert(TARGET, is_write);
+        let op = b.submit(Op::Write {
+            chunk: 0,
+            ext: Extent::new(0, 1),
+            data: vec![42],
+        });
+        assert_eq!((b.held.len(), b.done.get(&op)), (1, None));
+        // The drop commits, and node 2's copy is deleted.
+        b.hold_meta_if = None;
+        b.release_meta();
+        assert_eq!(b.t.chunks[0].replicas, [1, 3]);
+        b.replicas
+            .get_mut(&2)
+            .expect("replica")
+            .remove_chunk(VOL, 0);
+        // Node 2 comes back as a new replica, and its resync copies everything.
+        b.request_move(3, 2);
+        b.until("node 2 resynced or joined", |b| {
+            let c = &b.t.chunks[0];
+            c.joining == Some(2)
+                || c.isr.contains(&2)
+                || c.resync.as_ref().is_some_and(|r| {
+                    r.member == 2 && r.started && r.todo.is_empty() && r.discard.is_empty()
+                })
+        });
+        assert_eq!(
+            b.replicas[&2].block(VOL, 0, 0),
+            Some(42),
+            "the copy has the block"
+        );
+        assert_eq!(b.done.get(&op), None, "the write still waits on node 1");
+        let c = &b.t.chunks[0];
+        assert!(
+            c.joining != Some(2) && !c.isr.contains(&2),
+            "node 2 joined on its old replica's acknowledgement: {}",
+            b.t.describe()
+        );
+        // Node 1's acknowledgement completes the write; then node 2 joins.
+        let (_, _, reply) = b.held.remove(0);
+        b.hold.clear();
+        b.t.on_reply(b.now, TARGET, &reply);
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        b.until("node 2 in the ISR", |b| b.isr().contains(&2));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+    }
+
+    /// S11: node 2 keeps its session through chunk 1 while a move drops it from chunk 0 and
+    /// adds it back. Its acknowledgement of a write sent to its dropped replica, delivered late,
+    /// does not count: node 2 does not join, and the write waits on node 1.
+    #[test]
+    fn a_dropped_replicas_late_ack_does_not_count_after_the_drop() {
+        late_ack(false);
+    }
+
+    /// As above, the late acknowledgement delivered once node 2 is a replica again.
+    #[test]
+    fn a_dropped_replicas_late_ack_does_not_count_after_it_rejoins() {
+        late_ack(true);
+    }
+
+    fn late_ack(after_rejoin: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2]], 1);
+        b.replicas.insert(3, Replica::with_chunk_size(4));
+        b.hold_meta_if = Some(drops_node_2);
+        b.request_move(2, 3);
+        b.until("node 3 in the ISR", |b| b.isr().contains(&3));
+        // A write that node 3 acknowledges; nodes 1 and 2's acknowledgements are held.
+        b.hold.insert(TARGET, is_write);
+        b.hold.insert(2, is_write);
+        let op = b.write_at(0, 0, 42);
+        assert_eq!((b.held.len(), b.done.get(&op)), (2, None));
+        // The drop commits; node 2 keeps its session, and its copy of chunk 0 is deleted.
+        b.hold_meta_if = None;
+        b.release_meta();
+        assert_eq!(b.t.chunks[0].replicas, [1, 3]);
+        assert!(b.t.session_of(2).is_some(), "node 2 holds chunk 1");
+        b.hold.remove(&2);
+        b.replicas
+            .get_mut(&2)
+            .expect("replica")
+            .remove_chunk(VOL, 0);
+        let late = b.held_from(2, is_write);
+        if !after_rejoin {
+            b.deliver(late);
+        }
+        b.request_move(3, 2);
+        b.until("node 2 a replica again", |b| {
+            b.t.chunks[0].replicas.contains(&2)
+        });
+        if after_rejoin {
+            let late = b.held_from(2, is_write);
+            b.deliver(late);
+        }
+        b.until("node 2 resynced or joined", |b| {
+            let c = &b.t.chunks[0];
+            c.joining == Some(2)
+                || c.isr.contains(&2)
+                || c.resync.as_ref().is_some_and(|r| {
+                    r.member == 2 && r.started && r.todo.is_empty() && r.discard.is_empty()
+                })
+        });
+        let c = &b.t.chunks[0];
+        assert!(
+            c.joining != Some(2) && !c.isr.contains(&2),
+            "node 2 joined on its dropped replica's acknowledgement: {}",
+            b.t.describe()
+        );
+        assert_eq!(b.done.get(&op), None, "the write still waits on node 1");
+        // Node 1's acknowledgement completes the write; then node 2 joins.
+        b.hold.clear();
+        b.deliver_from(TARGET);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        b.until("node 2 in the ISR", |b| b.isr().contains(&2));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+    }
+
     #[test]
     fn deposition_ends_reads_waiting_to_go_again() {
         let mut b = Bench::new(&[1, 2], 2);
+        b.deposed_ok = true;
         b.write(0, 42);
         b.down.insert(2);
         b.until("node 2's session down", |b| b.t.session_of(2).is_none());
-        b.hold = Some(is_read);
+        b.hold.insert(TARGET, is_read);
         let op = b.read(0);
-        let (msg, _) = b.held[0].clone();
+        let (_, msg, _) = b.held[0].clone();
         b.fail_held(0);
         assert_eq!(b.t.avoid_len(), 1);
-        b.t.depose();
+        b.t.depose_checked();
         b.run();
         assert_eq!(b.done.get(&op), Some(&OpResult::Failed));
         assert_eq!(b.t.avoid_len(), 0);
@@ -2582,5 +3646,1096 @@ mod tests {
         b.t.on_read_failed(b.now, TARGET, msg.epoch, msg.session, msg.req);
         b.run();
         assert_eq!(b.t.avoid_len(), 0);
+    }
+
+    // docs/issues/11. Unless said, `max_bulk` is 1: each start is then the queue's choice
+    // for one free slot. The tests of S3, S6 and S8 that `ORDER_TESTS` lists are built so that
+    // they fail with today's pump: the waited chunk's work sits behind other work in queue
+    // order.
+
+    /// An order test, run with today's pump or not.
+    type OrderTest = fn(bool);
+
+    /// The tests that fail with today's pump (`Bugs::today_pump`), each run with it by
+    /// `the_order_tests_fail_with_todays_pump`.
+    const ORDER_TESTS: &[(&str, OrderTest)] = &[
+        ("read_on_a_middle_chunk", read_on_a_middle_chunk),
+        ("write_moves_its_chunk", write_moves_its_chunk),
+        ("wait_order", wait_order),
+        ("two_pieces", two_pieces),
+        ("repairs_not_waited", repairs_not_waited),
+        ("alternate", alternate),
+        ("one_resync_item", one_resync_item),
+        ("last_start_resets", last_start_resets),
+        ("next_free_slot", next_free_slot),
+        ("fenced_first_and_waited", fenced_first_and_waited),
+        ("fenced_late", fenced_late),
+        ("ahead_of_repairs", ahead_of_repairs),
+        ("sent_again", sent_again),
+    ];
+
+    #[test]
+    fn the_order_tests_fail_with_todays_pump() {
+        for &(name, test) in ORDER_TESTS {
+            let err = std::panic::catch_unwind(|| test(true))
+                .expect_err(&format!("{name} passes with today's pump"));
+            let msg = err
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| err.downcast_ref::<&str>().copied())
+                .unwrap_or_default();
+            assert!(
+                msg.starts_with("out of order"),
+                "{name} fails with today's pump for another reason: {msg}"
+            );
+        }
+    }
+
+    /// S1: chunks fenced in one progress pass queue their digests from chunk 0 up.
+    #[test]
+    fn digests_of_chunks_fenced_together_go_from_chunk_0() {
+        fenced_together(false);
+    }
+
+    /// S1's test fails with the queue order of before docs/issues/11.
+    #[test]
+    #[should_panic(expected = "out of order")]
+    fn digests_of_chunks_fenced_together_fail_with_todays_queue_order() {
+        fenced_together(true);
+    }
+
+    fn fenced_together(today_queue_order: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2], &[1, 2]], 1);
+        b.max_bulk = 1;
+        b.max_digest = 2;
+        b.today_queue_order = today_queue_order;
+        b.restart(1);
+        b.expect_starts(&[Dg(0, 0), Dg(0, 2), Dg(1, 0), Dg(1, 2), Dg(2, 0), Dg(2, 2)]);
+    }
+
+    /// S2: with no chunk waited, the queue goes in its order: a copy at the front, a chunk
+    /// fenced later ahead of those fenced before it, and chunks fenced together from chunk 0.
+    #[test]
+    fn with_nothing_waited_requests_go_in_queue_order() {
+        let mut b = Bench::with_chunks(&[&[1, 3, 4], &[1, 2], &[1, 2], &[1, 2, 5]], 1);
+        // Node 4 falls behind on chunk 0: block 0 is on its ISR only.
+        b.out_of_isr(0, 4);
+        b.diverge(1, 0, 0, 7);
+        b.diverge(3, 0, 0, 7);
+        b.max_bulk = 1;
+        b.hold.insert(2, is_hello);
+        b.hold.insert(5, is_hello);
+        b.hold.insert(4, is_digest);
+        b.restart(2);
+        // Chunk 0 serves and resyncs node 4: a discard of what its source does not hold, then a
+        // digest of the rest, held.
+        b.expect_starts(&[Ds(0, 1), Rs(0, 0)]);
+        // Chunks 1 and 2 are fenced together; chunk 3 later.
+        b.deliver_from(2);
+        b.deliver_from(5);
+        // Block 0 differs on node 4: its copy goes to the front.
+        b.deliver_from(4);
+        b.expect_starts(&[Ds(0, 1), Rs(0, 0), Cp(0, 0), Dg(3, 0), Dg(1, 0), Dg(2, 0)]);
+        assert_eq!(b.t.stats.waited_pumps, 0);
+    }
+
+    /// Five chunks on nodes 1 and 2, node 1 restarted: every chunk reconciles, and fences once
+    /// node 2's `Hello` is delivered.
+    fn five_chunks_fencing(today: bool, max_bulk: usize) -> Bench {
+        let mut b = Bench::with_chunks(&[&[1, 2][..]; 5], 1);
+        b.today = today;
+        b.max_bulk = max_bulk;
+        b.hold.insert(2, is_hello);
+        b.restart(1);
+        b
+    }
+
+    /// S3.2: a read queued before the fence completes, on chunk 2 of 5.
+    fn read_on_a_middle_chunk(today: bool) {
+        let mut b = five_chunks_fencing(today, 1);
+        let op = b.read_at(2, 0);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(2, 0), Dg(0, 0), Rd(2, 0), Dg(1, 0), Dg(3, 0), Dg(4, 0)]);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![0])));
+    }
+
+    #[test]
+    fn a_read_on_a_middle_chunk_reconciles_it_first() {
+        read_on_a_middle_chunk(false);
+    }
+
+    fn write_moves_its_chunk(today: bool) {
+        let mut b = five_chunks_fencing(today, 1);
+        let op = b.write_at(3, 1, 42);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(3, 0), Dg(0, 0), Wr(3, 1), Dg(1, 0), Dg(2, 0), Dg(4, 0)]);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+    }
+
+    #[test]
+    fn a_write_moves_its_chunk_ahead() {
+        write_moves_its_chunk(false);
+    }
+
+    /// Reads on chunk 3, then on chunk 1: chunk 3 first; with two slots, both at once.
+    fn wait_order(today: bool) {
+        let mut b = five_chunks_fencing(today, 1);
+        let (r3, r1) = (b.read_at(3, 0), b.read_at(1, 0));
+        b.deliver_from(2);
+        b.expect_starts(&[
+            Dg(3, 0),
+            Dg(1, 0),
+            Rd(3, 0),
+            Dg(0, 0),
+            Rd(1, 0),
+            Dg(2, 0),
+            Dg(4, 0),
+        ]);
+        assert!(b.done.contains_key(&r3) && b.done.contains_key(&r1));
+
+        let mut b = five_chunks_fencing(today, 2);
+        b.read_at(3, 0);
+        b.read_at(1, 0);
+        b.hold.insert(2, is_digest);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(3, 0), Dg(1, 0)]);
+        assert_eq!(b.t.digests.len(), 2);
+    }
+
+    #[test]
+    fn waited_chunks_go_in_wait_order() {
+        wait_order(false);
+    }
+
+    /// A request across chunks 3 and 4, in two pieces submitted one after the other.
+    fn two_pieces(today: bool) {
+        let mut b = five_chunks_fencing(today, 1);
+        b.read_at(3, 3);
+        b.read_at(4, 0);
+        b.deliver_from(2);
+        b.expect_starts(&[
+            Dg(3, 0),
+            Dg(4, 0),
+            Rd(3, 3),
+            Dg(0, 0),
+            Rd(4, 0),
+            Dg(1, 0),
+            Dg(2, 0),
+        ]);
+    }
+
+    #[test]
+    fn two_pieces_go_in_submission_order() {
+        two_pieces(false);
+    }
+
+    /// Chunk 0's digests differ; chunk 1 is waited: its digest goes before chunk 0's
+    /// repairs, which were queued ahead of it.
+    fn repairs_not_waited(today: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2]], 1);
+        b.today = today;
+        b.max_bulk = 1;
+        b.diverge(2, 0, 0, 9);
+        b.diverge(2, 0, 2, 9);
+        b.hold.insert(2, is_digest);
+        b.restart(1);
+        let op = b.read_at(1, 0);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0)]);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Rp(0, 0), Rd(1, 0), Rp(0, 2)]);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![0])));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 2), Some(0), "repaired");
+    }
+
+    #[test]
+    fn repairs_of_a_chunk_not_waited_wait() {
+        repairs_not_waited(false);
+    }
+
+    /// Chunk 0 on nodes 1, 3 and 4 serves and resyncs node 4, which lacks all of it (four
+    /// copies, with `max_io` 1); chunk 1 on nodes 1 and 2 reconciles, node 2 having restarted,
+    /// and its four blocks differ on node 2. Node 2's `Hello` and node 4's digests are held.
+    fn resync_beside_a_waited_chunk(today: bool, max_bulk: usize) -> Bench {
+        let mut b = Bench::with_chunks(&[&[1, 3, 4], &[1, 2]], 1);
+        b.today = today;
+        b.max_bulk = max_bulk;
+        b.max_io = 1;
+        b.out_of_isr(0, 4);
+        for blk in 0..BLOCKS {
+            b.diverge(1, 0, blk, 7);
+            b.diverge(3, 0, blk, 7);
+            b.diverge(2, 1, blk, 9);
+        }
+        b.hold.insert(2, is_hello);
+        b.hold.insert(4, is_digest);
+        b.restart(2);
+        b.expect_starts(&[Rs(0, 0)]);
+        b
+    }
+
+    /// S3.1, S3.3: one slot, a waited chunk with four repairs, a resync with four copies.
+    fn alternate(today: bool) {
+        let mut b = resync_beside_a_waited_chunk(today, 1);
+        let op = b.read_at(1, 0);
+        b.deliver_from(2);
+        b.deliver_from(4);
+        b.expect_starts(&[
+            Rs(0, 0),
+            Dg(1, 0),
+            Cp(0, 0),
+            Rp(1, 0),
+            Cp(0, 1),
+            Rp(1, 1),
+            Cp(0, 2),
+            Rp(1, 2),
+            Cp(0, 3),
+            Rp(1, 3),
+            Rd(1, 0),
+        ]);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![0])));
+        assert!(b.serves(1));
+    }
+
+    #[test]
+    fn waited_work_and_a_resync_alternate() {
+        alternate(false);
+    }
+
+    /// S3.1, S3.3: four slots, all free in one pump, with four copies queued ahead of the
+    /// waited chunk's digest. The resync digest, in flight when the chunk became waited, runs
+    /// to its end.
+    fn one_resync_item(today: bool) {
+        let mut b = resync_beside_a_waited_chunk(today, 1);
+        let op = b.read_at(1, 0);
+        b.hold.insert(2, is_digest);
+        b.deliver_from(2);
+        b.t.set_max_bulk(4);
+        b.hold.insert(4, is_copy);
+        b.deliver_from(4);
+        b.expect_starts(&[Rs(0, 0), Dg(1, 0), Cp(0, 0)]);
+        assert_eq!((b.resync_in_flight(), b.t.bulk), (1, 2));
+        // The digest's reply queues four repairs: three start, beside the one copy.
+        b.deliver_from(2);
+        b.expect_starts(&[
+            Rs(0, 0),
+            Dg(1, 0),
+            Cp(0, 0),
+            Rp(1, 0),
+            Rp(1, 1),
+            Rp(1, 2),
+            Rp(1, 3),
+            Cp(0, 1),
+            Cp(0, 2),
+            Cp(0, 3),
+            Rd(1, 0),
+        ]);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![0])));
+    }
+
+    #[test]
+    fn one_resync_item_in_flight_while_a_chunk_is_waited() {
+        one_resync_item(false);
+    }
+
+    /// S3.4: chunk 1's ISR has node 4, which is down, and the ISR minimum is 2: chunk 1
+    /// stays fencing, its read waits, and caps nothing. (Today's pump has no cap: this test
+    /// passes with it.)
+    #[test]
+    fn a_chunk_stuck_fencing_caps_no_resync() {
+        let mut b = Bench::with_chunks(&[&[1, 2, 3], &[1, 4]], 2);
+        b.down.insert(4);
+        b.out_of_isr(0, 3);
+        for blk in 0..BLOCKS {
+            b.diverge(1, 0, blk, 7);
+            b.diverge(2, 0, blk, 7);
+        }
+        b.max_bulk = 4;
+        b.max_digest = 1;
+        b.hold.insert(2, is_digest);
+        b.hold.insert(3, is_digest);
+        b.restart(1);
+        b.expect_starts(&[Dg(0, 0), Dg(0, 1), Dg(0, 2), Dg(0, 3)]);
+        let op = b.read_at(1, 0);
+        b.hold.remove(&2);
+        for _ in 0..4 {
+            b.deliver_from(2);
+        }
+        assert!(b.serves(0) && !b.serves(1));
+        b.expect_starts(&[
+            Dg(0, 0),
+            Dg(0, 1),
+            Dg(0, 2),
+            Dg(0, 3),
+            Rs(0, 0),
+            Rs(0, 1),
+            Rs(0, 2),
+            Rs(0, 3),
+        ]);
+        assert_eq!((b.resync_in_flight(), b.t.bulk), (4, 4));
+        assert_eq!(b.done.get(&op), None);
+        assert!(b.t.stats.waited_pumps_with_resync > 0);
+    }
+
+    /// S3, S7: reads on five reconciling chunks, a resync of chunk 0, and node 2, in the ISR
+    /// of the five at the ISR minimum, failing every 1.3 s. Replies from nodes 2 and 4 come
+    /// 200 ms late. (Liveness: passes with today's pump.)
+    #[test]
+    fn resyncs_progress_while_a_member_flaps() {
+        let mut b = Bench::with_chunks(
+            &[&[1, 3, 4], &[1, 2], &[1, 2], &[1, 2], &[1, 2], &[1, 2]],
+            2,
+        );
+        b.out_of_isr(0, 4);
+        for blk in 0..BLOCKS {
+            b.diverge(1, 0, blk, 7);
+            b.diverge(3, 0, blk, 7);
+        }
+        for c in 1..=5 {
+            b.diverge(2, c, 1, 9);
+        }
+        b.max_io = 1;
+        b.max_bulk = 1;
+        b.hold.insert(2, is_any);
+        b.hold.insert(4, is_any);
+        b.restart(2);
+        let ops: Vec<u64> = (1..=5).map(|c| b.read_at(c, 1)).collect();
+        let over = |b: &Bench| {
+            (0..6).all(|c| b.serves(c))
+                && b.t.chunks[0].isr.contains(&4)
+                && ops.iter().all(|op| b.done.contains_key(op))
+        };
+        let mut failures = 0;
+        for step in 1..=3000 {
+            if over(&b) {
+                break;
+            }
+            b.advance(10 * MS);
+            if step % 20 == 0 {
+                for _ in 0..b.held.len() {
+                    b.deliver(0);
+                }
+            }
+            if step % 130 == 0
+                && let Some(i) = b.held.iter().position(|h| h.0 == 2)
+            {
+                b.deliver_wrong(i);
+                failures += 1;
+            }
+        }
+        assert!(over(&b), "not done after 30 s: {}", b.t.describe());
+        assert!(failures > 0, "node 2 never failed");
+        assert!(b.t.stats.waited_pumps_with_resync > 0);
+        for op in &ops {
+            assert_eq!(b.done.get(op), Some(&OpResult::Read(vec![0])));
+        }
+    }
+
+    /// The last start resets once no chunk is waited: chunk 2, waited after chunk 1 served,
+    /// takes the first free slot, ahead of the copies queued before its digest.
+    fn last_start_resets(today: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 3, 4], &[1, 2], &[1, 2]], 1);
+        b.today = today;
+        b.max_bulk = 1;
+        b.max_io = 1;
+        b.out_of_isr(0, 4);
+        for blk in 0..BLOCKS {
+            b.diverge(1, 0, blk, 7);
+            b.diverge(3, 0, blk, 7);
+        }
+        b.hold.insert(2, is_hello);
+        b.hold.insert(4, is_digest);
+        b.restart(2);
+        b.read_at(1, 0);
+        b.hold.insert(2, is_digest);
+        b.deliver_from(2);
+        b.hold.insert(4, is_copy);
+        // The resync digest's reply queues the copies; chunk 1's digest starts (a waited start).
+        b.deliver_from(4);
+        b.expect_starts(&[Rs(0, 0), Dg(1, 0)]);
+        // Chunk 1 serves: nothing is waited, a copy starts.
+        b.deliver_from(2);
+        b.expect_starts(&[Rs(0, 0), Dg(1, 0), Cp(0, 0), Rd(1, 0)]);
+        b.read_at(2, 0);
+        b.deliver_from(4);
+        b.expect_starts(&[Rs(0, 0), Dg(1, 0), Cp(0, 0), Rd(1, 0), Dg(2, 0)]);
+        b.deliver_from(2);
+        b.expect_starts(&[
+            Rs(0, 0),
+            Dg(1, 0),
+            Cp(0, 0),
+            Rd(1, 0),
+            Dg(2, 0),
+            Cp(0, 1),
+            Rd(2, 0),
+        ]);
+    }
+
+    #[test]
+    fn the_last_start_resets_when_nothing_is_waited() {
+        last_start_resets(false);
+    }
+
+    /// S4: a joiner whose session fails on each round: the round's items leave the queue in
+    /// the pump that follows, so the queue does not grow. Chunk 1 stays fencing, waited, so
+    /// that the pumps take the waited path.
+    #[test]
+    fn aborted_rounds_leave_the_queue() {
+        let mut b = Bench::with_chunks(&[&[1, 3, 4], &[1, 2]], 2);
+        b.out_of_isr(0, 4);
+        b.diverge(1, 0, 0, 7);
+        b.diverge(3, 0, 0, 7);
+        b.max_bulk = 1;
+        b.hold.insert(2, is_hello);
+        b.hold.insert(4, is_discard);
+        b.restart(2);
+        b.read_at(1, 0);
+        let resync_items = |b: &Bench| {
+            b.t.queue
+                .iter()
+                .filter(|w| matches!(w.class(), Class::Resync(..)))
+                .count()
+        };
+        for _ in 0..4 {
+            // The discard in flight, its round's digest queued.
+            let round = b.t.chunks[0].resync.as_ref().expect("a resync").round;
+            assert_eq!(resync_items(&b), 1);
+            assert!(b.t.queue.iter().all(|w| match w.class() {
+                Class::Resync(_, r) => r == round,
+                _ => true,
+            }));
+            let i = b.held_from(4, is_discard);
+            b.deliver_wrong(i);
+            assert!(b.t.chunks[0].resync.is_none(), "the round is aborted");
+            assert_eq!((resync_items(&b), b.t.bulk), (0, 0));
+            b.until("node 4's next round", |b| b.t.chunks[0].resync.is_some());
+            b.until("its discard in flight", |b| b.t.bulk == 1);
+        }
+        assert!(b.t.stats.waited_pumps > 0);
+    }
+
+    /// S4: every slot is taken, by chunk 1's digest; a read and a write queued on chunk 0,
+    /// which serves, start at once.
+    #[test]
+    fn every_client_operation_is_tried_with_every_slot_taken() {
+        let mut b = Bench::with_chunks(&[&[1, 3], &[1, 2], &[1, 2]], 1);
+        b.max_bulk = 1;
+        b.hold.insert(2, is_digest);
+        b.restart(2);
+        b.read_at(1, 0);
+        let r = b.read_at(0, 0);
+        let w = b.write_at(0, 1, 5);
+        b.expect_starts(&[Dg(1, 0), Rd(0, 0), Wr(0, 1)]);
+        assert_eq!(b.done.get(&r), Some(&OpResult::Read(vec![0])));
+        assert_eq!(b.done.get(&w), Some(&OpResult::Written));
+        assert!(b.t.stats.waited_pumps > 0);
+    }
+
+    /// S5: node 1 holds 5 in block 0, node 2 0: a read queued on the chunk goes once the
+    /// repair is acknowledged, and returns 5.
+    #[test]
+    fn a_waited_read_returns_the_repaired_value() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.diverge(1, 0, 0, 5);
+        b.hold.insert(2, is_hello);
+        b.restart(2);
+        let op = b.read_at(0, 0);
+        b.hold.insert(2, is_write);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(0, 0), Rp(0, 0)]);
+        assert_eq!(b.done.get(&op), None);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(0, 0), Rp(0, 0), Rd(0, 0)]);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![5])));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(5));
+    }
+
+    /// S5: a write, then a read of its block, both queued while the chunk is waited; then the
+    /// same with node 2's session failing while the write waits on it.
+    #[test]
+    fn a_write_then_a_read_keep_their_order_while_waited() {
+        for fail in [false, true] {
+            let mut b = Bench::new(&[1, 2], 2);
+            b.hold.insert(2, is_hello);
+            b.restart(2);
+            let w = b.write_at(0, 0, 42);
+            let r = b.read_at(0, 0);
+            if fail {
+                b.hold.insert(2, is_write);
+            }
+            b.deliver_from(2);
+            if fail {
+                assert_eq!(b.done.get(&w), None);
+                let i = b.held_from(2, is_write);
+                b.deliver_wrong(i);
+                b.hold.clear();
+                b.until("read done", |b| b.done.contains_key(&r));
+            }
+            assert_eq!(b.client_log, [w, r], "fail {fail}");
+            assert_eq!(b.done.get(&w), Some(&OpResult::Written));
+            assert_eq!(b.done.get(&r), Some(&OpResult::Read(vec![42])));
+        }
+    }
+
+    /// S5: a fast read is refused on a chunk that does not serve; then on blocks of a queued
+    /// write; then on blocks of a read sent again and queued, after a failed local read and
+    /// after a lapsed lease.
+    #[test]
+    fn fast_reads_wait_for_the_chunk_and_queued_operations() {
+        let x = |b: Block| Extent::new(b, 1);
+        let mut b = Bench::new(&[1, 2], 2);
+        b.hold.insert(2, is_hello);
+        b.restart(2);
+        b.read_at(0, 3);
+        assert_eq!(b.t.try_fast_read(b.now, 0, x(0)), None, "fencing");
+        b.hold.insert(2, is_digest);
+        b.deliver_from(2);
+        assert_eq!(b.t.try_fast_read(b.now, 0, x(0)), None, "reconciling");
+        b.deliver_from(2);
+        assert!(b.serves(0));
+        let fr = b.t.try_fast_read(b.now, 0, x(0)).expect("serving");
+        assert!(b.t.finish_fast_read(b.now, fr, true));
+        b.run();
+
+        // A write on blocks 0 and 1 in flight; one on blocks 1 and 2 queued behind it.
+        b.hold.insert(2, is_write);
+        let w1 = b.submit(Op::Write {
+            chunk: 0,
+            ext: Extent::new(0, 2),
+            data: vec![10, 11],
+        });
+        let w2 = b.submit(Op::Write {
+            chunk: 0,
+            ext: Extent::new(1, 2),
+            data: vec![21, 22],
+        });
+        assert_eq!(b.t.try_fast_read(b.now, 0, x(2)), None, "a write queued");
+        let fr = b.t.try_fast_read(b.now, 0, x(3)).expect("block 3");
+        assert!(b.t.finish_fast_read(b.now, fr, true));
+        b.run();
+        b.deliver_from(2);
+        b.deliver_from(2);
+        assert_eq!(b.done.get(&w1), Some(&OpResult::Written));
+        assert_eq!(b.done.get(&w2), Some(&OpResult::Written));
+        b.hold.clear();
+
+        // Node 2 stops answering; with the ISR minimum 2 it stays a member. Its lease lasts a
+        // little beyond its session.
+        b.down.insert(2);
+        b.until("node 2's session down", |b| b.t.session_of(2).is_none());
+        assert!(b.t.lease_ok(0, b.now));
+        b.hold.insert(TARGET, is_read);
+        let r3 = b.read_at(0, 3);
+        b.fail_held(0);
+        assert_eq!(b.t.avoid_len(), 1, "waits for node 2");
+        assert_eq!(b.t.try_fast_read(b.now, 0, x(3)), None, "a read sent again");
+        let fr = b.t.try_fast_read(b.now, 0, x(0)).expect("block 0");
+        assert!(b.t.finish_fast_read(b.now, fr, true));
+        b.run();
+        // A read whose reply comes after the lease lapsed is queued again.
+        let r2 = b.read_at(0, 2);
+        b.until("the lease lapsed", |b| !b.t.lease_ok(0, b.now));
+        let i = b.held_from(TARGET, is_read);
+        b.deliver(i);
+        assert_eq!(b.done.get(&r2), None);
+        assert!(
+            b.t.queue
+                .iter()
+                .any(|w| matches!(w, Work::Client { op, .. } if *op == r2))
+        );
+        assert_eq!(b.t.try_fast_read(b.now, 0, x(2)), None, "a read sent again");
+        b.hold.clear();
+        b.down.clear();
+        b.until("reads done", |b| {
+            b.done.contains_key(&r2) && b.done.contains_key(&r3)
+        });
+        assert_eq!(b.done.get(&r2), Some(&OpResult::Read(vec![22])));
+        assert_eq!(b.done.get(&r3), Some(&OpResult::Read(vec![0])));
+    }
+
+    /// S9: a deposed target fails the operations waiting on its chunks.
+    #[test]
+    fn deposition_fails_waiting_operations() {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2], &[1, 2]], 1);
+        b.deposed_ok = true;
+        b.hold.insert(2, is_hello);
+        b.restart(1);
+        let ops = [b.read_at(1, 0), b.write_at(2, 0, 7), b.read_at(0, 1)];
+        // Another target takes over; this one learns of it from its next read of the volume.
+        b.meta.handle(&MetaRequest::Attach { vol: VOL, node: 9 });
+        b.until("deposed", |b| b.t.is_deposed());
+        for op in ops {
+            assert_eq!(b.done.get(&op), Some(&OpResult::Failed));
+        }
+    }
+
+    /// S6: four digests in flight; a read on chunk 5 takes the first slot that frees.
+    fn next_free_slot(today: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2][..]; 6], 1);
+        b.today = today;
+        b.max_bulk = 4;
+        b.hold.insert(2, is_digest);
+        b.restart(1);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Dg(2, 0), Dg(3, 0)]);
+        b.read_at(5, 0);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Dg(2, 0), Dg(3, 0), Dg(5, 0)]);
+    }
+
+    #[test]
+    fn a_waited_chunk_takes_the_next_free_slot() {
+        next_free_slot(false);
+    }
+
+    /// S6: chunk A (0) on nodes 1 and 2, B (1) on 1 and 3, digests of one block. A is fenced
+    /// first and waited; B's digests, fenced later, are queued ahead of A's last three.
+    fn fenced_first_and_waited(today: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 3]], 1);
+        b.today = today;
+        b.max_bulk = 1;
+        b.max_digest = 1;
+        b.hold.insert(3, is_hello);
+        b.hold.insert(2, is_digest);
+        b.restart(1);
+        b.expect_starts(&[Dg(0, 0)]);
+        let op = b.read_at(0, 0);
+        b.deliver_from(3);
+        b.hold.remove(&2);
+        b.deliver_from(2);
+        b.expect_starts(&[
+            Dg(0, 0),
+            Dg(0, 1),
+            Dg(0, 2),
+            Dg(0, 3),
+            Dg(1, 0),
+            Rd(0, 0),
+            Dg(1, 1),
+            Dg(1, 2),
+            Dg(1, 3),
+        ]);
+        assert!(b.done.contains_key(&op));
+    }
+
+    #[test]
+    fn a_chunk_fenced_first_and_waited_goes_before_one_fenced_later() {
+        fenced_first_and_waited(false);
+    }
+
+    /// S6: the same placement, A's digests differing. B, fenced late and waited, takes the
+    /// slot A's digest frees, ahead of A's repairs.
+    fn fenced_late(today: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 3]], 1);
+        b.today = today;
+        b.max_bulk = 1;
+        b.diverge(2, 0, 0, 9);
+        b.diverge(2, 0, 2, 9);
+        b.hold.insert(3, is_hello);
+        b.hold.insert(2, is_digest);
+        b.restart(1);
+        let op = b.read_at(1, 0);
+        b.deliver_from(3);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Rp(0, 0), Rd(1, 0), Rp(0, 2)]);
+        assert!(b.done.contains_key(&op));
+    }
+
+    #[test]
+    fn a_chunk_fenced_late_takes_the_next_free_slot() {
+        fenced_late(false);
+    }
+
+    /// S6: two slots; chunks 0 (X) and 1 (W) differ in blocks 0 and 2, and W is waited. X's
+    /// repairs, queued at the front after W's, go only to slots W cannot use.
+    fn ahead_of_repairs(today: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2]], 1);
+        b.today = today;
+        b.max_bulk = 2;
+        for c in 0..2 {
+            b.diverge(2, c, 0, 9);
+            b.diverge(2, c, 2, 9);
+        }
+        b.hold.insert(2, is_digest);
+        b.restart(1);
+        let op = b.read_at(1, 0);
+        b.hold.insert(2, is_digest_or_write);
+        fn w_digest(m: &ToReplica<Vec<Value>>) -> bool {
+            matches!(m.body, Request::Digest { chunk: 1, .. })
+        }
+        fn w_write_0(m: &ToReplica<Vec<Value>>) -> bool {
+            matches!(m.body, Request::Write { chunk: 1, ext, .. } if ext.start == 0)
+        }
+        fn w_write_2(m: &ToReplica<Vec<Value>>) -> bool {
+            matches!(m.body, Request::Write { chunk: 1, ext, .. } if ext.start == 2)
+        }
+        let i = b.held_from(2, w_digest);
+        b.deliver(i);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Rp(1, 0)]);
+        // X's digest: its repairs go to the front, the slot it frees to W.
+        let i = b.held_from(2, is_digest);
+        b.deliver(i);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Rp(1, 0), Rp(1, 2)]);
+        // W has nothing left to start: the slot goes to X meanwhile.
+        let i = b.held_from(2, w_write_0);
+        b.deliver(i);
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Rp(1, 0), Rp(1, 2), Rp(0, 0)]);
+        let i = b.held_from(2, w_write_2);
+        b.deliver(i);
+        b.expect_starts(&[
+            Dg(0, 0),
+            Dg(1, 0),
+            Rp(1, 0),
+            Rp(1, 2),
+            Rp(0, 0),
+            Rp(0, 2),
+            Rd(1, 0),
+        ]);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![0])));
+    }
+
+    #[test]
+    fn a_waited_chunk_goes_ahead_of_repairs_queued_before_it() {
+        ahead_of_repairs(false);
+    }
+
+    /// S6, no idle slot: chunk 1 on nodes 1 and 3 is waited, and its digest cannot start
+    /// (node 3's session is down, the ISR at its minimum); chunks 0 and 2 reconcile meanwhile.
+    /// (Today's pump idles no slot either: this test passes with it.)
+    #[test]
+    fn a_waited_digest_that_cannot_start_holds_nothing() {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 3], &[1, 2]], 2);
+        b.max_bulk = 1;
+        b.hold.insert(2, is_hello);
+        b.hold.insert(3, is_digest);
+        b.restart(1);
+        b.expect_starts(&[Dg(1, 0)]);
+        b.hold.insert(3, is_hello);
+        let i = b.held_from(3, is_digest);
+        b.deliver_wrong(i);
+        assert!(b.t.session_of(3).is_none());
+        let op = b.read_at(1, 0);
+        b.deliver_from(2);
+        b.expect_starts(&[Dg(1, 0), Dg(0, 0), Dg(2, 0)]);
+        assert!(b.serves(0) && b.serves(2) && !b.serves(1));
+        assert_eq!(b.done.get(&op), None);
+    }
+
+    /// S8: chunk 0's digest fails in flight with node 2's session (the ISR at its minimum, so
+    /// no removal) and goes back to the front; chunk 1's, waited, still goes first.
+    fn sent_again(today: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2]], 2);
+        b.today = today;
+        b.max_bulk = 1;
+        b.hold.insert(2, is_digest);
+        b.restart(1);
+        let op = b.read_at(1, 0);
+        let i = b.held_from(2, is_digest);
+        b.deliver_wrong(i);
+        assert!(matches!(
+            b.t.queue.front(),
+            Some(Work::Digest { chunk: 0, .. })
+        ));
+        b.hold.clear();
+        b.until("node 2's session open", |b| b.t.session_of(2).is_some());
+        b.expect_starts(&[Dg(0, 0), Dg(1, 0), Dg(0, 0), Rd(1, 0)]);
+        assert!(b.done.contains_key(&op));
+    }
+
+    #[test]
+    fn a_digest_sent_again_does_not_pass_a_waited_chunk() {
+        sent_again(false);
+    }
+
+    /// A reply that does not match: a digest reply of the wrong length, or of the wrong type,
+    /// fails the session and sends the digest again, its slot freed.
+    #[test]
+    fn a_digest_reply_of_the_wrong_length_frees_its_slot() {
+        for body in [Response::Digests(vec![Some(0)]), Response::Ok] {
+            let mut b = Bench::new(&[1, 2], 2);
+            b.max_bulk = 1;
+            b.hold.insert(2, is_digest);
+            b.restart(1);
+            assert_eq!((b.t.bulk, b.t.digests.len()), (1, 1));
+            let i = b.held_from(2, is_digest);
+            b.deliver_as(i, body.clone());
+            assert_eq!((b.t.bulk, b.t.digests.len()), (0, 0), "{body:?}");
+            assert!(matches!(
+                b.t.queue.front(),
+                Some(Work::Digest { chunk: 0, .. })
+            ));
+            b.hold.clear();
+            b.until("serving", |b| b.serves(0));
+            b.expect_starts(&[Dg(0, 0), Dg(0, 0)]);
+        }
+    }
+
+    /// A reply of the wrong type: a client read goes again, before the write on its block
+    /// queued behind it. (The wrong-type digest is in the test above.)
+    #[test]
+    fn a_reply_of_the_wrong_type_requeues_its_request() {
+        let mut b = Bench::new(&[1, 2], 2);
+        b.write(0, 42);
+        b.hold.insert(TARGET, is_read);
+        let r = b.read(0);
+        let w = b.write_at(0, 0, 43);
+        assert_eq!(b.done.get(&w), None, "behind the read");
+        let i = b.held_from(TARGET, is_read);
+        b.deliver_wrong(i);
+        b.hold.clear();
+        b.until("write done", |b| b.done.contains_key(&w));
+        assert_eq!(b.done.get(&r), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.done.get(&w), Some(&OpResult::Written));
+        assert_eq!(b.reads_to, [1, 2]);
+        let first_write = b.client_log.iter().position(|&op| op == w);
+        assert_eq!(first_write, Some(3), "{:?}", b.client_log);
+    }
+
+    /// Chunk 0 on nodes 1, 3 and 4, node 4 out of its ISR and lacking block 0: a discard of
+    /// blocks 1 to 3, a digest of block 0, then its copy.
+    fn resyncing(hold: Pred) -> Bench {
+        let mut b = Bench::with_chunks(&[&[1, 3, 4]], 1);
+        b.out_of_isr(0, 4);
+        b.diverge(1, 0, 0, 7);
+        b.diverge(3, 0, 0, 7);
+        b.max_bulk = 1;
+        b.hold.insert(4, hold);
+        b.restart(3);
+        b
+    }
+
+    /// A reply of the wrong type to a copy, or to a discard: the slot is freed once, nothing
+    /// goes back to the queue, and the round is aborted.
+    #[test]
+    fn a_copy_reply_of_the_wrong_type_frees_its_slot_once() {
+        let cases: [(Pred, &[Start]); 2] = [
+            (is_copy, &[Dg(0, 0), Ds(0, 1), Rs(0, 0), Cp(0, 0)]),
+            (is_discard, &[Dg(0, 0), Ds(0, 1)]),
+        ];
+        for (hold, starts) in cases {
+            let mut b = resyncing(hold);
+            b.expect_starts(starts);
+            let round = b.t.chunks[0].resync.as_ref().expect("a resync").round;
+            assert_eq!(b.t.bulk, 1);
+            let i = b.held_from(4, hold);
+            b.deliver_wrong(i);
+            assert_eq!(b.t.bulk, 0);
+            assert!(b.t.chunks[0].resync.is_none(), "the round is aborted");
+            assert!(
+                b.t.queue
+                    .iter()
+                    .all(|w| !matches!(w.class(), Class::Resync(_, r) if r == round)),
+                "nothing of the round is queued"
+            );
+            b.hold.clear();
+            b.until("node 4 in the ISR", |b| b.isr().contains(&4));
+            assert_eq!(b.replicas[&4].block(VOL, 0, 0), Some(7));
+        }
+    }
+
+    /// A reply of the wrong type to a `Mapped` probe aborts its round: it does not wait for
+    /// the probe for ever.
+    #[test]
+    fn a_mapped_reply_of_the_wrong_type_aborts_the_round() {
+        let mut b = Bench::with_chunks(&[&[1, 3, 4]], 2);
+        b.out_of_isr(0, 4);
+        b.diverge(1, 0, 0, 7);
+        b.diverge(3, 0, 0, 7);
+        b.hold.insert(TARGET, is_mapped);
+        b.restart(3);
+        let round = {
+            let r = b.t.chunks[0].resync.as_ref().expect("a resync");
+            assert_eq!(r.awaiting_mapped, 1);
+            r.round
+        };
+        let i = b.held_from(TARGET, is_mapped);
+        b.deliver_wrong(i);
+        // The next round asks node 3, node 1's session being down.
+        assert!(
+            b.t.chunks[0]
+                .resync
+                .as_ref()
+                .is_none_or(|r| r.round != round),
+            "the round is aborted"
+        );
+        b.hold.clear();
+        b.until("node 4 in the ISR", |b| b.isr().contains(&4));
+        assert_eq!(b.replicas[&4].block(VOL, 0, 0), Some(7));
+    }
+
+    /// A random extent of a chunk.
+    fn any_extent(rng: &mut Rng) -> Extent {
+        let start = rng.range(0, u64::from(BLOCKS) - 1) as Block;
+        let len = rng.range(1, u64::from(BLOCKS - start)) as Block;
+        Extent::new(start, len)
+    }
+
+    /// S5: on random queues the pump starts the same client operations, in the same order, as
+    /// today's, and admits the same fast reads. Chunks 1 up reconcile throughout (their
+    /// digests and reads are held); in half the cases chunk 0 serves and resyncs node 4.
+    #[test]
+    fn client_starts_match_todays_pump() {
+        for case in 0..1000u64 {
+            let mut rng = Rng::new(case);
+            let resync = case % 2 == 0;
+            let k = rng.range(2, 4) as usize;
+            let max_digest = rng.range(1, u64::from(BLOCKS)) as Block;
+            let max_io = rng.range(1, u64::from(BLOCKS)) as Block;
+            let mut data: Vec<(Block, Value)> = Vec::new();
+            for blk in 0..BLOCKS {
+                if rng.pct(60) {
+                    data.push((blk, rng.range(1, 99)));
+                }
+            }
+            let pieces = BLOCKS.div_ceil(max_digest) as usize * k;
+            let build = |today: bool| {
+                let first: &[NodeId] = if resync { &[1, 3, 4] } else { &[1, 3] };
+                let mut placement = vec![first];
+                placement.extend(std::iter::repeat_n(&[1, 2][..], k));
+                let mut b = Bench::with_chunks(&placement, 1);
+                if resync {
+                    b.out_of_isr(0, 4);
+                    for &(blk, v) in &data {
+                        b.diverge(1, 0, blk, v);
+                        b.diverge(3, 0, blk, v);
+                    }
+                    b.hold.insert(4, is_resync);
+                }
+                b.today = today;
+                b.max_digest = max_digest;
+                b.max_io = max_io;
+                // Every digest in flight, and two slots more for the resync.
+                b.max_bulk = if resync { pieces + 2 } else { pieces };
+                b.hold.insert(1, is_reconcile_off_chunk_0);
+                b.hold.insert(2, is_reconcile_off_chunk_0);
+                b.restart(2);
+                b
+            };
+            let mut benches = [build(false), build(true)];
+            let mut answers: [Vec<String>; 2] = Default::default();
+            let mut fast: [Vec<FastRead>; 2] = Default::default();
+            for _ in 0..rng.range(10, 60) {
+                let chunk = rng.range(0, k as u64) as ChunkIdx;
+                let ext = any_extent(&mut rng);
+                let roll = rng.range(0, 99);
+                let pick = rng.next_u64();
+                for (j, b) in benches.iter_mut().enumerate() {
+                    match roll {
+                        0..=29 => {
+                            b.submit(Op::Read { chunk, ext });
+                        }
+                        30..=54 => {
+                            let data = vec![pick % 100; ext.len as usize];
+                            b.submit(Op::Write { chunk, ext, data });
+                        }
+                        55..=69 => {
+                            let fr = b.t.try_fast_read(b.now, chunk, ext);
+                            answers[j].push(format!("{fr:?}"));
+                            fast[j].extend(fr);
+                        }
+                        70..=79 if !fast[j].is_empty() => {
+                            let fr = fast[j].remove(pick as usize % fast[j].len());
+                            let ok = b.t.finish_fast_read(b.now, fr, true);
+                            answers[j].push(format!("finish {ok}"));
+                            b.run();
+                        }
+                        _ => {
+                            if let Some(i) = b.held.iter().position(|h| h.0 == 4) {
+                                b.deliver(i);
+                            }
+                        }
+                    }
+                }
+            }
+            for (j, b) in benches.iter_mut().enumerate() {
+                for fr in std::mem::take(&mut fast[j]) {
+                    let ok = b.t.finish_fast_read(b.now, fr, true);
+                    answers[j].push(format!("finish {ok}"));
+                    b.run();
+                }
+                assert!((1..=k).all(|c| !b.serves(c as ChunkIdx)), "case {case}");
+            }
+            let [a, t] = &benches;
+            assert_eq!(a.client_log, t.client_log, "case {case}: client starts");
+            assert_eq!(answers[0], answers[1], "case {case}: fast reads");
+            assert_eq!(a.done, t.done, "case {case}: results");
+        }
+    }
+
+    /// S5: of two client operations on overlapping blocks, the one submitted first starts
+    /// first, with replies delivered in random order (in order per node) and at random times,
+    /// sessions failing on replies of the wrong type, and chunks coming to serve along the
+    /// way.
+    #[test]
+    fn overlapping_client_operations_start_in_queue_order() {
+        for case in 0..1000u64 {
+            let mut rng = Rng::new(case);
+            let nodes: &[NodeId] = if rng.pct(50) { &[1, 2, 3] } else { &[1, 2] };
+            let chunks = rng.range(1, 3) as usize;
+            let min_isr = rng.range(1, 2) as usize;
+            let mut b = Bench::with_chunks(&vec![nodes; chunks], min_isr);
+            for c in 0..chunks as ChunkIdx {
+                for blk in 0..BLOCKS {
+                    if rng.pct(30) {
+                        let v = rng.range(1, 99);
+                        b.diverge(rng.pick(nodes), c, blk, v);
+                    }
+                }
+            }
+            b.max_bulk = rng.range(1, 4) as usize;
+            b.max_digest = rng.range(1, u64::from(BLOCKS)) as Block;
+            b.max_io = rng.range(1, u64::from(BLOCKS)) as Block;
+            b.hold_all(is_any);
+            b.restart(rng.pick(nodes));
+            let mut ops: Vec<(u64, ChunkIdx, Extent)> = Vec::new();
+            for _ in 0..rng.range(20, 100) {
+                let roll = rng.range(0, 99);
+                let from = rng.pick(nodes);
+                match roll {
+                    0..=29 => {
+                        let chunk = rng.range(0, chunks as u64 - 1) as ChunkIdx;
+                        let ext = any_extent(&mut rng);
+                        let op = if rng.pct(50) {
+                            b.submit(Op::Read { chunk, ext })
+                        } else {
+                            let v = rng.range(1, 99);
+                            b.submit(Op::Write {
+                                chunk,
+                                ext,
+                                data: vec![v; ext.len as usize],
+                            })
+                        };
+                        ops.push((op, chunk, ext));
+                    }
+                    30..=79 => {
+                        if let Some(i) = b.held.iter().position(|h| h.0 == from) {
+                            b.deliver(i);
+                        }
+                    }
+                    80..=94 => b.advance(rng.range(1, 400) * MS),
+                    _ => {
+                        if let Some(i) = b.held.iter().position(|h| h.0 == from) {
+                            b.deliver_wrong(i);
+                        }
+                    }
+                }
+            }
+            b.drain();
+            let first = |op: u64| {
+                b.client_log
+                    .iter()
+                    .position(|&o| o == op)
+                    .unwrap_or_else(|| panic!("case {case}: op {op} never started"))
+            };
+            for (i, &(a, ca, xa)) in ops.iter().enumerate() {
+                for &(z, cz, xz) in &ops[i + 1..] {
+                    if ca == cz && xa.overlaps(&xz) {
+                        assert!(
+                            first(a) < first(z),
+                            "case {case}: op {z} started before op {a}: {:?}",
+                            b.client_log
+                        );
+                    }
+                }
+            }
+        }
     }
 }

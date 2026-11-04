@@ -324,6 +324,16 @@ impl Replica {
         Some(c.get(&block).copied().unwrap_or(0))
     }
 
+    /// Sets a block on this replica only, as a write that reached no other replica would: for
+    /// tests whose replicas must disagree.
+    #[cfg(test)]
+    pub fn set_block(&mut self, vol: VolumeId, chunk: ChunkIdx, block: Block, v: Value) {
+        self.data
+            .get_mut(&(vol, chunk))
+            .expect("chunk")
+            .insert(block, v);
+    }
+
     /// Handles one request. Returns the reply, or `None` if the request is dropped.
     pub fn handle(&mut self, m: &ToReplica<Vec<Value>>) -> Option<FromReplica<Vec<Value>>> {
         let mut action = self.core.handle(m);

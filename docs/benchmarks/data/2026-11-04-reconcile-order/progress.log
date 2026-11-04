@@ -1,0 +1,30 @@
+16:54:07 start
+16:54:09 deploy e8b6d01 to a
+16:54:23 deploy e8b6d01 to c
+16:55:16 main fc=0 run=1 rc=0 | device /dev/ublkb1 ready: 0.163 s first read (chunk 0, block 0): 0.237 s one block of every chunk: 0.927 s 
+16:55:50 main fc=32 run=1 rc=0 | device /dev/ublkb1 ready: 0.150 s first read (chunk 32, block 2097152): 0.267 s one block of every chunk: 0.958 s 
+16:56:24 main fc=0 run=2 rc=0 | device /dev/ublkb1 ready: 0.142 s first read (chunk 0, block 0): 0.229 s one block of every chunk: 0.982 s 
+16:56:57 main fc=32 run=2 rc=0 | device /dev/ublkb1 ready: 0.132 s first read (chunk 32, block 2097152): 0.214 s one block of every chunk: 0.956 s 
+16:57:32 main fc=0 run=3 rc=0 | device /dev/ublkb1 ready: 0.133 s first read (chunk 0, block 0): 0.233 s one block of every chunk: 0.975 s 
+16:58:05 main fc=32 run=3 rc=0 | device /dev/ublkb1 ready: 0.093 s first read (chunk 32, block 2097152): 0.191 s one block of every chunk: 0.881 s 
+16:58:05 deploy 5833375 to a
+16:58:06 deploy 5833375 to c
+16:58:42 branch fc=0 run=1 rc=0 | device /dev/ublkb1 ready: 0.131 s first read (chunk 0, block 0): 0.213 s one block of every chunk: 0.876 s 
+16:59:15 branch fc=32 run=1 rc=0 | device /dev/ublkb1 ready: 0.127 s first read (chunk 32, block 2097152): 0.211 s one block of every chunk: 0.881 s 
+16:59:49 branch fc=0 run=2 rc=0 | device /dev/ublkb1 ready: 0.137 s first read (chunk 0, block 0): 0.227 s one block of every chunk: 0.883 s 
+17:00:23 branch fc=32 run=2 rc=0 | device /dev/ublkb1 ready: 0.129 s first read (chunk 32, block 2097152): 0.214 s one block of every chunk: 0.891 s 
+17:00:57 branch fc=0 run=3 rc=0 | device /dev/ublkb1 ready: 0.109 s first read (chunk 0, block 0): 0.200 s one block of every chunk: 0.914 s 
+17:01:31 branch fc=32 run=3 rc=0 | device /dev/ublkb1 ready: 0.148 s first read (chunk 32, block 2097152): 0.237 s one block of every chunk: 0.912 s 
+17:01:31 DONE
+17:02:14 branch rerun: touching sources
+17:02:15 deploy 5833375 to a (binary was 1793804062)
+17:02:26 a binary rebuilt (1793804062 -> 1793804545)
+17:02:26 deploy 5833375 to c (binary was 1793804081)
+17:02:42 c binary rebuilt (1793804081 -> 1793804561)
+17:03:16 branch fc=0 run=1 rc=0 | device /dev/ublkb1 ready: 0.106 s first read (chunk 0, block 0): 0.125 s one block of every chunk: 0.807 s 
+17:03:51 branch fc=32 run=1 rc=0 | device /dev/ublkb1 ready: 0.115 s first read (chunk 32, block 2097152): 0.153 s one block of every chunk: 0.945 s 
+17:04:25 branch fc=0 run=2 rc=0 | device /dev/ublkb1 ready: 0.110 s first read (chunk 0, block 0): 0.130 s one block of every chunk: 0.927 s 
+17:04:58 branch fc=32 run=2 rc=0 | device /dev/ublkb1 ready: 0.120 s first read (chunk 32, block 2097152): 0.155 s one block of every chunk: 0.919 s 
+17:05:33 branch fc=0 run=3 rc=0 | device /dev/ublkb1 ready: 0.144 s first read (chunk 0, block 0): 0.168 s one block of every chunk: 0.906 s 
+17:06:06 branch fc=32 run=3 rc=0 | device /dev/ublkb1 ready: 0.110 s first read (chunk 32, block 2097152): 0.138 s one block of every chunk: 0.919 s 
+17:06:06 DONE
