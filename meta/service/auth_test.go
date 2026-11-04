@@ -118,8 +118,9 @@ func TestAuthorization(t *testing.T) {
 	req := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1}
 	_, err = nodeA.CreateVolume(ctx, req)
 	expect("node creates a volume", err, codes.PermissionDenied)
-	_, err = admin.CreateVolume(ctx, req)
+	created, err := admin.CreateVolume(ctx, req)
 	expect("admin creates a volume", err, codes.OK)
+	first := created.GetVolume().GetEpoch()
 	_, err = nodeA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("node attaches itself", err, codes.PermissionDenied)
 	_, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
@@ -135,15 +136,15 @@ func TestAuthorization(t *testing.T) {
 	expect("data plane restarts its target", err, codes.PermissionDenied)
 	restart, err := agentA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a", OnlyIfTarget: true})
 	expect("agent restarts its own target", err, codes.OK)
-	if restart.Volume.GetEpoch() != 2 {
-		t.Fatalf("restart epoch %d, want 2", restart.Volume.GetEpoch())
+	if restart.Volume.GetEpoch() != first+2 {
+		t.Fatalf("restart epoch %d, want %d", restart.Volume.GetEpoch(), first+2)
 	}
 	att, err := admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("admin attaches again", err, codes.OK)
 
-	// The token names the volume, the epoch and the node.
+	// The token names the volume, the epoch, the node and the volume's first epoch.
 	claims, err := captoken.Verify(pub, att.Token)
-	if err != nil || claims.Volume != "v" || claims.Epoch != 3 || claims.Node != "fl-a" {
+	if err != nil || claims.Volume != "v" || claims.Epoch != first+3 || claims.Node != "fl-a" || claims.FirstEpoch != first {
 		t.Fatalf("token %+v %v", claims, err)
 	}
 

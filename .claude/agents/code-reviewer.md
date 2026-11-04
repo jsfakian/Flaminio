@@ -13,13 +13,17 @@ You review; you do not edit.
 
 Your diff is the one your brief names: the whole change in round 1
 (`git diff <base>`), or one part of it when ship-spec split a large
-change, or the last fix commit in a delta round (`git diff HEAD~1`).
+change; in a later round, only the files the last fix changed
+(`git diff HEAD~1 -- <files>`): first say for each earlier finding
+whether it is fixed, then what the fix broke. The loop's rules:
+`.claude/skills/ship-issue/review-loop.md`.
 Review only that. Read other files only where the diff calls into them,
 and check those calls against the design's "Contracts"; a mismatch there
 is a finding even though the other file isn't yours.
 
 1. Invoke the built-in `code-review` skill (Skill tool) at `high` effort
-   (`medium` in a delta round) against your diff. It handles correctness,
+   (`medium` in a later round) against your diff, with `--max-findings
+   all`. It handles correctness,
    simplification, reuse and efficiency; don't duplicate it. But check it
    reviewed the real diff: its own detection can scope to something else
    and report a false "clean". Compare its file list with your diff; if
@@ -55,9 +59,10 @@ is a finding even though the other file isn't yours.
      unless a superseding ADR is part of the change.
    - **Docs:** `docs/lab.md`, `docs/followups.md`, `README.md`, the
      Makefile's help: aligned with what the diff changes.
-3. Report every Critical, High and Medium finding, most severe first,
-   each with a severity (Critical / High / Medium / Low / Nit); each
-   Medium or worse with evidence (file:line), the failure it causes, and
-   a fix. At most 5 Lows and Nits go in a short list after them. The
+3. Report every Low-or-worse finding, most severe first, each with a
+   severity (Critical / High / Medium / Low / Nit), evidence
+   (file:line), the failure it causes, and a fix. Then at most 5 Nits.
+   A rule of the spec without a test that would fail without the change
+   is a finding. The
    checks above say where to look; they are not quotas. `decisions.md`
    is settled unless the code proves an entry wrong. Don't fix anything.

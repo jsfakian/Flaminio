@@ -3,7 +3,7 @@ name: issue-to-spec
 description: >-
   Turn a GitHub issue (#n) into docs/issues/<n>/intent.md and spec.md
   (terms, the invariant, numbered rules S1…Sn, tests) via the planner
-  agent, then stop for human approval. First stage of the issue -> spec ->
+  agent, review it in a loop until clear, then stop for human approval. First stage of the issue -> spec ->
   design -> ship pipeline. Use when asked to spec out, scope, or plan an
   issue before implementing it.
 ---
@@ -21,11 +21,15 @@ Never chain into `spec-to-design` automatically. Conventions:
    - `args` is a number, `#n`, a GitHub URL or `docs/issues/<n>` → that
      issue.
    - No `args` → list the open issues (`gh issue list --state open`,
-     with their milestones) and ask which one, unless the user already
-     named one in this conversation.
-2. Branch: if on `main`, create `issue/<n>-<short-slug>` from an
-   up-to-date `origin/main`. If already on another issue's branch with
-   uncommitted work, stop and ask.
+     with their milestones), drop those blocked by their "Depends on",
+     and propose the lowest-numbered unblocked one, unless the user
+     already named one in this conversation.
+2. Branch: `issue/<n>-<short-slug>` from an up-to-date `origin/main`.
+   When another issue's branch is checked out, work in a worktree: `git
+   worktree add ../flaminio-<n> -b issue/<n>-<slug> origin/main`. Never
+   switch the branch of a checkout the lab is driven from: `make deploy`
+   copies that working tree. If the issue's branch or worktree exists,
+   resume it.
 3. If `docs/issues/<n>/spec.md` exists, resume it: revise in place, never
    regenerate. Take settled choices from `decisions.md`.
 4. Delegate to the `planner` agent (Agent tool, `subagent_type:
@@ -35,16 +39,20 @@ Never chain into `spec-to-design` automatically. Conventions:
    codes, test vectors) go in the design. When an edit would grow it past
    that, cut something first.
 5. Commit the plan: `Draft the plan of <what> (#n)`.
-6. Show the spec's full content in the conversation.
-7. **Stop.** Ask whether the spec is approved as written or needs
+6. **Spec review loop** (`.claude/skills/ship-issue/review-loop.md`):
+   one fresh `plan-reviewer` per round, focus `spec`, on intent and
+   spec. Fixes go through the same `planner` (SendMessage), so it keeps
+   what it has read; settled choices go to
+   `docs/issues/<n>/decisions.md` under `## Choices` (create it in the
+   style of `docs/issues/14/decisions.md`).
+7. Show the spec's full content in the conversation, with the loop's
+   rounds (findings by severity, what changed).
+8. **Stop.** Ask whether the spec is approved as written or needs
    changes. Do not invoke `spec-to-design` in the same turn, even if the
    spec looks fine. The approval must come from the user's own reply.
-8. On changes: continue the same `planner` with SendMessage (it keeps
-   what it has read), or edit directly; show the diff, commit
-   (`Address the <first|second|…> review of the plan of #n`), ask again.
-   Record each choice the feedback settles, with its reason, in
-   `docs/issues/<n>/decisions.md` under `## Choices` (create the file in
-   the style of `docs/issues/14/decisions.md`).
+   On changes: the same `planner` revises, commit, run the loop again on
+   what changed, show the diff, ask again. Record each choice the
+   feedback settles, with its reason, in `decisions.md`.
 9. On approval: add `- **Spec:** approved by <user>, <YYYY-MM-DD>.` under
    `## Approvals` at the top of `decisions.md`, and commit it.
 

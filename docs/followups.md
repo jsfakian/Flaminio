@@ -168,8 +168,8 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
    `DeleteVolume` drops the volume header and chunk metadata, writes `/flaminio/v1/tombstones/<id>`,
    and exposes `ListTombstones` / `ConfirmDeletion`. The volume id cannot be reused while the
    tombstone remains (so an agent sweep cannot wipe a recreated volume).
-2. **Each node's agent** lists its tombstones, deletes the chunks (`Store::delete_chunk`,
-   under a fencing epoch higher than any target's), and confirms. ✅ The CSI node plugin sweeps
+2. **Each node's agent** lists its tombstones, deletes the chunks (`Store::delete_volume`:
+   every chunk of the name, whatever its fence), and confirms. ✅ The CSI node plugin sweeps
    via the data plane's control-socket `delete` (which calls `ReplicaService::delete_volume`).
 3. *Lab, 2026-10-28:* 100 cycles of a PVC (RF 2, 1 GiB) and a pod writing 16 MiB through
    its filesystem, alternating fl-a and fl-b, then both deleted: about 20 s a cycle. Afterwards
@@ -292,4 +292,8 @@ the lab, never confirms: its replicas of deleted volumes stay, and the volume id
      today;
    - `meta-smoke`, the resync check and the CSI controller's deletions keep leaving tombstones
      pending for fl-c until step 1;
-   - creating a volume again under the same name is issue #30's; replicas no record names, #13's.
+   - creating a volume again under the same name: done (#30). It starts above every epoch of the
+     name, and drops an earlier volume's chunks at its first session on each node. Left (#30,
+     S8 and S9): the old tokens still open sessions on nodes the new volume has not reached, and
+     a volume created by an old metadata service starts at epoch 0 again;
+   - replicas no record names, #13's.

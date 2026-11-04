@@ -18,12 +18,14 @@ type Mem struct {
 	now     func() time.Time
 }
 
-// NewMem returns an empty in-memory KV. now is the clock for TTL keys (nil: time.Now).
+// NewMem returns an empty in-memory KV. now is the clock for TTL keys (nil: time.Now). Its
+// revisions start at the clock, in microseconds, so that a restarted service starts above the one
+// before it, whose volumes nodes may still hold (docs/issues/30, S2).
 func NewMem(now func() time.Time) *Mem {
 	if now == nil {
 		now = time.Now
 	}
-	return &Mem{data: map[string]Entry{}, expires: map[string]time.Time{}, now: now}
+	return &Mem{rev: max(now().UnixMicro(), 0), data: map[string]Entry{}, expires: map[string]time.Time{}, now: now}
 }
 
 func (m *Mem) expire() {

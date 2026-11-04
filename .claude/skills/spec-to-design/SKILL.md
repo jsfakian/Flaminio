@@ -3,7 +3,8 @@ name: spec-to-design
 description: >-
   Turn an approved docs/issues/<n>/spec.md into design.md (how each rule
   is built, files touched, contracts, tests, lab checks, risks, ADRs) via
-  the designer agent, then stop for human approval. Second stage of the
+  the designer agent, review the whole plan in a loop until clear, then
+  stop for human approval. Second stage of the
   issue -> spec -> design -> ship pipeline. Use after a human has approved
   a spec produced by issue-to-spec.
 ---
@@ -32,14 +33,19 @@ parallel against unapproved specs, no per-issue stop.
    settled. The design carries the implementation facts the spec leaves
    out (file:line, flags, exit codes, test vectors).
 4. Commit it: `Design <what> (#n)`.
-5. Show the design's full content, including the rule → test mapping,
-   the lab checks and `## ADRs`. If the design drafted an ADR, show it too
-   and say that approving the design accepts it.
-6. **Stop.** Ask whether the design is approved as written or needs
-   changes. Do not invoke `ship-spec` in the same turn.
-7. On changes: continue the same `designer` with SendMessage, or edit
-   directly; show the diff, commit (`Address the <first|…> review of the
-   design of #n`), ask again. Record each settled choice, with its
+5. **Design review loop** (`.claude/skills/ship-issue/review-loop.md`),
+   a loop of its own after the spec's, on the whole plan (intent, spec
+   and design together, so a design finding that changes the spec is
+   caught): two fresh `plan-reviewer`s per round, in parallel, focus
+   `design-code` and `design-security`. Fixes go through the same
+   `designer` (SendMessage), and reach the spec where a finding does.
+6. Show the design's full content, including the rule → test mapping,
+   the lab checks and `## ADRs`, with both loops' rounds. If the design drafted an ADR, show it too and say that
+   approving the design accepts it.
+7. **Stop.** Ask whether the design is approved as written or needs
+   changes. Do not invoke `ship-spec` in the same turn. On changes: the
+   same `designer` revises, commit, run the loop again on what changed,
+   show the diff, ask again. Record each settled choice, with its
    reason, in `decisions.md`.
 8. On approval: add `- **Design:** approved by <user>, <YYYY-MM-DD>.`
    under `## Approvals` in `decisions.md`, and commit it.

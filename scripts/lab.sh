@@ -614,6 +614,10 @@ cmd_meta_smoke() {
     log "nodes: $(metactl "$VM_A" "$VM_A" nodes | jq -c '[.nodes[] | {id, alive, witness: (.labels // {} | has("flaminio.io/witness")), zone: .labels["topology.kubernetes.io/zone"]}]')"
     out=$(metactl "$VM_A" "$VM_A" create "$vol" 1G 2 1 256M)
     log "created $vol: $(jq -c '[.volume.chunks[].replicas]' <<<"$out")"
+    # The volume's epochs start at its first epoch, the revision of its claim (docs/issues/30).
+    local first
+    first=$(jq -r .volume.epoch <<<"$out")
+    [[ $first =~ ^[0-9]+$ ]] || die "the created volume has no epoch: $out"
     if jq -e --arg w "$VM_W" '[.volume.chunks[].replicas[]] | index($w)' <<<"$out" >/dev/null; then
         die "a replica was placed on the witness $VM_W"
     fi
@@ -638,9 +642,9 @@ cmd_meta_smoke() {
     cmd_etcd up w
     wait_for "the metadata service to answer" 60 metactl "$VM_A" "$VM_W" get "$vol"
     out=$(metactl "$VM_A" "$VM_W" get "$vol")
-    [[ $(jq -r .volume.epoch <<<"$out") == 2 ]] || die "unexpected state after recovery: $out"
+    [[ $(jq -r .volume.epoch <<<"$out") == $((first + 2)) ]] || die "unexpected state after recovery: $out"
     metactl "$VM_A" "$VM_A" delete "$vol" >/dev/null
-    log "OK: metadata survived the loss of one member, refused without quorum, recovered (epoch 2)"
+    log "OK: metadata survived the loss of one member, refused without quorum, recovered (epoch $((first + 2)))"
 
     log "refusals:"
     if vssh "$VM_A" "/usr/local/bin/flaminio-meta --server $VM_A_WG:$META_PORT nodes" >/dev/null 2>&1; then
@@ -1866,8 +1870,9 @@ write_reset() {
 }
 
 # wbench deleted, with its replicas on every data node (delete_volume, NODE formatted if it is
-# stopped): a volume's replicas outlive its metadata, and a new wbench (epoch 1 again) would be
-# deposed by old replicas fenced at a later epoch.
+# stopped): a volume's replicas outlive its metadata. A new wbench starts above the old one's
+# epochs and drops its replicas where it opens a session (docs/issues/30); they are deleted here
+# to free their space on every node.
 delete_wbench() { delete_volume wbench "$1"; }
 
 # A freshly formatted store on NODE, and a new 16 GiB volume wbench (RF replicas, one on NODE)

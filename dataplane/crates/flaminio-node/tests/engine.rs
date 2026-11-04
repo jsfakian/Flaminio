@@ -1783,6 +1783,268 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A token of a volume created at first epoch `first` (version 2: docs/issues/30), as the
+/// metadata service signs it.
+fn token_first(key: &Ed25519KeyPair, volume: &str, epoch: u64, node: &str, first: u64) -> Vec<u8> {
+    let mut b = token(key, volume, epoch, node);
+    b.truncate(b.len() - 64);
+    b[4] = 2;
+    b.extend_from_slice(&first.to_be_bytes());
+    let sig = key.sign(&b);
+    b.extend_from_slice(sig.as_ref());
+    b
+}
+
+/// Volume "v" of `chunks` chunks on `replicas`, every replica in the ISR, attached on `target`.
+fn volume_on(chunks: u64, replicas: &[&str], target: &str, epoch: u64) -> pb::Volume {
+    pb::Volume {
+        size_bytes: chunks * CHUNK,
+        target: target.into(),
+        chunks: (0..chunks)
+            .map(|_| pb::ChunkMeta {
+                replicas: replicas.iter().map(|s| s.to_string()).collect(),
+                isr: replicas.iter().map(|s| s.to_string()).collect(),
+                isr_ver: 0,
+                ..Default::default()
+            })
+            .collect(),
+        ..volume(replicas, epoch)
+    }
+}
+
+/// Waits for `node`'s answer to an attach: its epoch, or why it failed.
+fn attach_result(node: &Node, token: Vec<u8>) -> Result<u64, String> {
+    node.inputs
+        .send(Input::Attach {
+            volume: "v".into(),
+            token,
+        })
+        .unwrap();
+    match node.wait("attach", |o| {
+        matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
+    }) {
+        Output::Attached { epoch, .. } => Ok(epoch),
+        Output::AttachFailed { why, .. } => Err(why),
+        _ => unreachable!(),
+    }
+}
+
+/// Registers the two nodes with the model.
+fn both_registered(model: &Arc<Mutex<Model>>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while model.lock().unwrap().nodes.len() < 2 {
+        assert!(Instant::now() < deadline, "nodes did not register");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A volume deleted and created again with the same name, at first epoch 1000, while fl-a and
+/// fl-b keep the earlier volume's replicas (nothing deleted them): it neither adopts their data
+/// nor is deposed by their fences, and the earlier volume's token is refused, at the attach and
+/// by fl-b (docs/issues/30, S5 to S7).
+#[test]
+fn a_volume_created_again_neither_adopts_nor_is_deposed() {
+    let dir = std::env::temp_dir().join(format!("flaminio-again-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[13; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let model = Arc::new(Mutex::new(Model::default()));
+    let a = start_node("fl-a", &ids["fl-a"], key.clone(), model.clone());
+    let b = start_node("fl-b", &ids["fl-b"], key.clone(), model.clone());
+    both_registered(&model);
+
+    // The earlier volume, from before first epochs: epoch 1, a version 1 token.
+    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1));
+    let old = token(&signer, "v", 1, "fl-a");
+    assert_eq!(attach_result(&a, old.clone()), Ok(1));
+    for (op, off) in [(1, 0), (2, CHUNK)] {
+        a.io(
+            op,
+            Io::Write {
+                offset: off,
+                data: pattern(1, 64 << 10).into(),
+            },
+        );
+    }
+    assert!(b.inspect(0, 64 << 10) == pattern(1, 64 << 10));
+    a.inputs.send(Input::Detach { volume: "v".into() }).unwrap();
+    a.wait("detach", |o| matches!(o, Output::Detached { .. }));
+
+    // Deleted and created again at first epoch 1000; attached at 1001. (A new geometry is
+    // dropped as well: the replica service's tests.)
+    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1001));
+    let why = attach_result(&a, old.clone()).unwrap_err();
+    assert!(why.contains("epoch 1 ") && why.contains("1001"), "{why}");
+    for (what, tok) in [
+        (
+            "another volume's",
+            token_first(&signer, "w", 1001, "fl-a", 1000),
+        ),
+        (
+            "another node's",
+            token_first(&signer, "v", 1001, "fl-b", 1000),
+        ),
+        ("no", Vec::new()),
+    ] {
+        assert!(attach_result(&a, tok).is_err(), "{what} token accepted");
+    }
+    let new = token_first(&signer, "v", 1001, "fl-a", 1000);
+    // A token that does not decode: the right one with an unknown version.
+    let mut garbled = new.clone();
+    garbled[4] = 9;
+    let why = attach_result(&a, garbled).unwrap_err();
+    assert!(why.contains("invalid capability token"), "{why}");
+    assert_eq!(attach_result(&a, new), Ok(1001));
+    for (op, off) in [(10, 0), (11, CHUNK)] {
+        let got = a
+            .io(
+                op,
+                Io::Read {
+                    offset: off,
+                    len: 64 << 10,
+                },
+            )
+            .unwrap();
+        assert!(got == vec![0; 64 << 10], "the old data at {off} is gone");
+    }
+    a.io(
+        12,
+        Io::Write {
+            offset: 0,
+            data: pattern(2, 64 << 10).into(),
+        },
+    );
+    let got = a
+        .io(
+            13,
+            Io::Read {
+                offset: 0,
+                len: 64 << 10,
+            },
+        )
+        .unwrap();
+    assert!(got == pattern(2, 64 << 10), "read back");
+    assert!(
+        b.inspect(0, 64 << 10) == pattern(2, 64 << 10),
+        "fl-b's replica"
+    );
+    assert!(
+        b.inspect(CHUNK, 64 << 10) == vec![0; 64 << 10],
+        "fl-b dropped the old data"
+    );
+
+    // A session to fl-b with the earlier volume's token, from a target of it on fl-a: fl-b's
+    // replica is fenced at 1001 now, so it answers Stale, and that target is deposed.
+    let old_model = Arc::new(Mutex::new(Model::default()));
+    {
+        let addr = model.lock().unwrap().nodes["fl-b"].clone();
+        let mut m = old_model.lock().unwrap();
+        m.nodes.insert("fl-b".into(), addr);
+        m.volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1));
+    }
+    let (mut zombie, rx) = hand_driven(
+        "fl-a",
+        &ids["fl-a"],
+        key,
+        old_model,
+        Timing::default(),
+        None,
+    );
+    attach(&mut zombie, &rx, &signer, 1);
+    zombie.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op: 1,
+            io: Io::Write {
+                offset: 0,
+                data: pattern(3, 4096).into(),
+            },
+        },
+    );
+    let mut serve =
+        |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
+    drive(&mut zombie, &rx, &mut [], &mut serve, &|o| {
+        matches!(o, Output::Deposed { .. })
+    });
+    let got = a
+        .io(
+            14,
+            Io::Read {
+                offset: 0,
+                len: 64 << 10,
+            },
+        )
+        .unwrap();
+    assert!(got == pattern(2, 64 << 10), "the new volume is untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// fl-b still runs a target of the earlier volume when the new one's first Hello drops its
+/// replica there: that target's I/O fails, and nothing panics (docs/issues/30, R9).
+#[test]
+fn a_drop_under_a_target_of_the_earlier_volume_fails_its_io() {
+    let dir = std::env::temp_dir().join(format!("flaminio-zombie-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[14; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let model = Arc::new(Mutex::new(Model::default()));
+    let a = start_node("fl-a", &ids["fl-a"], key.clone(), model.clone());
+    let b = start_node("fl-b", &ids["fl-b"], key, model.clone());
+    both_registered(&model);
+
+    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-b", 1));
+    assert_eq!(attach_result(&b, token(&signer, "v", 1, "fl-b")), Ok(1));
+    b.io(
+        1,
+        Io::Write {
+            offset: 0,
+            data: pattern(1, 64 << 10).into(),
+        },
+    );
+
+    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1001));
+    let new = token_first(&signer, "v", 1001, "fl-a", 1000);
+    assert_eq!(attach_result(&a, new), Ok(1001));
+    a.io(
+        2,
+        Io::Write {
+            offset: 0,
+            data: pattern(2, 64 << 10).into(),
+        },
+    );
+
+    b.inputs
+        .send(Input::Io {
+            volume: "v".into(),
+            op: 3,
+            io: Io::Write {
+                offset: 0,
+                data: pattern(3, 4096).into(),
+            },
+        })
+        .unwrap();
+    match b.wait("the old target's write", |o| {
+        matches!(o, Output::Done { op: 3, .. })
+    }) {
+        Output::Done { result, .. } => assert!(result.is_err(), "{result:?}"),
+        _ => unreachable!(),
+    }
+    let got = a
+        .io(
+            4,
+            Io::Read {
+                offset: 0,
+                len: 64 << 10,
+            },
+        )
+        .unwrap();
+    assert!(got == pattern(2, 64 << 10), "the new volume is untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// An engine with asynchronous commits on a deferred device (commits complete on command), and
 /// volume "v" (16 MiB) attached, for the tests of held groups (docs/issues/10). Built with the
 /// engine's defaults: the 8 MiB floor, so groups are held.
@@ -2205,6 +2467,7 @@ fn holding_staged_groups() {
                     epoch: 1,
                     node: "fl-b".into(),
                     issued_at: 0,
+                    first_epoch: 0,
                 },
                 size: CHUNK,
                 chunk_size: CHUNK,

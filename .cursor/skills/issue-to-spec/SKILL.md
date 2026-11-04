@@ -3,7 +3,7 @@ name: issue-to-spec
 description: >-
   Turn a GitHub issue (#n) into docs/issues/<n>/intent.md and spec.md
   (terms, the invariant, numbered rules S1…Sn, tests) via the planner
-  agent, then stop for human approval. First stage of the issue -> spec ->
+  agent, review it in a loop until clear, then stop for human approval. First stage of the issue -> spec ->
   design -> ship pipeline. Use when asked to spec out, scope, or plan an
   issue before implementing it.
 ---

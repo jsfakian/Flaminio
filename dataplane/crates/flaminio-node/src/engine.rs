@@ -32,7 +32,7 @@ use flaminio_metaclient::{Answer, Call, MetaClient, pb};
 use flaminio_net::BLOCK;
 use flaminio_net::frame::Frame;
 use flaminio_net::session::Accepted;
-use flaminio_net::token::Claims;
+use flaminio_net::token::{Claims, decode_unverified};
 use flaminio_repl::extent::Extent;
 use flaminio_repl::meta::{ChunkMeta, MetaReply, MetaRequest, VolumeMeta};
 use flaminio_repl::msg::{FromReplica, Request, Response, ToReplica};
@@ -362,6 +362,9 @@ struct TargetRt {
     sm: Target<Payload>,
     view: VolumeMeta,
     token: Vec<u8>,
+    /// The volume's first epoch, from the token: the local replica's session carries it, as a
+    /// remote one's token does (docs/issues/30, S6).
+    first_epoch: u64,
     size: u64,
     chunk_size: u64,
     /// NodeId → node name, and address.
@@ -1604,6 +1607,19 @@ impl<D: BlockDevice> Engine<D> {
         {
             return Err("unusable volume geometry".into());
         }
+        // The local replica takes the volume's first epoch from the token, so the token must be
+        // this attach's: epochs of different volumes of a name never overlap, so the epoch fixes
+        // the volume (docs/issues/30, S6). Its signature is not checked here (#15).
+        if a.token.is_empty() {
+            return Err("no capability token: the data plane needs one".into());
+        }
+        let claims = decode_unverified(&a.token).map_err(|e| e.to_string())?;
+        if claims.volume != volume || claims.node != self.cfg.node || claims.epoch != v.epoch {
+            return Err(format!(
+                "the token is for {} epoch {} on {}, the volume is at {}",
+                claims.volume, claims.epoch, claims.node, v.epoch
+            ));
+        }
         let mut nodes: Vec<String> = Vec::new();
         let id = |name: &str, nodes: &mut Vec<String>| -> NodeId {
             match nodes.iter().position(|n| n == name) {
@@ -1650,6 +1666,7 @@ impl<D: BlockDevice> Engine<D> {
                 sm,
                 view,
                 token: a.token,
+                first_epoch: claims.first_epoch,
                 size: v.size_bytes,
                 chunk_size: v.chunk_bytes,
                 nodes,
@@ -1926,6 +1943,7 @@ impl<D: BlockDevice> Engine<D> {
                         epoch: msg.epoch,
                         node: self.cfg.node.clone(),
                         issued_at: 0,
+                        first_epoch: rt.first_epoch,
                     },
                     size: rt.size,
                     chunk_size: rt.chunk_size,

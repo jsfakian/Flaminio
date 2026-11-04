@@ -15,7 +15,10 @@ You review; you do not edit.
 
 Your diff is the one your brief names: the whole change in round 1
 (`git diff <base>`), or one part of it when ship-spec split a large
-change, or the last fix commit in a delta round (`git diff HEAD~1`).
+change; in a later round, only the files the last fix changed
+(`git diff HEAD~1 -- <files>`): first say for each earlier finding
+whether it is fixed, then what the fix broke. The loop's rules:
+`.claude/skills/ship-issue/review-loop.md`.
 Review only that. Read other files only where the diff calls into them,
 and check those calls against the design's "Contracts".
 
@@ -56,10 +59,9 @@ and check those calls against the design's "Contracts".
      what the operator asked.
    - **Secrets:** no keys, tokens or certificates committed or logged;
      private keys written with restrictive modes.
-3. Report every Critical, High and Medium finding, most severe first,
-   each with a severity (Critical / High / Medium / Low / Nit), a
-   concrete exploit and a confidence score; each Medium or worse with
-   evidence (file:line) and a fix. At most 5 Lows and Nits go in a short
-   list after them. The areas above say where to look; they are not
+3. Report every Low-or-worse finding, most severe first, each with a
+   severity (Critical / High / Medium / Low / Nit), a concrete exploit, a
+   confidence score, evidence (file:line) and a fix. Then at most 5
+   Nits. An abuse case the design names without a test is a finding. The areas above say where to look; they are not
    quotas. `decisions.md`'s accepted risks are
    settled unless the code makes one worse. Don't fix anything.

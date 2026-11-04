@@ -3,7 +3,9 @@
 //
 // Keys, all under /flaminio/v1/:
 //
-//	volumes/<id>             volume header (JSON)
+//	volumes/<id>             volume header (JSON); its first_epoch is the revision of the claim
+//	                         that created the volume, above every epoch an earlier volume of
+//	                         the name reached (docs/issues/30)
 //	chunks/<id>/<index>      one chunk's placement and ISR (JSON), index as 8 digits
 //	nodes/<id>               registered node (JSON)
 //	alive/<id>               liveness record, expires without heartbeats
@@ -456,6 +458,11 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 			ops = ops[:0]
 		}
 	}
+	// The volume's epochs start at the claim's revision. Each attach is one header write that
+	// adds one to the epoch, so no epoch passes the revision of its header's last write: every
+	// epoch an earlier volume of this id reached, and every fence and token it left, is below
+	// the claim, which came after its deletion (docs/issues/30).
+	v.Start(uint64(claim))
 	v.Creating = false
 	hb, _ = json.Marshal(v.Header)
 	ok, err = s.kv.Txn(ctx, cmp, []kv.Op{{Key: volumeKey(spec.ID), Value: hb}})
@@ -734,7 +741,7 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 		out := &metav1.AttachResponse{Volume: volumePB(v)}
 		if s.opts.TokenKey != nil {
 			out.Token, err = captoken.Sign(s.opts.TokenKey, captoken.Claims{
-				Volume: h.ID, Epoch: h.Epoch, Node: h.Target, IssuedAt: time.Now().Unix(),
+				Volume: h.ID, Epoch: h.Epoch, FirstEpoch: h.FirstEpoch, Node: h.Target, IssuedAt: time.Now().Unix(),
 			})
 			if err != nil {
 				return nil, status.Error(codes.Internal, err.Error())
