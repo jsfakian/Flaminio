@@ -17,7 +17,7 @@ VOL=${VOL:-vol1}
 NODE=${NODE:-$VM_A}
 LIMIT=${LIMIT:-5}
 FIRST_CHUNK=${FIRST_CHUNK:-0}
-[[ $FIRST_CHUNK =~ ^[0-9]+$ ]] || die "FIRST_CHUNK must be a chunk number: '$FIRST_CHUNK'"
+[[ $FIRST_CHUNK =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "FIRST_CHUNK must be a chunk number: '$FIRST_CHUNK'"
 
 info=$(metactl "$VM_A" "$VM_A" get "$VOL")
 mapfile -t replicas < <(jq -r '[.volume.chunks[].replicas[]] | unique | .[]' <<<"$info")

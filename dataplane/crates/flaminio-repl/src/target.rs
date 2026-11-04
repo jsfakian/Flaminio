@@ -7,7 +7,7 @@
 //! Operations cover an extent of one chunk; the caller splits I/O at chunk boundaries. `P` is
 //! the payload type (see [`crate::msg`]): the target only stores and forwards payloads.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Debug;
 
 use crate::extent::{Extent, ExtentSet};
@@ -98,6 +98,9 @@ pub struct Bugs {
     /// A chunk's writes in flight keep the acknowledgements of a replica its list drops, so a
     /// node added back counts as holding them (S11).
     pub keep_dropped_acks: bool,
+    /// Not a bug: each newly fenced chunk's digests go to the queue's front as it fences, as
+    /// before docs/issues/11, so the last chunk fenced in a progress pass goes first (S1).
+    pub today_queue_order: bool,
 }
 
 /// What the target counted, for the simulator's reports (docs/issues/11).
@@ -922,8 +925,17 @@ impl<P: Clone + Debug> Target<P> {
                     r.unacked.remove(&seq);
                 }
                 if let Some(w) = self.writes.get_mut(&seq) {
-                    w.acked.insert(from);
-                    self.check_write(seq);
+                    // An acknowledgement counts only for a send the write still records: the
+                    // sends to a replica its chunk's list dropped are forgotten, and a node
+                    // added back is sent the write again only on a new session (S11).
+                    #[cfg(test)]
+                    let counts = w.sent.contains(&from) || self.bugs.keep_dropped_acks;
+                    #[cfg(not(test))]
+                    let counts = w.sent.contains(&from);
+                    if counts {
+                        w.acked.insert(from);
+                        self.check_write(seq);
+                    }
                 }
                 // A completed write may finish the chunk's reconciliation or unblock a join.
                 scope = Scope::Chunk(chunk as usize);
@@ -992,7 +1004,6 @@ impl<P: Clone + Debug> Target<P> {
             Scope::Chunk(i) => {
                 if !self.deposed {
                     self.advance_chunk(now, i);
-                    self.queue_newly_fenced();
                     self.send_meta(now);
                     self.pump(now);
                 }
@@ -1890,10 +1901,10 @@ impl<P: Clone + Debug> Target<P> {
     /// item in flight beside it (docs/issues/11, S3); otherwise the queue is tried in its
     /// order.
     fn pump(&mut self, now: Time) {
-        debug_assert!(self.newly_fenced.is_empty(), "digests left unqueued");
         if self.deposed {
             return;
         }
+        self.queue_newly_fenced();
         #[cfg(test)]
         let in_order = self.unready == 0 || self.bugs.today_pump;
         #[cfg(not(test))]
@@ -1909,7 +1920,8 @@ impl<P: Clone + Debug> Target<P> {
             .into_iter()
             .map(Some)
             .collect();
-        let mut waited_chunks: Vec<ChunkIdx> = Vec::new();
+        // Each waited chunk's wait rank.
+        let mut rank: HashMap<ChunkIdx, usize> = HashMap::new();
         let mut reconcile_all: Vec<(usize, ChunkIdx)> = Vec::new();
         let mut resync: Vec<usize> = Vec::new();
         for (k, item) in items.iter_mut().enumerate() {
@@ -1926,8 +1938,9 @@ impl<P: Clone + Debug> Target<P> {
                         .chunks
                         .get(chunk as usize)
                         .is_none_or(|c| c.phase == Phase::Ready);
-                    if !serves && !waited_chunks.contains(&chunk) {
-                        waited_chunks.push(chunk);
+                    if !serves {
+                        let next = rank.len();
+                        rank.entry(chunk).or_insert(next);
                     }
                 }
                 Class::Reconcile(chunk) => reconcile_all.push((k, chunk)),
@@ -1945,7 +1958,7 @@ impl<P: Clone + Debug> Target<P> {
                 }
             }
         }
-        if waited_chunks.is_empty() {
+        if rank.is_empty() {
             self.last_waited = false;
             self.queue = items.into_iter().flatten().collect();
             self.pump_in_order(now);
@@ -1958,21 +1971,18 @@ impl<P: Clone + Debug> Target<P> {
                 self.stats.waited_pumps_with_resync += 1;
             }
         }
-        let is_waited = |c: ChunkIdx| waited_chunks.contains(&c);
-        let mut waited: Vec<usize> = Vec::new();
-        for &c in &waited_chunks {
-            waited.extend(
-                reconcile_all
-                    .iter()
-                    .filter(|&&(_, rc)| rc == c)
-                    .map(|&(k, _)| k),
-            );
+        let is_waited = |c: ChunkIdx| rank.contains_key(&c);
+        // The waited chunks' items, chunk by chunk in wait order, and the others, each in
+        // queue order.
+        let mut by_rank: Vec<Vec<usize>> = vec![Vec::new(); rank.len()];
+        let mut reconcile: Vec<usize> = Vec::new();
+        for &(k, c) in &reconcile_all {
+            match rank.get(&c) {
+                Some(&r) => by_rank[r].push(k),
+                None => reconcile.push(k),
+            }
         }
-        let reconcile: Vec<usize> = reconcile_all
-            .iter()
-            .filter(|&&(_, c)| !is_waited(c))
-            .map(|&(k, _)| k)
-            .collect();
+        let waited: Vec<usize> = by_rank.concat();
         // What is in flight, from the maps.
         let mut resync_in_flight = self.digests.values().filter(|d| d.resync.is_some()).count()
             + self
@@ -2177,7 +2187,6 @@ impl<P: Clone + Debug> Target<P> {
         for i in 0..self.chunks.len() {
             self.advance_chunk(now, i);
         }
-        self.queue_newly_fenced();
         self.send_meta(now);
         self.pump(now);
     }
@@ -2218,6 +2227,16 @@ impl<P: Clone + Debug> Target<P> {
                         // Digests first, then repairs only where ISR members disagree. Queued
                         // once the progress pass is over (`queue_newly_fenced`).
                         let pieces = pending.pieces(self.max_digest);
+                        #[cfg(test)]
+                        if self.bugs.today_queue_order {
+                            for ext in pieces.iter().rev() {
+                                let chunk = i as ChunkIdx;
+                                self.queue.push_front(Work::Digest { chunk, ext: *ext });
+                            }
+                        } else if !pieces.is_empty() {
+                            self.newly_fenced.push((i, pieces));
+                        }
+                        #[cfg(not(test))]
                         if !pieces.is_empty() {
                             self.newly_fenced.push((i, pieces));
                         }
@@ -2810,6 +2829,8 @@ mod tests {
         max_digest: Block,
         max_io: Block,
         today: bool,
+        /// The targets `restart` makes queue newly fenced digests as before (S1).
+        today_queue_order: bool,
         /// The test deposes the target: the teardown does not drain it.
         deposed_ok: bool,
     }
@@ -2925,6 +2946,7 @@ mod tests {
                 max_digest: MAX_DIGEST_BLOCKS,
                 max_io: 4,
                 today: false,
+                today_queue_order: false,
                 deposed_ok: false,
             };
             b.run();
@@ -2946,6 +2968,7 @@ mod tests {
             self.t.set_max_bulk(self.max_bulk);
             self.t.set_max_digest(self.max_digest);
             self.t.bugs.today_pump = self.today;
+            self.t.bugs.today_queue_order = self.today_queue_order;
             self.held.clear();
             self.held_meta.clear();
             self.submitted.clear();
@@ -3533,6 +3556,76 @@ mod tests {
         assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
     }
 
+    /// S11: node 2 keeps its session through chunk 1 while a move drops it from chunk 0 and
+    /// adds it back. Its acknowledgement of a write sent to its dropped replica, delivered late,
+    /// does not count: node 2 does not join, and the write waits on node 1.
+    #[test]
+    fn a_dropped_replicas_late_ack_does_not_count_after_the_drop() {
+        late_ack(false);
+    }
+
+    /// As above, the late acknowledgement delivered once node 2 is a replica again.
+    #[test]
+    fn a_dropped_replicas_late_ack_does_not_count_after_it_rejoins() {
+        late_ack(true);
+    }
+
+    fn late_ack(after_rejoin: bool) {
+        let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2]], 1);
+        b.replicas.insert(3, Replica::with_chunk_size(4));
+        b.hold_meta_if = Some(drops_node_2);
+        b.request_move(2, 3);
+        b.until("node 3 in the ISR", |b| b.isr().contains(&3));
+        // A write that node 3 acknowledges; nodes 1 and 2's acknowledgements are held.
+        b.hold.insert(TARGET, is_write);
+        b.hold.insert(2, is_write);
+        let op = b.write_at(0, 0, 42);
+        assert_eq!((b.held.len(), b.done.get(&op)), (2, None));
+        // The drop commits; node 2 keeps its session, and its copy of chunk 0 is deleted.
+        b.hold_meta_if = None;
+        b.release_meta();
+        assert_eq!(b.t.chunks[0].replicas, [1, 3]);
+        assert!(b.t.session_of(2).is_some(), "node 2 holds chunk 1");
+        b.hold.remove(&2);
+        b.replicas
+            .get_mut(&2)
+            .expect("replica")
+            .remove_chunk(VOL, 0);
+        let late = b.held_from(2, is_write);
+        if !after_rejoin {
+            b.deliver(late);
+        }
+        b.request_move(3, 2);
+        b.until("node 2 a replica again", |b| {
+            b.t.chunks[0].replicas.contains(&2)
+        });
+        if after_rejoin {
+            let late = b.held_from(2, is_write);
+            b.deliver(late);
+        }
+        b.until("node 2 resynced or joined", |b| {
+            let c = &b.t.chunks[0];
+            c.joining == Some(2)
+                || c.isr.contains(&2)
+                || c.resync.as_ref().is_some_and(|r| {
+                    r.member == 2 && r.started && r.todo.is_empty() && r.discard.is_empty()
+                })
+        });
+        let c = &b.t.chunks[0];
+        assert!(
+            c.joining != Some(2) && !c.isr.contains(&2),
+            "node 2 joined on its dropped replica's acknowledgement: {}",
+            b.t.describe()
+        );
+        assert_eq!(b.done.get(&op), None, "the write still waits on node 1");
+        // Node 1's acknowledgement completes the write; then node 2 joins.
+        b.hold.clear();
+        b.deliver_from(TARGET);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        b.until("node 2 in the ISR", |b| b.isr().contains(&2));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+    }
+
     #[test]
     fn deposition_ends_reads_waiting_to_go_again() {
         let mut b = Bench::new(&[1, 2], 2);
@@ -3601,9 +3694,21 @@ mod tests {
     /// S1: chunks fenced in one progress pass queue their digests from chunk 0 up.
     #[test]
     fn digests_of_chunks_fenced_together_go_from_chunk_0() {
+        fenced_together(false);
+    }
+
+    /// S1's test fails with the queue order of before docs/issues/11.
+    #[test]
+    #[should_panic(expected = "out of order")]
+    fn digests_of_chunks_fenced_together_fail_with_todays_queue_order() {
+        fenced_together(true);
+    }
+
+    fn fenced_together(today_queue_order: bool) {
         let mut b = Bench::with_chunks(&[&[1, 2], &[1, 2], &[1, 2]], 1);
         b.max_bulk = 1;
         b.max_digest = 2;
+        b.today_queue_order = today_queue_order;
         b.restart(1);
         b.expect_starts(&[Dg(0, 0), Dg(0, 2), Dg(1, 0), Dg(1, 2), Dg(2, 0), Dg(2, 2)]);
     }

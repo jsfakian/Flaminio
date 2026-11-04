@@ -66,6 +66,18 @@ Settled during the spec and design reviews. Each line: the choice, and why.
   linear; nothing a try depends on changes within a pump.
 - **The accounting check is `cfg(test)`, in wrappers of the `pub` methods:** covers early
   returns; runs in the target tests and the simulator under `cargo test`, debug and release.
+- **Round 1 code+security review, Medium: late ack from a dropped replica.** The `Write` arm
+  of `on_reply` counts an acknowledgement only from a node in the write's `sent`: the drop
+  clears it, and only a new session sends the write to the node again, and the old session's
+  replies are dropped. So `adopt_replicas` needs no `inflight` cleanup.
+  `Bugs::keep_dropped_acks` covers both.
+- **Round 1, Low: the waited pump was O(N·W)** (a `Vec` of waited chunks searched per item, and
+  the reconcile items filtered once per waited chunk): a map chunk -> wait rank and one
+  bucketing pass make it O(N), as the design says.
+- **Round 1, nits:** `pump` queues the newly fenced digests itself, in place of a
+  `debug_assert` that its callers had; `Bugs::today_queue_order` (test-only) shows S1's test
+  fails with the old per-chunk `push_front`; `reconcile.sh` rejects a `FIRST_CHUNK` with
+  leading zeros or more than 9 digits.
 - **The leak fix puts the removed request back in the session's map before `fail_peer`:** no new
   path; it is re-queued with the others, in id order (S8).
 - **The bench's teardown drains, then asserts `is_settled()`; only the deposition tests opt

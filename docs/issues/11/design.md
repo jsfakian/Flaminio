@@ -16,11 +16,11 @@ The code is in `dataplane/crates/flaminio-repl`: the target (`src/target.rs`) an
 computed as today (`pending.pieces(self.max_digest)`). A new `queue_newly_fenced()` pushes them
 to the front: the chunks in reverse order, each chunk's pieces in reverse, so the queue starts
 with the lowest chunk's first piece.
-- **`progress`** calls it after its loop over the chunks, before `send_meta` and `pump`;
-- **`on_reply`'s `Scope::Chunk` path** calls it after its single `advance_chunk`, before `pump`;
+- **`pump`** calls it first, once it has checked the target is not deposed. `progress` (after
+  its loop over the chunks) and `on_reply`'s `Scope::Chunk` path (after its single
+  `advance_chunk`) call `send_meta`, which does not read the queue, then `pump`;
 - **`depose`** clears it, and also every chunk's `locks` and the test-only list of fast reads
-  (below): a deposed target starts nothing, and `try_fast_read` refuses on it. `pump`
-  `debug_assert`s `newly_fenced` is empty on entry.
+  (below): a deposed target starts nothing, and `try_fast_read` refuses on it.
 
 Between the loop and `queue_newly_fenced`, nothing reads the queue: `advance_chunk` sets phases,
 sends `Settle` and `Mapped`, and proposes ISR changes. So the only difference from today is the
@@ -58,14 +58,16 @@ They are computed only on the waited path, so a target whose chunks all serve pa
 ```text
 pump(now):
   if deposed: return
+  queue_newly_fenced() (S1)
   if unready == 0 (or the test switch, below): last_waited = false; pump_in_order(now); return
   pass 1: take the queue into a Vec<Option<Work>>, and in queue order:
     - drop a resync item whose chunk has no resync, or another round (try_start's test);
     - a client operation on a chunk not Ready: give the chunk the next wait rank, if it has none;
     - note each bulk item's index: reconcile (per chunk), or resync.
   if no chunk is waited: last_waited = false; put the items back; pump_in_order(now); return
-  waited: each waited chunk's reconcile indices, chunk by chunk in rank order.
-  reconcile: the reconcile indices of chunks not waited, in queue order.
+  one pass over the reconcile indices, each looked up in a map chunk -> wait rank:
+    waited: each waited chunk's, chunk by chunk in rank order (a list per rank, joined);
+    reconcile: those of chunks not waited, in queue order.
   count resync_in_flight and waited_in_flight from the maps.
   select (S3), while a slot is free and the last round started something:
     1. resync_in_flight == 0 and last_waited: the first resync item that starts
@@ -152,12 +154,24 @@ search ends in `replicas diverge` with no switch on.
 `w.acked.remove(r)` and `w.sent.remove(r)`. A write's completion and `drive_resync`'s view then
 count only replicas in the list.
 
-**Test-only:** `Bugs::keep_dropped_acks` skips the change. The simulator check
+**A late acknowledgement** (round 1 code review): the node's replies to the writes sent to the
+dropped replica may still arrive, on a session that survives when the node holds another chunk
+of the volume (sessions end only for nodes that hold none). So the `Write` arm of `on_reply`
+counts an acknowledgement only if the write's `sent` holds its sender. Once the drop cleared
+`sent`, the write is sent to the node again only by `retransmit`, on a new session
+(`send_write`'s only other caller, `start_write`, sends new writes), and the old session's
+replies are dropped by its id. So an acknowledgement counts only for a send to the replica that
+exists.
+
+**Test-only:** `Bugs::keep_dropped_acks` skips the change, and the check of `sent`. The simulator check
 `catches_keep_dropped_acks` (ignored, `make sim`, budget 20 000; its hint from the search, with
 seed 1 183 196 tried first) must catch it with `replicas diverge`. A target test,
 `a_dropped_replicas_ack_does_not_count_after_it_rejoins`, builds the scenario: a write
 acknowledged by node A's replica and waiting on node B, a move dropping A, A added back, B's
 acknowledgement delivered; the new A replica gets the block before the write completes.
+`a_dropped_replicas_late_ack_does_not_count_after_the_drop` and `…_after_it_rejoins` keep node
+A's session through a second chunk, and deliver A's held acknowledgement after the drop, or
+once A is a replica again: A does not join, and the write waits on B.
 
 ## Test-only parts
 
