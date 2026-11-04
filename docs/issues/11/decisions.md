@@ -1,5 +1,10 @@
 # Issue #11: Reconcile first the chunks that clients wait on — decisions
 
+## Approvals
+
+- **Spec:** approved by Ioannis Sfakianakis, 2026-10-30.
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-04.
+
 Settled during the spec and design reviews. Each line: the choice, and why.
 
 ## Scope
