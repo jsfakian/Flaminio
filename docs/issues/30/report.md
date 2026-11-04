@@ -63,15 +63,25 @@ Open review findings: none.
 
 ## Lab
 
-The design's lab check (spec, Checks), with the metadata service and the nodes deployed from
-this branch: **pending**, run on request (`/ship-spec 30 lab`), after #10's write campaign
-frees the lab.
-1. A volume created, attached on fl-a, 1 GiB written with a verify pattern, detached.
-2. Its attach token kept; the volume deleted, its tombstone removed with `etcdctl del`.
-3. Created again with another size and attached on fl-a: the epoch is above the old one.
-4. Reads zeros over the first GiB, then writes and verifies; no degraded chunk.
-5. Attached on fl-b: reads back the new pattern, not the old one.
-6. The old token at `node.sh attach` on fl-a: refused, naming both epochs.
+2026-11-04, the metadata service (fl-a, fl-b, fl-w) and the data nodes (fl-a, fl-b, fl-c)
+deployed from this branch (0225dc7), nodes first (S9). **Every check passes.**
+
+The design's procedure predates #14: `make vol-delete` now deletes a volume's replicas on every
+node. So the volume is deleted in the metadata service only (`metactl delete`) and its
+tombstone removed with `etcdctl del`, and it is placed on fl-c, which has no sweep, so its
+replicas are sure to stay. Scratch volumes `w30` and `w30b`, deleted after.
+
+| Step | Result |
+|---|---|
+| 1. `w30` (16 GiB, RF 2, fl-c+fl-b) attached on fl-c; 1 GiB written with A and read back | pass: 0 bytes not A; epoch 2001306 |
+| 2. Deleted in the metadata service; its tombstone removed by hand | pass |
+| 3. Created again (8 GiB) and attached on fl-c, which holds the old replicas | pass: epoch 2001395, above 2001306 |
+| 4. The first GiB reads zeros; B written and read back; no degraded chunk | pass: 0 bytes not zero; 0 not B; 0 degraded |
+| 5. Attached on fl-b, reading its own replica | pass: all B, none of A |
+| 6. The first incarnation's token at fl-c (`w30b`: 1 GiB, then 2 GiB) | pass: refused, "the token is for w30b epoch 2001530 on fl-c, the volume is at 2001541" |
+
+A token of the same incarnation for another node, after a later attach, is refused the same
+way ("epoch 2001397 on fl-b, the volume is at 2001398").
 
 ## ADRs
 
