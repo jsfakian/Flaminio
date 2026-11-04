@@ -459,25 +459,48 @@ mutation!(
 #[test]
 #[ignore = "slow in debug builds: run with `make sim`"]
 fn catches_fast_reads_across_a_fence() {
-    const NAME: &str = "catches_fast_reads_across_a_fence";
-    let bugs = target(|b| b.fast_read_no_fence_check = true);
-    let hint = 103_223u64;
+    hinted(
+        "catches_fast_reads_across_a_fence",
+        target(|b| b.fast_read_no_fence_check = true),
+        103_223,
+        4_000_000,
+    );
+}
+
+// A move must drop a replica that acknowledged a write still waiting on another member, and add
+// it back before the write completes (S11). Searched from seed 0 on 2026-11-04 (docs/issues/11):
+// first caught at seed 1183196, a two-chunk run, the seed that found the bug with no switch on.
+#[test]
+#[ignore = "slow in debug builds: run with `make sim`"]
+fn catches_keep_dropped_acks() {
+    hinted(
+        "catches_keep_dropped_acks",
+        target(|b| b.keep_dropped_acks = true),
+        1_183_196,
+        20_000,
+    );
+}
+
+/// A check whose first catch is too far for `make sim` to search: it tries `hint` only, and
+/// fails if that no longer catches. A search (`FLAMINIO_MUTATION_FIRST`) tries the hint first,
+/// unless `FLAMINIO_MUTATION_NO_HINT=1`, then its range, over `budget` seeds by default.
+fn hinted(name: &str, bugs: Bugs, hint: u64, budget: u64) {
     let no_hint = searching() && std::env::var("FLAMINIO_MUTATION_NO_HINT").as_deref() == Ok("1");
     if !no_hint {
         let mut skipped = Vec::new();
         if let Some(err) = try_seed(bugs, Config::random, hint, &mut skipped) {
             eprintln!(
-                "{NAME}: caught at seed {hint}: {}",
+                "{name}: caught at seed {hint}: {}",
                 err.lines().next().unwrap_or("")
             );
             return;
         }
         assert!(
             searching(),
-            "{NAME}: the hint {hint} no longer catches: search again (docs/issues/11, the search)"
+            "{name}: the hint {hint} no longer catches: search again (docs/issues/11, the search)"
         );
     }
-    find_failure(NAME, bugs, Config::random, 4_000_000);
+    find_failure(name, bugs, Config::random, budget);
 }
 
 // The checks on the campaign with more chunks (docs/issues/11).

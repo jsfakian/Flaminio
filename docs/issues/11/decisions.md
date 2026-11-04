@@ -100,6 +100,9 @@ Settled during the spec and design reviews. Each line: the choice, and why.
   does. 3 626 767 still catches, and so does the one-chunk seed 1 001 529, on main too: the
   earlier search had not covered every lower seed. So S2 holds; the hint is simply no longer
   pinned by it, and a pump change may move it (then search again).
+- **`catches_keep_dropped_acks` tries its hint only, as the fencing check (settled during
+  implementation, 2026-11-04):** the search found no catch in [0, 1 183 196); its first is
+  1 183 196 itself, beyond any budget `make sim` can search.
 
 ## Lab
 

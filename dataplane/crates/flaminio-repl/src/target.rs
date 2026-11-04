@@ -95,6 +95,9 @@ pub struct Bugs {
     /// runs can be compared with it (S2). The order of the digests queued by one progress pass
     /// (S1) stays the new one.
     pub today_pump: bool,
+    /// A chunk's writes in flight keep the acknowledgements of a replica its list drops, so a
+    /// node added back counts as holding them (S11).
+    pub keep_dropped_acks: bool,
 }
 
 /// What the target counted, for the simulator's reports (docs/issues/11).
@@ -2597,7 +2600,20 @@ impl<P: Clone + Debug> Target<P> {
             .copied()
             .filter(|n| !replicas.contains(n))
             .collect();
+        #[cfg(test)]
+        let forget = !self.bugs.keep_dropped_acks;
+        #[cfg(not(test))]
+        let forget = true;
         for r in &removed {
+            // A write counts as on a replica only while it exists: a node added back is a new
+            // replica, which holds the write once it acknowledges it or its resync copies it
+            // (S11).
+            if forget {
+                for w in self.writes.values_mut().filter(|w| w.chunk as usize == i) {
+                    w.acked.remove(r);
+                    w.sent.remove(r);
+                }
+            }
             c.dirty.remove(r);
             c.removing.remove(r);
             if c.resync.as_ref().is_some_and(|x| x.member == *r) {
@@ -2748,6 +2764,9 @@ mod tests {
         held: Vec<Held>,
         /// Metadata requests are held back, unanswered.
         hold_meta: bool,
+        /// Metadata requests that match are held back, to be answered later (`release_meta`).
+        hold_meta_if: Option<fn(&MetaRequest) -> bool>,
+        held_meta: Vec<(u64, MetaRequest)>,
         /// Where each client read was sent, in order.
         reads_to: Vec<NodeId>,
         done: BTreeMap<u64, OpResult<Vec<Value>>>,
@@ -2791,6 +2810,8 @@ mod tests {
                 hold: None,
                 held: Vec::new(),
                 hold_meta: false,
+                hold_meta_if: None,
+                held_meta: Vec::new(),
                 reads_to: Vec::new(),
                 done: BTreeMap::new(),
                 next_op: 1,
@@ -2810,6 +2831,11 @@ mod tests {
                 for o in out {
                     match o {
                         Output::Send { to, msg } => self.send(to, msg),
+                        Output::Meta { req, body }
+                            if self.hold_meta_if.is_some_and(|p| p(&body)) =>
+                        {
+                            self.held_meta.push((req, body));
+                        }
                         Output::Meta { req, body } if !self.hold_meta => {
                             let reply = self.meta.handle(&body);
                             self.t.on_meta(self.now, req, &reply);
@@ -2892,6 +2918,31 @@ mod tests {
         fn isr(&self) -> BTreeSet<NodeId> {
             self.t.chunks[0].isr.clone()
         }
+
+        /// Answers the metadata requests held back, in order.
+        fn release_meta(&mut self) {
+            for (req, body) in std::mem::take(&mut self.held_meta) {
+                let reply = self.meta.handle(&body);
+                self.t.on_meta(self.now, req, &reply);
+                self.run();
+            }
+        }
+
+        fn request_move(&mut self, from: NodeId, to: NodeId) {
+            let reply = self.meta.handle(&MetaRequest::MoveReplica {
+                vol: VOL,
+                chunk: 0,
+                from,
+                to,
+            });
+            assert!(matches!(reply, MetaReply::Applied { .. }), "move refused");
+        }
+    }
+
+    /// A metadata request that drops node 2's replica.
+    fn drops_node_2(m: &MetaRequest) -> bool {
+        matches!(m, MetaRequest::ChangeIsr { changes, .. }
+            if changes.iter().any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2))))
     }
 
     #[test]
@@ -3084,6 +3135,66 @@ mod tests {
         b.t.on_reply(b.now, TARGET, &reply);
         b.run();
         assert_eq!(b.done.get(&w), Some(&OpResult::Written));
+    }
+
+    /// S11: node 2's replica acknowledges a write that waits on node 1, a move drops it, and
+    /// node 2 comes back as a new replica. Its resync copies the block, but node 2 joins only
+    /// once the write has completed: its old acknowledgement does not count.
+    #[test]
+    fn a_dropped_replicas_ack_does_not_count_after_it_rejoins() {
+        let mut b = Bench::new(&[1, 2], 1);
+        b.replicas.insert(3, Replica::with_chunk_size(4));
+        // Node 3 joins; the drop of node 2 that follows is held back.
+        b.hold_meta_if = Some(drops_node_2);
+        b.request_move(2, 3);
+        b.until("node 3 in the ISR", |b| b.isr().contains(&3));
+        assert_eq!(b.held_meta.len(), 1, "the drop of node 2 is proposed");
+        // A write that nodes 2 and 3 acknowledge, and that waits on node 1.
+        b.hold = Some(is_write);
+        let op = b.submit(Op::Write {
+            chunk: 0,
+            ext: Extent::new(0, 1),
+            data: vec![42],
+        });
+        assert_eq!((b.held.len(), b.done.get(&op)), (1, None));
+        // The drop commits, and node 2's copy is deleted.
+        b.hold_meta_if = None;
+        b.release_meta();
+        assert_eq!(b.t.chunks[0].replicas, [1, 3]);
+        b.replicas
+            .get_mut(&2)
+            .expect("replica")
+            .remove_chunk(VOL, 0);
+        // Node 2 comes back as a new replica, and its resync copies everything.
+        b.request_move(3, 2);
+        b.until("node 2 resynced or joined", |b| {
+            let c = &b.t.chunks[0];
+            c.joining == Some(2)
+                || c.isr.contains(&2)
+                || c.resync.as_ref().is_some_and(|r| {
+                    r.member == 2 && r.started && r.todo.is_empty() && r.discard.is_empty()
+                })
+        });
+        assert_eq!(
+            b.replicas[&2].block(VOL, 0, 0),
+            Some(42),
+            "the copy has the block"
+        );
+        assert_eq!(b.done.get(&op), None, "the write still waits on node 1");
+        let c = &b.t.chunks[0];
+        assert!(
+            c.joining != Some(2) && !c.isr.contains(&2),
+            "node 2 joined on its old replica's acknowledgement: {}",
+            b.t.describe()
+        );
+        // Node 1's acknowledgement completes the write; then node 2 joins.
+        let (_, reply) = b.held.remove(0);
+        b.hold = None;
+        b.t.on_reply(b.now, TARGET, &reply);
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        b.until("node 2 in the ISR", |b| b.isr().contains(&2));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
     }
 
     #[test]

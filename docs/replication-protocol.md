@@ -382,6 +382,7 @@ on 2026-11-04 (docs/issues/11):
 | No resync filter on the replica (§7) | seed 163 | seed 335 |
 | A move's destination joins the ISR without a resync (§7, moves) | seed 2 | seed 2 |
 | A move drops its source before the destination is in the ISR (§7, moves) | seed 3 | |
+| A dropped replica's acknowledgements still count once it is added back (§7, moves) | seed 1183196: a write must wait on one member across a drop and a re-add | |
 | Fast reads without the lease check (§5, fast reads) | seed 561; split-brain scenario | |
 | Fast reads without the membership check (§5, fast reads) | seed 18962 | |
 | Fast reads without the fencing check at completion (§5, fast reads) | seed 103223: a slow device read must straddle a complete takeover | |
@@ -389,8 +390,8 @@ on 2026-11-04 (docs/issues/11):
 The seed numbers move whenever the simulator changes, so the tests search up to 20 000 seeds,
 and 60 000 for reconciliation pruning, early settling and fast reads without the membership
 check. That bug is rare by nature: the target must die between
-two repairs that are usually sent together. The fencing check tries its seed only, and fails if
-it no longer catches. A one-chunk seed moves only if the order of the target's work with no
+two repairs that are usually sent together. The fencing check and the dropped-acknowledgements
+check try their seed only, and fail if it no longer catches. A one-chunk seed moves only if the order of the target's work with no
 chunk waited changes (§6 step 3), which a test pins down: then the order is the bug.
 `scripts/dev/mutation-search.sh CHECK END [JOBS]` finds a check's first catch in `[0, END)`,
 split over every core.
