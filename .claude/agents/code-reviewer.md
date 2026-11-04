@@ -20,9 +20,10 @@ and check those calls against the design's "Contracts"; a mismatch there
 is a finding even though the other file isn't yours.
 
 1. **Round 1 only:** invoke the built-in `code-review` skill (Skill
-   tool) against your diff (base: the merge-base with `origin/main`), at
-   the effort your brief gives, with `--max-findings all`. It handles correctness, simplification,
-   reuse and efficiency; don't duplicate it. Check its file list matches
+   tool) on the diff range your brief gives (and only its paths, for a
+   part), at the effort it gives (`medium` if none), with
+   `--max-findings all`. It handles correctness, simplification, reuse
+   and efficiency; don't duplicate it. Check its file list matches
    your diff; if not, don't rely on it: review yourself and say so. In a
    later round, skip the skill and review the fix diff directly.
 2. Add what the generic skill can't know about this repo:

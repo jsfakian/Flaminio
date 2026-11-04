@@ -26,8 +26,8 @@ Low-or-worse finding is fixed and another round follows; Nits are fixed when fre
 
 - **Reviewers are new agents every round** (`plan-reviewer`, `code-reviewer`,
   `security-reviewer`), never `Explore` or plugin personas.
-- **How many:** two per round (code and security focus) when the change touches a trust
-  boundary or a safety path: `flaminio-repl`, `flaminio-store`, `flaminio-format`,
+- **How many:** two per round (code and security focus) when the change touches a **safety
+  path**: `flaminio-repl`, `flaminio-store`, `flaminio-format`,
   `flaminio-net`, `flaminio-uring`, `flaminio-io` (ublk), `meta/service`, `pkg/pki`,
   `pkg/captoken`. Otherwise one, with both focuses. The spec loop always has one.
 - **Round 1 reviews the whole thing:** in the spec loop, intent and spec; in the design loop,
@@ -38,12 +38,13 @@ Low-or-worse finding is fixed and another round follows; Nits are fixed when fre
   commit the last round reviewed (recorded in its log entry). The reviewer says for each
   earlier finding whether it is fixed, then what the fix broke, and reads other code only
   where the changed lines call into it or are called from it.
-- **Models and effort:** round 1 the default model; the built-in `code-review` skill at `high`
-  effort on a change touching the safety paths above, `medium` otherwise. Later rounds
-  `model: "sonnet"`, `effort: "medium"`, except a `security-reviewer` on a change touching
-  those paths, which keeps the default model.
-- **The brief** gives the issue number, the checkout, the round and its focus, the diff range,
-  the paths of `intent.md`, `spec.md`, `design.md` and `decisions.md`, and the earlier
+- **Models and effort:** round 1 the default model, with the built-in `code-review` skill at
+  `high` effort on a change touching a safety path, `medium` otherwise. Later rounds
+  `model: "sonnet"`, `effort: "medium"`; a `security-reviewer` on a safety-path change keeps
+  the default model.
+- **The brief** gives the issue number, the checkout, the round and its focus, the diff range
+  (for a part of a split change, the part's paths too), in round 1 of the code loop the
+  `code-review` effort, the paths of `intent.md`, `spec.md`, `design.md` and `decisions.md`, and the earlier
   findings. Don't paste documents the reviewer can read.
 
 ## Fixing a round

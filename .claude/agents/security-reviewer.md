@@ -21,8 +21,8 @@ Review only that. Read other files only where the diff calls into them,
 and check those calls against the design's "Contracts".
 
 1. **Round 1 only:** invoke the built-in `security-review` skill (Skill
-   tool) against your diff (base: the merge-base with `origin/main`).
-   It applies a hard-exclusion list and
+   tool) on the diff range your brief gives (and only its paths, for a
+   part). It applies a hard-exclusion list and
    adversarial confirmation; don't reinvent that. Check its file list
    matches your diff; if not, review yourself to the same standard
    (exclusions, a concrete exploit, a confidence score) and say so. In a
