@@ -78,7 +78,7 @@ continue from the next unfinished step and re-read only what it needs.
    Commit the files the design lists and the implementers reported (never
    `git add -A`): `<What the change does> (#n)`.
 3. **Tests.** Run `test-engineer` with `spec.md` and `design.md`; commit
-   its tests: `Test <what> (#n)`. Tests come before the review loop, so
+   the test files it reports: `Test <what> (#n)`. Tests come before the review loop, so
    the reviewers check them too.
 4. **Code review loop** (`review-loop.md`), on the change and its tests.
    - Round 1: the whole change. Only when it is too large to review well
@@ -111,6 +111,7 @@ continue from the next unfinished step and re-read only what it needs.
 7. **Only if the loop ended clear and conformance is PASS:**
    a. If the design proposed an ADR, set it to **Accepted** and add its
       row to `docs/adr/README.md`'s index; the design approval covered it.
+      Commit it: `Accept ADR NNNN (#n)`.
    b. Push the branch and open a **draft** PR (`gh pr create --draft`),
       titled and shaped as the README's Pull request convention says,
       with the pending lab checks named under `## Results`. It stays a

@@ -29,7 +29,7 @@ Verify every claim against the code (`AGENTS.md` has the map); don't trust the d
 - **The goal:** the rules achieve the issue's "Done when".
 - **Missed cases:** concurrency, ordering, restarts and crashes, epochs and fencing, failure
   paths, defaults and compatibility, format versions.
-- **Feasibility,** and consistency between intent and spec.
+- **Feasibility,** and consistency between intent, spec and (at the design gate) design.
 - **Every rule has a test;** scope that belongs in another issue is flagged.
 
 **Plan security review:**

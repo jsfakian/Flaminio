@@ -38,7 +38,10 @@ Low-or-worse finding is fixed and another round follows; Nits are fixed when fre
   commit the last round reviewed (recorded in its log entry). The reviewer says for each
   earlier finding whether it is fixed, then what the fix broke, and reads other code only
   where the changed lines call into it or are called from it.
-- **Models:** round 1 the default model; later rounds `model: "sonnet"`, `effort: "medium"`.
+- **Models and effort:** round 1 the default model; the built-in `code-review` skill at `high`
+  effort on a change touching the safety paths above, `medium` otherwise. Later rounds
+  `model: "sonnet"`, `effort: "medium"`, except a `security-reviewer` on a change touching
+  those paths, which keeps the default model.
 - **The brief** gives the issue number, the checkout, the round and its focus, the diff range,
   the paths of `intent.md`, `spec.md`, `design.md` and `decisions.md`, and the earlier
   findings. Don't paste documents the reviewer can read.
@@ -46,7 +49,8 @@ Low-or-worse finding is fixed and another round follows; Nits are fixed when fre
 ## Fixing a round
 
 - **One commit per round's fix, before the next round** (messages: `docs/issues/README.md`),
-  the body listing each finding and what changed.
+  the body listing each finding and what changed. Stage only the files the agents reported,
+  never `git add -A`.
 - **Cut before adding:** prefer removing a rule or mechanism to guarding it.
 - **Code fixes come with a regression test that fails without the fix,** and `make lint test`
   (plus `make sim` / `make contracts` where they apply) pass before the commit.

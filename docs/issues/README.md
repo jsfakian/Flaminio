@@ -43,7 +43,7 @@ implemented before both the spec and the design are approved.
   N`, `Record the approval of the spec of #n`, `Design <what> (#n)`, `Address the review of
   the design of #n, round N`, `Record the approval of the design of #n`, `<What the change
   does> (#n)`, `Test <what> (#n)`, `Address the code and security reviews of #n, round N`,
-  `Record the lab checks of #n`.
+  `Accept ADR NNNN (#n)`, `Record the lab checks of #n`.
 - **Pull request:** title `<What the change does> (#n)`; body `Closes #n.` (or `Part of #n.`
   when a step of the issue stays open), then `## Why`, `## What changes`, `## Results`,
   `## Tests`.
