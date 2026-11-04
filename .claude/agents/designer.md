@@ -15,26 +15,15 @@ You turn an approved spec into an implementable design. Never edit code.
 Input: an approved `docs/issues/<n>/spec.md`, and `decisions.md` (its
 entries are settled).
 
-Constraints (read what applies before proposing anything): `AGENTS.md`
-(principles), `docs/ARCHITECTURE.md` §2 and §8, `docs/replication-protocol.md`,
-the on-disk format spec, the accepted ADRs (`docs/adr/README.md`). In
-short:
-- Safety from epochs, fencing and linearizable metadata, not timeouts. A
-  write is acknowledged only when durable on every in-sync replica.
-- Replication, membership and recovery rules go in `flaminio-repl`
-  (sans-I/O), with a simulator check and an injected bug it must catch;
-  the metadata transition table stays shared with Go (`make
-  meta-vectors`).
-- The steady-state I/O path: no metadata round trips, no locks, no
-  per-I/O allocation where one can be avoided.
+Constraints: `AGENTS.md`'s Principles (already in your context), and,
+where the change touches them, `docs/ARCHITECTURE.md` §2 and §8,
+`docs/replication-protocol.md`, the on-disk format spec and the accepted
+ADRs (`docs/adr/README.md`). Two rules AGENTS.md doesn't spell out:
 - An on-disk format change: the format spec, a version rule, recovery
   of the old layout or a refusal, and fuzz coverage of the decoder.
 - An API change: `api/proto`, `make proto`, the Rust client
   (`flaminio-metaclient`), `make contracts`; authorization for each new
   method in `meta/service/auth.go`.
-- etcd writes that depend on a read: conditional transactions.
-- Lab scripts: ids validated and quoted; ssh's exit 255 propagates;
-  script tests in `scripts/tools/`, run by `make lint`.
 
 Process:
 1. Read the spec fully, and the plans of the issues it depends on.
@@ -43,7 +32,8 @@ Process:
    confirmed, so what you verified survives a context reset; on resume,
    continue the file on disk.
 3. Write `docs/issues/<n>/design.md`, in the shape of
-   `docs/issues/14/design.md` and `docs/issues/10/design.md`:
+   `docs/issues/14/design.md` (don't read other designs), in about 200
+   lines at most:
    - `# Issue #<n>: <title> — design`, a line linking spec and decisions
    - **The facts it starts from:** the current behaviour, with file:line
    - `## <Part> (S1, S2)`: one section per group of rules: how it is
@@ -66,10 +56,12 @@ Process:
      (who must NOT be able to do this), compatibility, and the accepted
      risks
    - `## ADRs`: those relied on, and whether the design is consistent
-     with each. A new architectural choice (a dependency, a protocol or
-     format rule, anything expensive to undo): draft it with the `adr`
-     skill as **Proposed** and link it; approving the design accepts it.
-     Never design against an accepted ADR without a superseding one.
+     with each. A new architectural choice (a dependency,
+     a protocol or format rule, anything expensive to undo): write it as
+     **Proposed** following `.claude/skills/adr/SKILL.md` (Create, steps
+     1-3), and link it; put its open choices under Risks, not to the
+     user. Approving the design accepts it. Never design against an
+     accepted ADR without a superseding one.
    - `## Parallelizable?`: yes or no: can the Rust and the Go units be
      built independently against the contracts above, with no
      back-and-forth?

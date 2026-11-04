@@ -12,12 +12,3 @@ description: >-
 
 Follow `.claude/skills/issue-to-spec/SKILL.md` exactly: it is the one source for
 this skill. Read it first, then run its steps.
-
-In Cursor:
-- Delegate each named agent via Task (`subagent_type: generalPurpose`),
-  with that agent's `.claude/agents/<name>.md` in the prompt, or its
-  `.cursor/agents/<name>.md` where Cursor picks it up directly.
-- Where the steps say "SendMessage" to resume an agent, resume it the way
-  Cursor allows, or start a new one with the file on disk as its input.
-- `model: "sonnet"` and `effort` don't apply; use Cursor's default model.
-- Ask the user in chat where the steps say AskUserQuestion.

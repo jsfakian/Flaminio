@@ -13,11 +13,10 @@ description: >-
 # Ship spec
 
 Stage 3 of 3. No human checkpoint inside it up to the draft pull request.
-Runs `implementer` → `test-engineer` → code review loop (`code-reviewer`
-+ `security-reviewer`, with `implementer` fixes, until clear:
-`.claude/skills/ship-issue/review-loop.md`) → `conformance-checker`,
-writes `docs/issues/<n>/report.md` and opens a draft PR. The lab checks are a separate run: `/ship-spec <n>
-lab` (step 9).
+Runs `implementer` → `test-engineer` → code review loop
+(`.claude/skills/ship-issue/review-loop.md`) → `conformance-checker`,
+writes `docs/issues/<n>/report.md` and opens a draft PR. The lab checks
+are a separate run: `/ship-spec <n> lab` (step 9).
 
 ## Preconditions
 
@@ -32,33 +31,24 @@ lab` (step 9).
 `docs/issues/<n>/decisions.md`: every choice the reviews settle and every
 accepted risk, each with its reason and the finding that raised it (as
 `docs/issues/14/decisions.md`). Every reviewer gets it and treats its
-entries as settled unless the code proves one wrong. A fix that adds a
-mechanism records why here.
+entries as settled unless the code proves one wrong.
 
 ## Context resets
 
-A long run can lose its context (compaction, a resumed session). Files
-and commits survive; what you had read doesn't. On resume, take progress
-from `git log origin/main..HEAD` (the commits name the review rounds),
-`git status`, `units.md` (if units were used), `decisions.md` and
-`report.md`; continue from the next unfinished step and re-read only what
-that step needs. A contradiction settled in `decisions.md` stays settled.
+Files and commits survive a reset; what you had read doesn't. Take
+progress from `git log origin/main..HEAD` (the commits name the rounds),
+`git status`, `units.md` (if used), `decisions.md` and `report.md`;
+continue from the next unfinished step and re-read only what it needs.
 
 ## Agents
 
-- **Reviewers run read-only:** `code-reviewer` and `security-reviewer`
-  have no Edit or Write. Use these named agents, not `Explore` or persona
-  agents from plugins.
-- Rounds, models, severities and when the loop ends:
-  `.claude/skills/ship-issue/review-loop.md`.
 - **One implementer holds the whole change** by default: Flaminio's
   worst bugs sit between components (an ordering, a crash point, a
-  fence), and one agent sees both sides. Units (step 2) are the fallback
-  for a change too large for that. Each fix round gets a fresh
-  implementer; reviewers are always new agents.
-- **Independent agents run in parallel:** the two reviewers of a round,
-  always; the Rust and Go implementers when the design allows (step 2).
-- This stage itself never reads the code: its context holds the spec,
+  fence), and one agent sees both sides. Each fix round gets a fresh
+  implementer.
+- **Independent agents run in parallel:** the reviewers of a round; the
+  Rust and Go implementers when the design allows (step 2).
+- This stage never reads the code itself: its context holds the spec,
   the design, `decisions.md` and the agents' reports.
 
 ## Steps
@@ -72,12 +62,10 @@ that step needs. A contradiction settled in `decisions.md` stays settled.
      the design and the spec; it works step by step, reading only what
      each step touches.
    - **Rust and Go in parallel:** the design says "Parallelizable? yes"
-     → two implementers in one message, one for the data plane
-     (`dataplane/`), one for the control plane (Go), each with its file
-     scope. Safe only because the design's "Contracts" pins the proto,
-     control-socket or wire format both build against. Neither runs
-     `make fmt`, `make lint` or tests (they touch the whole tree); run
-     `make fmt lint` once both finish.
+     → two implementers in one message, one for `dataplane/`, one for
+     the Go side, each with its file scope, both building against the
+     design's "Contracts". Neither runs `make fmt`, `make lint` or tests;
+     run `make fmt lint` once both finish.
    - **Units, the fallback,** for a change too large for one agent (about
      15 files or more on one side, or a design that says so): small
      ordered units of one module and its wiring, dependencies first (e.g.
@@ -86,55 +74,49 @@ that step needs. A contradiction settled in `decisions.md` stays settled.
      their tests last). Write them to `docs/issues/<n>/units.md` first
      (one line each: name, files, design sections, rules) and keep it
      current; run one fresh `implementer` per unit, in order, each brief
-     naming its unit, sections, rules and files (earlier units are on
-     disk). Never brief one to read everything first.
-   Check `git status` lists the design's files, then commit everything:
-   `<What the change does> (#n)`.
-3. **Tests.** Run `test-engineer` with `spec.md` and `design.md`: it
-   writes the design's tests and runs the local checks. Commit its tests:
-   `Test <what> (#n)`. Tests come before the review loop, so the
-   reviewers check them too (a rule without a test is a finding).
-4. **Code review loop** (`.claude/skills/ship-issue/review-loop.md`):
-   `code-reviewer` and `security-reviewer` in parallel, new agents each
-   round, on the change and its tests.
-   - **Round 1 reviews the whole change.** Only when it is too large to
-     review well in one pass (about 3 000 changed lines without
-     generated files, or units were used), split it: one pair per part
-     (a unit, or the data plane and the control plane), each checking
-     its calls into the other parts against the design's "Contracts".
-   - **Later rounds are incremental:** only the files the last fix
-     changed.
+     naming its unit, sections, rules and files.
+   Commit the files the design lists and the implementers reported (never
+   `git add -A`): `<What the change does> (#n)`.
+3. **Tests.** Run `test-engineer` with `spec.md` and `design.md`; commit
+   the test files it reports: `Test <what> (#n)`. Tests come before the review loop, so
+   the reviewers check them too.
+4. **Code review loop** (`review-loop.md`), on the change and its tests.
+   - Round 1: the whole change. Only when it is too large to review well
+     in one pass (about 3 000 changed lines without generated files, or
+     units were used), split it: one set of reviewers per part (a unit,
+     or the data plane and the control plane), each checking its calls
+     into the other parts against the design's "Contracts".
    - **Fixes:** one fresh `implementer` per round (one per side, in
      parallel, when the Rust and Go fixes don't touch each other's
      files), scoped to the files the findings point at, with the exact
-     findings (Lows included), a regression test for each that fails
-     without the fix, and an instruction to fix only those. Then the
-     local checks, and the commit, as `review-loop.md` says.
-   - The loop ends at the first clear round. Stopped at round 10 with
-     findings open → skip to step 6, and step 8 surfaces them.
-5. **Final checks and conformance.** Run `make lint test race
+     findings (Lows included) and an instruction to fix only those.
+   - Stopped at round 5 with findings open → skip to step 6, and step 8
+     surfaces them.
+5. **Final checks and conformance.** Run `make lint test race hygiene
    contracts` (and `make sim` when `flaminio-repl` changed), then
-   `conformance-checker` on the final diff and the results.
+   `conformance-checker` on the final diff and the results. A FAIL for a
+   missing test or doc goes back once to `test-engineer` or
+   `implementer`, then one incremental review round and a conformance
+   re-run; a second FAIL is reported (step 8).
 6. Write `docs/issues/<n>/report.md`:
    - `## Review rounds`: every loop's rounds (kept up to date during the
      loops), and the final state
    - `## Tests`: pass or fail per rule, and the `make` targets run
-   - `## Conformance`: the checker's table verbatim (only if steps 4–5
-     ran)
+   - `## Conformance`: the checker's table verbatim (absent when the
+     loop stopped with findings open)
    - `## Lab`: the design's lab checks, each `pending`
    - `## ADRs`: those relied on, and any proposed by the design
    Commit it with the docs the design lists (`docs/followups.md`,
    `docs/lab.md`, …) if not already in.
 7. **Only if the loop ended clear and conformance is PASS:**
-   a. If the design proposed an ADR, set it to **Accepted** (status line
-      and index row); the design approval covered it.
-   b. Push the branch and open a **draft** PR (`gh pr create --draft`).
-      Title: `<What the change does> (#n)`. Body, in the style of PRs
-      #31 and #32: `Closes #n.` (or `Part of #n.` and why it stays open,
-      when the change is one step of the issue); then `## Why`,
-      `## What changes`, `## Results` (pending lab checks named) and
-      `## Tests`. It stays a draft while lab checks are pending; with
-      none, mark it ready (`gh pr ready`).
+   a. If the design proposed an ADR, set it to **Accepted** and add its
+      row to `docs/adr/README.md`'s index; the design approval covered it.
+      Commit it: `Accept ADR NNNN (#n)`.
+   b. Push the branch and open a **draft** PR (`gh pr create --draft`),
+      titled and shaped as the README's Pull request convention says,
+      with the pending lab checks named under `## Results`. It stays a
+      draft while lab checks are pending; with none, mark it ready
+      (`gh pr ready`).
    c. Watch CI (`gh pr checks <pr> --watch`, in the background) and
       report the result. A failing check goes back to the loop as a
       finding.
@@ -151,9 +133,11 @@ that step needs. A contradiction settled in `decisions.md` stays settled.
 ## 9. Lab checks (`/ship-spec <n> lab`, on request only)
 
 The lab is shared, some checks take hours, and some reformat disks or
-delete volumes. Run them only when the user asks, one issue at a time,
-from this issue's checkout (`make deploy` copies the working tree it
-runs from).
+delete volumes. Run them only when the user asks, one issue at a time.
+`make deploy` copies the working tree it runs from: run from the main
+checkout with the issue's branch checked out, or from the issue's
+worktree with `LOCAL_STATE_DIR=<main checkout>/.lab` (the lab's PKI,
+known_hosts and markers live there, untracked).
 1. Check the lab is free: the hosts' load (`ssh rhythm uptime`,
    `ssh rhythm-backup uptime`) and that nobody else's run is going. If
    not, say so and stop.
@@ -170,9 +154,9 @@ runs from).
    its data under `docs/benchmarks/data/`, `docs/performance-plan.md`,
    `docs/followups.md`). Commit `Record the lab checks of #n` and push.
 6. Check each "Done when" and spec rule against what was measured, and
-   record pass or fail for each. A failing rule is fixed and re-tested
-   (one more code review round when the fix is large or touches
-   security), or surfaced to the user.
+   record pass or fail for each. A failing rule is fixed, gets one
+   incremental review round and a conformance re-run, and is re-tested;
+   or it is surfaced to the user.
 7. Restore the lab as the design says (e.g. volumes recreated and
    filled), then, if every check passed, `gh pr ready`. A failed check:
    don't mark it ready; report it and ask.

@@ -6,7 +6,7 @@ description: >-
   rule. Use as the last stage of ship-spec, after implementer,
   code-reviewer, security-reviewer and test-engineer have all run.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: sonnet
 ---
 
 You verify; you do not edit.
@@ -43,5 +43,5 @@ Open review findings: none | <list>
 ```
 
 Pending lab checks alone don't make it FAIL. Don't propose fixes; if
-FAIL, say exactly what's missing so it can go back to `implementer` or
-`test-engineer`.
+FAIL, say exactly what's missing (ship-spec step 5 decides what goes
+back).

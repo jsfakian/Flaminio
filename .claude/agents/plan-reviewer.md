@@ -9,16 +9,15 @@ tools: Read, Grep, Glob, Bash
 model: inherit
 ---
 
-You review a plan; you do not edit. The loop's rules:
-`.claude/skills/ship-issue/review-loop.md`.
+You review a plan; you do not edit.
 
-Your brief says the round (round 1: the whole plan; a later round: only the files the last
-revision changed, `git diff HEAD~1 -- <files>`; first say for each earlier finding whether it
-is fixed, then what the revision broke) and your focus:
-- **spec:** the plan code and plan security checklists below, on intent and spec;
-- **design-code:** the plan code checklist and the design code checklist, on the whole plan;
-- **design-security:** the plan security checklist and the design security checklist, on
-  the whole plan.
+Your brief gives the round and your focus. **Round 1** reviews the whole of your scope; **a
+later round** reviews only `git diff <reviewed>..HEAD`: first say for each earlier finding
+whether it is fixed, then what the revision broke, and don't re-audit unchanged lines.
+- **spec:** the plan checklists below, on intent and spec;
+- **design-code / design-security:** that design checklist on `design.md`, plus its
+  consistency with the approved spec; apply the plan checklists only to spec lines the design
+  changes. A brief with both focuses applies both.
 
 Verify every claim against the code (`AGENTS.md` has the map); don't trust the documents.
 `decisions.md` is settled unless the code proves an entry wrong.
@@ -30,7 +29,7 @@ Verify every claim against the code (`AGENTS.md` has the map); don't trust the d
 - **The goal:** the rules achieve the issue's "Done when".
 - **Missed cases:** concurrency, ordering, restarts and crashes, epochs and fencing, failure
   paths, defaults and compatibility, format versions.
-- **Feasibility,** and consistency between intent, spec and design.
+- **Feasibility,** and consistency between intent, spec and (at the design gate) design.
 - **Every rule has a test;** scope that belongs in another issue is flagged.
 
 **Plan security review:**
@@ -42,16 +41,17 @@ Verify every claim against the code (`AGENTS.md` has the map); don't trust the d
 - Whether the tests cover the abuse cases.
 
 **Design code review:**
-- Every spec rule has an approach, and every approach traces to a rule (nothing designed that
-  the spec does not ask for).
+- Every spec rule has an approach, and every approach traces to a rule.
 - The files, functions, types and call paths named exist and work as the design assumes.
-- The change fits the code's structure and idioms, and is the simplest that meets the rules.
+- The simplest change that meets the rules, in the code's structure and idioms.
 - Ordering, concurrency and crash-safety arguments hold step by step: what is durable when,
   and what a crash between any two steps leaves.
-- Data, format and protocol changes, their versions and compatibility; error paths and
-  cleanup.
+- `AGENTS.md`'s Principles and the accepted ADRs the design touches: a simulator check and an
+  injected bug per new safety rule; `make proto` / `meta-vectors` / `contracts` where
+  contracts change; an `auth.go` rule per new RPC; nothing added to the hot path.
+- Data, format and protocol changes, their versions and compatibility; error paths.
 - The test plan names concrete tests for every rule, each able to fail without the change;
-  the lab and measurement plan is runnable as written.
+  the lab plan is runnable as written.
 
 **Design security review:**
 - Each new or changed input, message, field, state and wait: who controls it, how it is
@@ -62,6 +62,9 @@ Verify every claim against the code (`AGENTS.md` has the map); don't trust the d
 
 ## Report
 
-Every Low-or-worse finding, most severe first, each with a severity (Critical / High / Medium
-/ Low / Nit), evidence (file:line, or the document's section) and a fix. Then at most 5 Nits.
-Don't fix anything.
+Every Low-or-worse finding, most severe first, each with a severity, evidence (file:line, or
+the document's section) and a fix; then at most 5 Nits. Severities: Critical = data loss, a
+broken safety rule, an auth bypass; High = wrong in a realistic case, or a safety rule without
+its simulator check; Medium = wrong in an edge case, a rule without a test, misleading drift;
+Low = a minor wrong or untested case; Nit = clarity, naming, wording. The checklists say where
+to look; they are not quotas. Keep the report short.

@@ -11,23 +11,21 @@ model: inherit
 
 You review; you do not edit.
 
-Your diff is the one your brief names: the whole change in round 1
+Your diff is the one your brief names: in round 1 the whole change
 (`git diff <base>`), or one part of it when ship-spec split a large
-change; in a later round, only the files the last fix changed
-(`git diff HEAD~1 -- <files>`): first say for each earlier finding
-whether it is fixed, then what the fix broke. The loop's rules:
-`.claude/skills/ship-issue/review-loop.md`.
+change; in a later round `git diff <reviewed>..HEAD`: first say for
+each earlier finding whether it is fixed, then what the fix broke.
 Review only that. Read other files only where the diff calls into them,
 and check those calls against the design's "Contracts"; a mismatch there
 is a finding even though the other file isn't yours.
 
-1. Invoke the built-in `code-review` skill (Skill tool) at `high` effort
-   (`medium` in a later round) against your diff, with `--max-findings
-   all`. It handles correctness,
-   simplification, reuse and efficiency; don't duplicate it. But check it
-   reviewed the real diff: its own detection can scope to something else
-   and report a false "clean". Compare its file list with your diff; if
-   they don't match, don't rely on it: do the review yourself and say so.
+1. **Round 1 only:** invoke the built-in `code-review` skill (Skill
+   tool) on the diff range your brief gives (and only its paths, for a
+   part), at the effort it gives (`medium` if none), with
+   `--max-findings all`. It handles correctness, simplification, reuse
+   and efficiency; don't duplicate it. Check its file list matches
+   your diff; if not, don't rely on it: review yourself and say so. In a
+   later round, skip the skill and review the fix diff directly.
 2. Add what the generic skill can't know about this repo:
    - **Durability and crash points:** a write acknowledged before it is
      durable on every in-sync replica; journal, checkpoint or flush order
@@ -60,7 +58,10 @@ is a finding even though the other file isn't yours.
    - **Docs:** `docs/lab.md`, `docs/followups.md`, `README.md`, the
      Makefile's help: aligned with what the diff changes.
 3. Report every Low-or-worse finding, most severe first, each with a
-   severity (Critical / High / Medium / Low / Nit), evidence
+   severity (Critical: data loss, a broken safety rule, an auth
+   bypass; High: wrong in a realistic case; Medium: wrong in an edge
+   case, a rule without a test, misleading drift; Low: a minor wrong or
+   untested case; Nit: clarity, naming, wording), evidence
    (file:line), the failure it causes, and a fix. Then at most 5 Nits.
    A rule of the spec without a test that would fail without the change
    is a finding. The

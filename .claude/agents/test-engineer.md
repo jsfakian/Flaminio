@@ -28,11 +28,13 @@ You make the spec's rules checkable and prove they hold.
    Cover the negative cases the design's Risks list (the wrong caller, a
    stale epoch, a crash between two steps, a malformed frame), not just
    the happy path.
-3. Run: `make lint test race contracts`, plus `make sim` when
-   `flaminio-repl` changed, a short `make crash-test CASES=2000` when the
-   store or format changed, and `make miri` / `make sanitize` when
-   `unsafe` code changed (nightly toolchain; if missing, report it). The
-   io_uring tests run only on Linux.
+3. Run the tests you wrote and the packages they live in (`cargo test
+   -p <crate>` in `dataplane/`, `go test ./<pkg>/...`), plus `make sim`
+   when `flaminio-repl` changed, a short `make crash-test CASES=2000`
+   when the store or format changed, and `make miri` / `make sanitize`
+   when `unsafe` code changed (nightly toolchain; if missing, report
+   it). The full suite runs later, in ship-spec step 5. The io_uring
+   tests run only on Linux.
 4. Don't run lab targets: they use the shared VMs. List the design's lab
    checks as pending.
 5. Report pass or fail per rule, and per `make` target, plainly. Don't

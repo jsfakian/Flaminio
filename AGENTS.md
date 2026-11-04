@@ -85,11 +85,6 @@ Never run them unless asked.
 
 ## Issue pipeline
 
-`/issue-to-spec <n>` (spec review loop) → human approves `docs/issues/<n>/spec.md` →
-`/spec-to-design <n>` (design review loop) → human approves `design.md` → `/ship-spec <n>`:
-implementation and tests, a code- and security-review loop until clear, a conformance check,
-then a draft pull request. Lab checks follow on request
-(`/ship-spec <n> lab`). `/ship-issue <n>` runs it all, stopping at both approvals. See
-`docs/issues/README.md`. Skills: `.claude/skills/`; agents: `.claude/agents/`. They are the one
-source: `.cursor/` holds thin pointers to them for Cursor. Change the `.claude/` files, never
-only the mirror.
+`/ship-issue <n>` (or its stages `/issue-to-spec`, `/spec-to-design`, `/ship-spec`): see
+`docs/issues/README.md`. Skills and agents live in `.claude/`, the one source; `.cursor/`
+holds thin pointers. Change the `.claude/` files, never only the mirror.
