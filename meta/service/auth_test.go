@@ -118,8 +118,9 @@ func TestAuthorization(t *testing.T) {
 	req := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1}
 	_, err = nodeA.CreateVolume(ctx, req)
 	expect("node creates a volume", err, codes.PermissionDenied)
-	_, err = admin.CreateVolume(ctx, req)
+	created, err := admin.CreateVolume(ctx, req)
 	expect("admin creates a volume", err, codes.OK)
+	first := created.GetVolume().GetEpoch()
 	_, err = nodeA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("node attaches itself", err, codes.PermissionDenied)
 	_, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
@@ -135,15 +136,15 @@ func TestAuthorization(t *testing.T) {
 	expect("data plane restarts its target", err, codes.PermissionDenied)
 	restart, err := agentA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a", OnlyIfTarget: true})
 	expect("agent restarts its own target", err, codes.OK)
-	if restart.Volume.GetEpoch() != 2 {
-		t.Fatalf("restart epoch %d, want 2", restart.Volume.GetEpoch())
+	if restart.Volume.GetEpoch() != first+2 {
+		t.Fatalf("restart epoch %d, want %d", restart.Volume.GetEpoch(), first+2)
 	}
 	att, err := admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("admin attaches again", err, codes.OK)
 
-	// The token names the volume, the epoch and the node.
+	// The token names the volume, the epoch, the node and the volume's first epoch.
 	claims, err := captoken.Verify(pub, att.Token)
-	if err != nil || claims.Volume != "v" || claims.Epoch != 3 || claims.Node != "fl-a" {
+	if err != nil || claims.Volume != "v" || claims.Epoch != first+3 || claims.Node != "fl-a" || claims.FirstEpoch != first {
 		t.Fatalf("token %+v %v", claims, err)
 	}
 
@@ -161,7 +162,8 @@ func TestAuthorization(t *testing.T) {
 	_, err = nodeB.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
 	expect("node reads", err, codes.OK)
 
-	// Tombstones: only that node's agent (or admin) lists and confirms for itself.
+	// Tombstones: a node's agent lists and confirms for itself, an administrator for any node
+	// (docs/issues/14, S3: flaminio-meta's confirm is narrower, the service's rules are not).
 	_, err = admin.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"})
 	expect("admin deletes", err, codes.OK)
 	_, err = agentB.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: "fl-a"})
@@ -172,10 +174,17 @@ func TestAuthorization(t *testing.T) {
 	expect("agent lists its tombstones", err, codes.OK)
 	_, err = agentB.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
 	expect("agent confirms for another node", err, codes.PermissionDenied)
+	_, err = nodeA.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
+	expect("data plane confirms its deletion", err, codes.PermissionDenied)
 	_, err = agentA.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-a"})
 	expect("agent confirms its deletion", err, codes.OK)
-	_, err = agentB.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-b"})
-	expect("agent confirms the other replica", err, codes.OK)
+	listed, err := admin.ListTombstones(ctx, &metav1.ListTombstonesRequest{Node: "fl-b"})
+	expect("admin lists a node's tombstones", err, codes.OK)
+	if len(listed.GetTombstones()) != 1 || listed.GetTombstones()[0].GetVolume() != "v" {
+		t.Fatalf("admin's listing for fl-b: %v", listed)
+	}
+	_, err = admin.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "fl-b"})
+	expect("admin confirms for a node", err, codes.OK)
 
 	// Recreate for the ISR checks below.
 	_, err = admin.CreateVolume(ctx, req)

@@ -10,7 +10,7 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 
 | # | Item | Why it matters | Order | Issues |
 |---|---|---|---|---|
-| 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads meet 90% of raw at QD32 (95%) and 1M (≈ 100%); 4K QD1 reads (84%) and 1M writes (about 70%) do not | Next | [#9](https://github.com/jsfakian/Flaminio/issues/9), [#10](https://github.com/jsfakian/Flaminio/issues/10) |
+| 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads meet 90% of raw at QD32 (95%) and 1M (≈ 100%); 1M writes now reach about 90% of raw ([#10](benchmarks/2026-10-29-writes-1m-floor.md)); only 4K QD1 reads (84%, #9) remain | Next | [#9](https://github.com/jsfakian/Flaminio/issues/9), [#10](https://github.com/jsfakian/Flaminio/issues/10) |
 | 2 | Reconciliation after a replica restart | Done: the first read after both replicas of a 16 GiB volume restarted waits 0.2 s (was 160 s) | Before the chaos run (step 8) | [#11](https://github.com/jsfakian/Flaminio/issues/11) |
 | 3 | Copying unwritten ranges | Done: a resync of 4 GiB written moves 4.3 GiB and stores 4.0 GiB (was 16 GiB) | With item 2: same tools | – |
 | 4 | Failure domains in placement | Done: zone and rack placement, from `metactl` and the StorageClass; the lab cannot show physical independence | Before the edge profile | [#7](https://github.com/jsfakian/Flaminio/issues/7), [#18](https://github.com/jsfakian/Flaminio/issues/18) |
@@ -23,7 +23,7 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 | 11 | Draining volumes that are not attached | A drain moves only attached volumes: their target carries the moves out | With the operator | [#17](https://github.com/jsfakian/Flaminio/issues/17) |
 | 12 | Zero-copy local reads after an attach | With `--zero-copy`, local reads that waited for reconciliation fail with EINVAL, and the target drops the local replica for 3 s each time | Before the chaos run (step 8) | [#5](https://github.com/jsfakian/Flaminio/issues/5) |
 | 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) | [#13](https://github.com/jsfakian/Flaminio/issues/13) |
-| 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; a data node without one (fl-c) keeps the replicas, and the volume id stays taken | With the node agent (step 6) | [#14](https://github.com/jsfakian/Flaminio/issues/14) |
+| 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; for a data node without one (fl-c), an operator confirms by hand (`lab.sh vol-confirm`) | With the node agent (step 6) | [#14](https://github.com/jsfakian/Flaminio/issues/14) |
 
 ## 1. Read performance
 
@@ -168,8 +168,8 @@ certificates. Until that lands, `make pki-issue` remains the interim path for la
    `DeleteVolume` drops the volume header and chunk metadata, writes `/flaminio/v1/tombstones/<id>`,
    and exposes `ListTombstones` / `ConfirmDeletion`. The volume id cannot be reused while the
    tombstone remains (so an agent sweep cannot wipe a recreated volume).
-2. **Each node's agent** lists its tombstones, deletes the chunks (`Store::delete_chunk`,
-   under a fencing epoch higher than any target's), and confirms. ✅ The CSI node plugin sweeps
+2. **Each node's agent** lists its tombstones, deletes the chunks (`Store::delete_volume`:
+   every chunk of the name, whatever its fence), and confirms. ✅ The CSI node plugin sweeps
    via the data plane's control-socket `delete` (which calls `ReplicaService::delete_volume`).
 3. *Lab, 2026-10-28:* 100 cycles of a PVC (RF 2, 1 GiB) and a pod writing 16 MiB through
    its filesystem, alternating fl-a and fl-b, then both deleted: about 20 s a cycle. Afterwards
@@ -258,6 +258,42 @@ Only the CSI node plugin sweeps tombstones (item 8). A data node without one, su
 the lab, never confirms: its replicas of deleted volumes stay, and the volume ids stay taken.
 
 **Steps:**
-1. **The sweep moves into the node agent** (step 6), which runs on every data node.
-2. Until then, an administrator can confirm a deletion for a node that is gone for good
-   (`ConfirmDeletion` accepts administrators); `metactl` needs a command for it.
+1. **The sweep moves into the node agent** (step 6), which runs on every data node. Then no data
+   node is without a sweep, and `vol-confirm` goes.
+2. **Done (docs/issues/14): confirming by hand, for fl-c.**
+   - `flaminio-meta tombstones [node]` lists them; `flaminio-meta confirm` confirms one volume for
+     one node, as that node's own agent only, with `--replicas-deleted`.
+   - `lab.sh vol-confirm` checks on the node that nothing sweeps there and that its replicas are
+     deleted, then confirms: the only supported way to confirm by hand.
+   - The harness deletes a volume's replicas on every data node, never confirms, and stops when
+     the volume is pending for fl-c. The metadata service logs every new confirmation.
+   - *Lab, 2026-11-02:*
+     - The one-time cleanup: `vol-confirm` freed wbench and volb, each pending for fl-c only
+       since 2026-10-30; no tombstone was left, and the service logged both confirmations with
+       fl-c's agent identity, address and certificate serial.
+     - A campaign of RF 1 on fl-b, one job, two repetitions, from fl-b's node stopped: every
+       reset deleted wbench and its replicas (fl-b started formatted when stopped) and left no
+       tombstone.
+     - A campaign whose `$VOL` (volb) was on fl-c stopped at its start with the procedure;
+       after `vol-confirm`, the same command with `RESUME` went on and finished.
+     - `vol delete` and `vol create` of volb, twice: each deletion stopped pending for fl-c,
+       and completed after `vol-confirm`; volb exists (RF 2, not written).
+     - A volume written on fl-c (1 GiB) with fl-c's node stopped: the deletion started the
+       node, deleted its 4 replicas, then stopped; `vol-confirm` refused while the node was
+       down, and confirmed once it ran.
+     - fl-c holds about 136 chunk replicas that no volume record names: older leftovers, #13's.
+3. **Later** (docs/issues/14, decisions):
+   - a tombstone's incarnation, given by the listing and required by the confirmation, so that a
+     confirmation cannot land on a later deletion of the same name;
+   - confirming for a node gone for good: an administrator could confirm for any stopped node,
+     which still holds its replicas;
+   - a lab-wide lock: two harness runs at once can delete each other's replicas;
+   - the token key and the etcd client certificate on the metadata members only: fl-c holds them
+     today;
+   - `meta-smoke`, the resync check and the CSI controller's deletions keep leaving tombstones
+     pending for fl-c until step 1;
+   - creating a volume again under the same name: done (#30). It starts above every epoch of the
+     name, and drops an earlier volume's chunks at its first session on each node. Left (#30,
+     S8 and S9): the old tokens still open sessions on nodes the new volume has not reached, and
+     a volume created by an old metadata service starts at epoch 0 again;
+   - replicas no record names, #13's.

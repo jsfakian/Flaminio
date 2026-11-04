@@ -19,6 +19,12 @@ x509-parser = "0.18.1"
 futures-lite = "2"
 thiserror.workspace = true
 
+[features]
+# token::decode_unverified: a token's claims without its signature, for the target's own replica
+# (flaminio-node) and the fuzz target (docs/issues/30, S6). Cargo unifies features across the
+# workspace, so this marks intent; it does not stop other crates from calling it.
+unverified = []
+
 [dev-dependencies]
 smol.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

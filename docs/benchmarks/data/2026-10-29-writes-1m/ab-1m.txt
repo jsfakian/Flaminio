@@ -1,0 +1,9 @@
+# 2026-11-04, fl-b, after the campaign: 1M QD8 O_DSYNC, 60 s each, interleaved (ab-1m.sh).
+# Flaminio: RF 1, zero copy, one queue, a fresh store and a new 16 GiB volume each time.
+# Raw: /dev/vdb, GiB 16-100, the profile's raw run (trace-disk.sh's fio line).
+flaminio 1: 946 MiB/s, p50 8.59 ms, p99 13.70 ms
+raw 1:      1043 MiB/s, p50 7.11 ms, p99 11.60 ms
+flaminio 2: 981 MiB/s, p50 8.29 ms, p99 12.91 ms
+raw 2:      1054 MiB/s, p50 7.18 ms, p99 11.47 ms
+# Before it, raw alone after the idle night (07:25): 1340 and 1268 MiB/s; the drive was faster
+# rested, so only the interleaved pairs are compared.

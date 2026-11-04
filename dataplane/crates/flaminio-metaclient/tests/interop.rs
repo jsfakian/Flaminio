@@ -40,7 +40,11 @@ fn interop_with_the_go_service() {
         panic!("GetVolume failed");
     };
     let v = r.volume.unwrap();
-    assert_eq!((v.epoch, v.target.as_str(), v.chunks.len()), (1, "fl-a", 2));
+    // Attached once: the epoch after its first, the revision of its claim, which the in-memory
+    // store starts at the clock (docs/issues/30).
+    let epoch = v.epoch;
+    assert!(epoch > 1, "epoch {epoch}");
+    assert_eq!((v.target.as_str(), v.chunks.len()), ("fl-a", 2));
     assert_eq!(
         (v.size_bytes, v.chunk_bytes, v.replicas, v.min_isr),
         (2 << 20, 1 << 20, 2, 1)
@@ -52,7 +56,7 @@ fn interop_with_the_go_service() {
     let change = |expected_ver: u64, new_isr: Vec<String>| {
         Call::ChangeIsr(pb::ChangeIsrRequest {
             volume: "v".into(),
-            epoch: 1,
+            epoch,
             changes: vec![pb::IsrChange {
                 chunk: 0,
                 expected_ver,
@@ -69,7 +73,7 @@ fn interop_with_the_go_service() {
     assert!(r.applied);
     assert_eq!(
         (r.epoch, r.chunks[0].isr_ver, r.chunks[0].isr.len()),
-        (1, 1, 1)
+        (epoch, 1, 1)
     );
     // A retry is refused and shows the result.
     let Answer::ChangeIsr(r) =

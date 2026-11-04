@@ -755,3 +755,146 @@ fn flush_coalesce_after_shared_flush_keeps_both() {
     expect.extend_from_slice(&b);
     assert_eq!(buf, expect);
 }
+
+/// A store that holds staged groups (docs/issues/10): a group may start with nothing in flight, and
+/// its commit starts only when the caller launches it.
+fn held_store(journal_mib: u64) -> Store<DeferredDevice> {
+    let dev = MemDevice::new(DEVICE);
+    Store::format(&dev, &options(journal_mib)).unwrap();
+    let mut s = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
+    s.create_chunk(key(0), CHUNK, 64 * MIB, 1).unwrap();
+    s.set_hold_staged(true);
+    s
+}
+
+#[test]
+fn holding_stages_with_nothing_in_flight() {
+    let mut s = held_store(16);
+    let a = blocks(1, 0, 16);
+    assert!(!s.commit_in_flight());
+    assert_eq!(
+        s.stage_writes(&[req(0, &a, 1)]).unwrap(),
+        1,
+        "a whole cluster"
+    );
+    assert!(s.holds_group());
+    assert!(!s.device().in_flight(), "held: its commit has not started");
+    assert!(s.launch_staged().unwrap());
+    assert_eq!(
+        s.device().pending_writes(),
+        1,
+        "the batch only: the data was written when it was staged"
+    );
+    assert!(s.poll_write_batch(false).unwrap().is_none());
+    s.device().complete();
+    let results = s.poll_write_batch(false).unwrap().expect("landed");
+    assert!(results.iter().all(Result::is_ok));
+    assert!(!s.commit_in_flight());
+    assert_eq!(read(&s, 0, 16 * 4096), a);
+    // A small write is not staged, held or not: it is all journal.
+    assert_eq!(s.stage_writes(&[req(0, &blocks(2, 0, 1), 2)]).unwrap(), 0);
+}
+
+#[test]
+fn a_crash_with_a_group_held_keeps_exactly_the_landed_commits() {
+    // Groups started with nothing in flight, then one more held (or launched, unlanded) when
+    // the power goes, every unflushed block kept, lost or torn: recovery shows the landed
+    // groups' writes, and no more.
+    for launched in [false, true] {
+        for seed in 0..8 {
+            let mut s = held_store(16);
+            let mut landed = vec![0u8; 1024 * 4096];
+            for i in 0..5u64 {
+                let d = blocks(1 + i as u32, i * 16, 16);
+                assert_eq!(s.stage_writes(&[req(i * 16 * 4096, &d, 1 + i)]).unwrap(), 1);
+                assert!(s.launch_staged().unwrap());
+                s.device().complete();
+                assert!(s.poll_write_batch(false).unwrap().is_some());
+                landed[(i * 16 * 4096) as usize..][..d.len()].copy_from_slice(&d);
+            }
+            let d = blocks(9, 5 * 16, 16);
+            assert_eq!(s.stage_writes(&[req(5 * 16 * 4096, &d, 6)]).unwrap(), 1);
+            if launched {
+                assert!(s.launch_staged().unwrap());
+            }
+            let image = s.into_device().into_inner().crash(seed);
+            let s = Store::open(image, StoreConfig::default()).unwrap();
+            let mut buf = vec![0u8; 1024 * 4096];
+            s.read(key(0), 0, &mut buf, 1).unwrap();
+            assert!(buf == landed, "launched {launched} seed {seed}");
+            s.fsck(true).unwrap();
+        }
+    }
+}
+
+#[test]
+fn holding_through_full_journals_keeps_the_data_and_checkpoints() {
+    // As the engine runs while holding: a group staged with nothing in flight or behind the
+    // commit in flight, each launched once the one ahead lands, so a group is nearly always
+    // staged and checkpoints wait. The 4 MiB journal fills, staging is refused, and a write then
+    // goes as a plain batch once everything has landed: checkpoints still run.
+    let mut s = held_store(4);
+    let fill = blocks(9, 0, 1024);
+    s.write(key(0), 0, &fill, 1, 1).unwrap();
+    let mut expect = fill.clone();
+    let checkpoints = s.stats().checkpoint_seq;
+    let write = |i: u64| (i % 64, blocks(2 + i as u32, (i % 64) * 16, 16));
+    let (mut staged, mut refused) = (0, 0);
+    let settle = |s: &mut Store<DeferredDevice>| {
+        while s.commit_in_flight() {
+            if s.holds_group() && !s.device().in_flight() {
+                assert!(s.launch_staged().unwrap());
+            }
+            if s.device().in_flight() {
+                s.device().complete();
+            }
+            if let Some(results) = s.poll_write_batch(false).unwrap() {
+                assert!(results.iter().all(Result::is_ok));
+            }
+        }
+    };
+    for i in 0..1500u64 {
+        let (x, d) = write(i);
+        let took = s.stage_writes(&[req(x * 16 * 4096, &d, 2 + i)]).unwrap();
+        // The commit in flight lands; the held group then starts, as its wait would end.
+        if s.device().in_flight() {
+            s.device().complete();
+            let results = s.poll_write_batch(false).unwrap().expect("landed");
+            assert!(results.iter().all(Result::is_ok));
+        }
+        if s.holds_group() && !s.device().in_flight() {
+            assert!(s.launch_staged().unwrap());
+        }
+        if took == 1 {
+            staged += 1;
+        } else {
+            refused += 1;
+            settle(&mut s);
+            assert!(matches!(
+                s.start_write_batch(&[req(x * 16 * 4096, &d, 2 + i)])
+                    .unwrap(),
+                Started::InFlight
+            ));
+        }
+        expect[(x * 16 * 4096) as usize..][..d.len()].copy_from_slice(&d);
+    }
+    settle(&mut s);
+    assert!(staged > 1000, "staged {staged}");
+    assert!(
+        refused > 0,
+        "refused {refused}: the journal never ran short"
+    );
+    assert!(
+        s.stats().checkpoint_seq > checkpoints,
+        "checkpoints ran ({} to {})",
+        checkpoints,
+        s.stats().checkpoint_seq
+    );
+    assert_eq!(read(&s, 0, 1024 * 4096), expect);
+    s.fsck(true).unwrap();
+    let s = Store::open(s.into_device().into_inner(), StoreConfig::default()).unwrap();
+    let mut buf = vec![0u8; 1024 * 4096];
+    s.read(key(0), 0, &mut buf, 1).unwrap();
+    assert!(buf == expect, "after recovery");
+    s.fsck(true).unwrap();
+}

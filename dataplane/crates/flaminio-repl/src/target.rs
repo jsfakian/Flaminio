@@ -2243,7 +2243,7 @@ mod tests {
         /// A one-chunk volume of 4 blocks on `replicas`, attached on node 1, serving.
         fn new(replicas: &[NodeId], min_isr: usize) -> Self {
             let mut meta = Metadata::default();
-            meta.create_volume(VOL, min_isr, 4, vec![replicas.to_vec()]);
+            meta.create_volume(VOL, 0, min_isr, 4, vec![replicas.to_vec()]);
             let MetaReply::Applied { view, .. } = meta.handle(&MetaRequest::Attach {
                 vol: VOL,
                 node: TARGET,

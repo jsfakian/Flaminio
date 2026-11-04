@@ -294,6 +294,14 @@ service is kept out of the I/O permission path entirely (§8.5).
 The metadata service is involved in I/O **only** for ISR changes when a replica fails, and for
 attach/failover (epoch issuance). It is not involved in normal reads, writes or lease renewal.
 
+**Restoring etcd.** A volume's epochs start at the etcd revision of the claim that created it
+(§8.4), which holds only while the revision never goes back. A restore from a snapshot must raise
+it above every revision the replaced cluster made: `etcdutl snapshot restore --bump-revision
+1000000000 --mark-compacted`. The bump must exceed the revisions made since the snapshot; 10^9
+does for any plausible gap, and keeps epochs far below 2^53. Copying the keys to a new cluster
+is not supported, and an etcd wiped while nodes keep their data is the same hazard: the nodes
+must be wiped too.
+
 ### 5.5 Controllers
 
 These are stateless reconcilers with leader election. They act on metadata-service state, and
@@ -463,6 +471,14 @@ The ISR is tracked **per chunk** and versioned (`isr_ver`).
 - ISR changes are conditional on the current epoch, so **an old target can neither collect acks
   from fenced replicas nor shrink the ISR around them.** It cannot complete a write. This holds
   regardless of clocks, pauses or partitions.
+- **A volume's epochs start at its first epoch,** the metadata store's revision of the claim
+  that created it, recorded in its header (docs/issues/30). Each attach is one header write, so
+  no epoch passes the revision of its header's last write: every epoch an earlier volume of the
+  same name reached, and every fence and token it left, is below the new volume's. The token
+  carries the first epoch (version 2). A replica whose record of the name is fenced below it
+  holds only an earlier volume's chunks, and deletes them before it opens the session: a volume
+  created again neither adopts an earlier one's data nor is deposed by its fences. Volumes
+  created before the first epoch was recorded have none, and keep version 1 tokens.
 
 ### 8.5 Leases: who may serve I/O
 
@@ -746,6 +762,11 @@ The product ships runbooks for: losing one zone; losing the metadata quorum; los
 cluster (restore from backup); ransomware (restore from immutable backups to a clean cluster);
 and a failed upgrade (rollback).
 
+Restoring the metadata from an etcd snapshot raises the revision above the replaced cluster's:
+`etcdutl snapshot restore --bump-revision 1000000000 --mark-compacted` (§5.4). Without it, a
+volume created after the restore may start below an earlier volume of its name, whose fences
+then depose it, and whose data it adopts.
+
 ## 15. Security architecture
 
 ### 15.1 Threat model
@@ -890,6 +911,11 @@ Standard objects (`StorageClass`, `PVC`, `VolumeSnapshotClass`) remain the tenan
 - **Rolling upgrades driven by the operator**, in this order: metadata service (one member at a
   time), controllers, then the data plane node by node. ublk user recovery keeps devices alive,
   and the storage disruption guard (§10.4) prevents taking two failure domains down at once.
+- **First epochs (docs/issues/30) reverse that order once:** nodes are upgraded before the
+  metadata service, as an older node refuses the version 2 tokens a newer service signs for the
+  volumes it creates. No volume is created during a rolling upgrade of the metadata service, nor
+  during a downgrade: an older instance creates volumes at epoch 0 again, which leftover replicas
+  fenced near a revision depose for good.
 - **Versioning.** The on-disk format uses compat/ro-compat/incompat feature flags. The
   replication protocol negotiates its version per session. Version N-1 interoperates with N.
   New on-disk features are enabled only after an explicit `finalize` step, so a rollback stays

@@ -28,7 +28,7 @@ local_chunks=$(jq -r --arg n "$NODE" \
 log "$VOL: $chunks chunks on ${replicas[*]}; restarting every replica, then attaching on $NODE"
 for vm in $(vms_of overlay); do
     [[ $vm == "$VM_W" ]] && continue
-    ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach 2>/dev/null || true
+    ENV_VARS="VOLUME=$VOL" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
 done
 for vm in "${replicas[@]}"; do run_on_vm "$vm" "$SCRIPTS/guest/node.sh" down; done
 for vm in "${replicas[@]}"; do ENV_VARS=$(node_env "$vm") run_on_vm "$vm" "$SCRIPTS/guest/node.sh" up; done

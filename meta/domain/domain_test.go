@@ -16,15 +16,16 @@ type vectorChunk struct {
 }
 
 type vector struct {
-	Op        string     `json:"op"`
-	MinISR    uint32     `json:"min_isr"`
-	Placement [][]string `json:"placement"`
-	Node      string     `json:"node"`
-	Epoch     uint64     `json:"epoch"`
-	Chunk     uint32     `json:"chunk"`
-	From      string     `json:"from"`
-	To        string     `json:"to"`
-	Changes   []struct {
+	Op         string     `json:"op"`
+	FirstEpoch uint64     `json:"first_epoch"`
+	MinISR     uint32     `json:"min_isr"`
+	Placement  [][]string `json:"placement"`
+	Node       string     `json:"node"`
+	Epoch      uint64     `json:"epoch"`
+	Chunk      uint32     `json:"chunk"`
+	From       string     `json:"from"`
+	To         string     `json:"to"`
+	Changes    []struct {
 		Chunk       uint32   `json:"chunk"`
 		ExpectedVer uint64   `json:"expected_ver"`
 		NewISR      []string `json:"new_isr"`
@@ -58,6 +59,7 @@ func TestVectors(t *testing.T) {
 		switch x.Op {
 		case "create":
 			v = NewVolume(Spec{ID: "v", MinISR: x.MinISR}, x.Placement)
+			v.Start(x.FirstEpoch)
 			continue
 		case "attach":
 			v.Attach(x.Node)

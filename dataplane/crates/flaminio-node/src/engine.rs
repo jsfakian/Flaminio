@@ -23,7 +23,8 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -31,7 +32,7 @@ use flaminio_metaclient::{Answer, Call, MetaClient, pb};
 use flaminio_net::BLOCK;
 use flaminio_net::frame::Frame;
 use flaminio_net::session::Accepted;
-use flaminio_net::token::Claims;
+use flaminio_net::token::{Claims, decode_unverified};
 use flaminio_repl::extent::Extent;
 use flaminio_repl::meta::{ChunkMeta, MetaReply, MetaRequest, VolumeMeta};
 use flaminio_repl::msg::{FromReplica, Request, Response, ToReplica};
@@ -99,10 +100,68 @@ impl MetaPort for MetaClient {
 pub const DEFAULT_GATHER: Duration = Duration::from_micros(300);
 
 /// Default floor on write-data bytes gathered into one commit (see [`Engine::set_commit_target_bytes`]).
-/// Zero: count/time gather only. A short lab with 8 MiB (and held staging) did not raise single-
-/// stream 1M above ~700 MiB/s, so the floor stays off until a sizing that clears ~80% of
-/// across-disk raw is found; opt in with `--commit-target-mib`.
-pub const DEFAULT_COMMIT_TARGET_BYTES: u64 = 0;
+/// With it, staged groups are held (docs/issues/10): 1M QD8 on fl-b, from ~686 MiB/s to ~849 (86%
+/// of raw across the disk), every commit carrying the 16 requests in flight. Zero: count/time
+/// gather only, as before.
+pub const DEFAULT_COMMIT_TARGET_BYTES: u64 = 8 << 20;
+
+/// The least window of a large-write wait (docs/issues/10, S1): a client sends its 1 MiB writes
+/// again 0.4–1.1 ms after a landing (fl-b).
+const LARGE_WINDOW: Duration = Duration::from_millis(2);
+
+/// How long past its window a large-write wait goes on while large writes are being copied in
+/// (docs/issues/10, S4).
+const ARRIVALS_LIMIT: Duration = Duration::from_millis(8);
+
+/// Requests a local commit holds back (docs/issues/10): who sent them, in order; how many are
+/// writes, their payload bytes, and how many of the writes are large ([`flaminio_store::large`]).
+#[derive(Default)]
+struct LocalGroup {
+    from: Vec<LocalFrom>,
+    writes: usize,
+    bytes: u64,
+    large: usize,
+    /// Started at once for a request queued behind it (or to settle): no wait after its
+    /// landing, so that the request starts then.
+    forced: bool,
+}
+
+/// Which wait for writes to gather a commit is in (docs/issues/10, S1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Wait {
+    /// After large writes, holding: 2 ms at least, and longer while large writes are being
+    /// copied in.
+    Large,
+    /// Otherwise: the gather window.
+    Small,
+}
+
+/// A wait for writes to gather: until `target` writes are queued or staged, or `until`.
+#[derive(Clone, Copy, Debug)]
+struct Gather {
+    target: usize,
+    until: Instant,
+    wait: Wait,
+    /// It went on past its window for writes being copied in (counted once).
+    held: bool,
+    /// ... and reached the limit (counted once).
+    limited: bool,
+}
+
+/// Local commits since the last report.
+#[derive(Default)]
+struct CommitStats {
+    commits: u64,
+    writes: u64,
+    /// Started when their wait for writes ran out.
+    expired: u64,
+    /// Staged groups among them.
+    staged: u64,
+    /// Waits that went on past their window for writes being copied in.
+    arrival_waits: u64,
+    /// ... up to the limit.
+    limit_hits: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -303,6 +362,9 @@ struct TargetRt {
     sm: Target<Payload>,
     view: VolumeMeta,
     token: Vec<u8>,
+    /// The volume's first epoch, from the token: the local replica's session carries it, as a
+    /// remote one's token does (docs/issues/30, S6).
+    first_epoch: u64,
     size: u64,
     chunk_size: u64,
     /// NodeId → node name, and address.
@@ -417,25 +479,33 @@ pub struct Engine<D: BlockDevice> {
     /// For each of the local replica's commits in flight, oldest first (several with pipelined
     /// commits): who sent the requests it holds back, in order, how many are writes, and their
     /// payload bytes.
-    committing: std::collections::VecDeque<(Vec<LocalFrom>, usize, u64)>,
+    committing: std::collections::VecDeque<LocalGroup>,
     /// The same for the group staged behind them. With pipelined commits it launches after a
     /// gather wait (see [`Self::maybe_launch_staged`]); otherwise its commit starts when the
     /// oldest in flight lands.
-    staged: Option<(Vec<LocalFrom>, usize, u64)>,
+    staged: Option<LocalGroup>,
     /// After a commit completes (or a staged group is waiting to launch), the next waits until
     /// this many writes are queued or staged, or until the instant (see `finish_commit`).
-    gather: Option<(usize, Instant)>,
+    gather: Option<Gather>,
     /// How long the next commit may wait for writes to gather.
     gather_window: Duration,
-    /// A wait for writes to gather began: the driver arms a timer for it.
-    gather_timer: Option<Duration>,
+    /// A wait for writes to gather began: the driver arms a timer for its end.
+    gather_timer: Option<Instant>,
     /// Floor on write-data bytes before the next commit starts (0: count/time only). Raised into
     /// the count target as `ceil(bytes / avg_write)`, so 1 MiB traffic packs toward 8 MiB while
     /// 4K still ends the wait on the time window.
     commit_target_bytes: u64,
-    /// Local commits since the last report: how many, their writes, how many started when
-    /// their wait for writes to gather ran out, and how many were staged.
-    commit_stats: (u64, u64, u64, u64),
+    /// Large writes the frontend is copying in (zero copy) and has not handed over yet
+    /// (docs/issues/10, S4).
+    arrivals: Arc<AtomicUsize>,
+    /// The local store's data cluster size, for telling large writes.
+    cluster_size: u64,
+    /// Inside `settle_local`: every wait for writes is over.
+    settling: bool,
+    /// Landings, launches and requests started: how `settle_local` sees that it progresses.
+    progress: u64,
+    /// Local commits since the last report.
+    commit_stats: CommitStats,
     /// Whether the local replica's commits may stay in flight between turns. Off, each commit is
     /// waited for: for a thread that cannot learn when one completes.
     async_commits: bool,
@@ -484,8 +554,13 @@ impl<D: BlockDevice> Engine<D> {
             gather: None,
             gather_window: DEFAULT_GATHER,
             gather_timer: None,
-            commit_target_bytes: DEFAULT_COMMIT_TARGET_BYTES,
-            commit_stats: (0, 0, 0, 0),
+            // Through the setter, below, so that the replica service and the store hold too.
+            commit_target_bytes: 0,
+            arrivals: Arc::default(),
+            cluster_size: 0,
+            settling: false,
+            progress: 0,
+            commit_stats: CommitStats::default(),
             async_commits: false,
             out: Vec::new(),
             local_reads: BTreeMap::new(),
@@ -498,6 +573,8 @@ impl<D: BlockDevice> Engine<D> {
             registrations: 0,
             next_register: now,
         };
+        e.cluster_size = e.service.cluster_size();
+        e.set_commit_target_bytes(DEFAULT_COMMIT_TARGET_BYTES);
         e.register();
         e
     }
@@ -717,7 +794,8 @@ impl<D: BlockDevice> Engine<D> {
                 if deaf {
                     return;
                 }
-                self.flush_local(now);
+                // A Hello fences the store, which settles it: a held group starts first.
+                self.settle_local(now);
                 match self.service.hello(&accepted) {
                     Ok((s, reply)) => {
                         let _ = replies.try_send(Reply::Send(reply));
@@ -766,18 +844,27 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     /// Lets the local replica's commits stay in flight between turns (`on`), for a thread that
-    /// pumps the engine when the store's device signals a commit done. Turning it off waits for
-    /// the commit in flight.
+    /// pumps the engine when the store's device signals a commit done. Turning it off settles
+    /// the local replica: the commits in flight, a held group and the queued requests.
     pub fn set_async_commits(&mut self, now: Instant, on: bool) {
+        // Settled while still asynchronous, so that a held group is handled by the held rules
+        // (`holding()` reads this flag).
+        if !on {
+            self.settle_local(now);
+        }
         self.async_commits = on;
         if !on {
-            self.finish_commit(now, true);
             self.gather = None;
-            let (commits, writes, expired, staged) = std::mem::take(&mut self.commit_stats);
-            if commits > 0 {
+            let s = std::mem::take(&mut self.commit_stats);
+            if s.commits > 0 {
                 eprintln!(
-                    "flaminio-node: {commits} local commits ({staged} staged), {:.1} writes each; {expired} started when their wait for writes ran out",
-                    writes as f64 / commits as f64
+                    "flaminio-node: {} local commits ({} staged), {:.1} writes each; {} started when their wait for writes ran out, {} waited on writes being copied in, {} of them to the limit",
+                    s.commits,
+                    s.staged,
+                    s.writes as f64 / s.commits as f64,
+                    s.expired,
+                    s.arrival_waits,
+                    s.limit_hits
                 );
             }
         }
@@ -789,16 +876,40 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     /// Floor on write-data bytes gathered into one commit (see [`DEFAULT_COMMIT_TARGET_BYTES`]).
-    /// Zero: gather by write count and time only, as before the byte floor. Non-zero also holds
-    /// the staged group after a landing so it can grow to the floor before its flush.
+    /// Non-zero also holds the staged group (docs/issues/10): after a landing it waits, and grows,
+    /// before its commit starts, and large writes are staged with nothing in flight. Zero:
+    /// gather by write count and time only, as before the byte floor. Turning it off first
+    /// settles a held group, which nothing would start otherwise.
     pub fn set_commit_target_bytes(&mut self, bytes: u64) {
+        if bytes == 0 && self.staged.is_some() {
+            self.settle_local(Instant::now());
+        }
         self.commit_target_bytes = bytes;
         self.service.set_hold_staged(bytes > 0);
     }
 
-    /// The timer to arm, once, when the next commit starts waiting for writes to gather: the
-    /// driver pumps the engine when it fires.
-    pub fn take_gather_timer(&mut self) -> Option<Duration> {
+    /// True while the local replica's groups are held (docs/issues/10): commits asynchronous and a
+    /// byte floor set. The frontend then hands large writes over as soon as each is copied in,
+    /// and counts them in [`Self::set_arrivals`]'s counter meanwhile.
+    pub fn holding(&self) -> bool {
+        self.async_commits && self.commit_target_bytes > 0
+    }
+
+    /// The local store's data cluster size, for telling large writes
+    /// ([`flaminio_store::large`]).
+    pub fn cluster_size(&self) -> u64 {
+        self.cluster_size
+    }
+
+    /// The counter of large writes the frontend is copying in (zero copy) and has not handed
+    /// over yet: one per device, so that a new device never inherits a count (docs/issues/10, S4).
+    pub fn set_arrivals(&mut self, arrivals: Arc<AtomicUsize>) {
+        self.arrivals = arrivals;
+    }
+
+    /// The instant to pump the engine at, once, when a commit starts waiting for writes to
+    /// gather: the driver pumps it then.
+    pub fn take_gather_timer(&mut self) -> Option<Instant> {
         self.gather_timer.take()
     }
 
@@ -816,53 +927,105 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     fn pending_write_count(&self) -> usize {
-        self.queued_writes() + self.staged.as_ref().map(|s| s.1).unwrap_or(0)
+        self.queued_writes() + self.staged.as_ref().map_or(0, |s| s.writes)
     }
 
     fn pending_write_bytes(&self) -> u64 {
-        self.queued_write_bytes() + self.staged.as_ref().map(|s| s.2).unwrap_or(0)
+        self.queued_write_bytes() + self.staged.as_ref().map_or(0, |s| s.bytes)
     }
 
-    /// Arms the gather wait after a commit of `writes` with `write_bytes` of payload. The count
-    /// target is at least those writes plus what is already queued. When the just-finished
-    /// commit's writes were large (≥ 64 KiB) and a byte floor is set, the count target is also
-    /// at least `ceil(commit_target_bytes / avg_write)` and the wait is at least 2 ms, so a
-    /// client can refill a full depth of 1 MiB writes. Small (4K) traffic keeps the short
-    /// window and the previous write count, so QD32 is not held for 8 MiB.
-    fn arm_gather(&mut self, now: Instant, writes: usize, write_bytes: u64) {
+    /// A large write: one the store can stage, of at least 64 KiB (docs/issues/10).
+    fn is_large(&self, f: &Frame) -> bool {
+        match f {
+            Frame::Write { ext, data, .. } => flaminio_store::large(
+                self.cluster_size,
+                u64::from(ext.start) * BLOCK as u64,
+                data.len() as u64,
+            ),
+            _ => false,
+        }
+    }
+
+    /// Arms a wait for writes to gather: until `target` writes are queued or staged, or the
+    /// window passes, 2 ms at least for a large-write wait (docs/issues/10, S1).
+    fn arm(&mut self, now: Instant, target: usize, wait: Wait) {
         if self.gather_window.is_zero() {
             return;
         }
-        let mut target = writes + self.queued_writes();
-        let mut window = self.gather_window;
-        if self.commit_target_bytes > 0 && writes > 0 && write_bytes > 0 {
-            let avg = write_bytes / writes as u64;
-            if avg >= 64 << 10 {
-                let as_writes = self.commit_target_bytes.div_ceil(avg) as usize;
-                target = target.max(as_writes);
-                window = window.max(Duration::from_millis(2));
-            }
-        }
-        self.gather = Some((target, now + window));
-        self.gather_timer = Some(window);
+        let window = match wait {
+            Wait::Large => self.gather_window.max(LARGE_WINDOW),
+            Wait::Small => self.gather_window,
+        };
+        let until = now + window;
+        self.gather = Some(Gather {
+            target,
+            until,
+            wait,
+            held: false,
+            limited: false,
+        });
+        self.gather_timer = Some(until);
     }
 
-    /// Whether the gather wait is over: enough writes, enough payload bytes, or the window ran
-    /// out. Returns `(ready, expired)`.
-    fn gather_ready(&self, now: Instant, count: usize) -> (bool, bool) {
-        let Some((target, until)) = self.gather else {
+    /// Arms the wait after the landing of `landed`'s commit. Holding, after large writes, it
+    /// waits for every write outstanding at the landing: the commit's, the held group's and the
+    /// queued ones, which a client keeping its queue full sends again at once. Otherwise, as
+    /// before, for those the commit acknowledged plus those queued. Starting at once would split
+    /// the client's writes into two halves that commit in turn (4K QD32: 13 writes per commit
+    /// against 23; 1M QD8: 4 MiB per flush against 8).
+    fn arm_after_landing(&mut self, now: Instant, landed: &LocalGroup) {
+        if landed.forced {
+            // It started for what is queued behind it, which starts now.
+            self.gather = None;
+            return;
+        }
+        let queued = self.queued_writes();
+        let (staged, staged_large) = self.staged.as_ref().map_or((0, 0), |s| (s.writes, s.large));
+        let large = staged_large > 0 || (landed.writes > 0 && landed.large == landed.writes);
+        if self.commit_target_bytes > 0 && large {
+            self.arm(now, landed.writes + staged + queued, Wait::Large);
+        } else {
+            self.arm(now, landed.writes + queued, Wait::Small);
+        }
+    }
+
+    /// Whether the wait for writes to gather is over: the floor's bytes are there, or the count,
+    /// or the window has passed. A large-write wait goes on past its window while large writes
+    /// are being copied in, up to `ARRIVALS_LIMIT` more, and before its window its count is met
+    /// only once none is: so the two halves of a 1 MiB write join one commit (docs/issues/10, S1
+    /// and S4). Settling, every wait is over. Returns `(ready, expired)`.
+    fn gather_ready(&mut self, now: Instant, count: usize) -> (bool, bool) {
+        let Some(g) = self.gather else {
             return (true, false);
         };
+        if self.settling {
+            return (true, false);
+        }
         if self.commit_target_bytes > 0 && self.pending_write_bytes() >= self.commit_target_bytes {
             return (true, false);
         }
-        if count >= target {
+        let arriving = g.wait == Wait::Large && self.arrivals.load(Ordering::Relaxed) > 0;
+        if now < g.until {
+            return (count >= g.target && !arriving, false);
+        }
+        if count >= g.target {
             return (true, false);
         }
-        if now >= until {
-            return (true, true);
+        if arriving {
+            let g = self.gather.as_mut().expect("gather");
+            if !g.held {
+                g.held = true;
+                self.commit_stats.arrival_waits += 1;
+            }
+            if now < g.until + ARRIVALS_LIMIT {
+                return (false, false);
+            }
+            if !g.limited {
+                g.limited = true;
+                self.commit_stats.limit_hits += 1;
+            }
         }
-        (false, false)
+        (true, true)
     }
 
     /// Sends the requests queued for the local replica, a batch at a time, until none are left
@@ -870,16 +1033,27 @@ impl<D: BlockDevice> Engine<D> {
     fn flush_local(&mut self, now: Instant) {
         for _ in 0..16 {
             if !self.finish_commit(now, !self.async_commits) {
-                self.stage_local();
+                self.stage_local(now);
                 self.maybe_launch_staged(now);
                 return;
             }
-            // Held staged group: grow it from the local queue, then launch when gather is ready.
-            if self.commit_target_bytes > 0 && self.staged.is_some() {
-                self.stage_local();
-                self.maybe_launch_staged(now);
-                if self.staged.is_some() || !self.committing.is_empty() {
-                    return;
+            // Holding: the writes the store can stage go to the held group, even with nothing in
+            // flight, their data to the disk at once; the group's commit starts by its wait
+            // (docs/issues/10, S1 and S2). Nothing else starts while a group is staged: the store
+            // holds it, and every other request would settle it behind the engine's back.
+            if self.holding() {
+                self.stage_local(now);
+                if self.staged.is_some() {
+                    if self.local.is_empty() {
+                        self.maybe_launch_staged(now);
+                    } else {
+                        // Queued behind the group, a request it cannot take (a small write, a
+                        // read, a write the store refuses): in order, it can grow no more.
+                        self.launch_held();
+                    }
+                    if self.staged.is_some() || !self.committing.is_empty() {
+                        return;
+                    }
                 }
             }
             if self.local.is_empty() {
@@ -891,7 +1065,7 @@ impl<D: BlockDevice> Engine<D> {
                     return;
                 }
                 if expired {
-                    self.commit_stats.2 += 1;
+                    self.commit_stats.expired += 1;
                 }
                 self.gather = None;
             }
@@ -902,7 +1076,10 @@ impl<D: BlockDevice> Engine<D> {
                 from.push(f);
                 items.push((s, frame));
             }
+            // The store holds no group the engine has not launched (docs/issues/10, S5).
+            debug_assert!(self.staged.is_none(), "start with a group staged");
             let p = self.service.start(&items);
+            self.progress += p.handled as u64;
             // Requests not handled yet wait for the commit, ahead of anything queued since.
             let rest: Vec<_> = from
                 .drain(p.handled..)
@@ -922,9 +1099,16 @@ impl<D: BlockDevice> Engine<D> {
                     .filter(|(_, f)| is_write(f))
                     .map(|(_, f)| write_data_len(f))
                     .sum();
-                self.commit_stats.0 += 1;
-                self.commit_stats.1 += writes as u64;
-                self.committing.push_back((held, writes, bytes));
+                let large = held_items.iter().filter(|(_, f)| self.is_large(f)).count();
+                self.commit_stats.commits += 1;
+                self.commit_stats.writes += writes as u64;
+                self.committing.push_back(LocalGroup {
+                    from: held,
+                    writes,
+                    bytes,
+                    large,
+                    forced: false,
+                });
             }
             self.deliver_local(now, from, p.replies);
         }
@@ -936,16 +1120,13 @@ impl<D: BlockDevice> Engine<D> {
     /// Ends the local replica's commit in flight if it is done (with `wait`, waits for it), and
     /// delivers the replies it held back. Returns true if no commit is in flight any more.
     ///
-    /// With commits in flight, the next commit then waits, briefly, for writes to gather: the
-    /// writes queued meanwhile, plus as many as this commit acknowledged, which a client keeping
-    /// its queue full sends again at once. Starting at once would split the client's writes into
-    /// two halves that commit in turn, each commit carrying half (4K QD32: 13 writes per commit
-    /// against 23). A client with one write in flight waits for nothing: its next write is the
-    /// target. With [`Self::set_commit_target_bytes`], the wait also aims at that many payload
-    /// bytes (via a raised count floor), so 1 MiB QD8 packs toward one flush.
+    /// With commits in flight, the next commit then waits, briefly, for writes to gather
+    /// ([`Self::arm_after_landing`]). A client with one write in flight waits for nothing: its
+    /// next write is the target.
     ///
-    /// Commits land in order. A group staged behind them joins them when the oldest lands, its
-    /// commit started then.
+    /// Commits land in order. Without a byte floor, a group staged behind them joins them when
+    /// the oldest lands, its commit started then. With one, the group is held: it starts when
+    /// it holds the floor's bytes, or by its wait.
     fn finish_commit(&mut self, now: Instant, wait: bool) -> bool {
         loop {
             if self.committing.is_empty() {
@@ -954,45 +1135,63 @@ impl<D: BlockDevice> Engine<D> {
             let Some(replies) = self.service.poll(wait) else {
                 return false;
             };
-            let (from, writes, write_bytes) =
-                self.committing.pop_front().expect("a commit in flight");
-            self.deliver_local(now, from, replies);
-            if self.commit_target_bytes == 0 {
+            let landed = self.committing.pop_front().expect("a commit in flight");
+            self.progress += 1;
+            let holding = self.commit_target_bytes > 0;
+            debug_assert_eq!(
+                holding,
+                self.service.holding(),
+                "the engine and the replica service disagree on holding staged groups"
+            );
+            // The staged group's bookkeeping comes before the replies: delivering them can make
+            // a target say Hello to its local replica, which settles (docs/issues/10, S5), and the
+            // engine's view of the group must match the service's by then.
+            if !holding {
+                // The service started the group's commit with this landing.
                 if let Some(st) = self.staged.take() {
-                    self.count_staged(st.1);
+                    self.count_staged(st.writes);
                     self.committing.push_back(st);
                 }
-            } else if let Some((_, n, b)) = self.staged.as_ref() {
-                // Held: launch now if the staged group already meets the byte floor.
-                if *b >= self.commit_target_bytes && self.service.launch() {
-                    let st = self.staged.take().expect("staged");
-                    self.count_staged(st.1);
-                    self.committing.push_back(st);
-                } else if *n > 0 {
-                    // Grow it under the gather wait (see flush_local / maybe_launch_staged).
-                    self.arm_gather(now, *n, *b);
+            } else if let Some(st) = self.staged.as_ref() {
+                if st.bytes >= self.commit_target_bytes && self.service.launch() {
+                    self.take_staged(false);
+                } else if self.async_commits {
+                    self.arm_after_landing(now, &landed);
                 }
             }
+            let LocalGroup {
+                from,
+                writes,
+                large,
+                forced,
+                ..
+            } = landed;
+            self.deliver_local(now, from, replies);
             if !self.committing.is_empty() {
                 continue;
             }
             if self.async_commits && self.staged.is_none() {
-                self.arm_gather(now, writes, write_bytes);
+                let landed = LocalGroup {
+                    writes,
+                    large,
+                    forced,
+                    ..LocalGroup::default()
+                };
+                self.arm_after_landing(now, &landed);
             }
             return true;
         }
     }
 
-    /// While a commit is in flight, stages the writes at the head of the local queue behind
-    /// it (`ReplicaService::stage`): their data goes to the disk during its flush. The staged
-    /// group's own commit starts when the oldest lands, or sooner with pipelined commits after
-    /// [`Self::maybe_launch_staged`] has gathered. With a byte floor, also appends after the
-    /// landing while the staged group is held.
-    fn stage_local(&mut self) {
+    /// Stages the writes at the head of the local queue (`ReplicaService::stage`): behind the
+    /// commit in flight, or, holding, with nothing in flight too. Their data goes to the disk
+    /// now. The staged group's commit starts when the oldest in flight lands, or, holding or
+    /// with pipelined commits, by [`Self::maybe_launch_staged`].
+    fn stage_local(&mut self, now: Instant) {
         if !self.async_commits {
             return;
         }
-        let holding = self.commit_target_bytes > 0 && self.staged.is_some();
+        let holding = self.commit_target_bytes > 0;
         if self.committing.is_empty() && !holding {
             return;
         }
@@ -1026,64 +1225,132 @@ impl<D: BlockDevice> Engine<D> {
         }
         if taken > 0 {
             let bytes: u64 = items[..taken].iter().map(|(_, f)| write_data_len(f)).sum();
-            let st = self.staged.get_or_insert_with(|| (Vec::new(), 0, 0));
-            st.0.extend(from);
-            st.1 += taken;
-            st.2 += bytes;
+            let large = items[..taken]
+                .iter()
+                .filter(|(_, f)| self.is_large(f))
+                .count();
+            let new = self.staged.is_none();
+            let st = self.staged.get_or_insert_with(LocalGroup::default);
+            st.from.extend(from);
+            st.writes += taken;
+            st.bytes += bytes;
+            st.large += large;
+            // A group started with nothing in flight keeps the last landing's wait while its
+            // window lasts. Otherwise it arms its own from its first write: as long as the old
+            // one waited for, or what is outstanding now (docs/issues/10, S1).
+            if new
+                && holding
+                && self.committing.is_empty()
+                && self.gather.is_none_or(|g| now >= g.until)
+            {
+                let target = self
+                    .gather
+                    .map_or(0, |g| g.target)
+                    .max(self.pending_write_count());
+                let wait = if large > 0 { Wait::Large } else { Wait::Small };
+                self.arm(now, target, wait);
+            }
             // Flush coalesce: partner's journal joins now; track it like launch().
             if self.service.coalesce_partner() {
                 let st = self.staged.take().expect("staged");
-                self.count_staged(st.1);
+                self.count_staged(st.writes);
                 self.committing.push_back(st);
             }
         }
     }
 
-    /// With pipelined commits, starts the staged group's commit behind those in flight once it
-    /// has gathered (same window as after a landing). Launching at the first staged write
+    /// Starts the staged group's commit once its wait is over: holding, the wait armed at the
+    /// last landing or at the group's first write; with pipelined commits, behind those in
+    /// flight, after the same window as after a landing. Launching at the first staged write
     /// bypassed gathering and cut 1M sequential from about 700 to 548 MiB/s.
     fn maybe_launch_staged(&mut self, now: Instant) {
-        let (staged_n, staged_bytes) = match &self.staged {
-            Some((_, n, b)) if *n > 0 => (*n, *b),
+        let (staged_n, staged_large) = match &self.staged {
+            Some(st) if st.writes > 0 => (st.writes, st.large),
             _ => return,
         };
         if self.async_commits && !self.gather_window.is_zero() {
             if self.gather.is_none() {
-                self.arm_gather(now, staged_n, staged_bytes);
-                if let Some((t, _)) = self.gather.as_mut() {
-                    *t = (*t).max(staged_n);
+                // Behind a commit in flight that nothing can join: its landing arms the wait.
+                if !self.committing.is_empty() && !self.service.pipelined() {
+                    return;
                 }
-                return;
+                let wait = if self.commit_target_bytes > 0 && staged_large > 0 {
+                    Wait::Large
+                } else {
+                    Wait::Small
+                };
+                self.arm(now, staged_n.max(self.pending_write_count()), wait);
+                // A group that already holds the floor's bytes need not wait a pump for it.
+                if !(self.commit_target_bytes > 0
+                    && self.pending_write_bytes() >= self.commit_target_bytes)
+                {
+                    return;
+                }
             }
             let (ready, expired) = self.gather_ready(now, self.pending_write_count());
-            if !ready {
+            // The wait stays until the group can start: behind a commit in flight, it may not.
+            if !ready || !self.service.launch() {
                 return;
             }
             if expired {
-                self.commit_stats.2 += 1;
+                self.commit_stats.expired += 1;
             }
             self.gather = None;
+            self.take_staged(false);
+            return;
         }
         if self.service.launch() {
-            let st = self.staged.take().expect("staged");
-            self.count_staged(st.1);
-            self.committing.push_back(st);
+            self.take_staged(false);
         }
+    }
+
+    /// The staged group, launched (`ReplicaService::launch` returned true), joins the commits in
+    /// flight. `forced`: it started for a request queued behind it, or to settle.
+    fn take_staged(&mut self, forced: bool) {
+        let mut st = self.staged.take().expect("staged");
+        st.forced = forced;
+        self.count_staged(st.writes);
+        self.progress += 1;
+        self.committing.push_back(st);
     }
 
     fn count_staged(&mut self, writes: usize) {
-        self.commit_stats.0 += 1;
-        self.commit_stats.1 += writes as u64;
-        self.commit_stats.3 += 1;
+        self.commit_stats.commits += 1;
+        self.commit_stats.writes += writes as u64;
+        self.commit_stats.staged += 1;
     }
 
-    /// Everything queued for the local replica handled and durable: before using the replica
-    /// directly.
-    fn settle_local(&mut self, now: Instant) {
-        while !self.committing.is_empty() || !self.local.is_empty() {
-            self.finish_commit(now, true);
-            self.flush_local(now);
+    /// Starts the held group's commit now, whatever its wait, when nothing is in flight: before
+    /// anything that settles the store (docs/issues/10, S5).
+    fn launch_held(&mut self) {
+        if self.committing.is_empty() && self.staged.is_some() && self.service.launch() {
+            self.take_staged(true);
         }
+    }
+
+    /// Everything queued for the local replica handled and durable, a held group included,
+    /// without waiting for writes to gather: before using the replica directly, or anything
+    /// that settles its store (docs/issues/10, S5).
+    fn settle_local(&mut self, now: Instant) {
+        let settling = std::mem::replace(&mut self.settling, true);
+        while !self.committing.is_empty() || !self.local.is_empty() || self.staged.is_some() {
+            let before = self.progress;
+            self.launch_held();
+            self.finish_commit(now, true);
+            self.launch_held();
+            self.flush_local(now);
+            if self.progress == before {
+                eprintln!(
+                    "flaminio-node: settling the local replica made no progress ({} commits in flight, {} requests queued, a group staged: {})",
+                    self.committing.len(),
+                    self.local.len(),
+                    self.staged.is_some()
+                );
+                debug_assert!(false, "settle_local made no progress");
+                break;
+            }
+        }
+        self.settling = settling;
     }
 
     fn deliver_local(&mut self, now: Instant, from: Vec<LocalFrom>, replies: Vec<Reply>) {
@@ -1340,6 +1607,19 @@ impl<D: BlockDevice> Engine<D> {
         {
             return Err("unusable volume geometry".into());
         }
+        // The local replica takes the volume's first epoch from the token, so the token must be
+        // this attach's: epochs of different volumes of a name never overlap, so the epoch fixes
+        // the volume (docs/issues/30, S6). Its signature is not checked here (#15).
+        if a.token.is_empty() {
+            return Err("no capability token: the data plane needs one".into());
+        }
+        let claims = decode_unverified(&a.token).map_err(|e| e.to_string())?;
+        if claims.volume != volume || claims.node != self.cfg.node || claims.epoch != v.epoch {
+            return Err(format!(
+                "the token is for {} epoch {} on {}, the volume is at {}",
+                claims.volume, claims.epoch, claims.node, v.epoch
+            ));
+        }
         let mut nodes: Vec<String> = Vec::new();
         let id = |name: &str, nodes: &mut Vec<String>| -> NodeId {
             match nodes.iter().position(|n| n == name) {
@@ -1386,6 +1666,7 @@ impl<D: BlockDevice> Engine<D> {
                 sm,
                 view,
                 token: a.token,
+                first_epoch: claims.first_epoch,
                 size: v.size_bytes,
                 chunk_size: v.chunk_bytes,
                 nodes,
@@ -1662,12 +1943,14 @@ impl<D: BlockDevice> Engine<D> {
                         epoch: msg.epoch,
                         node: self.cfg.node.clone(),
                         issued_at: 0,
+                        first_epoch: rt.first_epoch,
                     },
                     size: rt.size,
                     chunk_size: rt.chunk_size,
                     chunks,
                 };
-                self.flush_local(now);
+                // A Hello fences the store, which settles it: a held group starts first.
+                self.settle_local(now);
                 let rt = self.targets.get_mut(volume).expect("target");
                 match self.service.hello(&a) {
                     Ok((sref, frame)) => {

@@ -1,12 +1,20 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
+	"math/big"
 	"math/rand/v2"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,7 +22,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
@@ -22,6 +32,8 @@ import (
 	"github.com/flaminio/flaminio/meta/domain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/kv/kvtest"
+	"github.com/flaminio/flaminio/pkg/captoken"
+	"github.com/flaminio/flaminio/pkg/pki"
 )
 
 const mib = 1 << 20
@@ -76,7 +88,9 @@ func TestVolumeLifecycle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(v.Chunks) != 3 || v.Epoch != 0 {
+		// A volume starts at its first epoch, the revision of its claim (docs/issues/30).
+		e := v.Epoch
+		if len(v.Chunks) != 3 || e == 0 {
 			t.Fatalf("created %+v", v)
 		}
 		used := map[string]int{}
@@ -101,7 +115,7 @@ func TestVolumeLifecycle(t *testing.T) {
 
 		// Attach, then change an ISR under the right epoch and version.
 		a, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"})
-		if err != nil || a.Volume.Epoch != 1 || a.Volume.Target != "a" {
+		if err != nil || a.Volume.Epoch != e+1 || a.Volume.Target != "a" {
 			t.Fatalf("attach: %v %v", a, err)
 		}
 		c0 := a.Volume.Chunks[0]
@@ -112,42 +126,42 @@ func TestVolumeLifecycle(t *testing.T) {
 			}
 			return r
 		}
-		if r := change(1, 0, c0.Replicas[0]); !r.Applied || r.Chunks[0].IsrVer != 1 || len(r.Chunks[0].Isr) != 1 {
+		if r := change(e+1, 0, c0.Replicas[0]); !r.Applied || r.Chunks[0].IsrVer != 1 || len(r.Chunks[0].Isr) != 1 {
 			t.Fatalf("shrink: %+v", r)
 		}
 		// A retry of the same change is refused, and shows the state it produced.
-		if r := change(1, 0, c0.Replicas[0]); r.Applied || r.Chunks[0].IsrVer != 1 {
+		if r := change(e+1, 0, c0.Replicas[0]); r.Applied || r.Chunks[0].IsrVer != 1 {
 			t.Fatalf("retry: %+v", r)
 		}
-		if r := change(1, 1, c0.Replicas...); !r.Applied || len(r.Chunks[0].Isr) != 2 {
+		if r := change(e+1, 1, c0.Replicas...); !r.Applied || len(r.Chunks[0].Isr) != 2 {
 			t.Fatalf("expand: %+v", r)
 		}
 		// A new attach deposes the old target: its changes are refused with the new epoch.
 		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b"}); err != nil {
 			t.Fatal(err)
 		}
-		if r := change(1, 2, c0.Replicas[0]); r.Applied || r.Epoch != 2 {
+		if r := change(e+1, 2, c0.Replicas[0]); r.Applied || r.Epoch != e+2 {
 			t.Fatalf("old epoch: %+v", r)
 		}
 		// unless_target: a repeated publish to the target changes nothing and issues no token;
 		// to another node it attaches as usual.
-		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", UnlessTarget: true}); err != nil || r.Volume.Epoch != 2 || r.Token != nil {
+		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", UnlessTarget: true}); err != nil || r.Volume.Epoch != e+2 || r.Token != nil {
 			t.Fatalf("unless_target, already the target: %v %v", r, err)
 		}
 		// only_if_target: the target restarts under a new epoch; another node is refused.
 		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a", OnlyIfTarget: true}); code(err) != codes.FailedPrecondition {
 			t.Fatalf("only_if_target, not the target: %v", err)
 		}
-		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", OnlyIfTarget: true}); err != nil || r.Volume.Epoch != 3 || r.Volume.Target != "b" {
+		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", OnlyIfTarget: true}); err != nil || r.Volume.Epoch != e+3 || r.Volume.Target != "b" {
 			t.Fatalf("only_if_target: %v %v", r, err)
 		}
 		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b", OnlyIfTarget: true, UnlessTarget: true}); code(err) != codes.InvalidArgument {
 			t.Fatalf("both modes: %v", err)
 		}
-		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a", UnlessTarget: true}); err != nil || r.Volume.Epoch != 4 || r.Volume.Target != "a" {
+		if r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a", UnlessTarget: true}); err != nil || r.Volume.Epoch != e+4 || r.Volume.Target != "a" {
 			t.Fatalf("unless_target, another node: %v %v", r, err)
 		}
-		if _, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: 4, Changes: []*metav1.IsrChange{{Chunk: 9}}}); code(err) != codes.InvalidArgument {
+		if _, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: e + 4, Changes: []*metav1.IsrChange{{Chunk: 9}}}); code(err) != codes.InvalidArgument {
 			t.Fatalf("chunk out of range: %v", err)
 		}
 
@@ -179,7 +193,8 @@ func TestVolumeLifecycle(t *testing.T) {
 		if v, err := create(s, "v", 1, 3, 2); err != nil || len(v.Chunks) != 1 {
 			t.Fatalf("recreate: %v %v", v, err)
 		}
-		if g, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); err != nil || len(g.Volume.Chunks) != 1 || g.Volume.Epoch != 0 {
+		// Created again, it starts above every epoch the earlier volume reached.
+		if g, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); err != nil || len(g.Volume.Chunks) != 1 || g.Volume.Epoch <= e+4 {
 			t.Fatalf("recreated: %v %v", g, err)
 		}
 	})
@@ -453,8 +468,8 @@ func TestConcurrentTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if g.Volume.Epoch != uint64(attaches.Load()) {
-			t.Fatalf("epoch %d after %d attaches", g.Volume.Epoch, attaches.Load())
+		if g.Volume.Epoch != v.Epoch+uint64(attaches.Load()) {
+			t.Fatalf("epoch %d after %d attaches from %d", g.Volume.Epoch, attaches.Load(), v.Epoch)
 		}
 		for i, c := range g.Volume.Chunks {
 			if c.IsrVer != uint64(perChunk[i].Load()) {
@@ -509,7 +524,8 @@ func TestMoveAndDrain(t *testing.T) {
 			t.Fatal(err)
 		}
 		addNodes(t, s, "c")
-		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"}); err != nil {
+		a, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if err != nil {
 			t.Fatal(err)
 		}
 		if l, err := s.ListVolumes(ctx, &metav1.ListVolumesRequest{}); err != nil || len(l.Ids) != 1 || l.Ids[0] != "v" {
@@ -543,7 +559,7 @@ func TestMoveAndDrain(t *testing.T) {
 			if replicas != nil {
 				ch.ChangeReplicas, ch.NewReplicas = true, replicas
 			}
-			r, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: 1, Changes: []*metav1.IsrChange{ch}})
+			r, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: a.Volume.Epoch, Changes: []*metav1.IsrChange{ch}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -920,7 +936,8 @@ func TestMoveReplicaAfterAnAttachReadsAgain(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
 		s := moveFixture(t, store)
-		if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"}); err != nil {
+		a, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if err != nil {
 			t.Fatal(err)
 		}
 		store.key = chunkKey("v", 0)
@@ -941,7 +958,7 @@ func TestMoveReplicaAfterAnAttachReadsAgain(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if v.GetVolume().GetEpoch() != 2 || v.GetVolume().GetTarget() != "b" || v.GetVolume().GetChunks()[0].GetMovingTo() != "c" {
+		if v.GetVolume().GetEpoch() != a.Volume.Epoch+1 || v.GetVolume().GetTarget() != "b" || v.GetVolume().GetChunks()[0].GetMovingTo() != "c" {
 			t.Fatalf("volume %v", v.GetVolume())
 		}
 	})
@@ -1121,6 +1138,328 @@ func TestGetVolumeOfAVolumeDeletedMidCallIsNotFound(t *testing.T) {
 		store.hook.Store(&hook)
 		if _, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); code(err) != codes.NotFound {
 			t.Fatalf("get of a volume deleted mid-call: %v", err)
+		}
+	})
+}
+
+// captureLog sends slog's default logger to a buffer for the test, and returns what it logged
+// as JSON records. The package's tests do not run in parallel, so no other test logs meanwhile.
+func captureLog(t *testing.T) func() []map[string]any {
+	t.Helper()
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(lockedWriter{&mu, &buf}, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []map[string]any {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []map[string]any
+		for _, line := range bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n")) {
+			if len(line) == 0 {
+				continue
+			}
+			var rec map[string]any
+			if err := json.Unmarshal(line, &rec); err != nil {
+				t.Fatalf("log line %q: %v", line, err)
+			}
+			out = append(out, rec)
+		}
+		return out
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(b []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(b)
+}
+
+// confirmations returns the log's "deletion confirmed" records.
+func confirmations(records []map[string]any) []map[string]any {
+	var out []map[string]any
+	for _, r := range records {
+		if r["msg"] == "deletion confirmed" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// tombstone3 is a volume v, one chunk on nodes a, b and c (RF 3), deleted: its tombstone names
+// all three.
+func tombstone3(t *testing.T, s *Service) {
+	t.Helper()
+	addNodes(t, s, "a", "b", "c")
+	if _, err := create(s, "v", 1, 3, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteVolume(context.Background(), &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Each confirmation that newly confirms a node logs one line, for audit (docs/issues/14, S4):
+// the caller's identity, its address and certificate serial, the volume, the node, the nodes
+// still pending and the write's revision. A repeat, or a missing tombstone, logs nothing.
+func TestConfirmDeletionLogsOnce(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		tombstone3(t, s)
+		logged := captureLog(t)
+		cert := &x509.Certificate{SerialNumber: big.NewInt(0xbeef)}
+		ctx := peer.NewContext(context.Background(), &peer.Peer{
+			Addr:     &net.TCPAddr{IP: net.IPv4(10, 77, 0, 4), Port: 40000},
+			AuthInfo: credentials.TLSInfo{State: tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}},
+		})
+		ctx = context.WithValue(ctx, identityKey{}, pki.Identity{TrustDomain: td, Node: "c", Component: "agent"})
+		for range 2 {
+			if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "c"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := confirmations(logged())
+		if len(got) != 1 {
+			t.Fatalf("%d lines for a confirmation and its repeat, want 1: %v", len(got), got)
+		}
+		l := got[0]
+		if l["caller"] != pki.NodeID(td, "c", "agent") || l["peer"] != "10.77.0.4:40000" || l["serial"] != "beef" ||
+			l["volume"] != "v" || l["node"] != "c" || fmt.Sprint(l["pending"]) != "[a b]" {
+			t.Fatalf("log line %v", l)
+		}
+		if rev, ok := l["revision"].(float64); !ok || rev <= 0 {
+			t.Fatalf("revision %v", l["revision"])
+		}
+
+		// Without authentication, the caller is "unauthenticated"; the last confirmation, which
+		// removes the tombstone, logs too, with nothing pending.
+		for _, n := range []string{"a", "b"} {
+			if _, err := s.ConfirmDeletion(context.Background(), &metav1.ConfirmDeletionRequest{Volume: "v", Node: n}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got = confirmations(logged())
+		if len(got) != 3 || got[1]["caller"] != "unauthenticated" || got[1]["peer"] != "" || got[1]["serial"] != "" ||
+			got[2]["pending"] != nil || got[2]["revision"].(float64) <= got[1]["revision"].(float64) {
+			t.Fatalf("log lines %v", got)
+		}
+		// The tombstone is gone: a confirmation succeeds, and logs nothing.
+		if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "c"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := confirmations(logged()); len(got) != 3 {
+			t.Fatalf("a confirmation of a missing tombstone logged: %v", got[3:])
+		}
+	})
+}
+
+// Two confirmations interleaved, the second between the first's read and its write: both count,
+// the first is written again after its read, and each logs once.
+func TestConfirmDeletionInterleavedLogsEachOnce(t *testing.T) {
+	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		tombstone3(t, s)
+		logged := captureLog(t)
+		store.key = tombstoneKey("v")
+		hook := func() {
+			if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "b"}); err != nil {
+				t.Error(err)
+			}
+		}
+		store.txns.Store(0)
+		store.hook.Store(&hook)
+		if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: "v", Node: "a"}); err != nil {
+			t.Fatal(err)
+		}
+		if got := store.txns.Load(); got != 2 {
+			t.Fatalf("%d writes of the tombstone by the first confirmation, want 2: the first refused", got)
+		}
+		if tombstoned(t, s, "a", "v") || tombstoned(t, s, "b", "v") || !tombstoned(t, s, "c", "v") {
+			t.Fatal("both confirmations should count, and c stay pending")
+		}
+		got := confirmations(logged())
+		if len(got) != 2 || got[0]["node"] != "b" || fmt.Sprint(got[0]["pending"]) != "[a c]" ||
+			got[1]["node"] != "a" || fmt.Sprint(got[1]["pending"]) != "[c]" {
+			t.Fatalf("log lines %v", got)
+		}
+	})
+}
+
+// header reads a volume's stored header, first epoch included (no RPC returns it).
+func header(t *testing.T, store kv.KV, id string) domain.Header {
+	t.Helper()
+	e, ok, err := store.Get(context.Background(), volumeKey(id))
+	if err != nil || !ok {
+		t.Fatalf("header of %s: %v %v", id, ok, err)
+	}
+	var h domain.Header
+	if err := json.Unmarshal(e.Value, &h); err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// deleteAndConfirm deletes a volume, and confirms its tombstone for every node, so its id can be
+// created again.
+func deleteAndConfirm(t *testing.T, s *Service, id string, nodes ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: id}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		if tombstoned(t, s, n, id) {
+			if _, err := s.ConfirmDeletion(ctx, &metav1.ConfirmDeletionRequest{Volume: id, Node: n}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// attachTimes attaches a volume n times, alternating its target, and returns the last epoch.
+func attachTimes(t *testing.T, s *Service, id string, n int) uint64 {
+	t.Helper()
+	var epoch uint64
+	for i := range n {
+		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: id, Node: "ab"[i%2 : i%2+1]})
+		if err != nil {
+			t.Fatal(err)
+		}
+		epoch = r.Volume.Epoch
+	}
+	return epoch
+}
+
+// A volume starts at its first epoch, the revision of its claim; the first attach takes the next
+// one, and its token carries the first epoch (docs/issues/30, S1 and S4).
+func TestCreateStartsAtTheFirstEpoch(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		pub, key, _ := ed25519.GenerateKey(nil)
+		s := New(store, Options{TokenKey: key})
+		addNodes(t, s, "a", "b")
+		v, err := create(s, "v", 2, 2, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := header(t, store, "v")
+		if h.FirstEpoch == 0 || h.Epoch != h.FirstEpoch || v.Epoch != h.FirstEpoch {
+			t.Fatalf("created at epoch %d, header %+v", v.Epoch, h)
+		}
+		a, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if err != nil || a.Volume.Epoch != h.FirstEpoch+1 {
+			t.Fatalf("first attach: %v %v, want epoch %d", a, err, h.FirstEpoch+1)
+		}
+		if h2 := header(t, store, "v"); h2.FirstEpoch != h.FirstEpoch {
+			t.Fatalf("the attach changed the first epoch: %+v", h2)
+		}
+		c, err := captoken.Verify(pub, a.Token)
+		if err != nil || c.FirstEpoch != h.FirstEpoch || c.Epoch != a.Volume.Epoch {
+			t.Fatalf("token %+v %v, want first epoch %d", c, err, h.FirstEpoch)
+		}
+	})
+}
+
+// A volume deleted after 7 attaches and created again starts above every epoch it reached
+// (docs/issues/30, S1).
+func TestCreateAgainStartsAboveTheDeletedVolume(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		addNodes(t, s, "a", "b")
+		if _, err := create(s, "v", 2, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		old := attachTimes(t, s, "v", 7)
+		deleteAndConfirm(t, s, "v", "a", "b")
+		v, err := create(s, "v", 3, 2, 1)
+		if err != nil || v.Epoch <= old {
+			t.Fatalf("created again at epoch %d (%v), want above %d", v.GetEpoch(), err, old)
+		}
+	})
+}
+
+// A volume whose damaged header was deleted: the next one of its name starts above every epoch
+// it reached, which needs no read of it (docs/issues/30, S3).
+func TestCreateAfterADamagedHeaderStartsAboveIt(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b")
+		if _, err := create(s, "v", 2, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		old := attachTimes(t, s, "v", 7)
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey("v"), Value: []byte("not json")}}); err != nil {
+			t.Fatal(err)
+		}
+		deleteAndConfirm(t, s, "v", "a", "b")
+		v, err := create(s, "v", 2, 2, 1)
+		if err != nil || v.Epoch <= old {
+			t.Fatalf("created again at epoch %d (%v), want above %d", v.GetEpoch(), err, old)
+		}
+	})
+}
+
+// A volume created before the first epoch was recorded has none: it keeps its epoch and gets
+// version 1 tokens. Deleted and created again, the next one starts above it (docs/issues/30, S3).
+func TestALegacyVolume(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		pub, key, _ := ed25519.GenerateKey(nil)
+		s := New(store, Options{TokenKey: key})
+		addNodes(t, s, "a", "b")
+		if _, err := create(s, "v", 2, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		// As written before the change: no first_epoch, at epoch 7.
+		h := header(t, store, "v")
+		h.FirstEpoch, h.Epoch = 0, 7
+		b, _ := json.Marshal(h)
+		if strings.Contains(string(b), "first_epoch") {
+			t.Fatalf("a header without a first epoch writes one: %s", b)
+		}
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey("v"), Value: b}}); err != nil {
+			t.Fatal(err)
+		}
+		a, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if err != nil || a.Volume.Epoch != 8 {
+			t.Fatalf("attach: %v %v, want epoch 8", a, err)
+		}
+		if h := header(t, store, "v"); h.FirstEpoch != 0 {
+			t.Fatalf("the attach gave a first epoch: %+v", h)
+		}
+		c, err := captoken.Verify(pub, a.Token)
+		if err != nil || c.FirstEpoch != 0 || c.Epoch != 8 || a.Token[4] != 1 {
+			t.Fatalf("token %+v %v (version %d), want version 1", c, err, a.Token[4])
+		}
+		deleteAndConfirm(t, s, "v", "a", "b")
+		v, err := create(s, "v", 2, 2, 1)
+		if err != nil || v.Epoch <= 8 {
+			t.Fatalf("created again at epoch %d (%v), want above 8", v.GetEpoch(), err)
+		}
+	})
+}
+
+// An interrupted creation (its claim only) deleted, then created again: the new volume starts
+// above the claim (docs/issues/30, S1).
+func TestCreateAfterAnInterruptedCreationStartsAboveItsClaim(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b")
+		b, _ := json.Marshal(domain.Header{ID: "v", SizeBytes: 2 * mib, ChunkBytes: mib, Replicas: 2, MinISR: 1, Creating: true})
+		claim, ok, err := store.TxnRev(ctx, []kv.Cmp{{Key: volumeKey("v"), Rev: 0}}, []kv.Op{{Key: volumeKey("v"), Value: b}})
+		if err != nil || !ok {
+			t.Fatalf("claim: %v %v", ok, err)
+		}
+		deleteAndConfirm(t, s, "v", "a", "b")
+		v, err := create(s, "v", 2, 2, 1)
+		if err != nil || v.Epoch <= uint64(claim) {
+			t.Fatalf("created at epoch %d (%v), want above the interrupted claim %d", v.GetEpoch(), err, claim)
 		}
 	})
 }

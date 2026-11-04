@@ -41,6 +41,10 @@ type Header struct {
 	Replicas   uint32 `json:"replicas"`
 	MinISR     uint32 `json:"min_isr"`
 	Epoch      uint64 `json:"epoch"`
+	// The volume's first epoch: the store revision of the claim that created it, above every
+	// epoch an earlier volume of its name reached (docs/issues/30). 0 for a volume created before
+	// it was recorded.
+	FirstEpoch uint64 `json:"first_epoch,omitempty"`
 	Target     string `json:"target,omitempty"`
 	// True until every chunk record is written.
 	Creating bool `json:"creating,omitempty"`
@@ -201,6 +205,12 @@ func NewVolume(s Spec, placement [][]string) *Volume {
 		v.Chunks = append(v.Chunks, Chunk{Replicas: slices.Clone(p), ISR: sortedSet(p)})
 	}
 	return v
+}
+
+// Start sets the volume's epoch and first epoch to first, before its first attach.
+func (h *Header) Start(first uint64) {
+	h.Epoch = first
+	h.FirstEpoch = first
 }
 
 // Attach makes node the volume's target under a new epoch.

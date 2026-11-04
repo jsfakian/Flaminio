@@ -90,10 +90,13 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    /// Creates a volume, unattached, with every replica in the ISR.
+    /// Creates a volume, unattached, with every replica in the ISR, at its first epoch: the Go
+    /// service's is the revision of the claim that creates it, above every epoch an earlier volume
+    /// of its name reached (docs/issues/30). 0 for a volume created before it was recorded.
     pub fn create_volume(
         &mut self,
         vol: VolumeId,
+        first: Epoch,
         min_isr: usize,
         blocks_per_chunk: Block,
         placement: Vec<Vec<NodeId>>,
@@ -110,7 +113,7 @@ impl Metadata {
         self.volumes.insert(
             vol,
             VolumeMeta {
-                epoch: 0,
+                epoch: first,
                 target: None,
                 min_isr,
                 blocks_per_chunk,
@@ -247,7 +250,7 @@ mod tests {
 
     fn meta() -> Metadata {
         let mut m = Metadata::default();
-        m.create_volume(7, 2, 4, vec![vec![1, 2, 3], vec![2, 3, 4]]);
+        m.create_volume(7, 0, 2, 4, vec![vec![1, 2, 3], vec![2, 3, 4]]);
         m
     }
 

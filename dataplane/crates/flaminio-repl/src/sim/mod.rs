@@ -379,7 +379,7 @@ impl Sim {
         script: Option<Vec<(u64, Action)>>,
     ) -> Self {
         let mut meta = Metadata::default();
-        meta.create_volume(VOL, cfg.min_isr, cfg.blocks_per_chunk, placement.clone());
+        meta.create_volume(VOL, 0, cfg.min_isr, cfg.blocks_per_chunk, placement.clone());
         let drift = cfg.timing.drift_ppm;
         let nodes = (0..cfg.nodes)
             .map(|n| {

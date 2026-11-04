@@ -10,11 +10,16 @@
 // it:
 //
 //	"FLCT"  magic
-//	u8      version (1)
+//	u8      version (1 or 2)
 //	u16     length of the volume id, then the id
 //	u64     epoch
 //	u16     length of the node id, then the id
 //	i64     issue time, Unix seconds (for audit only: validity comes from the epoch)
+//	u64     version 2 only: the volume's first epoch, above 0 and below the epoch
+//
+// Version 2 carries the volume's first epoch (docs/issues/30): a replica fenced below it holds
+// only what earlier volumes of the name left, and deletes it. A volume without a first epoch
+// (created before it was recorded) gets version 1 tokens, byte for byte as before.
 //
 // A token has no expiry: it is worth nothing once its epoch has been fenced off.
 package captoken
@@ -27,10 +32,12 @@ import (
 )
 
 const (
-	magic   = "FLCT"
-	version = 1
+	magic = "FLCT"
+	// version1 has no first epoch; version2 adds it.
+	version1 = 1
+	version2 = 2
 	// MaxLen bounds a token, so a peer cannot make a replica buffer without limit.
-	MaxLen = 4 + 1 + 2 + 255 + 8 + 2 + 255 + 8 + ed25519.SignatureSize
+	MaxLen = 4 + 1 + 2 + 255 + 8 + 2 + 255 + 8 + 8 + ed25519.SignatureSize
 )
 
 // Claims are what a token grants: I/O on Volume, as Epoch's target running on Node.
@@ -39,6 +46,9 @@ type Claims struct {
 	Epoch    uint64
 	Node     string
 	IssuedAt int64
+	// FirstEpoch is the volume's first epoch, below Epoch; 0 for a volume without one, whose
+	// tokens are version 1.
+	FirstEpoch uint64
 }
 
 // Sign encodes and signs claims.
@@ -46,14 +56,24 @@ func Sign(key ed25519.PrivateKey, c Claims) ([]byte, error) {
 	if len(c.Volume) == 0 || len(c.Volume) > 255 || len(c.Node) == 0 || len(c.Node) > 255 {
 		return nil, errors.New("volume and node ids must be 1 to 255 bytes")
 	}
+	if c.FirstEpoch != 0 && c.FirstEpoch >= c.Epoch {
+		return nil, fmt.Errorf("first epoch %d is not below epoch %d", c.FirstEpoch, c.Epoch)
+	}
 	b := []byte(magic)
-	b = append(b, version)
+	if c.FirstEpoch == 0 {
+		b = append(b, version1)
+	} else {
+		b = append(b, version2)
+	}
 	b = binary.BigEndian.AppendUint16(b, uint16(len(c.Volume)))
 	b = append(b, c.Volume...)
 	b = binary.BigEndian.AppendUint64(b, c.Epoch)
 	b = binary.BigEndian.AppendUint16(b, uint16(len(c.Node)))
 	b = append(b, c.Node...)
 	b = binary.BigEndian.AppendUint64(b, uint64(c.IssuedAt))
+	if c.FirstEpoch != 0 {
+		b = binary.BigEndian.AppendUint64(b, c.FirstEpoch)
+	}
 	return append(b, ed25519.Sign(key, b)...), nil
 }
 
@@ -72,13 +92,23 @@ func Verify(pub ed25519.PublicKey, tok []byte) (Claims, error) {
 	}
 	var c Claims
 	r := reader{b: body}
-	if string(r.take(4)) != magic || r.u8() != version {
+	if string(r.take(4)) != magic {
+		return Claims{}, ErrInvalid
+	}
+	v := r.u8()
+	if v != version1 && v != version2 {
 		return Claims{}, ErrInvalid
 	}
 	c.Volume = string(r.take(int(r.u16())))
 	c.Epoch = r.u64()
 	c.Node = string(r.take(int(r.u16())))
 	c.IssuedAt = int64(r.u64())
+	if v == version2 {
+		c.FirstEpoch = r.u64()
+		if c.FirstEpoch == 0 || c.FirstEpoch >= c.Epoch {
+			return Claims{}, ErrInvalid
+		}
+	}
 	if r.bad || len(r.b) != 0 || c.Volume == "" || c.Node == "" {
 		return Claims{}, ErrInvalid
 	}
