@@ -63,6 +63,7 @@ and check those calls against the design's "Contracts".
    case, a rule without a test, misleading drift; Low: a minor wrong or
    untested case; Nit: clarity, naming, wording), a concrete exploit, a
    confidence score, evidence (file:line) and a fix. Then at most 5
-   Nits. An abuse case the design names without a test is a finding. The areas above say where to look; they are not
-   quotas. `decisions.md`'s accepted risks are
-   settled unless the code makes one worse. Don't fix anything.
+   Nits. An abuse case the design names without a test is a finding.
+   The areas above say where to look; they are not quotas.
+   `decisions.md`'s accepted risks are settled unless the code makes one
+   worse. Don't fix anything.
