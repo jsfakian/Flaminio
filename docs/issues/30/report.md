@@ -29,6 +29,13 @@ reviewers): **clear**. Every round 1 finding fixed; nothing broken. `None` (ever
 reached only from the control socket's `delete`, never from a token or a peer. Two free Nits
 fixed (8281c56): a paragraph reflowed, D13 named in the design.
 
+**Code loop, round 3** (incremental: the merge of main, 4f9879c, which brought #10's held
+groups to #30's drop): **clear**. The drop's `guard` lands a held group before any delete, and
+#10's `settle_local` runs before all three callers (the peer's Hello, the attach's Hello,
+`delete VOLUME`); a crash between them is covered by the batches' reasoning; the merge's
+`first_epoch: 0` in #10's test is a version 1 token, as meant. One free Nit fixed: the
+precondition (a held group is the caller's to settle) stated on `hello` and `delete_volume`.
+
 ## Tests
 
 `make lint`, `make test`, `make race`, `make contracts` and `make sim` pass on 8281c56.
