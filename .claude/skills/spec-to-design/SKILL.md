@@ -20,28 +20,28 @@ The spec is approved: `decisions.md` has `**Spec:** approved` under
 `## Approvals`, or the user approved it earlier in this conversation (or
 tells you to proceed now). Otherwise say so and stop. **Batch mode**
 (only when the user explicitly asks): one `designer` per issue in
-parallel against unapproved specs, no per-issue stop.
+parallel, each in its issue's worktree, no review loop, no per-issue
+stop.
 
 ## Steps
 
 1. Resolve the spec from `args` (`<n>`, `#n` or a path), or the most
    recently approved spec in this conversation. Work on its
-   `issue/<n>-…` branch.
+   `issue/<n>-…` branch (README's Branch convention).
 2. If `design.md` exists, resume it: revise in place, never regenerate.
-3. Delegate to the `designer` agent (Agent tool, `subagent_type:
-   designer`) with the spec path. Give it `decisions.md`; its entries are
-   settled. The design carries the implementation facts the spec leaves
-   out (file:line, flags, exit codes, test vectors).
+3. Delegate to the `designer` agent with the spec path and
+   `decisions.md` (its entries are settled).
 4. Commit it: `Design <what> (#n)`.
-5. **Design review loop** (`.claude/skills/ship-issue/review-loop.md`),
-   a loop of its own after the spec's, on the whole plan (intent, spec
-   and design together, so a design finding that changes the spec is
-   caught): two fresh `plan-reviewer`s per round, in parallel, focus
-   `design-code` and `design-security`. Fixes go through the same
-   `designer` (SendMessage), and reach the spec where a finding does.
+5. **Design review loop** (`.claude/skills/ship-issue/review-loop.md`):
+   `plan-reviewer`s with focus `design-code` and `design-security` (or
+   one with both, as the loop's "How many" says), on the design and its
+   consistency with the approved spec. Fixes go through the same
+   `designer` (SendMessage), and reach the spec only where a finding
+   does.
 6. Show the design's full content, including the rule → test mapping,
-   the lab checks and `## ADRs`, with both loops' rounds. If the design drafted an ADR, show it too and say that
-   approving the design accepts it.
+   the lab checks and `## ADRs`, with the rounds of the spec loop and
+   the design loop and anything left open. If the design drafted an ADR,
+   show it too and say that approving the design accepts it.
 7. **Stop.** Ask whether the design is approved as written or needs
    changes. Do not invoke `ship-spec` in the same turn. On changes: the
    same `designer` revises, commit, run the loop again on what changed,

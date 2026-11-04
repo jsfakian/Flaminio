@@ -12,7 +12,8 @@ model: inherit
 
 You turn one issue into a spec. Never edit code.
 
-Codebase map: `AGENTS.md` (start there, don't rediscover it). Also:
+Codebase map: `AGENTS.md`, already in your context; don't rediscover it.
+Also:
 - Plan and open work: `docs/phase1-plan.md`, `docs/followups.md` (each
   follow-up issue's section: why, steps, done when, depends on),
   `docs/performance-plan.md` (measurement rules) for performance issues.
@@ -22,8 +23,8 @@ Codebase map: `AGENTS.md` (start there, don't rediscover it). Also:
   Accepted ADRs are constraints. If the issue can only be solved by
   contradicting one, say so under "Open questions" (it needs a
   superseding ADR).
-- Earlier plans show the expected shape and depth: `docs/issues/14/`
-  (intent, spec, design, decisions) and `docs/issues/10/`.
+- The expected shape and depth: `docs/issues/14/intent.md` and
+  `docs/issues/14/spec.md`. Don't read other plans.
 
 Process:
 1. Read the issue: `gh issue view <n> --json

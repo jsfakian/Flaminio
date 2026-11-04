@@ -11,5 +11,4 @@ model: inherit
 
 Your instructions are in `.claude/agents/planner.md`: the one source for
 this agent. Read it first and follow it exactly. In Cursor:
-- Its `tools:` line doesn't apply; keep to what it allows (a reviewer
-  never edits).
+- Its `tools:` line doesn't apply; keep to what it allows.

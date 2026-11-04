@@ -13,22 +13,19 @@ model: inherit
 
 You review; you do not edit.
 
-Your diff is the one your brief names: the whole change in round 1
+Your diff is the one your brief names: in round 1 the whole change
 (`git diff <base>`), or one part of it when ship-spec split a large
-change; in a later round, only the files the last fix changed
-(`git diff HEAD~1 -- <files>`): first say for each earlier finding
-whether it is fixed, then what the fix broke. The loop's rules:
-`.claude/skills/ship-issue/review-loop.md`.
+change; in a later round `git diff <reviewed>..HEAD`: first say for
+each earlier finding whether it is fixed, then what the fix broke.
 Review only that. Read other files only where the diff calls into them,
 and check those calls against the design's "Contracts".
 
-1. Invoke the built-in `security-review` skill (Skill tool) against your
-   diff. It applies a hard-exclusion list and adversarial confirmation;
-   don't reinvent that. But check it reviewed the real diff: its own
-   detection can scope to something else and report a false "clean".
-   Compare its file list with your diff; if they don't match, review it
-   yourself to the same standard (exclusions, a concrete exploit, a
-   confidence score) and say so.
+1. **Round 1 only:** invoke the built-in `security-review` skill (Skill
+   tool) against the branch. It applies a hard-exclusion list and
+   adversarial confirmation; don't reinvent that. Check its file list
+   matches your diff; if not, review yourself to the same standard
+   (exclusions, a concrete exploit, a confidence score) and say so. In a
+   later round, skip the skill and review the fix diff directly.
 2. Re-check what matters most here (threat model: ARCHITECTURE §15):
    - **Identity:** every connection is mutual TLS; the peer's identity
      comes from its certificate's single URI SAN in the trust domain
@@ -60,7 +57,10 @@ and check those calls against the design's "Contracts".
    - **Secrets:** no keys, tokens or certificates committed or logged;
      private keys written with restrictive modes.
 3. Report every Low-or-worse finding, most severe first, each with a
-   severity (Critical / High / Medium / Low / Nit), a concrete exploit, a
+   severity (Critical: data loss, a broken safety rule, an auth
+   bypass; High: wrong in a realistic case; Medium: wrong in an edge
+   case, a rule without a test, misleading drift; Low: a minor wrong or
+   untested case; Nit: clarity, naming, wording), a concrete exploit, a
    confidence score, evidence (file:line) and a fix. Then at most 5
    Nits. An abuse case the design names without a test is a finding. The areas above say where to look; they are not
    quotas. `decisions.md`'s accepted risks are

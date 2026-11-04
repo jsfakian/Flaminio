@@ -19,8 +19,7 @@ docs/issues/<n>/
 `/spec-to-design <n>` (with a design review loop on the whole plan) → human approves
 `design.md` → `/ship-spec <n>` implements it with its tests (one agent, or Rust and Go in
 parallel), runs a code- and security-review loop until clear and a final conformance check,
-then opens a **draft** pull request. Every loop fixes every finding of Low severity or worse;
-after round 1, each round reviews only the files the last fix changed. The loops' rules:
+then opens a **draft** pull request. The loops' rules:
 [`.claude/skills/ship-issue/review-loop.md`](../../.claude/skills/ship-issue/review-loop.md). Lab
 checks, which need the shared lab and can take hours, run later on request
 (`/ship-spec <n> lab`); their results go into the pull request, which is then marked ready.
@@ -31,10 +30,19 @@ implemented before both the spec and the design are approved.
 
 ## Conventions
 
-- **Branch:** `issue/<n>-<short-slug>`, from `main`. The plan, the code, each review round and
-  the lab results are commits on it.
-- **Commits** follow the history: `Draft the plan of <what> (#n)`, `Design <what> (#n)`,
-  `<What the change does> (#n)`, `Address the first code and security reviews of #n`,
+- **Branch:** `issue/<n>-<short-slug>`, from an up-to-date `origin/main`, checked out in the
+  main checkout (commit or stash other work first; nothing uncommitted is carried over). A
+  worktree (`git worktree add ../flaminio-<n> -b issue/<n>-<slug> origin/main`) only when
+  several issues are worked on in parallel; remove it once its pull request is merged. The
+  plan, the code, each review round and the lab results are commits on the branch, pushed with
+  a pull request.
+- **Resuming:** an issue's branch or worktree that exists is resumed, never started again
+  (`git branch -a --list 'issue/<n>-*'`, `git worktree list`); progress is in the folder,
+  `git log origin/main..HEAD` and `decisions.md`.
+- **Commits:** `Draft the plan of <what> (#n)`, `Address the review of the plan of #n, round
+  N`, `Record the approval of the spec of #n`, `Design <what> (#n)`, `Address the review of
+  the design of #n, round N`, `Record the approval of the design of #n`, `<What the change
+  does> (#n)`, `Test <what> (#n)`, `Address the code and security reviews of #n, round N`,
   `Record the lab checks of #n`.
 - **Pull request:** title `<What the change does> (#n)`; body `Closes #n.` (or `Part of #n.`
   when a step of the issue stays open), then `## Why`, `## What changes`, `## Results`,
