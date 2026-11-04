@@ -10,7 +10,7 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 
 | # | Item | Why it matters | Order | Issues |
 |---|---|---|---|---|
-| 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads meet 90% of raw at QD32 (95%) and 1M (≈ 100%); 4K QD1 reads (84%) and 1M writes (about 70%) do not | Next | [#9](https://github.com/jsfakian/Flaminio/issues/9), [#10](https://github.com/jsfakian/Flaminio/issues/10) |
+| 1 | Read performance, and a write benchmark that can be trusted: [performance plan](performance-plan.md) | Reads meet 90% of raw at QD32 (95%) and 1M (≈ 100%); 1M writes now reach about 90% of raw ([#10](benchmarks/2026-10-29-writes-1m-floor.md)); only 4K QD1 reads (84%, #9) remain | Next | [#9](https://github.com/jsfakian/Flaminio/issues/9), [#10](https://github.com/jsfakian/Flaminio/issues/10) |
 | 2 | Reconciliation after a replica restart | Done: the first read after both replicas of a 16 GiB volume restarted waits 0.2 s (was 160 s) | Before the chaos run (step 8) | [#11](https://github.com/jsfakian/Flaminio/issues/11) |
 | 3 | Copying unwritten ranges | Done: a resync of 4 GiB written moves 4.3 GiB and stores 4.0 GiB (was 16 GiB) | With item 2: same tools | – |
 | 4 | Failure domains in placement | Done: zone and rack placement, from `metactl` and the StorageClass; the lab cannot show physical independence | Before the edge profile | [#7](https://github.com/jsfakian/Flaminio/issues/7), [#18](https://github.com/jsfakian/Flaminio/issues/18) |

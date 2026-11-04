@@ -1,0 +1,200 @@
+diff --git a/dataplane/crates/flaminio-io/src/ublk.rs b/dataplane/crates/flaminio-io/src/ublk.rs
+index a631933..0141a0f 100644
+--- a/dataplane/crates/flaminio-io/src/ublk.rs
++++ b/dataplane/crates/flaminio-io/src/ublk.rs
+@@ -476,7 +476,7 @@ async fn drive(
+ // --- Phase 1: a volume served by the node engine (flaminio-io node --attach) ---------------
+ 
+ use std::collections::HashMap;
+-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+ use std::sync::mpsc;
+ use std::sync::{Arc, Mutex};
+ use std::thread;
+@@ -523,6 +523,8 @@ struct Shared {
+     verify: bool,
+     /// How long a queue thread checks its ring without sleeping after a completion.
+     poll: Duration,
++    /// PROTOTYPE (#10): writes being copied in (the engine's counter).
++    arrivals: Arc<AtomicUsize>,
+     /// Queue rings with SINGLE_ISSUER and DEFER_TASKRUN (an experiment).
+     defer_taskrun: bool,
+     /// Per queue: what wakes its thread when another thread completes one of its operations.
+@@ -620,7 +622,10 @@ impl EngineCtx {
+     /// Pumps if requests were submitted since the last pump and no write is still being
+     /// staged. Returns whether it did.
+     fn pump_if_due(&self) -> bool {
+-        let due = self.due.get() && self.staging.get() == 0;
++        // PROTOTYPE (#10): FLAMINIO_PUMP_NOWAIT pumps while copies into staging are pending.
++        static NOWAIT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        let nowait = *NOWAIT.get_or_init(|| std::env::var_os("FLAMINIO_PUMP_NOWAIT").is_some());
++        let due = self.due.get() && (self.staging.get() == 0 || nowait);
+         if due {
+             self.pump();
+         }
+@@ -965,6 +970,7 @@ fn run_device(
+     if !verify {
+         eprintln!("flaminio-io: EXPERIMENT: local reads are not checked against their checksums");
+     }
++    let arrivals = engine.arrivals();
+     let shared = Arc::new(Shared {
+         fd: engine.device().as_raw_fd(),
+         device: c.device.clone(),
+@@ -978,6 +984,7 @@ fn run_device(
+         dev_id: ctrl.dev_info().dev_id as i32,
+         verify,
+         poll: Duration::from_micros(c.poll_us),
++        arrivals,
+         defer_taskrun: c.defer_taskrun,
+         wakes,
+     });
+@@ -1364,16 +1371,24 @@ async fn engine_io_task_zc(
+                     .offset(st.offset(tag as usize, 0))
+                     .build();
+                     ctx.staging.set(ctx.staging.get() + 1);
++                    ctx.shared.arrivals.fetch_add(1, Ordering::Relaxed);
+                     let copied = q.ublk_submit_sqe(sqe).await;
+                     ctx.staging.set(ctx.staging.get() - 1);
+                     if copied != n as i32 {
++                        ctx.shared.arrivals.fetch_sub(1, Ordering::Relaxed);
+                         -libc::EIO
+                     } else {
+                         // The one copy of the write's data in user space: into an aligned
+                         // shared buffer, which the store writes as is and the replicas share.
+                         let data =
+-                            st.with_slot(tag as usize, |b| AlignedBuf::shared_copy_of(&b[..n]));
++                            if std::env::var_os("FLAMINIO_WRITE_NOCOPY").is_some() {
++                                // PROTOTYPE (#10), RF 1 measurement only: the slot itself.
++                                st.prototype_bytes(tag as usize, n)
++                            } else {
++                                st.with_slot(tag as usize, |b| AlignedBuf::shared_copy_of(&b[..n]))
++                            };
+                         ctx.submit(Io::Write { offset, data }, done_tx.clone());
++                        ctx.shared.arrivals.fetch_sub(1, Ordering::Relaxed);
+                         match done_rx.recv().await {
+                             Ok(Event::Done(Ok(_))) => len as i32,
+                             Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
+diff --git a/dataplane/crates/flaminio-node/src/engine.rs b/dataplane/crates/flaminio-node/src/engine.rs
+index 95e4f76..f6ef247 100644
+--- a/dataplane/crates/flaminio-node/src/engine.rs
++++ b/dataplane/crates/flaminio-node/src/engine.rs
+@@ -433,6 +433,8 @@ pub struct Engine<D: BlockDevice> {
+     /// the count target as `ceil(bytes / avg_write)`, so 1 MiB traffic packs toward 8 MiB while
+     /// 4K still ends the wait on the time window.
+     commit_target_bytes: u64,
++    /// PROTOTYPE (#10): writes the frontend is copying in.
++    arrivals: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+     /// Local commits since the last report: how many, their writes, how many started when
+     /// their wait for writes to gather ran out, and how many were staged.
+     commit_stats: (u64, u64, u64, u64),
+@@ -485,6 +487,7 @@ impl<D: BlockDevice> Engine<D> {
+             gather_window: DEFAULT_GATHER,
+             gather_timer: None,
+             commit_target_bytes: DEFAULT_COMMIT_TARGET_BYTES,
++            arrivals: Default::default(),
+             commit_stats: (0, 0, 0, 0),
+             async_commits: false,
+             out: Vec::new(),
+@@ -791,6 +794,11 @@ impl<D: BlockDevice> Engine<D> {
+     /// Floor on write-data bytes gathered into one commit (see [`DEFAULT_COMMIT_TARGET_BYTES`]).
+     /// Zero: gather by write count and time only, as before the byte floor. Non-zero also holds
+     /// the staged group after a landing so it can grow to the floor before its flush.
++    /// PROTOTYPE (#10): the frontend counts the writes it is copying in here.
++    pub fn arrivals(&self) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
++        self.arrivals.clone()
++    }
++
+     pub fn set_commit_target_bytes(&mut self, bytes: u64) {
+         self.commit_target_bytes = bytes;
+         self.service.set_hold_staged(bytes > 0);
+@@ -859,7 +867,13 @@ impl<D: BlockDevice> Engine<D> {
+         if count >= target {
+             return (true, false);
+         }
+-        if now >= until {
++        // PROTOTYPE (#10): the window does not end while writes are being copied in, up to
++        // 8 ms more.
++        if now >= until
++            && !(self.commit_target_bytes > 0
++                && self.arrivals.load(std::sync::atomic::Ordering::Relaxed) > 0
++                && now < until + Duration::from_millis(8))
++        {
+             return (true, true);
+         }
+         (false, false)
+@@ -875,11 +889,14 @@ impl<D: BlockDevice> Engine<D> {
+                 return;
+             }
+             // Held staged group: grow it from the local queue, then launch when gather is ready.
+-            if self.commit_target_bytes > 0 && self.staged.is_some() {
++            // PROTOTYPE (#10): also start one when nothing is staged.
++            if self.commit_target_bytes > 0 {
+                 self.stage_local();
+-                self.maybe_launch_staged(now);
+-                if self.staged.is_some() || !self.committing.is_empty() {
+-                    return;
++                if self.staged.is_some() {
++                    self.maybe_launch_staged(now);
++                    if self.staged.is_some() || !self.committing.is_empty() {
++                        return;
++                    }
+                 }
+             }
+             if self.local.is_empty() {
+@@ -992,7 +1009,8 @@ impl<D: BlockDevice> Engine<D> {
+         if !self.async_commits {
+             return;
+         }
+-        let holding = self.commit_target_bytes > 0 && self.staged.is_some();
++        // PROTOTYPE (#10): with a byte floor, stage even when idle.
++        let holding = self.commit_target_bytes > 0;
+         if self.committing.is_empty() && !holding {
+             return;
+         }
+diff --git a/dataplane/crates/flaminio-node/src/replica/mod.rs b/dataplane/crates/flaminio-node/src/replica/mod.rs
+index 684fee5..86ea0b0 100644
+--- a/dataplane/crates/flaminio-node/src/replica/mod.rs
++++ b/dataplane/crates/flaminio-node/src/replica/mod.rs
+@@ -459,7 +459,8 @@ impl<D: BlockDevice> ReplicaService<D> {
+     pub fn stage(&mut self, items: &[(SessionRef, Frame)]) -> usize {
+         // Normally a commit must be in flight. With hold_staged, append to an existing staged
+         // group after that commit landed.
+-        if self.flying.is_empty() && !(self.hold_staged && self.staged.is_some()) {
++        // PROTOTYPE (#10): with hold_staged, a group may start with nothing in flight.
++        if self.flying.is_empty() && !self.hold_staged {
+             return 0;
+         }
+         let mut taken = 0;
+diff --git a/dataplane/crates/flaminio-store/src/store.rs b/dataplane/crates/flaminio-store/src/store.rs
+index 8c53953..8bd7d4c 100644
+--- a/dataplane/crates/flaminio-store/src/store.rs
++++ b/dataplane/crates/flaminio-store/src/store.rs
+@@ -1024,7 +1024,8 @@ impl<D: BlockDevice> Store<D> {
+         }
+         // Normally a commit must be in flight. With hold_staged, append to an existing staged
+         // group after that commit landed (growing toward a byte floor).
+-        if self.in_flight.is_empty() && !(self.hold_staged && self.staged.is_some()) {
++        // PROTOTYPE (#10): with hold_staged, a group may start with nothing in flight.
++        if self.in_flight.is_empty() && !self.hold_staged {
+             return None;
+         }
+         let slot = self.state.slot_of(key).ok()?;
+diff --git a/dataplane/crates/flaminio-uring/src/staging.rs b/dataplane/crates/flaminio-uring/src/staging.rs
+index 079de13..359d7be 100644
+--- a/dataplane/crates/flaminio-uring/src/staging.rs
++++ b/dataplane/crates/flaminio-uring/src/staging.rs
+@@ -88,6 +88,14 @@ impl Staging {
+ 
+     /// Runs `f` on slot `i`. The caller must not have I/O in flight on the slot meanwhile:
+     /// the kernel would write the memory `f` sees.
++    /// PROTOTYPE (#10), for one measurement: the first `n` bytes of slot `i`, not copied. The
++    /// slot can change under the result.
++    pub fn prototype_bytes(&self, i: usize, n: usize) -> bytes::Bytes {
++        let p = self.addr(i, 0, n);
++        // SAFETY: not sound in general (see above); the mapping lives as long as the process.
++        bytes::Bytes::from_static(unsafe { std::slice::from_raw_parts(p, n) })
++    }
++
+     pub fn with_slot<R>(&self, i: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
+         assert!(i < self.slots, "staging slot out of range");
+         assert!(

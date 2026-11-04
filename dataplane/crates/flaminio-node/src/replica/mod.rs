@@ -459,6 +459,16 @@ impl<D: BlockDevice> ReplicaService<D> {
         }
     }
 
+    /// True when several commits may be in flight at once (the store's pipelined commits).
+    pub fn pipelined(&self) -> bool {
+        self.store.pipelined()
+    }
+
+    /// True while staged groups are held (see [`Self::set_hold_staged`]).
+    pub fn holding(&self) -> bool {
+        self.hold_staged
+    }
+
     /// Defers starting the staged group when a commit lands (see [`Store::set_hold_staged`]).
     pub fn set_hold_staged(&mut self, hold: bool) {
         self.hold_staged = hold;
@@ -476,9 +486,9 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// durable (or sooner via [`Self::coalesce_partner`] / [`Self::launch`]). Returns how many
     /// items it took; the rest wait, in order.
     pub fn stage(&mut self, items: &[(SessionRef, Frame)]) -> usize {
-        // Normally a commit must be in flight. With hold_staged, append to an existing staged
-        // group after that commit landed.
-        if self.flying.is_empty() && !(self.hold_staged && self.staged.is_some()) {
+        // Behind a commit in flight; or, with hold_staged, with nothing in flight too: the
+        // writes start or join the held group (docs/issues/10, S2).
+        if self.flying.is_empty() && !self.hold_staged {
             return 0;
         }
         let mut taken = 0;
@@ -626,21 +636,52 @@ impl<D: BlockDevice> ReplicaService<D> {
 
     /// Starts the staged group's commit now, behind the commits in flight, if the store can
     /// (pipelined commits, below their depth: `Store::launch_staged`). Returns whether it did.
+    ///
+    /// A group whose items were all answered without a write (stale epochs, dropped sessions,
+    /// store refusals) has nothing for the store to commit. With nothing in flight it is
+    /// answered now, behind a commit in flight at that commit's landing (docs/issues/10, S5).
     pub fn launch(&mut self) -> bool {
-        match &self.staged {
-            Some(st) if !st.writes.is_empty() => {}
-            // Nothing for the store to commit: it waits for the next landing.
-            _ => return false,
+        let Some(st) = &self.staged else {
+            return false;
+        };
+        if st.writes.is_empty() {
+            if !self.flying.is_empty() {
+                return false;
+            }
+            let st = self.staged.take().expect("staged");
+            self.flying.push_back(st);
+            return true;
         }
+        // A settle behind the engine's back would have started the store's group already,
+        // stranding this one (docs/issues/10, S5).
+        debug_assert!(
+            self.store.holds_group(),
+            "the store lost the staged group's writes"
+        );
         match self.store.launch_staged() {
             Ok(true) => {
                 let st = self.staged.take().expect("staged");
                 self.flying.push_back(st);
                 true
             }
-            // A store failure shows at the next poll.
-            Ok(false) | Err(_) => false,
+            Ok(false) => false,
+            // The store is poisoned now (it was, or the promotion failed): nothing retries.
+            // The group's writes are answered with the error, and the group is answered in its
+            // turn, without the store.
+            Err(e) => {
+                let mut st = self.staged.take().expect("staged");
+                for (at, req) in std::mem::take(&mut st.writes) {
+                    fill(&mut st.replies[at], req, Err(clone_err(&e)));
+                }
+                self.flying.push_back(st);
+                true
+            }
         }
+    }
+
+    /// The store's data cluster size, in bytes.
+    pub fn cluster_size(&self) -> u64 {
+        self.store.cluster_size()
     }
 
     /// The progress of `start` when a commit stays in flight: the requests up to its first

@@ -62,10 +62,12 @@ usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:POR
                            just acknowledged to come back, so that they commit together
                            (default 300; 0: never waits)
       --commit-target-mib N
-                           gather at least N MiB of write data into one commit when the
-                           client's writes are large (default 0: count/time only; try 8)
+                           a commit of large writes starts once it holds N MiB, or the client's
+                           writes outstanding at the last commit (default 8). Its staged group
+                           is held meanwhile, its data written at once (docs/issues/10). 0: gather
+                           by count and time only, as before
       --flush-coalesce N   up to N commits share one fdatasync (0/1: off; 2: partner with
-                           staged early data). Default 0
+                           staged early data; needs --commit-target-mib 0). Default 0
       --sync-commits       commits block the queue thread until durable (as before commits
                            went asynchronous): for comparing
       --pipelined-commits  up to 4 commits in flight (spec §6.2): for measuring. Off by
@@ -219,6 +221,11 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
     // A write or read travels as one frame of at most 1 MiB of data.
     if c.io_buf == 0 || c.io_buf > (1 << 20) || !c.io_buf.is_multiple_of(4096) {
         return Err("--io-buf must be a multiple of 4K, at most 1M".into());
+    }
+    if c.flush_coalesce == 2 && c.commit_target_mib != Some(0) {
+        // While staged groups are held, no partner is ever promoted: a commit's flush would
+        // wait for one as long as writes keep coming.
+        return Err("--flush-coalesce 2 needs --commit-target-mib 0".into());
     }
     if c.defer_taskrun && c.poll_us != 0 {
         // Polling checks the ring without entering the kernel, where deferred completion work
@@ -466,7 +473,50 @@ pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::base64_decode;
+    use super::{base64_decode, parse};
+
+    fn args(extra: &[&str]) -> Vec<String> {
+        let mut a = vec![
+            "--device",
+            "/dev/null",
+            "--node",
+            "n1",
+            "--listen",
+            "127.0.0.1:1",
+            "--meta",
+            "127.0.0.1:2",
+            "--trust-domain",
+            "td",
+        ];
+        a.extend_from_slice(extra);
+        a.into_iter().map(String::from).collect()
+    }
+
+    #[test]
+    fn flush_coalesce_needs_the_floor_off() {
+        let e = parse(&args(&["--flush-coalesce", "2"]))
+            .err()
+            .expect("refused");
+        assert!(e.contains("--commit-target-mib 0"), "{e}");
+        assert!(
+            parse(&args(&[
+                "--flush-coalesce",
+                "2",
+                "--commit-target-mib",
+                "8"
+            ]))
+            .is_err()
+        );
+        let c = parse(&args(&[
+            "--flush-coalesce",
+            "2",
+            "--commit-target-mib",
+            "0",
+        ]))
+        .expect("ok");
+        assert_eq!((c.flush_coalesce, c.commit_target_mib), (2, Some(0)));
+        assert!(parse(&args(&["--flush-coalesce", "1"])).is_ok());
+    }
 
     #[test]
     fn base64() {

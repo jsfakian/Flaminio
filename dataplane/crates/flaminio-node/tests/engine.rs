@@ -1689,8 +1689,9 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         );
     }
 
-    // Byte floor: after four 1 MiB whole-cluster writes, the next commit waits for eight (8 MiB)
-    // before starting, so one flush covers a full QD8 of 1 MiB traffic.
+    // Holding (docs/issues/10): after a commit of four 1 MiB whole-cluster writes, the next group
+    // waits for the writes outstanding at the landing, four, not for its window (10 s here) nor for
+    // 8 MiB. Their data goes to the disk as each is staged, with nothing in flight.
     engine.set_commit_target_bytes(8 << 20);
     engine.set_commit_gather(Duration::from_secs(10));
     let write_mib = |engine: &mut Engine<DeferredDevice>, op: u64, i: u64| {
@@ -1713,28 +1714,50 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     assert!(engine.device().in_flight());
     engine.device().complete();
     acked(&mut engine, &mut buf, 20..=23);
-    // Four more would match the previous count target; the byte floor raises it to eight.
     for (op, i) in [(24u64, 0u64), (25, 1), (26, 2), (27, 3)] {
         write_mib(&mut engine, op, i);
     }
     run(&mut engine, &mut buf, 20, &done(24));
     assert!(
-        !engine.device().in_flight(),
-        "byte floor: four 1 MiB writes are not enough"
+        engine.device().in_flight(),
+        "count rule: the four writes outstanding at the landing are back"
     );
+    assert_eq!(
+        engine.device().pending_writes(),
+        1,
+        "their batch only: their data was written as each was staged"
+    );
+    engine.device().complete();
+    acked(&mut engine, &mut buf, 24..=27);
+
+    // The 8 MiB rule on its own: eight 1 MiB writes staged behind a commit in flight start at
+    // its landing, without waiting for the landed commit's writes to come back.
     for (op, i) in [(28u64, 4u64), (29, 5), (30, 6), (31, 7)] {
         write_mib(&mut engine, op, i);
     }
-    run(&mut engine, &mut buf, 5, &done(24));
+    run(&mut engine, &mut buf, 20, &done(28));
+    assert!(engine.device().in_flight(), "four, by the count rule");
+    for op in 32u64..40 {
+        write_mib(&mut engine, op, op - 24);
+    }
+    run(&mut engine, &mut buf, 5, &done(28));
     assert_eq!(
-        engine.device().pending_writes(),
-        9,
-        "eight 1 MiB writes in one commit (8 data + journal)"
+        engine.device().commits_in_flight(),
+        1,
+        "the eight are staged behind it"
     );
-    // Arm the next gather with a short window before this commit lands.
+    // Arm the next gather with a short window before these commits land.
     engine.set_commit_gather(Duration::from_millis(5));
     engine.device().complete();
-    acked(&mut engine, &mut buf, 24..=31);
+    acked(&mut engine, &mut buf, 28..=31);
+    run(&mut engine, &mut buf, 1, &done(32));
+    assert!(
+        engine.device().in_flight(),
+        "8 MiB staged: their commit started at the landing"
+    );
+    assert_eq!(engine.device().pending_writes(), 1, "their batch only");
+    engine.device().complete();
+    acked(&mut engine, &mut buf, 32..=39);
 
     // 4K path: byte floor does not hold the commit for 8 MiB; the gather window ends it.
     engine.handle(
@@ -2020,4 +2043,538 @@ fn a_drop_under_a_target_of_the_earlier_volume_fails_its_io() {
         .unwrap();
     assert!(got == pattern(2, 64 << 10), "the new volume is untouched");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An engine with asynchronous commits on a deferred device (commits complete on command), and
+/// volume "v" (16 MiB) attached, for the tests of held groups (docs/issues/10). Built with the
+/// engine's defaults: the 8 MiB floor, so groups are held.
+struct Holding {
+    engine: Engine<flaminio_store::DeferredDevice>,
+    rx: mpsc::Receiver<Input>,
+    dir: std::path::PathBuf,
+    buf: Vec<u8>,
+    arrivals: Arc<std::sync::atomic::AtomicUsize>,
+    model: Arc<Mutex<Model>>,
+}
+
+impl Holding {
+    fn new(name: &str) -> Self {
+        use flaminio_store::DeferredDevice;
+        let dir = std::env::temp_dir().join(format!("flaminio-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ids = identities(&dir);
+        let files = &ids["fl-a"];
+        let model = Arc::new(Mutex::new(Model::default()));
+        let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel::<Input>();
+        let sink_tx = Mutex::new(tx.clone());
+        let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let net = net::spawn(
+            NetConfig {
+                trust_domain: TD.into(),
+                server: Some(ServerSide {
+                    listener,
+                    tls: files.server_config().unwrap(),
+                    token_key: TokenKey::from_raw(signer.public_key().as_ref()).unwrap(),
+                }),
+                client: Some(files.client_config().unwrap()),
+            },
+            Arc::new(move |e| {
+                let _ = sink_tx.lock().unwrap().send(Input::Net(e));
+            }),
+        )
+        .unwrap();
+        let cfg = EngineConfig {
+            node: "fl-a".into(),
+            address: addr.to_string(),
+            timing: Timing::default(),
+            max_io: 64,
+            heartbeat: None,
+        };
+        let meta = Box::new(FakeMeta {
+            model: model.clone(),
+            inbox: tx.clone(),
+        });
+        let dev = store().into_device();
+        let deferred = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
+        let mut engine = Engine::new(cfg, ReplicaService::new(deferred), net, meta);
+        engine.set_async_commits(Instant::now(), true);
+        let arrivals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        engine.set_arrivals(arrivals.clone());
+        model.lock().unwrap().volume = Some(pb::Volume {
+            id: "v".into(),
+            size_bytes: 4 * CHUNK,
+            chunk_bytes: CHUNK,
+            replicas: 1,
+            min_isr: 1,
+            epoch: 1,
+            target: "fl-a".into(),
+            chunks: (0..4)
+                .map(|_| pb::ChunkMeta {
+                    replicas: vec!["fl-a".into()],
+                    isr: vec!["fl-a".into()],
+                    isr_ver: 0,
+                    ..Default::default()
+                })
+                .collect(),
+        });
+        let mut h = Holding {
+            engine,
+            rx,
+            dir,
+            buf: vec![0u8; MIB as usize],
+            arrivals,
+            model,
+        };
+        h.engine.handle(
+            Instant::now(),
+            Input::Attach {
+                volume: "v".into(),
+                token: token(&signer, "v", 1, "fl-a"),
+            },
+        );
+        h.run(20_000, &|o| matches!(o, Output::Attached { .. }));
+        h
+    }
+
+    /// Drives the engine for `turns` turns of about 1 ms, or until an output matches `want`,
+    /// playing the frontend for local reads. Returns the outputs that matched.
+    fn run(&mut self, turns: usize, want: &dyn Fn(&Output) -> bool) -> Vec<Output> {
+        use flaminio_store::BlockDevice;
+        let mut got = Vec::new();
+        for _ in 0..turns {
+            let now = Instant::now();
+            while let Ok(i) = self.rx.try_recv() {
+                self.engine.handle(now, i);
+            }
+            self.engine.turn(now);
+            for o in self.engine.take_output() {
+                if let Output::LocalRead(lr) = &o {
+                    let piece = &mut self.buf[lr.at..lr.at + lr.len];
+                    let plan = self.engine.plan_local_read(lr, piece).unwrap();
+                    for r in plan.reads() {
+                        let (o, n) = (r.buf_offset, r.len);
+                        self.engine
+                            .device()
+                            .read_at(r.device_offset, &mut piece[o..o + n])
+                            .unwrap();
+                    }
+                    let ok = plan.verify(&self.buf[lr.at..lr.at + lr.len]).is_ok();
+                    self.engine
+                        .local_read_done(Instant::now(), lr, Some(plan), ok);
+                    continue;
+                }
+                if want(&o) {
+                    got.push(o);
+                }
+            }
+            if !got.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        got
+    }
+
+    fn write(&mut self, op: u64, offset: u64, len: u64) {
+        self.engine.handle(
+            Instant::now(),
+            Input::Io {
+                volume: "v".into(),
+                op,
+                io: Io::Write {
+                    offset,
+                    data: pattern(op as u8, len).into(),
+                },
+            },
+        );
+    }
+
+    /// Drives the engine until every write of `ops` is acknowledged, completing commits as they
+    /// come.
+    fn acked(&mut self, ops: std::ops::RangeInclusive<u64>) {
+        let mut n = 0;
+        let want = ops.clone().count();
+        for _ in 0..20_000 {
+            if self.engine.device().in_flight() {
+                self.engine.device().complete();
+            }
+            n += self
+                .run(
+                    1,
+                    &|o| matches!(o, Output::Done { op, result: Ok(_) } if ops.contains(op)),
+                )
+                .len();
+            if n == want {
+                return;
+            }
+        }
+        panic!("writes {ops:?} not acknowledged ({n} of {want})");
+    }
+
+    /// Turns the engine for `turns` turns without completing anything.
+    fn idle(&mut self, turns: usize) {
+        self.run(turns, &|_| false);
+    }
+
+    fn in_flight(&self) -> bool {
+        self.engine.device().in_flight()
+    }
+
+    fn reads_back(&mut self, op: u64, offset: u64, len: u64) {
+        self.engine.handle(
+            Instant::now(),
+            Input::Io {
+                volume: "v".into(),
+                op: 1000 + op,
+                io: Io::ReadDirect { offset, len },
+            },
+        );
+        let done = self.run(
+            20_000,
+            &|o| matches!(o, Output::Done { op: d, .. } if *d == 1000 + op),
+        );
+        assert_eq!(done.len(), 1, "read of write {op}");
+        assert!(
+            self.buf[..len as usize] == pattern(op as u8, len),
+            "write {op} reads back"
+        );
+    }
+}
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Held groups (docs/issues/10): what a default-built engine does with large writes, and every path
+/// that settles the store with a group held.
+#[test]
+fn holding_staged_groups() {
+    use std::sync::atomic::Ordering;
+    let mut h = Holding::new("holding");
+    assert!(h.engine.holding(), "the default floor holds groups");
+    h.engine.set_commit_gather(Duration::from_millis(1)); // 2 ms for large writes
+
+    // A stream of four 1 MiB writes at a time: each round's group is staged, its data written
+    // at once, and starts by the count rule, not the 10 s window.
+    for round in 0..3u64 {
+        let base = 10 + round * 4;
+        for k in 0..4 {
+            h.write(base + k, k * MIB, MIB);
+        }
+        h.idle(5);
+        assert!(
+            h.in_flight(),
+            "round {round}: started without waiting for the window"
+        );
+        assert_eq!(
+            h.engine.device().pending_writes(),
+            1,
+            "round {round}: the batch only, the data written as it was staged"
+        );
+        h.acked(base..=base + 3);
+    }
+    h.reads_back(19, MIB, MIB); // the last round: writes 18-21 at 0-3 MiB
+
+    // At depth 1: after a commit of one write, the next starts at once (the count target is 1),
+    // without waiting for the window. Write 29 waits for the four of the last landing, the
+    // window, then starts alone; its landing arms a wait of 10 s for one write.
+    h.write(29, 4 * MIB, MIB);
+    while !h.in_flight() {
+        h.idle(1);
+    }
+    h.engine.set_commit_gather(Duration::from_secs(10));
+    h.acked(29..=29);
+    for op in 30..34u64 {
+        h.write(op, 4 * MIB, MIB);
+        h.idle(3);
+        assert!(
+            h.in_flight(),
+            "write {op} started without waiting for the window"
+        );
+        h.acked(op..=op);
+    }
+
+    // The two halves of a 1 MiB write join one commit: the second is still being copied in when
+    // the first reaches the engine, from a wait whose target is 1.
+    h.arrivals.store(1, Ordering::Relaxed);
+    h.write(40, 5 * MIB, MIB / 2);
+    h.idle(5);
+    assert!(
+        !h.in_flight(),
+        "the first half waits for its partner being copied in"
+    );
+    h.arrivals.store(0, Ordering::Relaxed);
+    h.write(41, 5 * MIB + MIB / 2, MIB / 2);
+    h.idle(3);
+    assert!(h.in_flight());
+    assert_eq!(
+        h.engine.device().commits_in_flight(),
+        1,
+        "one commit for both halves"
+    );
+    h.acked(40..=41);
+
+    // Past its window, a wait whose writes are not all back goes on while writes are being
+    // copied in, until they are, and at most 8 ms more.
+    h.engine.set_commit_gather(Duration::from_millis(1)); // 2 ms for large writes
+    h.write(42, 6 * MIB, MIB);
+    h.write(43, 7 * MIB, MIB);
+    h.idle(3);
+    assert!(h.in_flight(), "two writes, by the count rule");
+    h.acked(42..=43); // a landing of two: the next wait's target is 2
+    h.arrivals.store(1, Ordering::Relaxed);
+    h.write(44, 6 * MIB, MIB);
+    h.idle(5);
+    assert!(
+        !h.in_flight(),
+        "held past the 2 ms window while a write is being copied in"
+    );
+    h.arrivals.store(0, Ordering::Relaxed);
+    h.idle(3);
+    assert!(h.in_flight(), "started once nothing is being copied in");
+    h.acked(44..=44);
+    h.write(45, 7 * MIB, MIB);
+    h.idle(3);
+    h.acked(45..=45);
+    h.write(46, 6 * MIB, MIB);
+    h.write(47, 7 * MIB, MIB);
+    h.idle(3);
+    h.acked(46..=47);
+    h.arrivals.store(1, Ordering::Relaxed);
+    let t = Instant::now();
+    h.write(48, 6 * MIB, MIB);
+    while !h.in_flight() {
+        h.idle(1);
+        assert!(
+            t.elapsed() < Duration::from_secs(1),
+            "the limit ends the wait"
+        );
+    }
+    assert!(
+        t.elapsed() >= Duration::from_millis(9),
+        "not before the window and the limit ({:?})",
+        t.elapsed()
+    );
+    h.acked(48..=48);
+    // A small-write wait never holds for writes being copied in.
+    h.write(49, 8 * MIB, 4096);
+    h.idle(3);
+    h.acked(49..=49);
+    h.write(50, 8 * MIB + 4096, 4096);
+    h.idle(3);
+    assert!(h.in_flight(), "4K started without waiting on arrivals");
+    h.acked(50..=50);
+    h.arrivals.store(0, Ordering::Relaxed);
+
+    // A small write queued behind a held group starts it, as the group can take no more writes
+    // in order; the small write commits after it.
+    h.engine.set_commit_gather(Duration::from_secs(10));
+    h.write(51, 9 * MIB, MIB);
+    h.write(52, 10 * MIB, MIB);
+    h.idle(3);
+    h.acked(51..=52); // the next wait's target is 2
+    h.write(53, 9 * MIB, MIB);
+    h.idle(3);
+    assert!(!h.in_flight(), "the group waits for its second write");
+    // Elsewhere: a write overlapping 53 would wait in the target for 53 to complete.
+    h.write(54, 13 * MIB, 4096);
+    h.idle(3);
+    assert!(h.in_flight(), "the 4K behind the group started it");
+    assert_eq!(
+        h.engine.device().commits_in_flight(),
+        1,
+        "the group's commit; the 4K's comes after it"
+    );
+    // At the group's landing the 4K starts, with no wait (the window here is 10 s, and a
+    // session's request times out after 3 s).
+    let t = Instant::now();
+    h.acked(53..=53);
+    h.idle(3);
+    assert!(
+        h.in_flight(),
+        "the 4K's commit started at the group's landing"
+    );
+    h.acked(54..=54);
+    assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+    h.reads_back(53, 9 * MIB, MIB);
+    h.reads_back(54, 13 * MIB, 4096);
+
+    // Every path that settles the store, with a group held (its wait 10 s, its count not met),
+    // starts it and returns.
+    let hold = |h: &mut Holding, op: u64| {
+        h.write(op, 11 * MIB, MIB);
+        h.write(op + 1, 12 * MIB, MIB);
+        h.idle(3);
+        h.acked(op..=op + 1); // target 2 next
+        h.write(op + 2, 11 * MIB, MIB);
+        h.idle(3);
+        assert!(!h.in_flight(), "write {}: held", op + 2);
+    };
+    // Inspecting the local replica.
+    hold(&mut h, 60);
+    let (tx, rx) = mpsc::channel();
+    h.engine.handle(
+        Instant::now(),
+        Input::InspectLocal {
+            volume: "v".into(),
+            offset: 11 * MIB,
+            len: 4096,
+            reply: tx,
+        },
+    );
+    let got = rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .expect("inspected");
+    assert_eq!(
+        got[..],
+        pattern(62, MIB)[..4096],
+        "the held group is durable first"
+    );
+    h.acked(62..=62);
+    // Deleting another volume's replicas.
+    hold(&mut h, 70);
+    let (tx, rx) = mpsc::channel();
+    h.engine.handle(
+        Instant::now(),
+        Input::DeleteReplicas {
+            volume: "w".into(),
+            reply: tx,
+        },
+    );
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .expect("deleted");
+    h.acked(72..=72);
+    // A peer opening a session (its Hello fences the store).
+    hold(&mut h, 80);
+    let (replies, peer) = smol::channel::unbounded();
+    h.engine.handle(
+        Instant::now(),
+        Input::Net(net::NetEvent::Opened {
+            conn: 99,
+            accepted: Box::new(flaminio_net::session::Accepted {
+                peer_node: "fl-b".into(),
+                req: 1,
+                epoch: 1,
+                session: 7,
+                claims: flaminio_net::token::Claims {
+                    volume: "w".into(),
+                    epoch: 1,
+                    node: "fl-b".into(),
+                    issued_at: 0,
+                    first_epoch: 0,
+                },
+                size: CHUNK,
+                chunk_size: CHUNK,
+                chunks: vec![0],
+            }),
+            replies,
+        }),
+    );
+    assert!(peer.try_recv().is_ok(), "the Hello was answered");
+    h.acked(82..=82);
+    // Turning asynchronous commits off (detach), with a commit in flight, a group staged
+    // behind it, and a request queued behind the group.
+    h.write(90, 11 * MIB, MIB);
+    h.write(91, 12 * MIB, MIB);
+    h.idle(3);
+    assert!(h.in_flight(), "two, by the count rule");
+    h.write(92, 13 * MIB, MIB); // staged behind the commit in flight
+    h.write(93, 14 * MIB + MIB / 2, 4096); // queued behind the group
+    h.idle(3);
+    assert_eq!(h.engine.device().commits_in_flight(), 1);
+    h.engine.set_async_commits(Instant::now(), false);
+    let mut answered = Vec::new();
+    for _ in 0..100 {
+        for o in h.run(1, &|o| matches!(o, Output::Done { op: 90..=93, .. })) {
+            if let Output::Done { op, result } = o {
+                assert!(result.is_ok(), "write {op}: {result:?}");
+                answered.push(op);
+            }
+        }
+        if answered.len() == 4 {
+            break;
+        }
+    }
+    answered.sort();
+    assert_eq!(
+        answered,
+        [90, 91, 92, 93],
+        "every write answered, none refused"
+    );
+    h.reads_back(92, 13 * MIB, MIB);
+    h.reads_back(93, 14 * MIB + MIB / 2, 4096);
+}
+
+/// The attach path's Hello (a target opening its local replica's session) fences the store,
+/// which settles it: a held group starts first, and its writes are answered once durable, not
+/// before and not stranded (docs/issues/10, S5).
+#[test]
+fn an_attach_settles_a_held_group() {
+    let mut h = Holding::new("holding-attach");
+    h.engine.set_commit_gather(Duration::from_millis(1));
+    h.write(1, 0, MIB);
+    while !h.in_flight() {
+        h.idle(1);
+    }
+    h.acked(1..=1); // a landing of one: the next wait's target is 1
+    h.engine.set_commit_gather(Duration::from_secs(10));
+    h.write(2, 0, MIB);
+    h.write(3, MIB, MIB);
+    h.idle(3);
+    h.acked(2..=3); // target 2 next
+    h.write(4, 0, MIB);
+    h.idle(3);
+    assert!(!h.in_flight(), "write 4: held");
+
+    // Attaching a second volume: its target says Hello to the local replica.
+    {
+        let mut m = h.model.lock().unwrap();
+        let mut w = m.volume.clone().unwrap();
+        w.id = "w".into();
+        m.volume = Some(w);
+    }
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    h.engine.handle(
+        Instant::now(),
+        Input::Attach {
+            volume: "w".into(),
+            token: token(&signer, "w", 1, "fl-a"),
+        },
+    );
+    // The test completes no commit: write 4 is durable only if the Hello's settle waited for it.
+    let (mut attached, mut acked) = (false, false);
+    for _ in 0..5_000 {
+        let got = h.run(1, &|o| {
+            matches!(o, Output::Attached { .. } | Output::Done { op: 4, .. })
+        });
+        for o in got {
+            match o {
+                Output::Attached { volume, .. } => {
+                    assert_eq!(volume, "w");
+                    attached = true;
+                }
+                Output::Done { result, .. } => {
+                    assert!(result.is_ok(), "write 4: {result:?}");
+                    assert!(!h.in_flight(), "write 4 answered once durable");
+                    acked = true;
+                }
+                _ => {}
+            }
+        }
+        if attached && acked {
+            break;
+        }
+    }
+    assert!(attached, "w attached");
+    assert!(acked, "the held write answered, not stranded");
+    h.reads_back(4, 0, MIB);
+    h.write(5, MIB, MIB);
+    h.acked(5..=5);
+    h.reads_back(5, MIB, MIB);
 }
