@@ -2325,14 +2325,45 @@ fn holding_staged_groups() {
     h.write(43, 7 * MIB, MIB);
     h.idle(3);
     assert!(h.in_flight(), "two writes, by the count rule");
+    let data = pattern(44, MIB).into(); // built before the landing: it takes milliseconds
     h.acked(42..=43); // a landing of two: the next wait's target is 2
+    // The landing armed the wait; the harness never takes its timer, so this is the window's end.
+    let until = h
+        .engine
+        .take_gather_timer()
+        .expect("the landing arms a wait");
     h.arrivals.store(1, Ordering::Relaxed);
-    h.write(44, 6 * MIB, MIB);
-    h.idle(5);
-    assert!(
-        !h.in_flight(),
-        "held past the 2 ms window while a write is being copied in"
+    h.engine.handle(
+        Instant::now(),
+        Input::Io {
+            volume: "v".into(),
+            op: 44,
+            io: Io::Write {
+                offset: 6 * MIB,
+                data,
+            },
+        },
     );
+    // Turns as `run` does, at instants of our own, until one is past the window: the hold ends
+    // 8 ms after the window by the clock, not by turns, and a slow build (the sanitizers) can be
+    // past that already, where the turn shows nothing.
+    loop {
+        let now = Instant::now();
+        while let Ok(i) = h.rx.try_recv() {
+            h.engine.handle(now, i);
+        }
+        h.engine.turn(now);
+        if now >= until {
+            if now < until + Duration::from_millis(8) {
+                assert!(
+                    !h.in_flight(),
+                    "held past the 2 ms window while a write is being copied in"
+                );
+            }
+            break;
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
     h.arrivals.store(0, Ordering::Relaxed);
     h.idle(3);
     assert!(h.in_flight(), "started once nothing is being copied in");
