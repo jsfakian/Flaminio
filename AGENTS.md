@@ -51,11 +51,12 @@ Use the Makefile; `make help` lists everything.
 ```bash
 make build test      # debug build; Rust and Go tests, fuzz regression inputs
 make lint            # clippy -D warnings, rustfmt, go vet, gofmt, buf lint, shellcheck, actionlint, script tests
-make race hygiene contracts sim   # the rest of what CI runs on a pull request (docs/ci.md)
+make race hygiene contracts sim   # the rest of what CI runs on a pull request (docs/ci.md),
+make sanitize QUICK=1             # with the sanitizers' quick run (Linux, nightly toolchain)
 make fmt             # format Rust and Go
 make proto           # regenerate api/gen after an api/proto change
 make meta-vectors    # regenerate the metadata transition vectors from the Rust model
-make crash-test miri sanitize     # longer or nightly checks
+make crash-test miri sanitize     # longer or nightly checks (sanitize in full)
 ```
 
 Before a pull request: `make lint test race hygiene contracts`. Lab targets (`make deploy`,

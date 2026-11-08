@@ -39,6 +39,9 @@ COUNT     ?= 1
 SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net
 # Instrumented builds go apart from the normal ones, under CARGO_TARGET_DIR when it is set (CI).
 SANITIZE_TARGET := $(or $(CARGO_TARGET_DIR),target)
+# QUICK=1 (pull requests): ThreadSanitizer skips the store's two long single-threaded tests, where
+# it can find nothing; 3.5 of its 4 minutes. AddressSanitizer still runs them.
+SANITIZE_TSAN_SKIP := $(if $(QUICK),-- --skip power_loss_anywhere --skip a_power_cut_with_commits_in_flight_keeps_a_prefix_of_them)
 
 .PHONY: help
 help: ## Show this help
@@ -127,11 +130,11 @@ contracts: ## Generated code and vectors match their sources; fuzz lockfile; Rus
 miri: ## Miri (nightly) on the data plane's unsafe code that runs without system calls
 	cd $(DATAPLANE) && MIRIFLAGS=-Zmiri-strict-provenance $(CARGO) +$(NIGHTLY) miri test -p flaminio-uring --lib aligned::tests::
 
-sanitize: ## AddressSanitizer with leak detection, then ThreadSanitizer, on the data plane's tests (Linux, nightly)
+sanitize: ## AddressSanitizer with leak detection, then ThreadSanitizer, on the data plane's tests (Linux, nightly; QUICK=1 for pull requests)
 	cd $(DATAPLANE) && CARGO_TARGET_DIR=$(SANITIZE_TARGET)/asan RUSTFLAGS=-Zsanitizer=address \
 	    $(CARGO) +$(NIGHTLY) test --target x86_64-unknown-linux-gnu $(SANITIZE_CRATES) --lib --tests
 	cd $(DATAPLANE) && CARGO_TARGET_DIR=$(SANITIZE_TARGET)/tsan RUSTFLAGS=-Zsanitizer=thread \
-	    $(CARGO) +$(NIGHTLY) test -Zbuild-std --target x86_64-unknown-linux-gnu $(SANITIZE_CRATES) --lib --tests
+	    $(CARGO) +$(NIGHTLY) test -Zbuild-std --target x86_64-unknown-linux-gnu $(SANITIZE_CRATES) --lib --tests $(SANITIZE_TSAN_SKIP)
 
 disk-demo: release ## Format and inspect a sparse disk image (IMAGE, IMAGE_SIZE)
 	@mkdir -p $(dir $(IMAGE))
