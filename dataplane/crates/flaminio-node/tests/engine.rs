@@ -418,6 +418,19 @@ fn replicated_volume_through_a_replica_failure() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Timing with no heartbeat, lease renewal or volume refresh within a test. A test that counts
+/// commits or device writes needs it: a heartbeat queued behind writes changes how they go to
+/// the store (it starts a held group, and the writes behind it are not staged), and at 1 s
+/// heartbeats fall inside such a test once the sanitizers slow it down.
+fn quiet() -> Timing {
+    Timing {
+        lease: 600_000_000,
+        heartbeat: 300_000_000,
+        refresh: 300_000_000,
+        ..Timing::default()
+    }
+}
+
 /// An engine on `name` for the tests to drive by hand, as the ublk frontend's threads do: its
 /// inputs (network events, metadata answers) arrive on the receiver.
 fn hand_driven(
@@ -1055,18 +1068,12 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
     let model = Arc::new(Mutex::new(Model::default()));
     let signer = Ed25519KeyPair::from_seed_unchecked(&[10; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
-    let quiet = Timing {
-        lease: 600_000_000,
-        heartbeat: 300_000_000,
-        refresh: 300_000_000,
-        ..Timing::default()
-    };
     let (mut engine, rx) = hand_driven(
         "fl-a",
         &ids["fl-a"],
         key.clone(),
         model.clone(),
-        quiet,
+        quiet(),
         None,
     );
     let b = start_node("fl-b", &ids["fl-b"], key, model.clone());
@@ -1417,7 +1424,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     let cfg = EngineConfig {
         node: "fl-a".into(),
         address: addr.to_string(),
-        timing: Timing::default(),
+        timing: quiet(),
         max_io: 64,
         heartbeat: None,
     };
@@ -2088,7 +2095,7 @@ impl Holding {
         let cfg = EngineConfig {
             node: "fl-a".into(),
             address: addr.to_string(),
-            timing: Timing::default(),
+            timing: quiet(),
             max_io: 64,
             heartbeat: None,
         };
@@ -2326,8 +2333,9 @@ fn holding_staged_groups() {
     h.idle(3);
     assert!(h.in_flight(), "two writes, by the count rule");
     let data = pattern(44, MIB).into(); // built before the landing: it takes milliseconds
+    h.engine.take_gather_timer(); // an earlier wait's
     h.acked(42..=43); // a landing of two: the next wait's target is 2
-    // The landing armed the wait; the harness never takes its timer, so this is the window's end.
+    // The landing armed the wait, and the harness takes no timer: this is the window's end.
     let until = h
         .engine
         .take_gather_timer()

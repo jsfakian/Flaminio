@@ -10,7 +10,7 @@ command.
 
 | Workflow | When | Jobs (each one `make` target) |
 |---|---|---|
-| [CI](../.github/workflows/ci.yml) | every pull request and push to `main` | `lint`; Rust tests (`cargo test --locked`, then `fuzz-regressions`); `race`; `hygiene`; `contracts`; `sim` |
+| [CI](../.github/workflows/ci.yml) | every pull request and push to `main` | `lint`; Rust tests (`cargo test --locked`, then `fuzz-regressions`); `race`; `hygiene`; `contracts`; `sim`; `sanitize QUICK=1` |
 | [Nightly](../.github/workflows/nightly.yml) | 01:00 UTC, and by hand | simulation of 200 000 seeds starting from a new one each day; `crash-test`; `race COUNT=20`; `sanitize`; `miri`; `hygiene` |
 | [Fuzz](../.github/workflows/fuzz.yml) | Saturdays 02:00 UTC, and by hand | `fuzz`, 10 minutes per target; the corpus carries over between runs; failing inputs are kept and reported (see [Fuzzing](#fuzzing)) |
 | [Lab](../.github/workflows/lab.yml) | by hand only | one lab check on the lab VMs, from the lab runner |
@@ -35,7 +35,12 @@ What the targets check:
 - **`sim`:** the replication-protocol simulator, 20 000 random runs, then every injected bug
   must be caught.
 - **`sanitize`** (nightly toolchain): the tests of the crates with threads, io_uring or unsafe code
-  under AddressSanitizer, which also reports memory leaks, then ThreadSanitizer.
+  under AddressSanitizer, which also reports memory leaks, then ThreadSanitizer. With `QUICK=1`
+  (pull requests), ThreadSanitizer skips the store's two long single-threaded tests
+  (`power_loss_anywhere`, `a_power_cut_with_commits_in_flight_keeps_a_prefix_of_them`), where it
+  can find nothing: about a minute instead of five. The sanitizers slow the tests down several
+  times, so a test that counts commits or device writes must not depend on how fast it runs;
+  the engine tests use `quiet()` timing, with no heartbeat inside a test.
 - **`miri`** (nightly toolchain): the unsafe code that runs without system calls, the aligned
   buffers of `flaminio-uring`, under Miri with strict provenance.
 - **Store space:** `chunk_churn_leaves_no_space_behind` (in `cargo test`) creates, writes and
@@ -86,7 +91,7 @@ that branch: `cd dataplane/fuzz && cargo update --workspace`, then commit and pu
 
 | Runner | Label | Runs |
 |---|---|---|
-| `centaur-flaminio-1` … `-4` | `flaminio` | CI, Nightly, Fuzz |
+| `centaur-flaminio-1` … `-5` | `flaminio` | CI, Nightly, Fuzz |
 | `centaur-flaminio-lab` | `flaminio-lab` | Lab, one check at a time |
 
 Each runner is a systemd user service, `actions-runner-<name>`, in `~/actions-runners/<name>`,
@@ -99,7 +104,7 @@ from scratch.
 
 ```sh
 scripts/ci/runner-host.sh tools                      # packages, Rust toolchains, cargo tools
-scripts/ci/runner-host.sh runner flaminio-5 flaminio # one more CI runner
+scripts/ci/runner-host.sh runner flaminio-6 flaminio # one more CI runner
 scripts/ci/runner-host.sh runner flaminio-lab flaminio-lab
 ```
 
