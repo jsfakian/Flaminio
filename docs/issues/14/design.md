@@ -1,21 +1,28 @@
 # Issue #14: Tombstones on nodes outside Kubernetes — design
 
-How the [spec](spec.md)'s rules are built. Settled choices: [decisions](decisions.md).
+How the [spec](spec.md)'s rules are built. Settled choices: [decisions](decisions.md). Steps up
+to the one-time cleanup shipped (pull request #31), as written here; what is left is "The next
+step", at the end.
 
-The facts it starts from:
+The facts it starts from, as the code stands after #30:
 - `DeleteVolume` writes the tombstone with the nodes `replicaNodes` finds (replicas, and a
   moving chunk's source and destination); `CreateVolume` refuses an id with one;
   `ConfirmDeletion` succeeds for a missing tombstone and answers `InvalidArgument` for a node not
-  on an existing one; `ListVolumes` skips headers being created or deleted
-  (`meta/service/service.go`).
+  on an existing one; `ListVolumes` skips headers being created or deleted, and `get` answers
+  `NotFound` for them (`meta/service/service.go`).
+- A volume created again starts at its claim's revision, above every epoch of its name, and its
+  first `hello` on a node drops the chunks of the name fenced below that (#30;
+  `createVolume`, `replica/mod.rs`).
 - `Authorize` lets an administrator list and confirm for any node, a node's agent for itself;
   `pki.PeerIdentity` takes the leaf's single URI SAN in the trust domain (`meta/service/auth.go`,
   `pkg/pki/pki.go`).
 - The CSI sweep lists, deletes through the control socket, then confirms, every 5 s
   (`control/csi/tombstones.go`). The control socket's delete refuses a volume attached on that
-  node and deletes under epoch `u64::MAX` (`dataplane/crates/flaminio-node/src/engine.rs`,
+  node and deletes every chunk of the name, whatever its fence (`Store::delete_volume(uuid,
+  None)` since #30's D13; `dataplane/crates/flaminio-node/src/engine.rs`,
   `dataplane/crates/flaminio-node/src/replica/mod.rs`).
-- `node.sh delete` today succeeds silently when the node is not running.
+- `node.sh delete` succeeded silently when the node was not running, before step 2; it now
+  prints `not running`, exit 3 (below).
 
 **Every data node,** below: `vms_of all` (fl-a, fl-b), and `$VM_C` once it is created.
 
@@ -48,7 +55,8 @@ The facts it starts from:
   4. **Listed:** `ConfirmDeletion`. Stdout: the tombstone as read, `pending` less the node.
      Errors: the service's (`rpc error: code = ...`), exit 1.
 - **Usage text:** the doc comment and usage line say `lab.sh vol-confirm` is the only supported
-  entry point, never shell history, and what a wrong confirmation does.
+  entry point, never shell history, and what a wrong confirmation does, as S2 says. The shipped
+  wording predates #30: the next step corrects it.
 
 ## The service (S4)
 
@@ -57,7 +65,8 @@ the node was not confirmed before, one `slog.Info`: the caller (`callerOf`; "una
 without), the peer address (`peer.FromContext`), the certificate serial (from the peer's TLS
 state), the volume, the node, the nodes still pending, the revision. No line on a retry's
 failed attempt, a missing tombstone, or a repeat. A write committed by etcd whose answer was lost
-and that the client retries (`meta/kv/etcd.go`) finds the node confirmed: no line.
+and that the client retries (`meta/kv/etcd.go`) finds the node confirmed, or, when it was the
+last confirmation, no tombstone: no line.
 
 ## node.sh (S5, S7)
 
@@ -67,10 +76,12 @@ and that the client retries (`meta/kv/etcd.go`) finds the node confirmed: no lin
 - **`detach`:** `detached` (0), `not attached` (0), `not running` (3), else 1.
 - **`control()`** moves to `scripts/guest/common.sh`, which `run_on_vm` and `run_detached`
   prepend to every guest script (its comment says both), so `confirm.sh` uses the same one.
-  The socket path is a variable passed to `python3` as an argument (`sudo` resets the
-  environment).
-- **Callers that do not redirect stdout** get `>/dev/null`: `cmd_vol` (attach, detach),
-  `cmd_partition`'s detach, the CSI cleanup's, the drain test's, and `scripts/checks/reconcile.sh`.
+  The socket path, `/run/flaminio/node.sock`, is passed to `python3` as an argument (`sudo`
+  resets the environment); `CONTROL_SOCKET` overrides it only under `FLAMINIO_SCRIPT_TEST=1`.
+- **Callers that do not redirect stdout** get `>/dev/null`: `cmd_vol attach`'s detach of the
+  other nodes, `cmd_partition`'s detach, the CSI cleanup's, the drain test's, and
+  `scripts/checks/reconcile.sh`. `cmd_vol detach` captures the status line instead, and stops
+  unless it is `detached` or `not attached` (exit 255 on ssh's 255).
 
 ## delete_volume (S5)
 
@@ -87,16 +98,25 @@ removal pass the campaign's node; `vol delete` passes none. In order:
    `FORMAT=0` passed explicitly: fl-c as `ensure_node_c` does, the others with `cmd_node up`.
    A failed start: exit 1.
 4. **Re-check:** `get <volume>` answers `NotFound`; anything else (a creation meanwhile): exit
-   1, before any delete.
+   1, before any delete. It sees only a finished creation: `get` answers `NotFound` for a
+   header still being created, and the deletes of step 5 come after it. Those deletes ignore
+   fences, and the sweeps of fl-a and fl-b may have freed the id since step 2 (an RF 1 wbench on
+   fl-b, within 5 s). The name created and attached by another caller (`make vol-create` then
+   `make vol-attach`, or a second campaign), whose first session reaches a replica node between
+   this re-check and the delete there (seconds), loses its replicas on the nodes it is not
+   attached on; the node it is attached on refuses the delete ("attached here", `engine.rs`),
+   which stops the deletion before the nodes after it. Accepted (spec, the invariant;
+   decisions). #13's S13 removes these deletes and this re-check.
 5. **Clean** every data node: `node.sh delete` must print `deleted <n>`; anything else, `not
    running` included: exit 1, naming the node.
 6. **Pending without a sweep:** `tombstones` (administrator) shows the volume pending for a node
    outside `vms_of all`: exit 1 at once, naming that node. For `$VM_C`, it prints the procedure:
    `lab.sh vol-confirm <volume> $VM_C`, then the interrupted command again (`RESUME=<dir> make
    bench-writes`, or `make vol-delete`). For any other node, it says no procedure applies.
-7. **Wait:** `tombstones` every 5 s, for `TOMBSTONE_WAIT` s (120). A failed poll is retried. On
-   time-out: exit 255 if the last poll failed with 255, else 1, naming the pending nodes and
-   `make csi-deploy`.
+7. **Wait:** `tombstones` every 5 s, for `TOMBSTONE_WAIT` s (120). Only a poll that failed with
+   ssh's 255 or a transient error (`Unavailable`, `DeadlineExceeded`, `Canceled`) is retried;
+   any other error stops at once, exit 1. On time-out: exit 255 if the last poll failed with
+   255, else 1, naming the pending nodes and `make csi-deploy`.
 
 ssh's 255 from any step exits 255; when it was fl-c's and fl-c's `created` flag exists, the
 message says fl-c's VM may be off. `unknown command` from `metactl`: exit 1 with `make meta-up`.
@@ -122,21 +142,29 @@ Callers run it before stopping or formatting a node (`write_reset`, `write_whole
 ## vol-confirm (S7)
 
 `lab.sh vol-confirm <volume> <node>`. The workstation runs the steps; three node-side parts run
-on the node, as subcommands of one guest script, `scripts/guest/confirm.sh`, which takes the
-paths of `flaminio-meta`, `flaminio-agent` and the disk tool (`agent.sh`'s,
-`~/flaminio/dataplane/target/release/flaminio-disk`) as variables, and confirms as the node's
-agent. The workstation passes, in `ENV_VARS`, `META=$(vmvar "$VM_A" WG):$META_PORT` and
-`TRUST_DOMAIN`; `confirm.sh` runs `/usr/local/bin/flaminio-meta` (where step 2 installs it) with
+on the node, as subcommands of one guest script, `scripts/guest/confirm.sh`, which confirms as
+the node's agent. It runs fixed paths, under `sudo`: `/usr/local/bin/flaminio-meta`,
+`/usr/local/bin/flaminio-agent` and the disk tool (`agent.sh`'s,
+`~/flaminio/dataplane/target/release/flaminio-disk`). `META_BIN`, `AGENT_BIN` and `DISK_TOOL`
+override them only under `FLAMINIO_SCRIPT_TEST=1`, for its tests: `ENV_VARS` never chooses a
+binary run as root. The workstation passes, in `ENV_VARS`, `META=$(vmvar "$VM_A" WG):$META_PORT`
+and `TRUST_DOMAIN`; `confirm.sh` runs `flaminio-meta` (where step 2 installs it) with
 `--server "$META" --cert /etc/flaminio/pki/agent.crt --key /etc/flaminio/pki/agent.key --ca
 /etc/flaminio/pki/ca.crt`, and `confirm` also with `--trust-domain "$TRUST_DOMAIN"`.
-1. **Workstation:** `vms_of <node>` must give exactly one VM, not in `vms_of cluster`; it is
-   used for every later step. Else exit 1, before anything is installed.
+1. **Workstation:** `vms_of <node>` must give exactly one VM, not in `vms_of cluster`, and in
+   `data_vms` (fl-c counts only with its `created` flag; else: `make data-node-up`); it is used
+   for every later step. Else exit 1, before anything is installed.
 2. **Workstation:** builds `flaminio-meta` as `meta up` does; installs it on the node when its
    hash differs.
 3. **`confirm.sh check`** (node): `tombstones <node>` lists the volume, else exit 0 "not listed:
-   nothing done". No process `flaminio-csi` or `flaminio-agent` (`pgrep -x`); `k3s` and
-   `k3s-agent` each `inactive`, `disabled` or `not-found` (`systemctl is-active`, `is-enabled`).
-   Issue #13's sweep unit, when it comes, joins this list.
+   nothing done". Then the sweep check: no process `flaminio-csi` or `flaminio-agent` (`pgrep
+   -x`); and `k3s` and `k3s-agent` each either not found, or both inactive and with its unit
+   file disabled or masked (`systemctl show`: `LoadState` `not-found`; else `ActiveState`
+   `inactive` and `UnitFileState` `disabled` or `masked*`). Not `is-enabled`: for a missing unit,
+   systemd 249's prints nothing. Issue #13 puts the sweep inside `flaminio-io node`, the process
+   step 5 requires to run, so no check here could see it: `vol-confirm`, `confirm.sh` and
+   `flaminio-meta confirm` go in the same change as #13's sweep, and must not outlive it (#13,
+   S13).
 4. **Workstation:** `node.sh detach` on every data node, then again: the second round must
    answer only `not attached` or `not running`, and where `not running`, no `flaminio-io`
    process runs.
@@ -147,9 +175,11 @@ agent. The workstation passes, in `ENV_VARS`, `META=$(vmvar "$VM_A" WG):$META_PO
    disk, whose `readlink -f` is the running unit's `--device` (`systemctl show flaminio-node`).
    Then the control socket's delete: `ok <n> replicas deleted`.
 6. **Workstation:** step 4's check again.
-7. **`confirm.sh confirm`** (node): step 5's unit and process check again; the delete again,
-   `ok 0 replicas deleted`; then `confirm <volume> <node> --replicas-deleted`. `{}`: exit 1,
-   "confirmed by another caller".
+7. **`confirm.sh confirm`** (node): step 5's checks again (unit, process, disk), and step 3's
+   sweep check; the delete again, `ok 0 replicas deleted`; then `confirm <volume> <node>
+   --replicas-deleted`. `{}`: exit 1, "confirmed by another caller": the read just before the
+   call showed the volume no longer pending. A confirmation by another caller between that read
+   and the call is reported as this one's: accepted (spec, S7.8; decisions).
 
 Any other stop: exit 1; ssh's 255: 255. Nothing is confirmed before step 7.
 
@@ -173,7 +203,7 @@ each volume `tombstones fl-c` lists; then `metactl tombstones` lists none.
   - as the node's agent: the token before and after the positionals; stdout and stderr as
     above; the last confirmation frees the id; again, an unknown volume, a node not on the
     tombstone: `{}`, exit 0, no `ConfirmDeletion`;
-  - the usage text names `lab.sh vol-confirm`.
+  - the usage text names `lab.sh vol-confirm`, and (the next step) the wipe S2 names.
 - **S3** (`auth_test.go`): an administrator lists and confirms for any node; `io` may not
   confirm.
 - **S4** (`service_test.go`): the log line's fields, with the identity and the peer set in the
@@ -186,12 +216,14 @@ each volume `tombstones fl-c` lists; then `metactl tombstones` lists none.
   directory; the fake socket in a short temporary path, under macOS's 104 bytes):
   - `node.sh`: `common.sh` prepended, `sudo` and `systemctl` stubbed, a real `python3` against a
     fake socket server: each status line and exit, for its answer, an inactive unit, an error;
-  - `confirm.sh`: `common.sh` prepended, `pgrep` and `systemctl` stubbed, fakes at the given
-    paths, a fake socket answering the deletes: each check's stop; `confirm` gets
+  - `confirm.sh`: `common.sh` prepended, `pgrep` and `systemctl` stubbed, fakes at the paths
+    the overrides give under `FLAMINIO_SCRIPT_TEST=1`, a fake socket answering the deletes:
+    each check's stop; a masked and a missing k3s unit accepted; `confirm` gets
     `--trust-domain` with `TRUST_DOMAIN`, and `--server`, `--cert`, `--key` and `--ca` as above;
     the unit inactive, no `flaminio-io`, two, one whose PID is not `MainPID`; the disk check
     with none, two, the wrong one, a symlink to the right one; the second delete finding 1;
-    `confirm` printing `{}`;
+    a CSI plugin, or an enabled `k3s-agent`, since `check`: no confirm; `confirm` printing `{}`;
+    without `FLAMINIO_SCRIPT_TEST=1`, the overrides of the paths and the socket ignored;
   - `delete_volume`, `write_volume`, `vol-confirm`, the campaign's start and the restore,
     extracted from `lab.sh` as `scripts/checks/resync.sh` extracts `metactl`, with fake
     `run_on_vm`, `vssh`, `metactl`, `cmd_node`, `ensure_node_c`, `sleep` and the build and
@@ -228,3 +260,41 @@ each volume `tombstones fl-c` lists; then `metactl tombstones` lists none.
 - **A campaign with replicas on fl-c** needs an operator at every deletion.
 - **The start of a stopped node** in `delete_volume` costs a reconciliation of its other
   volumes.
+- **The name created and attached by another caller while `delete_volume` runs** (`make
+  vol-create` then `make vol-attach`, or a second campaign), whose first session reaches a
+  replica node between its re-check and its delete there (seconds), loses its replicas on the
+  nodes it is not attached on: its deletes ignore fences and can come after the id is freed.
+  Accepted (decisions).
+
+## The next step
+
+Step 2 shipped text that #30, or the code itself, made false (plan reviews, rounds 1 and 2).
+The next change of #14 corrects it. If #13's S13 lands first, it removes `confirm`, its usage
+text and its test, rewrites `docs/lab.md`'s section, and marks follow-ups §14 step 1 done: the
+corrections to those, the follow-ups' step 1 and row 26 included, go with #13.
+- **`meta/cmd/flaminio-meta/main.go`:** the doc comment's paragraph on `confirm` (lines 25-30)
+  and `usage` (214-218). "The new volume then serves the old one's data there, or is deposed by
+  them" becomes what S2 says: a delete of the name that runs after the id is freed wipes the new
+  volume's replicas there; leftovers hold space until its first session there, old tokens still
+  open sessions on them, and a volume created by an old metadata service is deposed by them;
+  outside #30's S8-S9 cases, the new volume does not serve the old one's data (docs/issues/14,
+  docs/issues/30).
+- **`meta/cmd/flaminio-meta/main_test.go`:** `TestUsage` (366) asserts the wipe, not "keeps
+  them": it fails on the shipped text.
+- **`docs/lab.md`:**
+  - 226-227: "A campaign of RF 1 on fl-b never stops for fl-c" becomes S6's: it never stops for
+    wbench, and stops once, at its start, when vol1 has a replica on fl-c;
+  - 214-223, the harness's deletions: no other lab command while a deletion runs (S10;
+    decisions, accepted risks);
+  - 246, `vol-confirm`'s step 7: "finds the volume still pending" becomes "the read just before
+    the call shows the volume still pending";
+  - 248-252, what a wrong confirmation does: the wipe first, as S2.
+- **`docs/followups.md`:**
+  - §14 step 1 (281-282): the sweep moves into the node daemon (`flaminio-io node`, #13), and
+    `vol-confirm`, `confirm.sh` and `flaminio-meta confirm` go with it;
+  - row 26 (item 14), the "When" column: #13;
+  - §14 "Later": the incarnation item gains the bounded delete, outside #30's S8-S9 cases; the
+    lab-wide lock item widens to any other lab command while a deletion runs (decisions,
+    accepted risks).
+
+Tests: `TestUsage`; `make lint test`. No lab check: no behaviour changes.

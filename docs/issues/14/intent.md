@@ -1,10 +1,14 @@
 # Issue #14: Tombstones on nodes outside Kubernetes — intent
 
 [Issue #14](https://github.com/jsfakian/Flaminio/issues/14), follow-ups §14. This change is the
-issue's step 2, and what the lab needs from it. Step 1 waits for the node agent: issue #14 stays
-open after this change.
+issue's step 2, and what the lab needs from it. It shipped (pull request #31); issue #30 merged
+after it. What is left of it: the corrections the design lists under "The next step". Step 1 is
+issue #13's: issue #14 stays open after this change.
 
 ## Why
+
+As the lab and the code stood before step 2. Issue #30 changed what items 5 and 6 say: each
+says how.
 
 Deleting a volume leaves a tombstone, `/flaminio/v1/tombstones/<id>`. It names the nodes that
 the volume's chunk records named, as replicas or in a move (`replicaNodes`, `DeleteVolume`,
@@ -34,18 +38,26 @@ new volume with the same id.
 4. **No command confirms.** `ConfirmDeletion` accepts an administrator for any node, and a
    node's agent for itself (`Authorize`, `meta/service/auth.go`). But `flaminio-meta`, which the
    lab runs as `metactl`, has no command for tombstones.
-5. **The harness deletes the replicas already, but cannot tell that it did.** `delete_wbench`
-   deletes wbench's replicas on fl-a, fl-b and fl-c through each node's control socket
-   (`node.sh delete`): "a new wbench (epoch 1 again) would be deposed by old replicas fenced at a
-   later epoch". `node.sh delete` succeeds without deleting anything when the node is not
-   running (it returns at once, logging nothing), and the harness discards its output. Nobody
-   then confirms for fl-c.
+5. **The harness deleted the replicas already, but could not tell that it did.** `delete_wbench`
+   deleted wbench's replicas on fl-a, fl-b and fl-c through each node's control socket
+   (`node.sh delete`), because a new wbench started at epoch 1 again and was deposed by old
+   replicas fenced at a later epoch. Since #30 a new wbench starts above every epoch of its name
+   and drops those replicas at its first session; they are deleted to free their space
+   (`delete_wbench`'s comment, `scripts/lab.sh`). `node.sh delete` succeeded without deleting
+   anything when the node was not running (it returned at once, logging nothing), and the
+   harness discarded its output. Nobody then confirmed for fl-c.
 6. **A wrong confirmation is worse than a blocked id.** A node's store names a volume by a hash
-   of its name alone (`volume_uuid`, `flaminio-node/src/lib.rs`), and a new target's `hello`
-   creates only the chunks a replica lacks, keeping those it has (`replica/mod.rs`). Replicas of
-   an old volume left on a node that was confirmed become the new volume's chunks there: it
-   serves the old volume's data. Those fenced at a later epoch depose the new target instead.
-   Re-creation under the same name is issue #30's.
+   of its name alone (`volume_uuid`, `flaminio-node/src/lib.rs`), and every delete of a name
+   through a node's control socket (the CSI sweep's, `node.sh delete`'s) deletes all its chunks
+   there, whatever their fence (`Store::delete_volume(uuid, None)`, `replica/mod.rs`). A
+   confirmation that frees the id while a delete has yet to run on the node lets that delete
+   wipe the replicas of a volume created again with the name there: with RF 1, its data. That is
+   what the tombstone guards (`createVolume`). Before #30, leftovers on a confirmed node also
+   became the new volume's chunks, or deposed it. Since #30 a volume created again starts above
+   every epoch of its name and drops them at its first session on each node. Until then they
+   hold space, and the old volume's tokens still open sessions on them; a volume created by an
+   old metadata service (a rolling upgrade, a downgrade) is still deposed by them (#30, S8 and
+   S9).
 
 ## What we want
 
@@ -63,27 +75,30 @@ new volume with the same id.
 
 ## Out of scope
 
-- **Step 1: the sweep in the node agent,** on every data node (follow-ups §14). It waits for
-  the node agent. Then no data node is without a sweep, and the lab command goes.
+- **Step 1: the sweep on every data node** (follow-ups §14). Issue #13 takes it in: the sweep
+  runs inside the node daemon, `flaminio-io node`. Then no data node is without a sweep, and
+  `vol-confirm`, `confirm.sh` and `flaminio-meta confirm` go in the same change (#13, S13).
 - **The metadata service's rules:** `ListTombstones`, `ConfirmDeletion` and their caller rules
   stay as they are. The one change is a log line, with its revision, for each new confirmation
-  (spec, S5).
+  (spec, S4).
 - **A tombstone's incarnation.** Tombstones are keyed by the volume's name alone, so a
   confirmation meant for one deletion can land on the next one of the same name. A revision or
   incarnation field, given by the listing and required by the confirmation, would close that. It
-  changes the API; spec S13 records it for later.
+  changes the API; decisions and follow-ups §14 record it for later.
 - **The CSI sweep** stays as it is.
 - **Confirming for a node gone for good.** Only a node's own agent confirms in this step: an
   administrator could confirm for any stopped node, which still holds its replicas, and a
-  liveness lease cannot tell the two apart. Spec S13 records it.
+  liveness lease cannot tell the two apart. Decisions and follow-ups §14 record it.
 - **Replicas no record names,** such as a completed move's source: issue #13.
 - **The other paths that delete volumes with replicas on fl-c:** `meta-smoke` (`smoke-*`),
   `scripts/checks/resync.sh` (`resync-*`), and the CSI controller's deletions of PVCs. Their ids
   are not reused, so they block nothing, but they keep leaving tombstones pending for fl-c, and
-  replicas there. Spec S13 records them; step 1 ends them.
+  replicas there. Decisions and follow-ups §14 record them; step 1 ends them.
 - **A lab-wide lock.** Two harness runs at once (two operators, or a workstation and the lab
-  runner by hand) can delete each other's replicas, as today. Spec S13 records a lock for later.
+  runner by hand) can delete each other's replicas, as today. Decisions and follow-ups §14
+  record a lock for later.
 - **What fl-c holds beyond its agent identity.** `cmd_pki issue c` also puts the token key and a
   metadata service etcd client certificate on fl-c, which is not a metadata member. Root on fl-c
   can write etcd or mint tokens: confirming as fl-c's agent guards against mistakes, not against
-  a compromised fl-c. Spec S13 records restricting those to the metadata members.
+  a compromised fl-c. Decisions and follow-ups §14 record restricting those to the metadata
+  members.

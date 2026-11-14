@@ -17,11 +17,22 @@ Step 2 of the issue ([intent](intent.md)). Settled choices and accepted risks:
 ## The invariant
 
 While a node is pending, only a confirmer for that node can remove the tombstone, and so let the
-id be created again. Every hazard needs two confirmers for one node: one that confirms while the
-other has yet to delete, or confirms a tombstone the other's deletion was not for. **Exactly one
-confirmer per node:** the CSI sweep on fl-a and fl-b; an operator, through `vol-confirm`, on
-fl-c. The harness never confirms. A node confirmed while it still holds replicas keeps them, and
-a volume created again with that name meets them: issue #30.
+id be created again. **Exactly one confirmer per node:** the CSI sweep on fl-a and fl-b; an
+operator, through `vol-confirm`, on fl-c. The harness never confirms.
+
+Every delete of a name through a node's control socket deletes all its chunks there, whatever
+their fence, unless the volume is attached on that node. So a delete that runs after the id is
+freed wipes a volume created again with the name on that node, where it is not attached: with
+RF 1, its data. Two confirmers for one node lead there: one confirms while the other has yet to
+delete, or confirms a tombstone the other's deletion was not for. So does the harness's own
+delete on every data node (S5), which can run after the sweeps have freed the id: one deleter
+and confirmer per node, plus the harness while no other lab command runs (a risk accepted after
+approval: decisions).
+
+A node confirmed while it still holds replicas, with no delete to come, keeps them until a volume
+created again with that name drops them at its first session there (issue #30). Until then they
+hold space, and the old volume's tokens still open sessions on them; a volume created by an old
+metadata service is still deposed by them (#30, S8 and S9).
 
 ## Behaviour
 
@@ -43,7 +54,12 @@ not listed; it still keeps its id from being created again.
 - **What it prints comes from the read:** the caller, the volume, the node, the tombstone's nodes
   and pending nodes. The service's answer says nothing more.
 - **Its usage text** names `lab.sh vol-confirm` as the only supported entry point, and says what
-  a wrong confirmation does (the invariant).
+  a wrong confirmation does, as the invariant does: a delete of the name that runs after the id
+  is freed wipes the new volume's replicas there; leftovers hold space until its first session
+  there, old tokens still open sessions on them, and a volume created by an old metadata service
+  is deposed by them. Not that the new volume serves the old one's data: not since #30, outside
+  its S8-S9 cases (a store whose revision went back; a volume created by an old metadata
+  service, at epoch 0).
 
 **S3. Who may call the service.** Unchanged: an administrator for any node, a node's agent for
 itself. S2's narrower rule is the CLI's.
@@ -51,7 +67,9 @@ itself. S2's narrower rule is the CLI's.
 **S4. The service.** Unchanged, but for one log line: each confirmation that newly confirms a node
 logs, once, the caller's identity, its address and certificate serial, the volume, the node, the
 nodes still pending, and the write's revision. A repeated or empty confirmation logs nothing.
-It is for audit after the fact.
+One exception: when etcd committed the write but its answer was lost, the retry finds the node
+confirmed, or, after the last confirmation, no tombstone, and nothing is logged (decisions). It
+is for audit after the fact.
 
 ### The lab harness
 
@@ -61,7 +79,11 @@ of `$VOL` at a campaign's start, and `vol delete` (which today deletes the metad
 - **deletes the volume's replicas on every data node,** each of them running: a node that is not
   is started first, only the campaign's node with its store formatted (the campaign formats it
   anyway). It does so only once the volume is detached everywhere, and gone from the metadata
-  service;
+  service. Those deletes ignore fences, and can run after the sweeps have freed the id; its
+  check that the id was not created again sees only a finished creation. So the name created
+  and attached by another caller (`make vol-create` then `make vol-attach`, or a second
+  campaign), whose first session reaches a replica node between that check and the delete there
+  (seconds), loses its replicas on the nodes it is not attached on: accepted (decisions);
 - **stops at once,** naming the node, with the manual procedure (S7) and the command to run
   again after it, when the volume is then pending for a node without a sweep: waiting would not
   help;
@@ -77,8 +99,10 @@ of `$VOL` at a campaign's start, and `vol delete` (which today deletes the metad
   node.
 - **wbench is created only once the campaign's node is alive,** and every chunk must have a
   replica there.
-- **A campaign that places wbench or `$VOL` on fl-c** (RF 2, or fl-c as the campaign's node)
-  stops at each deletion until an operator runs `vol-confirm`. RF 1 on fl-b never does.
+- **A campaign that places wbench on fl-c** (RF 2, or fl-c as the campaign's node) stops at each
+  of its deletions until an operator runs `vol-confirm`. **One whose `$VOL` has a replica on
+  fl-c** stops once, at its start, whatever its RF and node: `$VOL` is removed there. An RF 1
+  campaign on fl-b never stops for wbench.
 - **The restore** no longer moves `$VOL`'s replicas back: `$VOL` is gone.
 
 **S7. Confirming by hand: `lab.sh vol-confirm <volume> <node>`.** Run by an operator, with no
@@ -91,8 +115,10 @@ order, and otherwise confirms nothing:
 5. the node's data plane is the one its service runs, on the disk its claim policy calls ours;
 6. its replicas are deleted;
 7. after that, still attached nowhere, and a second delete finds none;
-8. its own agent confirms, and the confirmation finds the volume still pending: otherwise
-   another caller confirmed, and it fails.
+8. its own agent confirms, and the read just before the call shows the volume still pending:
+   otherwise another caller confirmed, and it fails. A confirmation by another caller between
+   that read and the call is reported as this one's: the service's answer cannot tell them
+   apart. Accepted (decisions).
 
 **S8. The stale tombstones, once,** by an operator, before the lab check, recorded in the PR:
 `vol-confirm` for every tombstone pending for fl-c (wbench, volb, and the one-off `smoke-*` and
@@ -108,7 +134,8 @@ none is left.
 **S10. Docs.**
 - `docs/lab.md`: the prerequisites of a campaign and of `vol delete` (the new `flaminio-meta`,
   fl-c's node, the CSI node plugins on fl-a and fl-b); when a campaign stops at fl-c, and what
-  to run; the two commands; `vol-confirm` as the only way to confirm by hand.
+  to run; the two commands; `vol-confirm` as the only way to confirm by hand; no other lab
+  command while a deletion runs.
 - Follow-ups §14: step 2 done, with the lab check's result, and the later steps (decisions).
 
 ## Tests
