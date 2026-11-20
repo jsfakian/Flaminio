@@ -1,17 +1,13 @@
 {
   "date": "2026-11-20",
-  "main_base": "2dccdb537103b193c4d170f16e932033843f80e3",
-  "audit_source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+  "main_base": "391a5666336b586239ffd7e3420d0df51f281f30",
+  "audit_source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
   "scope": "Committed canonical and active-review snapshots: issue plans, actual reviews, proposed ADRs and audit evidence. Publication does not imply implementation or approval.",
   "terminal_statuses": [
     "clear",
     "cleared_completed"
   ],
   "remaining_issues": [
-    64,
-    65,
-    66,
-    67,
     68,
     69
   ],
@@ -19,7 +15,7 @@
     {
       "number": 4,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/4",
       "files": 5,
       "content_sha256": "e57173b7b96ad820cca3a9a94c881c9131b81a7bc06346a64eeb9fefd615a5c6",
@@ -29,7 +25,7 @@
     {
       "number": 5,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/5",
       "files": 5,
       "content_sha256": "7b4e43c8b73d897fb21ba195d565ede378fbd12d3bf9766e8930ebaf925085fa",
@@ -39,7 +35,7 @@
     {
       "number": 6,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/6",
       "files": 5,
       "content_sha256": "d16ba637de50b5c862396ecac2972195c4d0fc55ca9764085e8162b36e4b4d59",
@@ -49,7 +45,7 @@
     {
       "number": 7,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/7",
       "files": 5,
       "content_sha256": "69093ab91ec06056b02a92691f56e12d6b810f460532f262308c270a6357f6a6",
@@ -59,7 +55,7 @@
     {
       "number": 8,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/8",
       "files": 5,
       "content_sha256": "59472657fad795be2f4a560c36e74f69c75579c70a4ebd06962a0c51ab35e35f",
@@ -69,7 +65,7 @@
     {
       "number": 9,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/9",
       "files": 5,
       "content_sha256": "b242fee792e79e2f352dc1d533500bcc875c440ffda1afe216e47e2bcfd039d0",
@@ -79,7 +75,7 @@
     {
       "number": 10,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/10",
       "files": 5,
       "content_sha256": "d4f8d05fd941e9fd2c3b038a95dcf5909255f0c0d6d62278a57c03cc2801c758",
@@ -89,7 +85,7 @@
     {
       "number": 11,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/11",
       "files": 5,
       "content_sha256": "f536e9a2280b13732de41dbdac985dcea9b878b724038336358cadb83a6a6400",
@@ -119,7 +115,7 @@
     {
       "number": 14,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/14",
       "files": 5,
       "content_sha256": "2b6ab13e57743d663356cf18cf70c2791a4e7ef38e52329cea4ea3cc9af70e71",
@@ -169,7 +165,7 @@
     {
       "number": 30,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
       "published_path": "docs/issues/30",
       "files": 5,
       "content_sha256": "71bf653cb9e8ce8bdfff8d7868b2a184339d6175c74eeec8c8d43c5456681127",
@@ -388,43 +384,43 @@
     },
     {
       "number": 64,
-      "branch": "issue/64-erasure-coding",
-      "source_commit": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+      "branch": "review-resume/64",
+      "source_commit": "085e3f48d72f56a0ae648297e2ee426defeee56a",
       "published_path": "docs/issues/64",
-      "files": 5,
-      "content_sha256": "33715f255b55097d22001e079abe527a40bb38c5b6fc1ca27c16ea4e67c35605",
-      "status": "pending",
-      "active_review_copy": false
+      "files": 6,
+      "content_sha256": "154606386f1c46fb6864e09de5e5ceccc46724885708cc0d6481e818064ba81f",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 65,
-      "branch": "issue/65-rdma-transport",
-      "source_commit": "9d806703f4642ecdbcbd9bde6cbe4fdd2430b22c",
+      "branch": "review-resume/65",
+      "source_commit": "e8511b5a26fe1c1ba832b90493feaf4f8c797bc5",
       "published_path": "docs/issues/65",
-      "files": 4,
-      "content_sha256": "d4e40468f0fed57364dfcae0091497d53d4050f35ca94d86d5997ff3fd3b788f",
-      "status": "pending",
-      "active_review_copy": false
+      "files": 5,
+      "content_sha256": "e63b8e0ae6f6b4af9d469011905f7dc989b7a97fa5a36ee86a0d51731fcecd9c",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 66,
-      "branch": "issue/66-nvme-of-and-vhost-user-blk",
-      "source_commit": "9ae0a6adad7915b4ae4ad0dd6345a77a4525e2da",
+      "branch": "review-resume/66",
+      "source_commit": "9e9f15c8a33b6fcec21e7f34cb7d32f3a4a71a69",
       "published_path": "docs/issues/66",
-      "files": 4,
-      "content_sha256": "fbe59f0de328a506893bf84ddbad7db12a163491b93779b6c0b3af184ad7827e",
-      "status": "pending",
-      "active_review_copy": false
+      "files": 5,
+      "content_sha256": "1bf59f0f754e7fc62bab4c5db0dcdb6d0d941ee86c83c9200511f1c9f7f74b22",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 67,
-      "branch": "issue/67-rwx-nfs-gateway",
-      "source_commit": "fd544c8cf66d0ba7e279c3aadd51f88ad2b34f3b",
+      "branch": "review-resume/67",
+      "source_commit": "5ff126ac4a395f20885885feaefcf3302489b5fc",
       "published_path": "docs/issues/67",
-      "files": 5,
-      "content_sha256": "438f6537320cb25bdfd5537811ef7c1449e21628de81b2485e15ff7761f9c7f2",
-      "status": "pending",
-      "active_review_copy": false
+      "files": 8,
+      "content_sha256": "a42901efa10fd85d50e91f07260d3d67ab65d772a12f37142b55512124989d3c",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 68,

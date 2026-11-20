@@ -3,6 +3,7 @@
 [intent](intent.md) · [decisions](decisions.md) · [design](design.md)
 
 Approved 2026-11-13; not implemented.
+Review corrections of 2026-11-20 are proposed and unapproved (decisions.md).
 Existing intent's step 1 only, after #15. No NVMe/TCP, vhost-user-blk, external host,
 loopback fallback or new security protocol. Those and their failover checks keep #66 open.
 
@@ -25,8 +26,9 @@ cannot manufacture a successful read or write without the corresponding engine a
 ## Behaviour
 
 **S1. Separation.** Node lifecycle, registry and routing have no dependency on ublk identifiers,
-queue types or device operations. Registry entries name a frontend binding and typed endpoint;
-ublk is one adapter. Its id/path exist only in its endpoint and adapter implementation.
+queue types or device operations. Client entries name a frontend binding and typed endpoint;
+ublk is one adapter. Device lifetime identity remains separate from current request routing.
+Maintenance targets have no client frontend or endpoint. ublk id/path stay in the adapter.
 
 **S2. Compatibility.** Existing ublk devices, CLI/control-socket output, startup/detach rules,
 queue options, zero-copy modes, batching and error results remain compatible. Non-Linux builds
@@ -35,7 +37,9 @@ or way to start the test frontend is exposed.
 
 **S3. Validate and bound.** Before engine admission, validate operation, checked offset/length,
 4 KiB alignment, geometry, buffer bounds and supported flags. Per-binding requests, routes,
-channels and buffer memory are bounded by configured queue count/depth and I/O size. Reject
+channels and buffer memory are bounded by configured queue count/depth and I/O size, including
+event descriptors, payload bytes and a reserved terminal result. Routing never waits under
+the engine lock or silently loses terminal results. Preserve #84 classifier/refusal precedence. Reject
 invalid or excess requests without allocating unbounded work or mutating the engine.
 
 **S4. Completion.** Writes complete only after the matching engine Done. Slow reads combine
@@ -47,6 +51,8 @@ cacheless/no-op behavior subject to #84's conformance contract; no new barrier g
 one checksum retry, fallback and completion policy. A fast read needs final engine approval
 before success. Plans and buffers remain alive until every submitted disk operation completes,
 including error, cancellation, detach and unwind paths; each plan releases exactly once.
+An armed owner aborts before destruction could release memory still referenced by published I/O;
+ordinary cancellation drains. Dropping an undrained task is a fail-stop, not cancellation proof.
 
 **S6. Stop.** Deposition or detach stops admission and ends all current pending requests once;
 late events cannot revive the generation. Target shutdown precedes frontend/device disposal.
@@ -70,16 +76,19 @@ before release. Documentation distinguishes this boundary from unimplemented exp
 ## Tests
 
 - S1–S3: compile/module checks and unit validation matrix; exact socket compatibility, limits,
-  overflow and unknown flags; no test adapter reachable through production commands.
+  overflow and unknown flags; exact #84 refusal errnos; preserved recovery tuples/kept states;
+  maintenance allocates no frontend; no test adapter reachable through production commands.
 - S4–S6: shared-policy test frontend with real engine: withheld write Done; mixed read pieces;
-  checksum retry/fallback; all stop/late-generation/cancellation/reused-buffer cases.
-- S7–S8: round batching, staging guard cleanup, event routing and bounded channel saturation.
+  checksum retry/fallback; all stop/late-generation/cancellation/reused-buffer cases; armed-owner
+  subprocess tests for panic/drop before outstanding backing memory can be released.
+- S7–S8: round batching, staging guard cleanup, event routing and bounded channel saturation, paused multi-piece readers and terminal delivery.
 - S9: authorized A/B benchmarks and existing lab correctness checks; no lab run in this draft.
 
 ## Open questions
 
-Existing intent recommends after #15 and a test-only adapter; neither is recorded as accepted
-here. Exact shared interface must fit #15's future registry/router and #48's recovery changes.
+After #15 and a test-only adapter are settled below. The shared interface preserves the
+device/request identity and refusal/mailbox/ownership semantics in the design; exact Rust
+signatures still follow the approved thin compilable prototype.
 Kernel distribution survey and authenticated external export/failover designs remain later steps.
 
 Settled at approval, 2026-11-13: after #15, kept small; the test frontend is test-only; the shared

@@ -1,0 +1,41 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review66_r2_code (fresh incremental design-code)",
+  "reviewed_commit": "8d3068043b2bfd66d4ef988335f258669156d29a",
+  "dependency_commits": {
+    "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+    "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+    "48": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+    "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+    "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24",
+    "85": "0d95430b0e45c12bb61f59ae62b42a03709a4804"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "design.md:68-78 now retains #84 sole classifier, registration-first EIO, unsupported flags/op EOPNOTSUPP, range EINVAL and configured max_io in both modes; whoever lands second reuses/moves one classifier. S3 fixture at design.md:168 tests refusal errnos and zero staging/engine effects. Matches #84 design.md classifier rules 1-4 and current ublk unsupported-operation mapping."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "design.md:30-41 explicitly separates fresh routing Binding from immutable full #15 device tuple; Kept has no fd, Resuming obtains one at verified ready-open, and Running/Stopping use verified handle subject to direct/privsep rules. Device-info and conditional detach retain original tuple; #17 maintenance has neither client binding nor endpoint. design.md:167 names recovery tuple/kept/no-frontend/predecessor-route fixtures. Matches #48 design.md lifetime/request contracts and #17 maintenance state machine."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "spec.md Open questions now says after #15 and test-only are settled, retains approved prototype wording, and preserves historical approval in decisions.md."
+    },
+    {
+      "id": "SEC66-R1-01",
+      "status": "fixed in affected correctness scope",
+      "evidence": "design.md:120-146 reserves 2P descriptors, max_io payload credit and separate Done slot before admission; router establishes terminal ownership before route removal, never waits under engine lock, and latches binding failure/detaches on exhaustion/closed consumer. Local owners retain credits until drain; finite simultaneous occupancy does not claim finite whole-life retries. engine.rs:1703-1730 splits aligned requests by chunks; :1880-1914 emits one final Piece per remote suboperation and one Done; Io::ReadDirect explicitly carries no Done payload. design.md:172 adds paused reader, exhaustion/closed/stop-race fixtures."
+    },
+    {
+      "id": "SEC66-R1-02",
+      "status": "fixed in affected correctness scope",
+      "evidence": "design.md:87-103 defines prepublication preparation and armed PublishedBatch custom Drop abort before owner-field destruction, plus enclosing queue Drop before tasks/backing mappings/ring. Covers eager helper publication, partial publication, panic/cleanup, and task drop; normal cancellation drains. design.md:170 names subprocess failures before backing release with independent backing reference. This is explicitly new frontend protection, separate from #85 UringDevice guard."
+    }
+  ],
+  "findings": [],
+  "report": "Fresh incremental correctness review of 9ae0a6adad7915b4ae4ad0dd6345a77a4525e2da..8d3068043b2bfd66d4ef988335f258669156d29a excluding report.md. Read actual R1 code/security artifacts and report, intent/settled decisions, changed spec/design/decisions, and affected ublk descriptor/request/router/local-I/O and engine split/direct-read/completion/finalization paths. Checked relevant current mapped #15/#17/#48/#74/#84/#85 contracts at the exact recorded hashes; proposals remain distinct from implemented source and dependency plans were not reopened. All three prior code comments and both related security comments have concrete corrections; independent security reviewer owns final security disposition. Zero new comments including Nits. Preserved approved after-15 step1 internal extraction, test-only Memory and thin compilable-signature prototype scope; no broader export or approval-only finding. Tests/prototype are future validation, not executed evidence. No runtime/lab/benchmark/disk actions, source/dependency edits, tracker writes or subagents. Only this JSON artifact written. Verified HEAD unchanged and checkout clean after trace."
+}

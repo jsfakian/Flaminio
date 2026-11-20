@@ -43,3 +43,21 @@ approval).
 The [design](design.md) maps stability, reclaim, credential and namespace bypass tests.
 Ship exact pinned configuration and privilege evidence before exposure. Later node-loss,
 automatic provisioning and performance work are still needed to close #67.
+
+
+## Subsequent review correction — proposed, unapproved, 2026-11-20
+
+The historical accepted decision above is preserved. The proposed additions are the
+[qualification contract](qualification-contract.md) and [withdrawal contract](withdrawal-contract.md):
+physical/VM and host-client preflight, sync/reply ordering evidence, ordinary finite resource
+containment and an owned host mount-helper gate with durable withdrawal ownership. The helper
+installation and potentially held teardown are new unapproved consequences; no acceptance of
+these revisions is inferred from the 2026-11-13 approval. No new CSI or gateway API identity.
+
+
+## R2 refinement — proposed, unapproved, 2026-11-20
+
+The mount-admission source additionally carries the actual consumer PVC UID; permanent export,
+filesystem and reclaim identity remain unchanged. The [withdrawal contract](withdrawal-contract.md)
+orders UID acquisition/binding/publication and rejects stale owned sources after replacement.
+This is a subsequent unapproved refinement, not historical acceptance of the changed mechanism.

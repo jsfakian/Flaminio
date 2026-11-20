@@ -45,3 +45,30 @@ Nothing is implemented. Approved before its plan review cleared (status: pending
   unsafe FFI library) is then decided in an ADR on that evidence. Recommended by Claude, no
   recommendation in the plan: the step measures and builds no transport, and the plan forbids
   such an ADR before its evidence.
+
+## Review corrections — 2026-11-20 (proposed, unapproved)
+
+The approval and settlements above describe the historical plan. These R1 corrections do not
+claim fresh approval, measured results or a production transport change.
+
+- **R1-C1 — job-level RF2 profiling.** Attach after each reset/setup, reacquire both daemon
+  identities, wait for profiler readiness and retain a unique fresh/steady attempt window with
+  its own all-job fio completions/bytes. Stop before unrelated campaign work; partial/resumed
+  windows cannot borrow another attempt's numerator or denominator. Preserve existing campaign
+  reset/integrity/restore behavior. Per-host markers/margins are explicit because guest clocks
+  are not assumed synchronized.
+- **R1-C2 — CPU accounting boundary.** Endpoint-thread CPU remains a useful labeled partial
+  metric. Retain helper identities and a separate bounded CPU-scoped system/idle observation
+  where available, covering off-thread kernel/background activity without double counting.
+  Report endpoint-only differences and separate host-incremental estimates; transport-total
+  saving stays unknown when off-thread attribution/coverage is unqualified. No unavailable
+  counter becomes zero. Result-schema observation/window fields are proposed clarifications
+  before implementation, not a claim that the historical approval covered these additions.
+- **R1-C3 — cut the optional actual-Net fixture.** Its detached-thread API cannot provide the
+  harness's join-before-next-trial contract. Omit this optional local fixture instead of adding
+  a product lifecycle change for measurement. The authorized production profile still observes
+  handoffs; local frame trials explicitly do not measure them.
+
+Planned analysis/campaign fixtures cover these corrections. Only static document/source and
+link/whitespace checks were performed here; no benchmark, profiler, lab or implementation test
+was run.

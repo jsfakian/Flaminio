@@ -1884,37 +1884,382 @@
       "number": 64,
       "worktree": "/home/jsfakian/Documents/src/flaminio-64",
       "branch": "issue/64-erasure-coding",
-      "status": "pending",
-      "rounds": [],
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review64_r1_combined (design-code and design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "Medium",
+              "summary": "The study attributes device classes and cold classification to a dependency increment that explicitly excludes them.",
+              "evidence": "docs/issues/64/study.md:10-11 calls device-class, capacity reserve and cold classification draft #72 work; design.md:18-19 says #72 plans classes/capacity; study.md:100-102 and decisions.md:16 assign accounting/classes to #72. Current mapped #72 spec.md:3-4 limits the increment to a per-node capacity ledger and create/move admission. Its decisions.md, Choices settled by the design review round 1, explicitly cuts the class operation and states there is no device-class field; no cold classifier is supplied. Completion of the reviewed #72 increment therefore does not establish those prerequisites.",
+              "fix": "Keep the approved not-yet outcome and workload/class prerequisites, but distinguish #72's actual ledger/admission increment from future class policy and independently unspecified cold classification. Correct the current-facts and dependency text and qualify the settled prerequisite attribution without reopening the approved decision or editing #72."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "The S5 cost study omits its required RF comparison, round-trip estimates and conversion cost.",
+              "evidence": "spec.md S5 and intent.md outcome 5 require read/write/round-trip estimates against RF2/RF3; S5 also includes conversion. study.md:55-62 gives general coding byte formulas but defers all network-round-trip costs to an unknown protocol, provides no RF2/RF3 operation baseline, and does not quantify conversion. The confinement table only lists conversion concerns. Saying these quantities depend on a future protocol is honest, but does not supply the explicitly promised first-order comparison.",
+              "fix": "Add a small assumptions-labeled paper comparison for RF2/RF3 and the illustrated systematic coding case: data bytes/operations and dependency stages or minimum network rounds for small/full writes, healthy/degraded reads and rebuild, plus conversion read/write bytes and temporary coexistence space. Separate baseline data-transfer/read-before-write rounds from unknown durable-decision rounds; do not select a production protocol or invent timings/measurements."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Low",
+              "summary": "Remove statements that the already-settled not-yet priority decision still awaits a human decision.",
+              "evidence": "spec.md:77-78 says a human has not accepted that priority decision; study.md:100 says pending human decision and :105-107 calls it a pending recommendation not to record as accepted. design.md:6-7 and its future-alignment text similarly describe a pending outcome. Those statements contradict decisions.md Settled at approval and the explicit accepted study title/appended approval statements: the user approved not yet and its reopening criteria on 2026-11-13. This is a false status statement, not a request for fresh approval.",
+              "fix": "State consistently that the not-yet outcome/reopening criteria were settled at the recorded approval, while no coding protocol, library, geometry, runtime implementation or superseding accepted ADR exists. Mark later review revisions as after approval as appropriate, preserving all historical approval records and #64 remaining open."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Nit",
+              "summary": "Attribute the quoted single-source lease rationale to its actual local source.",
+              "evidence": "intent.md:52-54 says ADR0005 argues that the new target must fence at least one ISR member because it needs an up-to-date source. That quoted rationale is in docs/ARCHITECTURE.md:496-499 (section8.5), not in docs/adr/0005-replica-confirmed-leases.md. The accepted ADR contains the older immediate-read rule instead, while current protocol section6/target::advance_chunk require fencing the effective ISR and reconciliation before serving. design.md:32 correctly acknowledges the stricter current rule.",
+              "fix": "Correct the quote attribution to ARCHITECTURE section8.5, and retain the design's distinction between the old ADR wording and current protocol/source behavior; no accepted ADR edit is required."
+            }
+          ],
+          "dependency_commits": {
+            "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+            "46": "d04aa6f649e26f76305c678f270fa33576c38c0c",
+            "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+            "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/64-r1-combined.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "R1-C1 corrects current #72 scope to ledger/create+move admission and separates future classes from cold classification conditional on a later cold-only scope, preserving the approved reopening criteria/history. R1-C2 adds the assumptions-labeled RF2/RF3/systematic-coding paper comparison for bytes/operations, basic data dependency rounds, healthy/degraded reads, rebuild and conversion/coexistence. It assumes authorized operations and separates unknown coding durable-decision rounds, with no measured timing or selected geometry/protocol/ACK policy. R1-C3 consistently records the already-settled not-yet outcome while leaving review corrections unapproved and runtime/coding choices unaccepted. R1-C4 fixes the single-source rationale attribution to ARCHITECTURE8.5 and preserves current stricter takeover behavior without editing accepted ADR0005. Proposed documentation corrections await fresh incremental review. Historical approvals remain separate; subsequent revisions unapproved. No runtime/dependency/lab changes.",
+          "fix_commit": "67c03381e14cede0a476137a0a87aa0b029ec4eb"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "67c03381e14cede0a476137a0a87aa0b029ec4eb",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review64_r2_combined (design-code and design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/64-r2-combined.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
       "approved": "2026-11-13",
-      "approval_commit": "9c353f5 86307ff"
+      "approval_commit": "9c353f5 86307ff",
+      "active_review_checkout": "/tmp/flaminio-64-review-resume",
+      "active_review_branch": "review-resume/64",
+      "review_resume_reason": "Continue authorized allowed-root review workflow, preserving canonical source86307ff unchanged.",
+      "round": "2",
+      "reviewed_commit": "67c03381e14cede0a476137a0a87aa0b029ec4eb",
+      "authoritative_report": "docs/issues/64/report.md",
+      "latest_fix_commit": "67c03381e14cede0a476137a0a87aa0b029ec4eb",
+      "active_review_commit": "085e3f48d72f56a0ae648297e2ee426defeee56a",
+      "clear_round": 2,
+      "clear_report_commit": "085e3f48d72f56a0ae648297e2ee426defeee56a"
     },
     {
       "number": 65,
       "worktree": "/home/jsfakian/Documents/src/flaminio-65",
       "branch": "issue/65-rdma-transport",
-      "status": "pending",
-      "rounds": [],
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "9d806703f4642ecdbcbd9bde6cbe4fdd2430b22c",
+          "reviewers": [
+            "review65_r1_combined (design-code and design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "Medium",
+              "summary": "The RF2 profile wrapper needs job-level attachment and matching completion windows across daemon restarts.",
+              "evidence": "docs/issues/65/design.md:77-84 proposes an outer campaign wrapper with PID-start checking but does not define attachment/window hooks. scripts/lab.sh:1857-1870 stops the node during every write_reset, and write_volume:1884-1886 starts a new daemon. The campaign invokes measured jobs at :2060 and :2074, with whole-disk writes, preconditioning and idle at :2063-2068 and integrity/restart work at :2094 between measured jobs. Attaching once around the campaign profiles a dead PID after the first reset; attaching for a broad campaign interval instead mixes unrelated operations into CPU/sample numerators. PID-reuse rejection alone does not repair either case, so S4/S5 CPU per successful durable I/O is not reproducible as designed.",
+              "fix": "Specify opt-in hooks immediately around each selected fio measurement after write_reset/write_volume, reacquire and validate target/peer PID-start identities per window, wait for profiler readiness, and retain that window's successful completion count/bytes and interval along with its profiles. Stop before preconditioning, idle, integrity and restart, and invalidate interrupted/missing windows rather than combining them with another round's denominator. Keep existing reset/integrity/restore semantics. Add fake campaign tests with PID changes across resets, unrelated precondition/integrity CPU, failed attach and partial/resumed jobs."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "Endpoint thread CPU alone does not account for the kernel-network CPU that the comparison is intended to measure.",
+              "evidence": "spec.md S4 requires accounting for shared/idle CPU and attribution to kernel TCP. design.md:55-67 defines CPU ns/op only from endpoint thread CPU clocks and makes perf optional; its shared/cgroup/host background accounting is specified only for the separate RF2 campaign at :80. TCP may execute receive/softirq work outside the endpoint threads (for example ksoftirqd), and async I/O helpers may run elsewhere. Thread CPU clocks and perf attached only to those TIDs exclude that work rather than putting it in the unknown bucket. In contrast memory streams remove kernel processing. The resulting paired CPU difference can therefore omit precisely the displaced work while being reported as total endpoint/transport CPU.",
+              "fix": "Define the accounting boundary explicitly: retain endpoint-thread CPU as a labeled partial metric, record helper threads and a bounded system/CPU-scoped kernel/background observation for local trials, and treat unattributable off-thread work as unknown. Only present a transport-total CPU difference when its accounting coverage is qualified; otherwise report the endpoint-only difference and an inconclusive kernel/total saving. Do not add overlapping thread and system counters. Add an analysis fixture with nonzero off-thread network work and one with unavailable system profiling, verifying neither silently becomes zero or a qualified total."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Low",
+              "summary": "The optional actual-Net fixture cannot satisfy the stated join-before-exit lifecycle through the current Net API.",
+              "evidence": "design.md:39-41 includes an optional fixture using actual NetCommand/NetEvent, and :48-51 requires cancel/close/join on failure. flaminio-node/src/net.rs:97-165 spawns a detached OS thread and returns only Net { cmds }; NetCommand::Close at :158-160 cancels an outgoing session, not the network thread or accepting loop. Dropping all Net handles permits eventual thread exit, but gives the harness no join or completion handle. Without a specific benchmark-only lifecycle, repeated fixtures can overlap teardown or leave listeners/tasks alive while later trials start, violating the stated isolation and contaminating counters.",
+              "fix": "Either omit this optional fixture from the increment or specify a bounded child-process fixture that owns actual Net instances and is awaited/reaped on success, failure and timeout before the next trial. An explicitly scoped dev-only lifecycle mechanism is another option if it leaves product behavior unchanged. Add a fixture test proving no owned process/listener remains after timeout and repeated trials do not overlap."
+            }
+          ],
+          "dependency_commits": {},
+          "inputs": [
+            "docs/issues/review-inputs/65-r1-combined.json"
+          ],
+          "status": "needs_fix",
+          "resolution": "R1-C1: proposed per-job reset-safe PID/readiness/measurement windows with matching retained successful fio counters and resume/error handling; R1-C2: endpoint CPU explicitly partial with separate non-additive host/off-thread observations and unknown coverage; R1-C3: optional detached actual-Net fixture removed. Added focused future fixtures. Local links, historical-decision prefix, scoped diff and whitespace checked; no runtime/lab execution. Technical revisions remain unapproved.",
+          "fix_commit": "ea0bda3952d61b8cc646b1275e54016bc4922381"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "ea0bda3952d61b8cc646b1275e54016bc4922381",
+          "reviewers": [
+            "review65_r2_combined (design-code and design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {},
+          "inputs": [
+            "docs/issues/review-inputs/65-r2-combined.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
       "approved": "2026-11-13",
-      "approval_commit": "de191df 7b0094f"
+      "approval_commit": "de191df 7b0094f",
+      "active_review_checkout": "/tmp/flaminio-65-review-resume",
+      "active_review_branch": "review-resume/65",
+      "active_review_commit": "e8511b5a26fe1c1ba832b90493feaf4f8c797bc5",
+      "round": "2",
+      "reviewed_commit": "ea0bda3952d61b8cc646b1275e54016bc4922381",
+      "authoritative_report": "docs/issues/65/report.md",
+      "latest_fix_commit": "ea0bda3952d61b8cc646b1275e54016bc4922381",
+      "clear_round": 2,
+      "clear_report_commit": "e8511b5a26fe1c1ba832b90493feaf4f8c797bc5"
     },
     {
       "number": 66,
       "worktree": "/home/jsfakian/Documents/src/flaminio-66",
       "branch": "issue/66-nvme-of-and-vhost-user-blk",
-      "status": "pending",
-      "rounds": [],
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "9ae0a6adad7915b4ae4ad0dd6345a77a4525e2da",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review66_r1_code (design-code)",
+            "/root/remaining_plan_reviews/review66_r1_security (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "Medium",
+              "summary": "The shared validation/error contract needs an explicit unsupported-operation result and composition with #84's descriptor classifier.",
+              "evidence": "docs/issues/66/design.md:58-64 validates operation/flags but defines only Invalid, Io and Stopped, with Invalid -> EINVAL and every other result -> EIO; it then says unsupported mappings are frozen. Current ublk.rs:1279-1281 and :1454-1456 returns EOPNOTSUPP for unsupported operations, which none of those shared errors can represent. #84 design.md:43-63 explicitly selects one descriptor classifier used by both modes, with registration-first EIO, unsupported flags/operations EOPNOTSUPP, and invalid read/write ranges EINVAL. #66 currently mentions #84 only for flush/discard behavior (:88-90), so its proposed universal validation contract is incomplete at the precise error distinction S2 requires.",
+              "fix": "Specify the boundary between ublk descriptor classification and common Request validation, preserving a typed Unsupported/refusal result or an explicit adapter-level Refuse(errno) before common admission. Add a whoever-lands-second hook to move/reuse #84's sole classifier without a second conflicting descriptor decoder; carry its configured max_io and precedence into both modes. Extend the concrete table/transcript fixture to assert EOPNOTSUPP for unknown op/unsupported flag, EIO for registration-first failure, EINVAL for invalid range, and zero engine/staging work on refusal. No dependency plan needs changing."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "Fresh request bindings must be explicitly separate from the preserved device lifetime and the endpoint states used by #48.",
+              "evidence": "docs/issues/66/design.md:29-32 gives a registry entry a current-process Binding and Endpoint::Ublk{id,dev_t,held_fd}; :46-47 requires a successor's fresh binding, but :155-158 leaves kept/device-less states to later reconciliation. #15 device-lifetime-contract.md requires the full (volume,first_epoch,boot_uuid,instance,generation,rdev,diskseq) identity in device-info and conditional detach. #48 design.md:289-312 requires that exact original device tuple survive recovery while routing separately uses a new generation; kept entries have no held fd. A new Binding cannot supply that original tuple, and the proposed held-fd endpoint shape does not represent a kept device. The plan promises unchanged typed status/control behavior without spelling out these two distinct identities or a representable kept state.",
+              "fix": "Add the concrete whoever-lands-second semantic composition now: immutable adapter/device lifetime metadata retaining the full #15 tuple independently of fresh routing Binding; kept/resuming/running endpoint states with held fd only when actually open; describe/device-info/conditional detach use the preserved tuple while all I/O routes use only the new binding. Preserve #17 maintenance entries without manufacturing a client frontend/endpoint or admitting client I/O. Exact Rust signatures can remain for the approved thin prototype. Name fixtures proving pre-restart conditional detach still matches after recovery, stale predecessor events cannot reach new requests, kept status requires no fabricated fd, and maintenance starts allocate no frontend."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Nit",
+              "summary": "The Open questions introduction still says the approved timing and test-only choices are unaccepted.",
+              "evidence": "docs/issues/66/spec.md:81-82 says neither 'after #15' nor 'test-only' is recorded as accepted here, immediately before :85-87 records both as settled; decisions.md:14-25 preserves their approval.",
+              "fix": "Label :81-83 as historical pre-approval questions or replace the stale present-tense introduction with the settled choices, retaining the original approval record and prototype settlement."
+            },
+            {
+              "id": "SEC66-R1-01",
+              "severity": "Medium",
+              "summary": "Bounded routing needs an event-capacity and terminal-delivery rule that remains nonblocking under the engine lock.",
+              "evidence": "docs/issues/66/design.md:41\u201345 sends bounded events and removes the route at a terminal event; :98\u2013100 derives queue capacities from queues\u00d7depth without specifying event slots or full/closed handling. The retained #15 router contract (design.md, The router, lines31\u201337) routes under the engine lock through nonblocking try_send. Current ublk.rs:605\u2013615 ignores try_send failure and removes the waiter for Done. One legitimate depth-one read crossing two remote chunk pieces can generate Piece, Piece, Done before its consumer runs (engine.rs:1889\u20131900 emits each direct-read Piece; sub_done then emits Done). A request-count bound alone is not an event bound. Converting these channels to bounded queues without a stated mailbox/credit policy can discard Done after route removal, hang the request and exhaust the binding; blocking on capacity while holding the engine lock can deadlock the read/stop path.",
+              "fix": "Specify a concrete nonblocking bounded mailbox/credit policy in event units, accounting for the maximum pieces and terminal result per admitted request and any retained retry/control events. Reserve capacity before engine admission or retain terminal state separately; never remove a live route before its terminal result is durably owned by the mailbox. State full/closed behavior explicitly (safe binding failure is acceptable, silent event loss is not), preserving memory and local-I/O ownership during stop. Add a paused-consumer depth-one multi-piece read fixture, saturated/closed mailbox and stop race fixtures proving terminal delivery or explicit fail-closed completion without an engine-lock wait."
+            },
+            {
+              "id": "SEC66-R1-02",
+              "severity": "Medium",
+              "summary": "The frontend batch lifetime contract does not define how unwinding is stopped before pending kernel buffers are destroyed.",
+              "evidence": "spec.md S5 promises safety on unwind, while design.md:73\u201384 says batches retain ownership and invokes an existing daemon fail-stop path if draining is impossible, but does not define an armed unwind/drop guard or its destruction order. Current local_read and fast_read_copy in ublk.rs:1293\u20131341,1638\u20131694 publish raw-buffer SQEs while building pending Vecs. Pinned libublk0.4.8 io.rs:2231\u20132233 unwraps submission, uring_async.rs:546\u2013570 eagerly pushes SQEs before returning the future, and UblkUringOpFuture (uring_async.rs:26\u201390) has no draining Drop. Ordinary future/Vec ownership therefore does not keep a request buffer alive when its task unwinds or is dropped with SQEs outstanding. #85 explicitly adds armed abort-on-unwind protection to UringDevice; that separate device ring does not protect the ublk queue ring, and the current flaminio-io daemon has no existing abort/exit path to invoke here.",
+              "fix": "Define the queue-local batch ownership mechanism explicitly: prepare lengths/buffers/bookkeeping before the first publication, arm a fail-stop-on-unwind/drop guard before any SQE can be published, and retain it through every completion and ownership-releasing cleanup. Its guard must execute before borrowed buffers/plans/tasks can be destroyed, with partial publication or unprovable drain terminating the process without unwinding those owners. Ordinary cancellation/error must drain before release. This can follow #85\u2019s principle without adding an external protocol or changing the settled thin-signature prototype. Add subprocess/injected-backend fixtures for panic after first publication, partial setup, task cancellation and panic during completion/cleanup; prove fail-stop occurs before a tracked pending backing allocation is released, using an independent backing reference so the test never creates dangling kernel memory."
+            }
+          ],
+          "dependency_commits": {
+            "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+            "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+            "48": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+            "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24",
+            "85": "0d95430b0e45c12bb61f59ae62b42a03709a4804"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/66-r1-code.json",
+            "docs/issues/review-inputs/66-r1-security.json"
+          ],
+          "status": "needs_fix",
+          "resolution": "R1-C1: #84 sole classifier, configured max_io and explicit Unsupported/EOPNOTSUPP precedence retained. R1-C2: #15/#48 immutable device tuple and kept/resuming/running handles separated from fresh I/O binding; #17 maintenance has no client endpoint. R1-C3: stale present-tense Open questions corrected. SEC66-R1-01: event/payload reservation, separate terminal/failure slots and nonblocking overflow/drain ownership specified. SEC66-R1-02: explicit frontend PublishedBatch and enclosing queue Drop-before-fields guards cover unwind/hard task cancellation. Future fixtures added; links, arithmetic, whitespace and historical decision prefix checked. No runtime/prototype/lab tests executed; revisions unapproved.",
+          "fix_commit": "8d3068043b2bfd66d4ef988335f258669156d29a"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "8d3068043b2bfd66d4ef988335f258669156d29a",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review66_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review66_r2_security (incremental design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+            "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+            "48": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+            "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+            "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24",
+            "85": "0d95430b0e45c12bb61f59ae62b42a03709a4804"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/66-r2-code.json",
+            "docs/issues/review-inputs/66-r2-security.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
       "approved": "2026-11-13",
-      "approval_commit": "1d60b36"
+      "approval_commit": "1d60b36",
+      "active_review_checkout": "/tmp/flaminio-66-review-resume",
+      "active_review_branch": "review-resume/66",
+      "active_review_commit": "9e9f15c8a33b6fcec21e7f34cb7d32f3a4a71a69",
+      "round": "2",
+      "reviewed_commit": "8d3068043b2bfd66d4ef988335f258669156d29a",
+      "authoritative_report": "docs/issues/66/report.md",
+      "latest_fix_commit": "8d3068043b2bfd66d4ef988335f258669156d29a",
+      "clear_round": 2,
+      "clear_report_commit": "9e9f15c8a33b6fcec21e7f34cb7d32f3a4a71a69"
     },
     {
       "number": 67,
       "worktree": "/home/jsfakian/Documents/src/flaminio-67",
       "branch": "issue/67-rwx-nfs-gateway",
-      "status": "pending",
-      "rounds": [],
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "fd544c8cf66d0ba7e279c3aadd51f88ad2b34f3b",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review67_r1_code (design-code)",
+            "/root/remaining_plan_reviews/review67_r1_security (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "Medium",
+              "summary": "The mandatory VM lab procedure cannot compose with its physical-only #83 prerequisite.",
+              "evidence": "docs/issues/67/intent.md:8,76-81 requires consumers on fl-a/fl-b; design.md:156-162 prescribes the VM lab and says #83 host profile remains a prerequisite. At dependency 67862ad667ac3121b453c9227cef1e8ec5248138, #83 spec S1 and design.md:19-42 require physical-boottime-v1 and explicitly refuse existing lab VMs; a qualification run cannot make these VMs supported. #84 design.md:224-227 already records the compatible before-#83/after-#83 distinction. Thus this plan has no executable success path under its own stated composed prerequisite.",
+              "fix": "Add an explicit whoever-lands-second composition in #67 only: before #83 lands, any VM evidence is limited to the old supported/test baseline and cannot certify physical clock admission; after #83 lands, gateway-up/test on these VMs refuses before publication/mutation, and the two-node success/restart qualification runs on two admitted physical workload hosts. Preserve one manually provisioned node-pinned gateway and no node-loss failover. State what physical and minimum-kernel #84 evidence is actually required rather than imply VM checks satisfy it. Add fake preflight fixtures for excluded VM refusal and admitted two-node setup, and label the future real evidence by host/profile."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "The plan omits the host NFS-client dependency needed for the static NFS PV to mount.",
+              "evidence": "intent.md:61-68 explicitly observes that lab VMs lack mount.nfs and that their kernel NFS-client support is unverified. scripts/guest/provision.sh:10 installs neither nfs-common nor equivalent client tooling. design.md:63-69 uses an in-tree NFS PV, and :103-110/:130-151 define setup/files/tests without any host-client installation or fail-closed helper/module preflight. Building a Ganesha/tunnel image under scripts/dev does not supply the kubelet host mount namespace. Official Kubernetes source pkg/volume/nfs/nfs.go:221-227 passes type nfs to the host mounter (https://raw.githubusercontent.com/kubernetes/kubernetes/v1.34.0/pkg/volume/nfs/nfs.go). A normal provisioned lab node therefore cannot perform the promised consumer mount.",
+              "fix": "Specify the supported host NFSv4.1 client package/helper and kernel capability prerequisites on both consumer nodes. Either add explicit lab provisioning changes (including scripts/guest/provision.sh in the files list), or document an operator-installed prerequisite and make up/test refuse before creating/publicizing resources when the actual kubelet host helper or kernel client is absent. Record client versions in qualification and add missing-helper/missing-client-support fixtures plus the future real mount through each node-local proxy."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Medium",
+              "summary": "The stable-ACK qualification needs an ordering/error oracle beyond process-kill checksum survival.",
+              "evidence": "design.md:39-42 requires durable shutdown-independent ordering, but its concrete S2 evidence at :143 and Lab :156-158 is stable-write/COMMIT/fsync plus SIGKILL and byte verification. Killing Ganesha on the same node does not discard the backing filesystem kernel page cache; an erroneous server that calls pwritev then returns stable success before fsync can pass that restart/checksum test. Existing #84 tests establish durability of completed block writes, not that Ganesha waited for its filesystem sync before an NFS stable reply. Official Ganesha VFS file.c:1322-1340 and :1570-1614 show the actual boundary: pwritev, conditional fsync before done_cb for stable WRITE, and fsync status for COMMIT (https://raw.githubusercontent.com/nfs-ganesha/nfs-ganesha/next/src/FSAL/FSAL_VFS/file.c). The draft needs a concrete fixture that fails when this required ordering is omitted.",
+              "fix": "Extend the accepted pinned-release qualification with observed filesystem-sync-to-NFS-reply ordering and deterministic delayed/failed sync cases for both stable WRITE and COMMIT. For example, gate the selected release\u2019s actual fsync/fdatasync boundary and show no stable-success reply until successful completion; return an injected sync error and assert no stable-success reply. Include a negative candidate/fixture that skips the wait so the oracle demonstrably fails. Retain SIGKILL/reclaim tests and #84 block conformance; no new replica rule, node-loss test or shared-lab execution is required for this plan review."
+            },
+            {
+              "id": "SEC67-R1-01",
+              "severity": "Medium",
+              "summary": "Teardown needs a consumer-withdrawal barrier before checking that mounts are gone.",
+              "evidence": "docs/issues/67/design.md:113-117 checks for live consumer pods/mounts and then removes TLS/proxies/server, but never withdraws the still-bound consumer claim or prevents new use of it. Under spec.md Tenant/S4, an ordinary unprivileged pod creator in the authorized consumer namespace can create another allowed PVC-using Pod after that check; Restricted admission explicitly allows persistentVolumeClaim volumes (Kubernetes Pod Security Standards, https://kubernetes.io/docs/concepts/security/pod-security-standards/). Its kubelet mount can race proxy unmount/removal or a later reuse of the per-export port. UID ownership checks protect which objects are deleted but do not serialize this new mount against down, so S7 teardown cannot prove consumers have stopped.",
+              "fix": "Define a minimal durable withdrawal/quiescence protocol before the no-consumer check, for example remove the exact owned consumer-claim UID from usable service and wait for claim protection plus existing and in-flight node mounts to retire, or use an equally concrete admission barrier. Keep the barrier effective across interruption/resume and refuse proxy/port/server retirement while any old consumer operation remains ambiguous. Reuse of names/ports must not authorize an old mount against a replacement export. Add fake/API/node fixtures creating a new Pod and delaying a mount between the initial check and removal, plus interrupted/resumed withdrawal and claim/port replacement. Preserve backing data and the existing no-force-unmount rule."
+            },
+            {
+              "id": "SEC67-R1-02",
+              "severity": "Medium",
+              "summary": "The new tenant-driven server and tunnel processes lack a finite resource-containment profile and pressure qualification.",
+              "evidence": "docs/issues/67/design.md:94-101 qualifies capabilities/seccomp but specifies no CPU/memory/pid/fd or connection/handshake/buffering limits for Ganesha, its pod tunnel or the host node proxies. Contracts at :121-127 and tests at :142-148 likewise omit pressure/exhaustion behavior. Authorized unprivileged consumers can generate many opens/locks and concurrent filesystem operations; a network peer reaching the TLS listener can also occupy pre-authentication work. Neither root squash nor mTLS bounds that work. Ganesha documents independent RPC_Max_Connections, RPC_Ioq_ThrdMax, DRC and send/receive-buffer controls (https://github.com/nfs-ganesha/nfs-ganesha/blob/next/src/doc/man/ganesha-core-config.rst), but this plan does not select/qualify even an overall containment boundary. An unconstrained gateway or host proxy can exhaust resources shared with the storage node, beyond the export trust boundary.",
+              "fix": "Add a bounded per-export qualification profile using ordinary container/service CPU, memory, task/fd controls and supported server/tunnel connection, handshake and buffer limits, with explicit overload/timeout/restart semantics preserving stable-write and recovery rules. Exact version-specific values may remain in the approved qualification artifact, but finite budget categories, host-proxy containment and pass criteria must be required now. Add future slow/failed TLS handshake and concurrent NFS open/request pressure fixtures proving bounded ownership/cleanup and safe recovery after containment kills. This does not require filesystem quotas, a custom transport-memory proof or a new replication protocol."
+            }
+          ],
+          "dependency_commits": {
+            "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+            "82": "18fb58576f2d5a8cbf31463619c652fbf475a5bc",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+            "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/67-r1-code.json",
+            "docs/issues/review-inputs/67-r1-security.json"
+          ],
+          "status": "needs_fix",
+          "resolution": "R1-C1: explicit before/after #83 VM/physical host qualification matrix. R1-C2: operator-installed host NFS client/helper and fail-closed actual kubelet preflight. R1-C3: stable WRITE/COMMIT sync delay/error ordering and negative oracle. SEC67-R1-01: durable per-export host mount-helper gate seals delayed calls, retains bounded invocation ownership and requires both-node/API quiescence before endpoint retirement. SEC67-R1-02: finite ordinary server/tunnel/host-proxy containment and pressure/restart qualification. Historical decisions and accepted local ADR prefixes preserved; new helper/held-retirement consequences proposed/unapproved. Links, whitespace and scope checked; future runtime/qualification tests not executed.",
+          "fix_commit": "1b4a2aafa883c13224f2b8e825efc5449adf7415"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "1b4a2aafa883c13224f2b8e825efc5449adf7415",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review67_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review67_r2_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "SEC67-R2-01",
+              "severity": "Medium",
+              "summary": "A fresh Serving lifetime must distinguish delayed helper calls from a previously retired consumer of the same export.",
+              "evidence": "withdrawal-contract.md:9-24 gates only (loopback address, port, /flaminio/<persistent export UUID>) and records the current consumer PVC UID internally; :59-64 releases the endpoint after retirement and permits replacement consumers with a new PVC UID. A kubelet mount operation paused before entering this dispatcher owns no invocation token or mount yet. It can arrive after down seals/retires and a later up reuses that same export/port for a new claim. It then sees fresh Serving and identical source/options; the old PVC UID is not an incoming credential the dispatcher can compare. Official Kubernetes v1.34 NFS plugin nfs.go:221-227 sends only server:exportPath, target and mount options to the host mounter, and nestedpendingoperations.go:167-175 runs saved mount work asynchronously; operation_generator.go:395-416,515-523 uses its captured VolumeSpec/Pod. API absence and the current mount/token inventory therefore do not establish that every not-yet-entered helper call has vanished. Persistent export UUID alone does not fence a replacement consumer lifetime.",
+              "fix": "Bind each new consumer/Serving lifetime to a fresh mount-admission generation carried in the actual immutable PV source or an endpoint tuple that is never reused for that lifetime, and reject old generations before real-helper launch. Keep persistent NFS filesystem/export identity separately for same-lifetime process restart and data retention. Define retained/rejected stale-source behavior so an old owned source never falls through to the unrelated-NFS delegation path; no new CSI controller is needed. Add a fixture pausing an old cached kubelet operation before dispatcher entry, completing down and opening a new claim for the same backing export, then releasing the old call: it must be refused while a new-generation call succeeds. Include interrupted retirement/reopening and name/port reuse."
+            }
+          ],
+          "dependency_commits": {
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+            "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/67-r2-code.json",
+            "docs/issues/review-inputs/67-r2-security.json"
+          ],
+          "status": "needs_fix",
+          "resolution": "SEC67-R2-01: immutable PV source now carries actual consumer PVC UID alongside permanent export UUID, with Pending-PVC UID acquisition/Preparing/binding/Serving order. Permanent FSID/export/server identity remains separate; all stale/unknown reserved owned sources deny before real-helper delegation, even after record pruning. Added delayed-before-dispatch/reopen and partial-publication fixtures. Historical decision/ADR prefixes preserved; 23 links and staged whitespace checked; no runtime/helper/API/server/lab tests. Revisions remain proposed/unapproved.",
+          "fix_commit": "5bfd5945f4a960a9a2ad36b2c6b413ae6f1d2687"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "5bfd5945f4a960a9a2ad36b2c6b413ae6f1d2687",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review67_r3_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review67_r3_security (incremental design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {},
+          "inputs": [
+            "docs/issues/review-inputs/67-r3-code.json",
+            "docs/issues/review-inputs/67-r3-security.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
       "approved": "2026-11-13",
-      "approval_commit": "fd544c8"
+      "approval_commit": "fd544c8",
+      "active_review_checkout": "/tmp/flaminio-67-review-resume",
+      "active_review_branch": "review-resume/67",
+      "active_review_commit": "5ff126ac4a395f20885885feaefcf3302489b5fc",
+      "round": "3",
+      "reviewed_commit": "5bfd5945f4a960a9a2ad36b2c6b413ae6f1d2687",
+      "authoritative_report": "docs/issues/67/report.md",
+      "latest_fix_commit": "5bfd5945f4a960a9a2ad36b2c6b413ae6f1d2687",
+      "clear_round": 3,
+      "clear_report_commit": "5ff126ac4a395f20885885feaefcf3302489b5fc"
     },
     {
       "number": 68,

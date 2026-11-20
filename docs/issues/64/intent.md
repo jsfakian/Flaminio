@@ -49,9 +49,11 @@ assume them:
    blocks; the rest are remote reads, and a block of a member that is away costs k reads and a
    decode. `dataLocality` (§9) and `PreferNode` (`Place`) mean "a whole copy here".
 5. **Leases do not depend on what members hold; their reason does.** Every member of the ISR,
-   and a joiner, confirms the epoch (`lease_ok`, `target.rs:1624`; ADR 0005). ADR 0005 argues
-   that a new target "must fence at least one ISR member of every chunk anyway, because it
-   needs an up-to-date source". With k+m one member is not a source: k are.
+   and a joiner, confirms the epoch (`lease_ok`, `target.rs:1624`; ADR 0005). ARCHITECTURE §8.5
+   gives the rationale that a new target "must fence at least one ISR member of every chunk
+   anyway, because it needs an up-to-date source". That is not the current takeover rule: protocol §6 requires
+   fencing the effective ISR and reconciliation before serving. With k+m one member is not a
+   reconstruction source: k coherent fragments are.
 6. **Reconciliation takes any member as the authority, so nothing keeps versions.** After a
    failover the target unites the ISR members' uncertain sets (`on_fenced`, `target.rs:1311`),
    asks every ISR member for a CRC per block (`:1764`), calls a block bad when replies differ

@@ -33,3 +33,44 @@ Nothing is implemented. Approved before its plan review cleared (status: pending
   `scripts/lab.sh` to `scripts/checks/gateway.sh`.
 - **The ADR's decision** (`adr-proposal.md`, Proposed decision; `design.md`, Docs, risks and
   ADRs): accepted as proposed, with the plan.
+
+
+## Review corrections — 2026-11-20 (proposed, unapproved)
+
+The approval and settlements above remain the historical record. These actual R1 corrections
+are not fresh human acceptance, implemented support or executed qualification evidence.
+
+- **R1-C1:** before #83, explicitly label older VM-baseline evidence; after #83, current VMs
+  refuse before mutation and successful two-host qualification uses admitted physical hosts.
+  #84 physical/minimum-kernel evidence stays separate; no VM override or dependency-plan edit.
+- **R1-C2:** require operator-installed NFSv4.1 host client/helper and actual kubelet-path
+  preflight on both consumer nodes, with recorded versions and missing-client refusal fixtures.
+  Up/test never silently install packages or load modules.
+- **R1-C3:** add stable WRITE/COMMIT sync delay/error ordering and a negative skip-wait oracle.
+  Process-kill page-cache survival and downstream block conformance cannot replace that test.
+- **SEC67-R1-01:** the proposed owned host mount-helper gate records invocation ownership
+  before launch. Down durably seals both hosts, waits pre-seal helpers, deletes only the owned
+  consumer PVC and proves node/API quiescence before endpoint retirement. Unknown ownership
+  holds resources; no timeout/force-token/port-reuse shortcut. This adds a host installation
+  prerequisite and may leave down blocked with old service retained, an explicit unapproved
+  availability cost; it adds no CSI/controller or gateway API credential.
+- **SEC67-R1-02:** require finite per-export Ganesha, tunnel and host-proxy containment categories,
+  effective control read-back and slow-handshake/NFS pressure/restart qualification. Exact
+  release-specific values remain in the accepted qualification approach; no custom memory proof
+  or filesystem quota is introduced.
+
+See [qualification](qualification-contract.md) and [withdrawal](withdrawal-contract.md) contracts
+for concrete future checks. Only static source/document/link/whitespace checks ran for this fix.
+
+
+## R2 review correction — 2026-11-20 (proposed, unapproved)
+
+- **SEC67-R2-01:** each consumer's actual API UID appears in its immutable PV NFS path, after
+  Pending PVC creation and before PV/binding/Serving publication. Permanent export UUID,
+  Export_Id/FileSystem_ID and server owner/reclaim identity remain separate. Reopening requires
+  a new PVC UID; cached old source paths cannot pass against the new Serving record. All stale,
+  unknown or malformed reserved owned sources fail closed rather than delegate as unrelated NFS.
+  Paused-before-dispatch, partial reopen and old/new source fixtures exercise this distinction.
+
+The prior withdrawal/resource corrections and historical accepted decision remain preserved;
+this refinement is unapproved and no helper/API/mount/runtime/lab fixture was executed.

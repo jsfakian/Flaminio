@@ -2,9 +2,9 @@
 
 [spec](spec.md) · [decisions](decisions.md) · [study](study.md)
 
-Approved 2026-11-13; not implemented.
-Docs-only first increment. The study recommends **not yet**, not an accepted roadmap
-change. No coding library, format, simulator rule or replicated-volume behavior is implemented.
+Approved 2026-11-13; not implemented. Review revisions dated 2026-11-20 are unapproved.
+Docs-only first increment. The **not yet** outcome and reopening criteria were settled at that
+approval. No coding library, format, simulator rule or replicated-volume behavior is implemented.
 Settled at approval, 2026-11-13: not yet, with the study's reopening criteria (see decisions.md,
 Settled at approval).
 
@@ -15,22 +15,25 @@ sends identical extent data; `:1644` selects one readable source; `:1450` comput
 `flaminio-repl/src/replica.rs` stores no durable per-block version in its core; uncertain state
 is volatile/restart-wide. `flaminio-format/src/meta.rs:450` maps locations/zeros, not fragment
 version+commit evidence. `sim/mod.rs:1355` expects replicas to agree on values, not decodable
-fragment sets. #45/#46 first increments do not supply coded multi-source recovery. #72 now
-plans classes/capacity but is not implemented. The lab has3VM data nodes on2physical hosts.
+fragment sets. #45/#46 first increments do not supply coded multi-source recovery. #72's reviewed
+increment plans a per-node capacity ledger and create/move admission, not device classes or cold
+classification; none is implemented. The lab has3VM data nodes on2physical hosts.
 
 ## Study artifact and outcome (S1–S10)
 
 [study.md](study.md) answers the eleven existing intent outcomes. Keep formulas and assumptions
 adjacent to numbers. It explicitly separates code evidence, estimates, candidate mechanisms,
-unknown proof and new measurement requirements. Recommend revisit after real workload/class
-need, coding recovery model and independent-domain evidence exist. Recording this recommendation
-does not accept a coding protocol or remove #64 from the roadmap.
+unknown proof and new measurement requirements. The approved outcome is to revisit after real
+workload/class need, coding recovery model and independent-domain evidence exist. The review
+revisions clarify prerequisites and estimates; they accept no coding protocol and keep #64 open.
 
 Use no proposed production pseudocode as proof. The write-hole worked cases are counterexamples
 to directly reusing replication, not a proof every erasure scheme fails. Candidate versioned
 COW/commit evidence must be modeled before implementation and must preserve untouched blocks.
-The current stricter takeover protocol supersedes the intent's outdated ADR0005 immediate-read
-premise; fragment recovery must prove sufficient current sources, fencing and lease exclusion.
+ARCHITECTURE §8.5 supplies the intent's single-source lease rationale; ADR0005 contains the older
+immediate-read wording. Current protocol §6 and `Target::advance_chunk` require fencing the
+effective ISR and reconciliation before serving. Fragment recovery must extend those stricter
+source, fencing and lease requirements; this study does not change the accepted ADR.
 
 If reviewers/user later select a protocol/library/profile, create an issue-local **Proposed**
 ADR with exact failure/ack policy, stripe geometry, identities, format and model contracts.
@@ -39,10 +42,11 @@ or byte layout is reserved; study is the permitted recorded not-yet branch of th
 
 ## Files touched
 
-- `docs/issues/64/{spec,design,study}.md`: scoped requirements and current recommendation.
+- `docs/issues/64/{intent,spec,design,study,decisions}.md`: scoped requirements, study and review
+  corrections; historical approvals and the settled not-yet outcome are preserved.
 - Future implementation of this docs increment aligns architecture §20.6/§11.4, README phase6
-  row and followups with the recommendation and its pending status, without rewriting accepted
-  ADRs or claiming coded storage exists. GitHub issue evidence is appended, original scope kept.
+  row and followups with the approved not-yet outcome and reopening criteria, without rewriting
+  accepted ADRs or claiming coded storage exists. GitHub issue evidence is appended, original scope kept.
 - No Rust/Go/manifests/Makefile dependency or production source changes in this increment.
 
 ## Contracts
@@ -58,10 +62,10 @@ conditions, not sufficient crash-consistency or adversarial-integrity proofs.
 |---|---|
 | S1/S2 | study use case/domain/capacity table, check ratios and reserve/version exclusions |
 | S3/S4 | q/k/D policy and explicit interrupted-write/target-loss cases; unknown proofs remain blockers |
-| S5/S6 | declared stripe/update assumptions and confinement tradeoff table, no invented timing |
+| S5/S6 | RF2/RF3/coding operation/byte/transfer-round and conversion estimates; declared assumptions and confinement table, no invented timing |
 | S7 | named dependency contracts including identity/integrity/retention and rebuild source sets |
 | S8 | model/check/mutation plan precedes data-plane work, permanent loss explicitly included |
-| S9/S10 | independent-domain lab requirements and unaccepted not-yet/reopening criteria |
+| S9/S10 | independent-domain lab requirements and approved not-yet/reopening criteria; review revisions unapproved |
 
 Settled at approval, 2026-11-13: not yet and its reopening criteria (see decisions.md, Settled at
 approval).

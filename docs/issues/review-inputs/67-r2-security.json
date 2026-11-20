@@ -1,0 +1,45 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review67_r2_security (fresh incremental design-security)",
+  "reviewed_commit": "1b4a2aafa883c13224f2b8e825efc5449adf7415",
+  "dependency_commits": {
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC67-R1-01",
+      "status": "partially_fixed",
+      "evidence": "withdrawal-contract.md:18-58 introduces durable Serving/Withdrawing/Retired state, bounded write-ahead invocation tokens and two-host sealing before consumer/API/node quiescence, with ambiguity held across failure/retry. This repairs check-then-remove during withdrawal. However the source identifies the persistent export rather than a fresh consumer-serving generation; delayed calls not yet entered into the dispatcher can survive retirement and a later reopening, as SEC67-R2-01 details."
+    },
+    {
+      "id": "SEC67-R1-02",
+      "status": "fixed",
+      "evidence": "qualification-contract.md:40-65 requires effective finite ordinary CPU/memory/task/fd, server/RPC/cache, tunnel/proxy connection/handshake/buffering controls and pressure/containment-kill recovery tests. withdrawal-contract.md:29-33 also bounds the new helper/probe processes and invocation records (8 records, <=4KiB each), with exhaustion refusal and no timeout clearing ownership. Exact release-specific values remain within the explicitly accepted qualification approach."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed in affected security scope",
+      "evidence": "qualification-contract.md:9-15, spec S8 and design Lab distinguish old-baseline VM evidence from mandatory physical-boottime-v1 admission after #83; excluded VMs refuse before gateway creation/publication. Checked current mapped #83 admission and #84 matrix at recorded hashes."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed in affected security scope",
+      "evidence": "qualification-contract.md:17-25 requires operator-installed host mount.nfs/NFSv4.1 support in the actual kubelet environment, records versions/options, refuses missing/unknown support before mutation and defines actual mounts on both hosts. No package/module mutation is silently implied."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed in affected security scope",
+      "evidence": "qualification-contract.md:27-38 supplies explicit stable WRITE/COMMIT sync delay and injected-error ordering oracles, plus a negative early-success candidate that must fail. Process death and downstream block conformance are explicitly insufficient substitutes."
+    }
+  ],
+  "findings": [
+    {
+      "id": "SEC67-R2-01",
+      "severity": "Medium",
+      "summary": "A fresh Serving lifetime must distinguish delayed helper calls from a previously retired consumer of the same export.",
+      "evidence": "withdrawal-contract.md:9-24 gates only (loopback address, port, /flaminio/<persistent export UUID>) and records the current consumer PVC UID internally; :59-64 releases the endpoint after retirement and permits replacement consumers with a new PVC UID. A kubelet mount operation paused before entering this dispatcher owns no invocation token or mount yet. It can arrive after down seals/retires and a later up reuses that same export/port for a new claim. It then sees fresh Serving and identical source/options; the old PVC UID is not an incoming credential the dispatcher can compare. Official Kubernetes v1.34 NFS plugin nfs.go:221-227 sends only server:exportPath, target and mount options to the host mounter, and nestedpendingoperations.go:167-175 runs saved mount work asynchronously; operation_generator.go:395-416,515-523 uses its captured VolumeSpec/Pod. API absence and the current mount/token inventory therefore do not establish that every not-yet-entered helper call has vanished. Persistent export UUID alone does not fence a replacement consumer lifetime.",
+      "fix": "Bind each new consumer/Serving lifetime to a fresh mount-admission generation carried in the actual immutable PV source or an endpoint tuple that is never reused for that lifetime, and reject old generations before real-helper launch. Keep persistent NFS filesystem/export identity separately for same-lifetime process restart and data retention. Define retained/rejected stale-source behavior so an old owned source never falls through to the unrelated-NFS delegation path; no new CSI controller is needed. Add a fixture pausing an old cached kubelet operation before dispatcher entry, completing down and opening a new claim for the same backing export, then releasing the old call: it must be refused while a new-generation call succeeds. Include interrupted retirement/reopening and name/port reuse."
+    }
+  ],
+  "report": "Fresh incremental security review of fd544c8cf66d0ba7e279c3aadd51f88ad2b34f3b..1b4a2aafa883c13224f2b8e825efc5449adf7415 excluding report.md, including both new normative appendices. Read actual R1 pair and recorded report, changed intent/spec/design/decisions/local ADR, qualification and withdrawal contracts. The five original findings have the dispositions above; one Medium remains in the new withdrawal/reopen contract, with no additional Nits. Verified the affected real kubelet NFS source-to-mounter interface and asynchronous saved-operation path against official Kubernetes v1.34 sources, and checked current relevant #83/#84 composition at recorded hashes. No unchanged full NFS/security re-audit, speculative CSI bypass, future node-loss/RWX expansion, custom memory proof or approval-only finding. Historical accepted first-slice/qualification approach remains preserved and review amendments are explicitly proposed/unapproved. Static diff whitespace and exact clean issue HEAD verified; dependency HEADs recorded from actual reads. No repository edits, subagents, runtime/server/helper/API/mount/lab/test actions. Only this report artifact written. Primary sources: https://raw.githubusercontent.com/kubernetes/kubernetes/v1.34.0/pkg/volume/nfs/nfs.go ; https://raw.githubusercontent.com/kubernetes/kubernetes/v1.34.0/pkg/volume/util/nestedpendingoperations/nestedpendingoperations.go ; https://raw.githubusercontent.com/kubernetes/kubernetes/v1.34.0/pkg/volume/util/operationexecutor/operation_generator.go ."
+}

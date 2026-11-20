@@ -3,6 +3,7 @@
 [spec](spec.md) · [decisions](decisions.md) · [ADR, Accepted with the plan, 2026-11-13](adr-proposal.md)
 
 Approved 2026-11-13; not implemented.
+Review corrections of 2026-11-20 are proposed and unapproved (decisions.md).
 First-step lab design only. No CSI RWX capability is advertised. Qualification gates
 below must be met before exposure; dependency versions and privilege profile are unaccepted.
 Settled at approval, 2026-11-13: the dependency and privilege approach as proposed, exact versions
@@ -39,7 +40,8 @@ Settled at approval, 2026-11-13: this server as proposed (see decisions.md, Sett
 A qualification fixture must establish the exact pinned release's FSAL configuration, sync
 stable-write/COMMIT behavior, persistent recovery backend and durable shutdown-independent
 ordering. No export is enabled until restart tests verify file handles, opens/locks and
-stable data. Persistent record loss stops startup; never silently initialize a replacement
+stable data. The [qualification contract](qualification-contract.md) adds an independent
+stable WRITE/COMMIT sync-ordering/error oracle; SIGKILL survival alone is insufficient. Persistent record loss stops startup; never silently initialize a replacement
 identity. Server-private state has restrictive ownership and is not reachable through NFS
 pseudo-root traversal, symlinks or a second export.
 
@@ -61,7 +63,9 @@ A generic tunnel that merely accepts any CA-signed client is insufficient.
 Settled at approval, 2026-11-13: these tunnels as proposed (see decisions.md, Settled at approval).
 
 The trusted operator creates a static NFS PV pointing at node-loopback proxy and pre-binds it
-with claimRef namespace/name/**UID** to the one consumer claim. `mountOptions` require
+with claimRef namespace/name/**UID** to the one consumer claim. The immutable NFS path includes
+that actual PVC UID, separately from permanent export/FSID/reclaim identity; the withdrawal
+contract orders Pending PVC creation, source/PV binding and Serving publication. `mountOptions` require
 `vers=4.1,proto=tcp,hard,nosuid,nodev` and the assigned port. Retain reclaim policy. Proxies
 exist only on the two allowed workload nodes; PV node affinity limits scheduling accordingly.
 Applications mount via that PVC, with ordinary restricted Pod security. They never name a
@@ -97,30 +101,41 @@ with a minimal capability set must pass the fixture; if it cannot, return for de
 Read-only rootfs, no host namespaces, service-account token automount false, no hostPath,
 no host socket/device mounts. Tunnel process is nonroot with all capabilities dropped.
 Secrets mount only in tunnel containers. Pin all image digests and record dependency licenses.
+Require the finite per-export server, pod-tunnel and host-proxy containment and pressure tests
+in the [qualification contract](qualification-contract.md); no unlimited default is accepted.
 Settled at approval, 2026-11-13: this privilege profile as proposed, exact rules recorded in
 `qualification.md` (see decisions.md, Settled at approval).
 
 Proposed `make gateway-{up,status,down,test} GATEWAY=<id> NAMESPACE=<ns> CLAIM=<name>` dispatches
 through `scripts/lab.sh` to `scripts/checks/gateway.sh`. `up` requires an explicit existing
 backing PVC and selected node, performs all preflights before publication, and checkpoints
-resource UIDs. It installs only labeled/UID-owned objects. Store inventory in workstation lab
+resource UIDs. The [withdrawal gate](withdrawal-contract.md) must be installed before the
+consumer PV/PVC is published. Both workload hosts must already have the operator-installed NFSv4.1 client
+helper/kernel support specified in the [qualification contract](qualification-contract.md);
+missing/unknown support refuses before any gateway resource is created. No implicit package
+installation or module loading by up/test. It installs only labeled/UID-owned objects. Store inventory in workstation lab
 state, excluding secret bytes; validate Kubernetes names and quote every shell argument.
 Output names gateway, backing PVC, consumer claim UID, node, endpoint identity and readiness.
 Exit 0 success, 1 configuration/runtime failure, 2 invalid arguments, 255 lost SSH.
 `status` is read-only; on partial failure print owned stages and safe retry instructions.
+Down output/help explicitly names the consumer PVC UID it withdraws/deletes and the backing
+PVC it retains; deleting the consumer claim is part of this proposed teardown contract.
 Settled at approval, 2026-11-13: these commands as proposed (see decisions.md, Settled at approval).
 
-`down` first refuses while live consumer pods/mounts exist; authorized caller stops them,
-then repeats down. Disable TLS ingress, unmount proxies after kernel clients are gone, stop
-server, and remove only matching-UID owned objects/credentials. Keep backing data and identity.
-No force unmount, raw formatting or implicit PVC deletion. If ownership or lifecycle state is
-ambiguous, leave data and stop. Retry uses the persisted inventory, never names alone.
+`down` follows the [withdrawal contract](withdrawal-contract.md): persist Withdrawing, seal
+both actual kubelet mount-helper gates, retain every pre-seal invocation until reaped, withdraw
+the exact consumer PVC UID, then prove API and node mount quiescence before retiring endpoints.
+Existing service remains while consumers drain; delayed post-seal or old-source mounts after
+a new consumer opens are refused. Unknown
+ownership holds retirement across retry. No force unmount, backing-PVC deletion or name/port
+reuse while old ownership is ambiguous. The host helper has no gateway/API identity.
 
 ## Contracts
 
 Backing CSI API/protobuf/control socket unchanged. The Kubernetes contract comprises one
 backing RWO PVC, one gateway Deployment+TLS Service, protected Secrets, owned NetworkPolicies,
-node proxy service/config and one Retain static NFS PV with a UID-bound consumer PVC. Exact
+node proxy service/config, owned host mount-helper gates and one Retain static NFS PV with
+a UID-bound consumer PVC. Withdrawal seals and invocation records follow the local contract. Exact
 image digests, config grammar, capabilities/seccomp rules and tunnel identity encoding belong
 in a required `qualification.md` fixture before implementation ships; their absence blocks
 exposure. No new metadata RPC or replica capability is granted. The later CSI RWX stage needs
@@ -132,6 +147,8 @@ its own controller, authorization, scheduling/accounting and deletion contracts.
 - `scripts/dev/`: reproducible pinned server/tunnel image builder, S2/S5/S6.
 - `scripts/checks/gateway.sh`, `scripts/lab.sh`, Makefile help: S7–S8 command contracts.
 - `scripts/tools/gateway-test.sh`: faked lifecycle/API/SSH tests, S1/S4–S7.
+- `scripts/guest/gateway-mount-guard.py`: owned host-helper dispatcher/state and probes, S7;
+  operator installation preserves real-helper delegation for unrelated NFS sources.
 - `docs/lab.md`, README roadmap, `docs/followups.md`: prerequisites and actual delivery scope.
   Existing CSI mode validation and node failover behavior are not altered by this increment.
 
@@ -139,13 +156,13 @@ its own controller, authorization, scheduling/accounting and deletion contracts.
 
 | Rules | Planned evidence |
 |---|---|
-| S1/S7 | script fixtures for valid/hostile names, foreign UID, interrupted creation/deletion, occupied node, missing policy, retained backing PVC, no unrelated deletes |
-| S2 | pinned server fixture with stable writes/COMMIT and fsync, abrupt SIGKILL, byte verification; refuse async configuration |
+| S1/S7 | hostile/foreign UID, missing policy; delayed mount/new Pod during withdrawal, cached old source released after new-UID reopen, interrupted Preparing/Serving, wrapper death with live child, interrupted seals, stale UID/port reuse and unknown node state hold retirement; retained backing PVC/no unrelated deletes |
+| S2 | gate the pinned release sync boundary: delay then fail stable WRITE/COMMIT sync; no premature stable reply, error propagates; negative skip-wait candidate must fail; retain SIGKILL/byte verification |
 | S3 | open handle across restart, lock conflict then reclaim, same identity/address, persisted recovery; changed identity/config must refuse startup |
 | S4 | restricted namespace/API tests plus raw socket/inline-NFS attempts from both allowed and foreign namespaces; PV theft/claimRef mismatch denied |
 | S5 | correct/wrong node and gateway certs, expiry, credential rotation and old connection closure; capture verifies no cross-host plaintext |
-| S6 | actual capabilities and seccomp fixture, forbidden server-private path traversal, root squash, no secret/API/control/disk access |
-| S8 | two nodes alternate writes/renames and fsync; restart server; blocked bypasses; unchanged ordinary CSI checks |
+| S6 | capabilities/seccomp, private paths/root squash; finite server/tunnel/host-proxy budgets; slow TLS and concurrent open/lock/RPC pressure, cleanup and containment-kill/restart |
+| S8 | excluded VM refusal after #83; admitted physical two-node setup; absent host helper/client support refuses before mutation; alternate writes/renames/fsync, restart, bypasses, unchanged CSI checks |
 
 Local `make lint` includes script tests; `make test race hygiene contracts` covers affected
 Go/Rust baseline if any code is added. Server qualification requires real kernel NFS clients.
@@ -159,7 +176,12 @@ reclaim timing and checksums. It deletes its test objects on cleanup; preserves 
 unless operator separately authorizes destruction. Restore prior proxy/policy configuration
 only for objects this run created, keeping isolation until all consumers are gone. Then run
 existing `make csi-test csi-failover` with separate authorization for node power cycling.
-No raw disk format is part of this check. #83 host profile and #84 durability remain prerequisites.
+No raw disk format is part of this check. Host/profile and client preflights follow the
+[qualification contract](qualification-contract.md): before #83, VM runs name the older baseline
+and do not certify its clock contract; after #83, current VMs refuse before mutation and the
+success/restart check uses two admitted physical workload hosts. #84 durability evidence must
+name the supported physical/kernel profile, including its minimum-kernel qualification; VM
+checks never substitute for it. Whoever lands second composes these rules in #67 only.
 Settled at approval, 2026-11-13: `make gateway-test` as proposed (see decisions.md, Settled at
 approval).
 

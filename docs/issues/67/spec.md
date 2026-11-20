@@ -3,6 +3,7 @@
 [intent](intent.md) · [decisions](decisions.md) · [design](design.md)
 
 Approved 2026-11-13; not implemented.
+Review corrections of 2026-11-20 are proposed and unapproved (decisions.md).
 The existing intent's first step: one manually provisioned lab gateway and statically
 bound claims. Node-loss failover, automatic CSI RWX provisioning and performance remain later
 steps. The issue stays open. Server and encryption choices require the Proposed ADR.
@@ -57,17 +58,24 @@ consumer mounts use nosuid/nodev and hard NFSv4.1 behavior.
 **S7. Repeatable lifecycle.** An explicit lab command installs, reports and removes the owned
 gateway resources, with validated/quoted names. Teardown stops consumers before server and
 proxy removal, preserving the backing volume unless a separate explicit data deletion is
-requested. Failed setup is diagnosable and resumable without touching unrelated resources.
+requested. Host NFS clients and finite server/tunnel/proxy containment are prerequisites.
+Withdrawal prevents new and delayed mounts before proving consumer quiescence. A replacement
+consumer has a fresh API UID carried in its immutable mount source; cached old sources cannot
+enter the new Serving lifetime, including after name/port reuse. Failed setup is diagnosable and resumable without touching unrelated resources.
 
 **S8. Evidence.** A lab check uses consumers on both workload nodes, verifies cross-node file
 visibility and stable-write survival across ungraceful gateway process restart, exercises
 handles/open locks, and attempts namespace/direct-network bypasses. Existing CSI tests pass.
 The check records versions, policies, privileges and results; no result is invented here.
+Before #83, VM evidence names its older baseline; after #83, excluded VMs refuse and success
+requires two admitted physical workload hosts. Stable-reply evidence includes delayed/failed
+filesystem sync and a negative ordering fixture, beyond surviving kernel page-cache contents.
 
 ## Tests
 
 - S1, S4–S7: manifest/config and fake-Kubernetes script tests; hostile names; wrong owner UID;
-  missing policy; partial setup/teardown; secret permissions; forbidden network paths.
+  missing policy; partial setup/teardown; delayed/new mounts during durable withdrawal;
+  interrupted helper ownership and endpoint reuse; secret permissions; forbidden network paths.
 - S2–S3: real NFS clients with fsync, stable-write/COMMIT evidence, killed gateway, persistent
   recovery directory and reclaim tests; block durability depends on #84 conformance evidence.
 - S4–S6: lab tenant attempts inline NFS, foreign PVC/PV, hostNetwork/hostPath, direct port,

@@ -1,0 +1,45 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review64_r1_combined (fresh FULL combined design-code/design-security)",
+  "reviewed_commit": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+  "dependency_commits": {
+    "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+    "46": "d04aa6f649e26f76305c678f270fa33576c38c0c",
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [],
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "Medium",
+      "summary": "The study attributes device classes and cold classification to a dependency increment that explicitly excludes them.",
+      "evidence": "docs/issues/64/study.md:10-11 calls device-class, capacity reserve and cold classification draft #72 work; design.md:18-19 says #72 plans classes/capacity; study.md:100-102 and decisions.md:16 assign accounting/classes to #72. Current mapped #72 spec.md:3-4 limits the increment to a per-node capacity ledger and create/move admission. Its decisions.md, Choices settled by the design review round 1, explicitly cuts the class operation and states there is no device-class field; no cold classifier is supplied. Completion of the reviewed #72 increment therefore does not establish those prerequisites.",
+      "fix": "Keep the approved not-yet outcome and workload/class prerequisites, but distinguish #72's actual ledger/admission increment from future class policy and independently unspecified cold classification. Correct the current-facts and dependency text and qualify the settled prerequisite attribution without reopening the approved decision or editing #72."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "Medium",
+      "summary": "The S5 cost study omits its required RF comparison, round-trip estimates and conversion cost.",
+      "evidence": "spec.md S5 and intent.md outcome 5 require read/write/round-trip estimates against RF2/RF3; S5 also includes conversion. study.md:55-62 gives general coding byte formulas but defers all network-round-trip costs to an unknown protocol, provides no RF2/RF3 operation baseline, and does not quantify conversion. The confinement table only lists conversion concerns. Saying these quantities depend on a future protocol is honest, but does not supply the explicitly promised first-order comparison.",
+      "fix": "Add a small assumptions-labeled paper comparison for RF2/RF3 and the illustrated systematic coding case: data bytes/operations and dependency stages or minimum network rounds for small/full writes, healthy/degraded reads and rebuild, plus conversion read/write bytes and temporary coexistence space. Separate baseline data-transfer/read-before-write rounds from unknown durable-decision rounds; do not select a production protocol or invent timings/measurements."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "Low",
+      "summary": "Remove statements that the already-settled not-yet priority decision still awaits a human decision.",
+      "evidence": "spec.md:77-78 says a human has not accepted that priority decision; study.md:100 says pending human decision and :105-107 calls it a pending recommendation not to record as accepted. design.md:6-7 and its future-alignment text similarly describe a pending outcome. Those statements contradict decisions.md Settled at approval and the explicit accepted study title/appended approval statements: the user approved not yet and its reopening criteria on 2026-11-13. This is a false status statement, not a request for fresh approval.",
+      "fix": "State consistently that the not-yet outcome/reopening criteria were settled at the recorded approval, while no coding protocol, library, geometry, runtime implementation or superseding accepted ADR exists. Mark later review revisions as after approval as appropriate, preserving all historical approval records and #64 remaining open."
+    },
+    {
+      "id": "R1-C4",
+      "severity": "Nit",
+      "summary": "Attribute the quoted single-source lease rationale to its actual local source.",
+      "evidence": "intent.md:52-54 says ADR0005 argues that the new target must fence at least one ISR member because it needs an up-to-date source. That quoted rationale is in docs/ARCHITECTURE.md:496-499 (section8.5), not in docs/adr/0005-replica-confirmed-leases.md. The accepted ADR contains the older immediate-read rule instead, while current protocol section6/target::advance_chunk require fencing the effective ISR and reconciliation before serving. design.md:32 correctly acknowledges the stricter current rule.",
+      "fix": "Correct the quote attribution to ARCHITECTURE section8.5, and retain the design's distinction between the old ADR wording and current protocol/source behavior; no accepted ADR edit is required."
+    }
+  ],
+  "report": "FULL docs-only first-increment review of intent.md, spec.md, design.md, study.md and decisions.md on the exact clean issue64 snapshot. Applied both correctness and security checklists; four genuine comments including one Nit. Verified ratio/domain/loss arithmetic, q>=k+D as a necessary rather than sufficient bound, interrupted full/partial-stripe and target-member-loss reasoning, unmodified per-block semantics, and the explicit absence of a chosen or proved coding protocol. Read actual metadata validation/placement/move and CSI parameter paths; target write completion/source selection/fencing/takeover/reconciliation/resync; volatile replica uncertainty, store redirected/deferred writes and pending reclamation, sequence field, format mapping/allocation sizes, simulator representation/history/convergence checks, TLS13 and capability-token contracts. Checked local architecture, accepted ADR0005/0006, benchmark/lab evidence and main-checkout Proposed0009/0011, plus relevant mapped #45/#46/#50/#51/#72/#90 contracts at recorded HEADs. #51 HEAD includes its post-clear decisions reflow; #90 report HEAD is distinguished from technical-clear hash. No proposed dependency was treated as implemented. The study honestly identifies hostile-fragment authentication/replay, identity, epoch/session, retained-version/key/root lifetime and publication/GC as future proof obligations; no new production trust boundary, API, safety rule or simulator mutant is demanded for this unimplemented not-yet study. No runtime tests, lab actions, new measurements, external service writes or repository edits were performed. Issue body was read from supplied cache; substantive citations reviewed were local primary code/docs and supplied benchmarks, so no external technical source was needed. git diff --check passed; issue64 HEAD/status rechecked clean and unchanged before artifact creation. Findings are documentation corrections/completion only and do not reopen the approved outcome or select EC geometry/library/protocol."
+}

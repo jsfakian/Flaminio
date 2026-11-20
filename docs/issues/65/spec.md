@@ -3,6 +3,7 @@
 [intent](intent.md) · [decisions](decisions.md) · [design](design.md)
 
 Approved 2026-11-13; not implemented.
+Review corrections of 2026-11-20 are proposed and unapproved (decisions.md).
 Measurement increment before the issue's transport ADR. No RDMA, kTLS, authentication
 change or product transport switch. #65 remains open through its actual hardware/refusal tests.
 
@@ -14,7 +15,9 @@ change or product transport switch. #65 remains open through its actual hardware
 - **Counterfactual:** a matched benchmark variant omitting encryption or kernel networking;
   a measured estimate, not a proof of what RDMA/kTLS would achieve.
 - **CPU per I/O:** measured CPU consumption divided by completed successful operations, for
-  both endpoints separately and their total. Wall latency is not summed across CPUs.
+  both endpoints separately and their sum, labeled with the observed CPU boundary. Endpoint
+  thread CPU excludes off-thread work and is not total transport CPU. Wall latency is not
+  summed across CPUs.
 
 ## The invariant
 
@@ -40,12 +43,18 @@ and output. Invalid/truncated/mismatched replies fail the trial and invalidate i
 
 **S4. Attribution.** Record CPU per endpoint/thread, throughput and QD1 latency distributions;
 attribute samples to TLS, kernel TCP, framing/copies/allocation, handoffs and unknown. Preserve
-raw profiles and thread identities. Account for profiling overhead and shared/idle CPU;
+raw profiles and thread identities, including helper threads. Retain a separate bounded
+system/CPU-scoped observation of kernel and background work for local trials when available.
+Endpoint-only CPU and system observations are overlapping views, never additive. Missing or
+unattributable off-thread work makes kernel/transport-total saving unknown, even when the
+endpoint-only comparison is valid. Account for profiling overhead and shared/idle CPU;
 unsupported counters or insufficient samples make that attribution inconclusive.
 
 **S5. Production context.** Separately profile both target and peer during an authorized RF2
 write campaign, with the same-session RF1/raw and link evidence required by the performance
-plan. Include per-thread CPU and integrity results. Synthetic ACK timing is never substituted
+plan. Each selected fresh/steady fio invocation has its own matching profile/completion window,
+reacquiring target/peer process identities after resets; interrupted windows are invalid.
+Include per-thread CPU and integrity results. Synthetic ACK timing is never substituted
 for durable RF2 timing, nor extrapolated from the current slow network to fast NICs.
 
 **S6. Honest estimates.** Report paired variant differences and uncertainty without adding
@@ -68,8 +77,10 @@ fallback. No roadmap completion or ADR acceptance is implied by a measurement.
 - S1–S3: benchmark parser/limits and each variant on a small local run; corrupt/short ACK,
   outstanding cap, invalid args, no arbitrary address or credential path, normal TLS refusal.
 - S4/S6: fixture analysis with missing counters, low samples, profiling overhead and variance;
-  validate units/denominators and paired estimates, no double-counted endpoint wall time.
-- S5: authorized RF2 paired profile campaign, clean data verification, retained raw outputs.
+  validate units/denominators and paired estimates, off-thread CPU and unavailable system
+  observations, no double-counted endpoint/system CPU or endpoint wall time.
+- S5: fake campaign reset/PID changes, per-job windows, partial/resumed jobs and failed attach;
+  authorized RF2 paired profile campaign, clean data verification, retained raw outputs.
 - S7–S8: read-only inventory fixtures and documentation/result schema checks.
 
 ## Open questions

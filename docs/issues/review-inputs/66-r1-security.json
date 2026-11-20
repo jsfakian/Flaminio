@@ -1,0 +1,29 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review66_r1_security (fresh full design-security)",
+  "reviewed_commit": "9ae0a6adad7915b4ae4ad0dd6345a77a4525e2da",
+  "dependency_commits": {
+    "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+    "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+    "48": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+    "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24",
+    "85": "0d95430b0e45c12bb61f59ae62b42a03709a4804"
+  },
+  "prior_findings": [],
+  "findings": [
+    {
+      "id": "SEC66-R1-01",
+      "severity": "Medium",
+      "summary": "Bounded routing needs an event-capacity and terminal-delivery rule that remains nonblocking under the engine lock.",
+      "evidence": "docs/issues/66/design.md:41\u201345 sends bounded events and removes the route at a terminal event; :98\u2013100 derives queue capacities from queues\u00d7depth without specifying event slots or full/closed handling. The retained #15 router contract (design.md, The router, lines31\u201337) routes under the engine lock through nonblocking try_send. Current ublk.rs:605\u2013615 ignores try_send failure and removes the waiter for Done. One legitimate depth-one read crossing two remote chunk pieces can generate Piece, Piece, Done before its consumer runs (engine.rs:1889\u20131900 emits each direct-read Piece; sub_done then emits Done). A request-count bound alone is not an event bound. Converting these channels to bounded queues without a stated mailbox/credit policy can discard Done after route removal, hang the request and exhaust the binding; blocking on capacity while holding the engine lock can deadlock the read/stop path.",
+      "fix": "Specify a concrete nonblocking bounded mailbox/credit policy in event units, accounting for the maximum pieces and terminal result per admitted request and any retained retry/control events. Reserve capacity before engine admission or retain terminal state separately; never remove a live route before its terminal result is durably owned by the mailbox. State full/closed behavior explicitly (safe binding failure is acceptable, silent event loss is not), preserving memory and local-I/O ownership during stop. Add a paused-consumer depth-one multi-piece read fixture, saturated/closed mailbox and stop race fixtures proving terminal delivery or explicit fail-closed completion without an engine-lock wait."
+    },
+    {
+      "id": "SEC66-R1-02",
+      "severity": "Medium",
+      "summary": "The frontend batch lifetime contract does not define how unwinding is stopped before pending kernel buffers are destroyed.",
+      "evidence": "spec.md S5 promises safety on unwind, while design.md:73\u201384 says batches retain ownership and invokes an existing daemon fail-stop path if draining is impossible, but does not define an armed unwind/drop guard or its destruction order. Current local_read and fast_read_copy in ublk.rs:1293\u20131341,1638\u20131694 publish raw-buffer SQEs while building pending Vecs. Pinned libublk0.4.8 io.rs:2231\u20132233 unwraps submission, uring_async.rs:546\u2013570 eagerly pushes SQEs before returning the future, and UblkUringOpFuture (uring_async.rs:26\u201390) has no draining Drop. Ordinary future/Vec ownership therefore does not keep a request buffer alive when its task unwinds or is dropped with SQEs outstanding. #85 explicitly adds armed abort-on-unwind protection to UringDevice; that separate device ring does not protect the ublk queue ring, and the current flaminio-io daemon has no existing abort/exit path to invoke here.",
+      "fix": "Define the queue-local batch ownership mechanism explicitly: prepare lengths/buffers/bookkeeping before the first publication, arm a fail-stop-on-unwind/drop guard before any SQE can be published, and retain it through every completion and ownership-releasing cleanup. Its guard must execute before borrowed buffers/plans/tasks can be destroyed, with partial publication or unprovable drain terminating the process without unwinding those owners. Ordinary cancellation/error must drain before release. This can follow #85\u2019s principle without adding an external protocol or changing the settled thin-signature prototype. Add subprocess/injected-backend fixtures for panic after first publication, partial setup, task cancellation and panic during completion/cleanup; prove fail-stop occurs before a tracked pending backing allocation is released, using an independent backing reference so the test never creates dangling kernel memory."
+    }
+  ],
+  "report": "Full safety-security review of all #66 intent/spec/design/decisions at the exact stated HEAD, against current frontend submit/read/fast-read/stop routing, engine detach/local-read/finish-plan and direct-piece paths, Store ReadPlan ownership, pinned libublk0.4.8 eager queue publication and future lifecycle, and relevant current mapped #15/#17/#48/#84/#85 contracts. Preserved approved step1 internal extraction, ublk-only production/test-only Memory, after15 ordering and thin compilable-signature prototype settlement. No export protocol, new replication safety rule, runtime dependency change or human-approval requirement invented. Two Medium findings above; no additional Nits. #48 persistent tuple versus fresh routing binding consistency is handled in the independent correctness scope; no duplicate security finding asserted. Dependency hashes identify current contracts actually read, not an assertion of fresh review of those dependencies. No source/docs edits, tracker writes, subagents, runtime/prototype/tests/lab/benchmark/disk actions; future fixtures were assessed statically only. Reviewed checkout remained exact and clean at completion. Only this JSON report was written."
+}

@@ -1,0 +1,40 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review66_r2_security (fresh incremental design-security)",
+  "reviewed_commit": "8d3068043b2bfd66d4ef988335f258669156d29a",
+  "dependency_commits": {
+    "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+    "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+    "48": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+    "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24",
+    "85": "0d95430b0e45c12bb61f59ae62b42a03709a4804"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC66-R1-01",
+      "status": "fixed",
+      "evidence": "design.md:120-146 now reserves per-tag 2P LocalRead/Piece descriptor credits, max_io payload credit and a separate Done slot before admission; P=max_io/4096. Router retains engine-lock output order without waiting and removes a route only after terminal mailbox ownership. Failure/closed/full uses a non-consuming per-binding latch and existing lifecycle owner after unlocking, preserves plans/mailboxes through drain or abort, and cannot be overwritten by successful Done. Simultaneous retry credit exhaustion has an explicit failure policy rather than a false total retry bound. The paused depth-one multi-piece, closed/full/retry-credit and stop-race fixtures at :172 cover the original case. Confirmed current engine geometry is nonzero and 4096-aligned (:1604-1608), submit splits only at aligned chunk boundaries (:1690-1755), direct sub_done emits at most one final remote Piece per suboperation and a separate Done (:1880-1916), and failed local reads may retry (:2280-2335 and target::on_read_failed), which the new policy explicitly accounts for."
+    },
+    {
+      "id": "SEC66-R1-02",
+      "status": "fixed",
+      "evidence": "design.md:87-106 defines prepared batch ownership before any eager publication, an armed PublishedBatch custom Drop that aborts before its owner fields, and a separate enclosing queue custom Drop before task/buffer/mapping/ring destruction. Hard task drop, partial publication and unprovable drain fail-stop; ordinary cancellation keeps the task alive and drains, retaining protection through ownership-releasing cleanup. This no longer relies on async local-drop ordering or a nonexistent daemon path. Source confirms libublk0.4.8 __ublk_submit_sqe_async eagerly pushes before returning its future, ublk_submit_sqe unwraps it, and UblkUringOpFuture has no draining Drop. Current local_read/fast_read_copy publish before awaiting; the proposed owner guards cover those affected paths. Future subprocess/backend fixtures at :170 explicitly check panic/drop/cleanup before backing release with an independent backing reference."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "Cross-scope revision check: design.md:68-78 now preserves #84 sole descriptor classification, registration-first EIO, unsupported EOPNOTSUPP, invalid-range EINVAL and configured max_io before staging/admission, with exact errno/refusal fixtures at :168. Verified affected current #84 classifier contract lines43-65."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "Cross-scope revision check: design.md:30-41 separates immutable original DeviceLifetime from fresh routing Binding; kept entries have no fd, resuming opens only at verified ready-open and maintenance has no client endpoint. This matches current #48 lifetime/request contract at lines289-322 and #17 S9/S10 no-device/no-client semantics. I/O identities cannot inherit the original device generation."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "spec.md Open questions now states the approved after-#15/test-only choices as settled and preserves the thin compilable-signature prototype and later survey/ADR choices. Historical decisions remain separate from explicitly unapproved review corrections."
+    }
+  ],
+  "findings": [],
+  "report": "ZERO comments including Nits. Fresh incremental safety-security review of 9ae0a6adad7915b4ae4ad0dd6345a77a4525e2da..8d3068043b2bfd66d4ef988335f258669156d29a, excluding report.md from technical scope. Read actual R1 security and correctness artifacts plus recorded issue report; reviewed changed spec/design/decisions and current intent/settlements. Independently confirmed the two security findings and checked all three cross-scope corrections, then traced affected current direct-read subdivision/completion/retry, frontend local/fast read publication, pinned libublk0.4.8 future lifecycle, #15 nonblocking router/lock order, #48 lifetime separation, #17 maintenance exclusion, #84 classifier and #85 distinct-ring ownership contracts. The reservation bounds simultaneous retained frontend events; retry exhaustion explicitly fails the binding while preserving owners. Custom owning Drop contracts and queue-owner protection provide the required panic/cancellation ordering without relying on generator destruction order. No new external protocol, authority, credential channel, replication rule or unsupported simulator requirement introduced. Exact Rust signatures remain for the approved thin prototype; substantive review corrections remain unapproved. Dependency hashes record relevant contracts actually read without reopening them or asserting their current contents freshly reviewed. Static diff whitespace check passed; issue HEAD remained exact and clean and dependency hashes were rechecked. No runtime, prototype, implementation test, lab, benchmark, disk, tracker write or subagent action executed. Only this report artifact written."
+}

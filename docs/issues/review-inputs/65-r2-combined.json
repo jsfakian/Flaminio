@@ -1,0 +1,24 @@
+{
+  "reviewer": "review65_r2_combined (fresh incremental design-code/design-security)",
+  "reviewed_commit": "ea0bda3952d61b8cc646b1275e54016bc4922381",
+  "dependency_commits": {},
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "design.md RF2 profile and inventory (lines 87\u2013113) now specifies hooks per selected fio invocation after reset/setup, fresh target/peer PID-start identities, readiness, acknowledged per-host measurement markers, attempt-scoped retained fio JSON and successful operation/byte counters, group aggregates counted once, invalid partial/failed windows, and profiler detach/await before unrelated work. Spec S5 and focused reset/PID/precondition/integrity/readiness/resume/multijob/marker fixtures agree. Verified existing write_reset/write_volume and fresh/steady invocation/integrity/resume flow in scripts/lab.sh:1857\u20131890,2020\u20132115 and guest fio group_reporting at scripts/guest/bench-writes.sh:83\u2013108."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "spec.md CPU-per-I/O definition and S4 plus design.md Samples and interpretation explicitly label endpoint CPU partial, retain helper identities/counters and separate bounded system/online-CPU observations with matched idle intervals, record unavailable/lost coverage as unknown, prohibit adding overlapping views, and distinguish endpoint estimates from host incremental estimates and qualified transport totals. Schema and fixtures include off-thread work, unavailable profiling and overlapping counters."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "design.md Local harness and variants removes the optional actual-Net fixture and associated unbounded-channel lifecycle claim. Local frame trials explicitly exclude production handoffs; authorized RF2 profiling observes them separately. Confirmed current flaminio-node/src/net.rs:85\u2013165 returns only a command sender after spawning a detached OS thread, so omission resolves the joinability defect without a product lifecycle change."
+    }
+  ],
+  "findings": [],
+  "report": "Incremental review of 9d806703f4642ecdbcbd9bde6cbe4fdd2430b22c..ea0bda3952d61b8cc646b1275e54016bc4922381 excluding report.md. Read actual prior combined JSON in both /tmp and canonical review-inputs plus issue report, current intent/spec/decisions to preserve the approved measurement-only slice, changed design/spec/decisions and affected campaign, guest fio and Net lifecycle paths. Confirmed each actual R1 finding fixed; reviewed revised counting, windows, off-thread/system coverage, artifact fields, fixture removal and associated future tests for correctness/security fallout. Zero comments including Nits. No external dependency plan contract was relevant; dependency_commits is empty. Historical approvals remain historical and substantive corrections remain proposed/unapproved; no approval-only finding. No RDMA transport expansion, runtime safety rule or simulator requirement invented. Static diff whitespace check passed. No runtime, lab, benchmark, profiler, disk or implementation tests were executed; future tests remain proposed. Final git HEAD remained the reviewed full hash and working tree was clean. Read-only except this JSON report."
+}

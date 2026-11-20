@@ -1,0 +1,35 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review67_r1_code",
+  "reviewed_commit": "fd544c8cf66d0ba7e279c3aadd51f88ad2b34f3b",
+  "dependency_commits": {
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+    "82": "18fb58576f2d5a8cbf31463619c652fbf475a5bc",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "84": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24"
+  },
+  "prior_findings": [],
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "Medium",
+      "summary": "The mandatory VM lab procedure cannot compose with its physical-only #83 prerequisite.",
+      "evidence": "docs/issues/67/intent.md:8,76-81 requires consumers on fl-a/fl-b; design.md:156-162 prescribes the VM lab and says #83 host profile remains a prerequisite. At dependency 67862ad667ac3121b453c9227cef1e8ec5248138, #83 spec S1 and design.md:19-42 require physical-boottime-v1 and explicitly refuse existing lab VMs; a qualification run cannot make these VMs supported. #84 design.md:224-227 already records the compatible before-#83/after-#83 distinction. Thus this plan has no executable success path under its own stated composed prerequisite.",
+      "fix": "Add an explicit whoever-lands-second composition in #67 only: before #83 lands, any VM evidence is limited to the old supported/test baseline and cannot certify physical clock admission; after #83 lands, gateway-up/test on these VMs refuses before publication/mutation, and the two-node success/restart qualification runs on two admitted physical workload hosts. Preserve one manually provisioned node-pinned gateway and no node-loss failover. State what physical and minimum-kernel #84 evidence is actually required rather than imply VM checks satisfy it. Add fake preflight fixtures for excluded VM refusal and admitted two-node setup, and label the future real evidence by host/profile."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "Medium",
+      "summary": "The plan omits the host NFS-client dependency needed for the static NFS PV to mount.",
+      "evidence": "intent.md:61-68 explicitly observes that lab VMs lack mount.nfs and that their kernel NFS-client support is unverified. scripts/guest/provision.sh:10 installs neither nfs-common nor equivalent client tooling. design.md:63-69 uses an in-tree NFS PV, and :103-110/:130-151 define setup/files/tests without any host-client installation or fail-closed helper/module preflight. Building a Ganesha/tunnel image under scripts/dev does not supply the kubelet host mount namespace. Official Kubernetes source pkg/volume/nfs/nfs.go:221-227 passes type nfs to the host mounter (https://raw.githubusercontent.com/kubernetes/kubernetes/v1.34.0/pkg/volume/nfs/nfs.go). A normal provisioned lab node therefore cannot perform the promised consumer mount.",
+      "fix": "Specify the supported host NFSv4.1 client package/helper and kernel capability prerequisites on both consumer nodes. Either add explicit lab provisioning changes (including scripts/guest/provision.sh in the files list), or document an operator-installed prerequisite and make up/test refuse before creating/publicizing resources when the actual kubelet host helper or kernel client is absent. Record client versions in qualification and add missing-helper/missing-client-support fixtures plus the future real mount through each node-local proxy."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "Medium",
+      "summary": "The stable-ACK qualification needs an ordering/error oracle beyond process-kill checksum survival.",
+      "evidence": "design.md:39-42 requires durable shutdown-independent ordering, but its concrete S2 evidence at :143 and Lab :156-158 is stable-write/COMMIT/fsync plus SIGKILL and byte verification. Killing Ganesha on the same node does not discard the backing filesystem kernel page cache; an erroneous server that calls pwritev then returns stable success before fsync can pass that restart/checksum test. Existing #84 tests establish durability of completed block writes, not that Ganesha waited for its filesystem sync before an NFS stable reply. Official Ganesha VFS file.c:1322-1340 and :1570-1614 show the actual boundary: pwritev, conditional fsync before done_cb for stable WRITE, and fsync status for COMMIT (https://raw.githubusercontent.com/nfs-ganesha/nfs-ganesha/next/src/FSAL/FSAL_VFS/file.c). The draft needs a concrete fixture that fails when this required ordering is omitted.",
+      "fix": "Extend the accepted pinned-release qualification with observed filesystem-sync-to-NFS-reply ordering and deterministic delayed/failed sync cases for both stable WRITE and COMMIT. For example, gate the selected release\u2019s actual fsync/fdatasync boundary and show no stable-success reply until successful completion; return an injected sync error and assert no stable-success reply. Include a negative candidate/fixture that skips the wait so the oracle demonstrably fails. Retain SIGKILL/reclaim tests and #84 block conformance; no new replica rule, node-loss test or shared-lab execution is required for this plan review."
+    }
+  ],
+  "report": "Fresh FULL correctness/codebase-consistency review of all five #67 documents (intent, spec, design, decisions, accepted local ADR) at the exact requested snapshot, plus actual CSI capability/stage/publish/attachment paths, cacheless ublk contract, store device/uring flush contracts, lab provisioning/image/K3s/test manifests, command dispatch and ADR0001-0005. Read relevant mapped #79/#82 dependency contracts and #83/#84 spec/design including the physical/VM qualification composition. External technical verification used official Ganesha configuration/VFS source and official Kubernetes NFS plugin source; moving Ganesha next is evidence only, not a selected implementation pin. Preserved Nov13 accepted node-pinned single-gateway slice and qualification-based exact versions/privileges/tunnel choice; no approval-only defect or RWX/failover expansion. Three Medium findings; zero additional Low/Nit findings. Read-only review except this report. No runtime, server/kernel-client, lab, disk, fault, benchmark, deployment or test execution; proposed qualification checks are future work. Scoped HEAD and clean working tree verified unchanged at completion."
+}

@@ -1,0 +1,31 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review64_r2_combined (fresh incremental combined design-code/design-security)",
+  "reviewed_commit": "67c03381e14cede0a476137a0a87aa0b029ec4eb",
+  "dependency_commits": {
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "study.md Use and capacity / Dependencies / Recorded outcome and design.md Current facts now identify #72 as proposed per-node ledger and create/move admission. Separate future device-class policy and conditional cold classification are explicit; decisions.md preserves historical approval and corrects attribution. Verified against mapped #72 spec.md:3-4 and decisions.md class exclusions at recorded HEAD."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "study.md Cost and confinement now compares RF2/RF3 with illustrative systematic k+m for small/full writes, healthy/degraded reads and rebuild, with requests, bytes and transfer dependency rounds. Quiescent conversion gives L reads, E=(k+m)L/k writes, rL+E coexistence and reverse conversion. Checked U=4KiB,k=4,m=2 numerical examples, ratios and phase counts. Remote coordinator, uncached inputs, known coherent sources and permitted operations are explicit. Unknown coding durable-decision rounds are kept separate from algebraic data phases and no production profile/ACK policy is selected."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "spec.md Open questions, design.md Study artifact/outcome and study.md Recorded outcome consistently preserve the settled 2026-11-13 not-yet decision and original reopening requirements. Headers and decisions.md separately identify 2026-11-20 review corrections as unapproved. Runtime, protocol/library/geometry and superseding ADR remain unaccepted/unimplemented; #64 remains open."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "intent.md Why 5 and design.md attribute the single-source quotation to ARCHITECTURE section8.5. Verified the quotation there, older immediate-read wording in accepted ADR0005, and effective-ISR fencing followed by reconciliation in protocol section6 and Target::advance_chunk. No accepted ADR was edited."
+    }
+  ],
+  "findings": [],
+  "report": "ZERO comments including Nits. Fresh combined incremental review of 86307ffa383e79a1eb4c50ed4a56216108e0c383..67c03381e14cede0a476137a0a87aa0b029ec4eb, excluding report.md from technical scope. Read actual R1 combined JSON and issue report, confirmed every actual prior finding, then reviewed changed intent/spec/design/study/decisions lines and affected arithmetic, operation authorization/locality assumptions, data dependency versus durable-decision rounds, conversion/coexistence accounting, criterion/status and source attribution fallout. Read affected current Target::check_write and Target::advance_chunk, replication protocol sections4/6, ARCHITECTURE8.5 and ADR0005; inspected only the relevant mapped #72 scope contract, without reopening it or treating drafts as implemented. Existing approval is historical and the approved docs-only not-yet slice is preserved; no production erasure-coding choice, shipping mechanism, new safety proof or dependency expansion is required. Security review finds no new runtime input, authority or resource boundary introduced by these paper estimates. No runtime tests, API/tracker writes, lab/disk/deploy actions, repository edits or subagents. git diff --check passed. Exact issue HEAD and clean status rechecked; #72 HEAD rechecked unchanged. Artifact creation is the only write."
+}

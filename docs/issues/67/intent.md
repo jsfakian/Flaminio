@@ -79,8 +79,10 @@ open after this change.
 
 1. A gateway: one pod that mounts one ReadWriteOnce Flaminio filesystem volume and exports it
    over NFS. One gateway per volume; it serves nothing else.
-2. Pods on fl-a and fl-b mount the export at the same time, write the same tree, and each reads
-   what the other wrote.
+2. Pods on two supported workload hosts mount the export at the same time, write the same
+   tree, and each reads what the other wrote. The original fl-a/fl-b VM layout is historical
+   old-baseline evidence only once #83 lands: its composed success case requires admitted
+   physical workload hosts, and its excluded VMs refuse before setup (design/qualification).
 3. What the gateway acknowledged as stable is on the volume. After the gateway is killed
    without warning and starts again, every such write is there, and clients go on without
    remounting: their handles stay valid, at an address that did not change.

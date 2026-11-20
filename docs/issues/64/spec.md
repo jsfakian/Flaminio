@@ -2,7 +2,7 @@
 
 [intent](intent.md) · [decisions](decisions.md) · [design](design.md)
 
-Approved 2026-11-13; not implemented.
+Approved 2026-11-13; not implemented. Review revisions dated 2026-11-20 are unapproved.
 Step 1 only: evidence-backed study and outcome (Accepted with the plan, 2026-11-13), no production
 or simulator code.
 No coding profile/library or new risk is accepted. Steps2–4 and actual m-loss tests keep #64 open.
@@ -42,8 +42,8 @@ needed to select one complete version. A scalar highest sequence, equal CRCs or 
 fragment majority is insufficient. An unresolved proof remains a blocker, not pseudocode safety.
 
 **S5. Cost model.** For proposed stripe units, estimate reads/writes/round trips for small/full
-writes, healthy/degraded reads, repair and conversion. Label estimates, assumptions and unknown
-measurements; existing slow-link RF numbers cannot prove coded performance. State frontend
+writes, healthy/degraded reads, repair and conversion against RF2/RF3. Label estimates,
+assumptions and unknown measurements; existing slow-link RF numbers cannot prove coded performance. State frontend
 alignment/atomicity implications and no unsupported multi-block atomicity claim.
 
 **S6. Containment alternatives.** Compare freely writable coded volumes, full-stripe-only
@@ -74,9 +74,10 @@ Later simulator/runtime proposals must include the explicit S8 mutations and m-l
 
 ## Open questions
 
-[Study](study.md) recommends not yet: no actual workload need, coding commit protocol, model or
-qualified failure-domain lab evidence exists. A human has not accepted that priority decision.
-No replicated-volume rule or accepted ADR is changed by recording the recommendation.
+None for the priority decision: **not yet** and the [study](study.md)'s reopening criteria were
+settled at the recorded 2026-11-13 approval. A coding commit protocol, library, geometry and
+acknowledgement policy remain unspecified; no runtime implementation or superseding accepted ADR
+exists. No replicated-volume rule or accepted ADR changes.
 
 Settled at approval, 2026-11-13: not yet, with the study's reopening criteria (see decisions.md,
 Settled at approval).
