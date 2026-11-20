@@ -1,0 +1,98 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r5_security (fresh incremental design-security / changed-spec)",
+  "reviewed_commit": "366b4ce780be29c60469ec92227969b913d41aad",
+  "dependency_commits": {
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 security artifact preserves the R2 both-plugin API-server client-authentication correction. R5 changes outgoing-reader/resource lifecycle and retains the authenticated admission boundary; no new authentication bypass was identified in changed lines."
+    },
+    {
+      "id": "R1-C2",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 artifact preserves the permanent-history-backed ProvenNonStorage branch. R5 does not alter its classification, admission or recovery predicates."
+    },
+    {
+      "id": "R1-C3",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 artifact preserves exact metadataID==Kubernetes-name joining and immutable UID enrollment. R5 does not change that identity protocol."
+    },
+    {
+      "id": "SEC91-R1-01",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 artifact records authenticated API-server origin before actionable allocation. R5 does not alter the listener client CA/URI, request authentication or enrollment allocation boundary."
+    },
+    {
+      "id": "SEC91-R1-02",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 artifact records early existing-name AlreadyExists refusal and durable same-name claims. The R5 lifecycle preserves uncertain writes/claims through process replacement rather than reclaiming them."
+    },
+    {
+      "id": "SEC91-R1-03",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 artifact records the all-Node/nonstorage recovery branch; R5 leaves its no-history/no-reference proof and durable occupancy unchanged."
+    },
+    {
+      "id": "SEC91-R1-04",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 artifact records saved exact old-store evidence and returned-store/moved-away retirement; R5 does not replace it with heap, process or elapsed-time evidence."
+    },
+    {
+      "id": "SEC91-R1-05",
+      "status": "resolved at proposed-contract level",
+      "evidence": "reader-contract.md:100-121,156-194 retains the production two-pass bounded CodecV2, fixed/cardinality-limited preflight and charged direct construction before generated child allocation. The formerly associated whole-library claim is explicitly withdrawn, while typed cardinality and application credits remain enforced; total stock ownership instead uses the lifecycle containment/restart contract."
+    },
+    {
+      "id": "SEC91-R1-06",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R4 artifact records authenticated HTTP1-only bounded admission serving. R5 retains that boundary and adds exec-only liveness with process replacement. SEC91-R5-01 below records affected deadline drift rather than reopening unchanged listener allocation rules."
+    },
+    {
+      "id": "SEC91-R2-01",
+      "status": "resolved by revised proposed contract",
+      "evidence": "reader-contract.md:115-149 and resource-lifecycle-contract.md:22-51 expressly separate application64MiB credit from gRPC transport queues, caches and runtime heap. Verified numeric cgroup-v2 memory.max<=268435456 plus memory.swap.max=0 is the actual containment mechanism; ordinary receive/header/call limits remain. The unsupported whole-stock-library64MiB proof and custom machinery are no longer requirements."
+    },
+    {
+      "id": "SEC91-R3-01",
+      "status": "resolved by revised proposed contract",
+      "evidence": "reader-contract.md:125-149 and lifecycle:22-34,48-51 accept ordinary stock pooling/padding and retained references under the actual cgroup limit. No exactPool, capacity/Len proof, Put/ConnEnd purge or same-process recovery claim remains. The earlier source-derived component failure is not represented as a proven whole64MiB overflow."
+    },
+    {
+      "id": "SEC91-R4-01",
+      "status": "resolved at proposed-contract level",
+      "evidence": "resource-lifecycle-contract.md:10-34 acknowledges itemNodePool/settings/cleanupStream reference chains and small SliceBuffer behavior. :38-51 contains the whole container; :68-102 denies admission, exits75/uses kubelet fallback and starts a fresh process. No completed lease-credit or ConnEnd event is inferred to clear private caches; the proposed fixtures explicitly cross observed termination."
+    },
+    {
+      "id": "SEC91-R4-02",
+      "status": "resolved at proposed-contract level",
+      "evidence": "resource-lifecycle-contract.md:17-20 acknowledges the exact1025-byte/R+1 abandoned-root path. :56-66,73-95 recycles on receive/decode/size/cancel/resource errors without waiting for a nonexistent Put, forcing Free or resetting durable state. :119-126 and reader:292-302 require four malformed attempts across actual supervised restarts followed by a healthy fresh-process call. The expected #90 trailers-only full-to-page status branch is separately bounded and preserves fresh strict paging."
+    }
+  ],
+  "findings": [
+    {
+      "id": "SEC91-R5-01",
+      "severity": "Low",
+      "summary": "Propagate the revised24-second validator deadline to the normative admission sequence.",
+      "evidence": "Changed docs/issues/91/design.md:85 now sets validator<=24s, consistent with security-contract.md:171-177's absolute24s request-header-to-reply/unwind deadline and stop-actionable-work-by23s rule. The affected normative admission-contract.md:149-153 still allocates a20s reader plus up to8s of a validator28s deadline for Kubernetes reads/CAS. An implementation following that sequence can still initiate durable work after the selected actionable deadline or lose its allow response after reserving the slot. This is a contract inconsistency, not a claim that durable CAS safety is broken.",
+      "fix": "Use the single absolute deadline throughout the admission sequence. Replace the28s/8s language with the remaining budget under24s, reserve the stated response/unwind time, and clamp reader/API/CAS subdeadlines accordingly. Include a slow-reader/API fixture proving no new actionable write starts after the cutoff while ambiguous submitted writes remain held."
+    },
+    {
+      "id": "SEC91-R5-02",
+      "severity": "Nit",
+      "summary": "Clarify the compression fixture after removing the identity-only transport policy.",
+      "evidence": "reader-contract.md:125-133 now leaves compression to stock gRPC, and changed :289 explicitly tests fragmented/supported compressed input. qualification.md:72-74 still calls for unqualified 'compression refusal', inherited from the deleted no-registered-compressor/identity-only contract. Pinned grpc rpc_util.go checkRecvPayload and recvAndDecompress distinguish an unavailable compressor or invalid compressed flag from a supported compressed response; those outcomes should be explicit in the composed qualification text.",
+      "fix": "State that supported compressed responses exercise the ordinary receive/decompressed-size/cardinality bounds, while unsupported encoding, malformed compression and decompressed boundary+1 errors hold/recycle. Do not reintroduce the withdrawn custom transport or blanket compression prohibition merely to match the old fixture wording."
+    }
+  ],
+  "report": {
+    "scope": "Incremental13e6f180bd4dc51507eb089df8384d6761d9a83b..366b4ce780be29c60469ec92227969b913d41aad across docs/issues/91 excluding report.md from technical scope. Read both actual91-r4 reviewer JSONs and actual issue report history, all nine changed technical documents including the new resource-lifecycle contract, current owner intent/spec/decisions and cached issue91 body. Followed only affected reader/codec/stock-transport, cgroup supervision, health, quiesce/admission deadline, submitted-write/restart and expected-page-discovery paths. Read the relevant current #90 bounded-page/error contract in its mapped worktree; recorded report HEAD separately from its technical-clear snapshot. No unchanged unrelated guard or dependency re-audit.",
+    "results": "One Low and one Nit; zero additional Critical/High/Medium comments. Both actual R4 findings are addressed at the proposed-contract level by withdrawing the arbitrary whole-stock-gRPC64MiB claim and replacing it with honest application accounting, verified cgroup containment and actual process replacement. No maintained fork/private drain API/force-Free or internal-cache purge is required. Quiescing denies new admission, preserves durable slot/enrollment/nameclaim state, tolerates late remote commits through rereads/preconditions, and does not convert cancellation into failure certainty. Healthy recovery explicitly crosses old-process death and fresh startup, with repeated restart/backoff and held maintenance acknowledged as Proposed unapproved costs. S1/S4, read-only metadata, durable single-slot accounting and original physical-host/storage qualification remain intact. This is observation/admission resource management, not new replication/membership/recovery authority; no invented simulator obligation is imposed.",
+    "source_checks": "Read local pinned grpc1.85.0 rpc_util.go parser.recvMsg/checkRecvPayload/recvAndDecompress/decompress, controlbuf.go itemList.dequeue, stream/client behavior and current CSI metadata client/PKI helper context. Owner go.mod/go.sum pin the stated versions. Current #90 budgets.md:46-81,106-110 supplies bounded strict pages and normal full Get/Attach FailedPrecondition naming the page APIs; #91 retains no-payload/no-codec discovery and refuses unexpected/error paths. Linux primary documentation confirms hierarchical cgroup containment, memory.max reclaim/OOM with possible temporary overage, separate swap limits and oom-group behavior: https://docs.kernel.org/admin-guide/cgroup-v2.html#memory . Kubernetes1.36 primary documentation confirms Always container restart and exponential backoff rather than immediate availability: https://v1-36.docs.kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#container-restarts . Checked exec probe/liveness/readiness semantics in https://v1-36.docs.kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/ . These are source/plan checks, not executed resource measurements.",
+    "limits": "Read-only review except this actual /tmp JSON artifact. No repository/dependency edits, child agents, tracker writes, runtime/gRPC/API/cgroup/OOM/lab/disk/deploy/benchmark/fault actions. All transport/cardinality/allocation/health/quiesce/process-restart/durable-state/physical-host fixtures remain future implementation obligations, not passed tests. No human approval or accepted resource tradeoff is fabricated; lack of fresh approval alone is not a defect.",
+    "snapshot_verification": "Final git rev-parse HEAD remained366b4ce780be29c60469ec92227969b913d41aad, git status --porcelain was empty, and git diff --check on the incremental docs/issues/91 range excluding report.md passed. Relevant #90 worktree was clean at c9231b243dceb196a0eccb615055887c9879bb73."
+  }
+}

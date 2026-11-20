@@ -1,0 +1,82 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review62_r2_security (fresh incremental design-security and changed-spec security, R2)",
+  "reviewed_commit": "e637c0b9a0c9e05590fd6ae28e50b4a1668d6512",
+  "dependency_commits": {
+    "18": "b00ac22d8de3783ce01a183d1f095abcfe7e295d",
+    "47": "189305c8c757ca3e3d956a254a0857be6c4b1599",
+    "61": "4fe0f143a4e8780ae5c0a861996f6b1d5a638646",
+    "71": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC62-R1-01",
+      "status": "fixed",
+      "evidence": "observer-contract.md:150-209 specifies a ListNodes-only private worker/runtime/channel outside MetaClient::call and Engine::meta_call, capacity-one request/completion slots and one outstanding attempt through cancellation acknowledgement, dropped ticks, 2 s whole-call deadline and >=5 s completion-based retry. Its bounded protobuf projection checks raw bytes, visited fields, nodes, labels and strings before allocation; atomic last-good/candidate images, attempt/lifetime checks and no replacement until cancellation/join bound failed and stale paths. Future isolation/input/lifetime tests at :225-236 cover stalled endpoints, authoritative progress, caps, cancellation and restart."
+    },
+    {
+      "id": "SEC62-R1-02",
+      "status": "fixed",
+      "evidence": "spec.md S7 and observer-contract.md:9-139 compose the actual #71/#47 observe boundary into schema3, retaining separate socket permissions, telemetry-off/privsep refusal, serving/rate/pending/wait bounds, four targets and the 65536-byte line. Exact traffic/nullable latency, eight aggregate peer rows or complete refusal, bounded snapshot/format/decode storage, strict Rust/Go v1/v2/v3 fixtures and upgrade order are explicit. Clear dependency plans remain read-only; no root stats fallback exists."
+    },
+    {
+      "id": "SEC62-R1-03",
+      "status": "fixed",
+      "evidence": "counting-contract.md:10-45 gives each TargetRt a fresh Arc<TargetInstance>, retains it through route/session/events, and compares Arc::ptr_eq before any TX/RX addition or RX flow lookup. Queued old events keep their marker alive, avoiding address reuse; diagnostic ordinal exhaustion invalidates observation without weakening isolation. :165-174 requires same-volume/same-epoch detach/reattach with queued Reply/Refused and same-live-instance superseded-session coverage."
+    },
+    {
+      "id": "SEC62-R1-04",
+      "status": "fixed",
+      "evidence": "spec.md S10 and counting-contract.md:125-154 require read-only binary/process/profile/provenance checks before mutation. Active #83 refuses current VMs with blocked/uncollected; pre-#83 VM evidence is explicitly separately authorized exploratory evidence. Supported collection requires the already qualified disposable physical equivalent, with no synthetic attestation, forced admission or clock-policy relaxation. :175-179 requires refusal fixtures asserting zero setup/load/drain/cleanup mutation."
+    },
+    {
+      "id": "SEC62-R1-05",
+      "status": "fixed",
+      "evidence": "design.md identity section and counting-contract.md:21-37,71-95 preserve immutable exact-ref/G/incarnation/session/profile admission before flow matching and physical-node aggregation, naming #90 as sole owner, #61 as wrapper and #72 as capacity only. Codec tests cover actual ordinary/snapshot/root profiles, v4 ALPN and legacy profiles with real lengths and rejected-identity fixtures, without changing authority."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "Same shared root as SEC62-R1-02: observer-contract.md:9-139 replaces nonexistent root stats-v1 with exact bounded observe schema3 and optional exact #47 latency; strict cross-language compatibility/fixtures are specified."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "Same shared root as SEC62-R1-01: observer-contract.md:150-209 isolates and bounds topology work rather than using the existing unbounded serial authoritative FIFO."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "counting-contract.md:49-77 supplies one outgoing decoded receipt before Refused-to-Lost, including the initial Hello refusal; RefusedReceipt is Other with zero payload and no second Reply/Lost count. Actual current session::connect sends Hello without reading its response and outgoing_session discards Refused into Lost, matching the correction. :165-167 names real initial/established codec/session tests."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "Same shared root as SEC62-R1-04: the current VM baseline now takes the explicit pre-mutation blocked branch under active #83, with qualified physical collection or distinctly exploratory pre-#83 evidence."
+    },
+    {
+      "id": "R1-C5",
+      "status": "fixed",
+      "evidence": "Same shared root as SEC62-R1-05; observer-contract.md:143-148 additionally uses the real unpaged ListNodesResponse rather than inventing #72 label paging."
+    },
+    {
+      "id": "R1-C6",
+      "status": "fixed",
+      "evidence": "intent.md Why2, spec.md S9 and counting-contract.md:99-121 derive floors from actual per-chunk known-zone placements, preserve unknown incompleteness and include the mixed RF2 bestEffort fixture with weighted floor0.5. Current #18 S10 explicitly permits per-chunk fallback and current resolveDomain permits zone/rack/node fallback; requested zone alone is no longer treated as proof of distinct zones."
+    }
+  ],
+  "findings": [],
+  "report": {
+    "scope": "Incremental security review of f920db069130df65d57874d88ea729ce9f4d56d8..e637c0b9a0c9e05590fd6ae28e50b4a1668d6512 for docs/issues/62, excluding report.md. Read both actual R1 JSON artifacts and the issue report; reviewed changed intent/spec/design/decisions, new counting-contract.md and observer-contract.md, and only affected current source/dependency paths. Confirmed all five security findings and the six shared correctness roots. Source checks cover actual NetCommand/NetEvent, outgoing_session and Conn::recv/connect refusal behavior, TargetRt/start/detach lifetime, the existing metaclient queue/timeout implementation, current ListNodes protobuf and method authorization, and placement fallback. Relevant current dependency contracts were read at the exact hashes listed.",
+    "results": "Zero comments including Nits. The revised input/resource/cancellation bounds are concrete: independent authenticated bounded topology lane; one outstanding attempt including cancellation acknowledgement; fully validated bounded projection and atomic last-good cache; explicit telemetry row/byte refusal, strict schemas and bounded snapshots; immutable per-target marker checked before flow/accounting; exact decoded Refused receipt before unchanged loss; preserved #90 authority and #83 admission. No new replication/membership/recovery safety rule or cost policy was added, so no new safety mutant is required. Historical measurement boundaries and human approval provenance are preserved.",
+    "dependency_provenance": "dependency_commits are actual checkout HEADs read, not implementation or acceptance claims. #90 technical-clear commit is 331f337d3b847ff2d4faabc572f4ceae74837cd7 and report HEAD c9231b243dceb196a0eccb615055887c9879bb73; #47 technical-clear commit is 3bb708eec85f3a1a9476b57cfa8843e2e0a3fac7 and current report HEAD 189305c8c757ca3e3d956a254a0857be6c4b1599. #61 is composition only. No dependency was reopened or edited.",
+    "validation": "Static/read-only review and independent JSON size arithmetic only; a deliberately conservative combined schema3 construction remains below65536 bytes. Runtime implementations, Rust/Go fixtures, abuse/equivalence/cancellation checks and baseline collection are future work, not executed results. No runtime/lab/disk/benchmark/deploy/fault action, repository mutation, tracker write or child agent was performed. Only this JSON artifact was written.",
+    "snapshot_verification": {
+      "head": "e637c0b9a0c9e05590fd6ae28e50b4a1668d6512",
+      "working_tree": "clean; unchanged from initial read",
+      "dependency_hash_changes": []
+    }
+  }
+}

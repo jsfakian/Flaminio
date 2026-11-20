@@ -1,0 +1,33 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r6_code (fresh incremental design-code / changed-spec)",
+  "reviewed_commit": "f6220b5eefbb0092979327465d2bd9d3aa58039d",
+  "dependency_commits": {
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [
+    {
+      "id": "R5-C1",
+      "status": "resolved",
+      "evidence": "admission-contract.md:133-140,158-165 replaces the stale28s/+8s additive procedure with fixed H, D=H+24s and A=H+23s. Body/decode/initial reads consume the budget; reader=min(start+20s,A), metadata RPC=min(start+2s,readerDeadline), Kubernetes operation=min(start+2s,A). Every durable dispatch/retry, including enrollment, checks cutoff. Unknown submitted writes remain held. qualification.md:98-103 requires nonzero prior work/full remaining reader allowance, actual contexts/dispatch timestamps, no late CAS and bounded reply/unwind."
+    },
+    {
+      "id": "SEC91-R5-01",
+      "status": "resolved",
+      "evidence": "The same normative admission correction is propagated coherently through design.md:85, security-contract.md:171-186 and decisions.md:78-82. No per-stage reset or additional post-reader CAS budget remains; the last second is reserved for reply/unwind. Cancellation is not treated as proof that a remote write failed, and the fixture preserves unknown occupancy across process replacement."
+    },
+    {
+      "id": "SEC91-R5-02",
+      "status": "resolved",
+      "evidence": "qualification.md:72-77 distinguishes supported compressed responses within encoded/decompressed/cardinality caps from unsupported encoding, malformed compression and decompressed boundary+1, which hold/recycle. This agrees with unchanged reader-contract.md:125-133,289-290 and pinned grpc1.85.0 rpc_util.go:783-806,906-922,942-1038. No blanket identity-only policy or custom transport is reintroduced."
+    }
+  ],
+  "findings": [],
+  "report": {
+    "scope": "Incremental366b4ce780be29c60469ec92227969b913d41aad..f6220b5eefbb0092979327465d2bd9d3aa58039d, excluding report.md. Read both actual R5 reviewer artifacts and report history; reviewed all five changed technical documents and only affected admission timing, initial-read/enrollment, reader/RPC/API/CAS/retry, response/unwind, ambiguous-write and stock-compression qualification paths. Read owner intent/spec/decisions and cached issue intent to preserve guard-only scope. Relevant #90 full-to-page contract was read at its mapped report HEAD, with technical-clear hash distinguished. No dependency was edited/reopened.",
+    "results": "Zero comments including Nits. All three actual R5 IDs are resolved. Fixed absolute request budgeting now governs the normative procedure and future fixture rather than allowing20s reader plus8s API work after earlier work. Actionable writes cease by H+23s; reply/unwind has until H+24s; already-submitted unknown writes stay conservatively held. Stock compression qualification accepts supported bounded input and holds/recycles unsupported/malformed/oversized input. Existing resource/synchronous-guard decisions remain closed as established by actual R5; no withdrawn whole-library memory proof is reopened. No new replication/membership/recovery authority, simulator obligation, per-I/O metadata trip or lock is introduced.",
+    "source_checks": "Verified owner go.mod pins grpc1.85.0/protobuf1.36.12. Read pinned local grpc rpc_util.go parser/checkRecvPayload/recvAndDecompress/decompress: encoded length cap precedes decode, unsupported/invalid encoding is an error, decompression is size-limited and oversize fails. Read control/csi/meta.go metaCall parent-context/attempt timeout behavior, distinguishing current code from proposed guard contracts. Read unchanged resource-lifecycle-contract.md quiesce/exit/restart and durable remote-write recovery paths, and reader-contract.md codec/stock transport/future fixtures only as affected by this delta. Read #90 budgets.md bounded pages/full-Get FailedPrecondition discovery contract at c9231b2; these proposals are not represented as implemented.",
+    "limits": "Read-only plan review except this actual /tmp JSON artifact. No repository/dependency edits, child agents, tracker actions, runtime/API/gRPC/cgroup/lab/disk/deploy/benchmark/fault actions. All deadline/codec/transport/process/API/physical qualification fixtures remain future implementation requirements, not executed passes. Proposed resource/admission choices remain unapproved; lack of fresh human acceptance alone is not a technical finding.",
+    "snapshot_verification": "Owner final HEAD remains f6220b5eefbb0092979327465d2bd9d3aa58039d; git status --short empty; incremental git diff --check excluding report.md passed. Relevant #90 report HEAD remains c9231b243dceb196a0eccb615055887c9879bb73 and clean."
+  }
+}

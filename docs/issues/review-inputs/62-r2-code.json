@@ -1,0 +1,77 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review62_r2_code (fresh incremental design-code and changed-spec correctness)",
+  "reviewed_commit": "e637c0b9a0c9e05590fd6ae28e50b4a1668d6512",
+  "dependency_commits": {
+    "18": "b00ac22d8de3783ce01a183d1f095abcfe7e295d",
+    "47": "189305c8c757ca3e3d956a254a0857be6c4b1599",
+    "71": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "spec S7 and observer-contract Ownership/Schema3/Bounds replace removed root stats ABI with #71 observe, exact optional #47 latency, strict schema1/2/3 decoder composition, upgrade sequencing, eight complete traffic rows or refusal, inherited socket trust/rate/pending/time/64KiB bounds. Compared actual mapped #71 contracts and #47 design report schema. Independently reconstructed envelopes: schema2 46,075; schema3 60,615 bytes for longest legal non-null-instance reason counter_overflow, within 65,536."
+    },
+    {
+      "id": "SEC62-R1-02",
+      "status": "fixed",
+      "evidence": "spec S7 and observer-contract Ownership/Schema3/Bounds replace removed root stats ABI with #71 observe, exact optional #47 latency, strict schema1/2/3 decoder composition, upgrade sequencing, eight complete traffic rows or refusal, inherited socket trust/rate/pending/time/64KiB bounds. Compared actual mapped #71 contracts and #47 design report schema. Independently reconstructed envelopes: schema2 46,075; schema3 60,615 bytes for longest legal non-null-instance reason counter_overflow, within 65,536."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "observer-contract Topology refresh defines dedicated ListNodes-only worker/channel/runtime independent of MetaClient authority FIFO and Engine waiter map, one outstanding request through acknowledgment, discarded pending ticks, 2s whole-call bound, >=5s completion-based retry, one endpoint/channel, bounded projection decoder/cache, whole-image generation-checked last-good install and cancellation. Concrete future stalled-endpoint/hostile-wire/cap/lifetime and authority-equivalence tests cover behavior. Actual existing serial metaclient queue confirms need for isolation."
+    },
+    {
+      "id": "SEC62-R1-01",
+      "status": "fixed",
+      "evidence": "observer-contract Topology refresh defines dedicated ListNodes-only worker/channel/runtime independent of MetaClient authority FIFO and Engine waiter map, one outstanding request through acknowledgment, discarded pending ticks, 2s whole-call bound, >=5s completion-based retry, one endpoint/channel, bounded projection decoder/cache, whole-image generation-checked last-good install and cancellation. Concrete future stalled-endpoint/hostile-wire/cap/lifetime and authority-equivalence tests cover behavior. Actual existing serial metaclient queue confirms need for isolation."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "counting-contract Decoded receipt places production Conn::recv receipt length hook before outgoing_session Refused-to-Lost conversion. Explicit single RefusedReceipt then unchanged Lost, Other/zero payload, no double Reply count. Real-codec initial/established refusal plus replacement-instance fixtures specified. Actual session::connect sends Hello without reading reply, matching hook placement."
+    },
+    {
+      "id": "SEC62-R1-03",
+      "status": "fixed",
+      "evidence": "spec S4 and counting-contract One target instance allocate fresh Arc marker for each constructed TargetRt and carry immutable attribution into commands/sessions/receipts; Arc::ptr_eq check precedes flow lookup/addition. Nonreused diagnostic ordinal and exhaustion are separate. Same-volume/same-epoch detach/reattach and queued old Reply/Refused tests cover actual standalone attach path."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "spec S10, design Floors and counting-contract Honest environment preflight require exact build/profile/provenance/admission evidence before mutation. Active #83 current VMs block/uncollected; separately authorized genuinely pre83 campaign is exploratory only. Separately authorized qualified disposable physical fixture and honest unavailable outcomes preserve mapped #83 physical-boottime-v1 without bypass. Refusal/cleanup fixtures specified."
+    },
+    {
+      "id": "SEC62-R1-04",
+      "status": "fixed",
+      "evidence": "spec S10, design Floors and counting-contract Honest environment preflight require exact build/profile/provenance/admission evidence before mutation. Active #83 current VMs block/uncollected; separately authorized genuinely pre83 campaign is exploratory only. Separately authorized qualified disposable physical fixture and honest unavailable outcomes preserve mapped #83 physical-boottime-v1 without bypass. Refusal/cleanup fixtures specified."
+    },
+    {
+      "id": "R1-C5",
+      "status": "fixed",
+      "evidence": "spec S4 and counting-contract #90 owner map use exact captured ref/G/incarnation/session/profile before physical-node aggregation. Current and composed ALPN4 profiles0..4, HelloIdentity0x32/FencedIdentity0x51 and real codec prefix-inclusive length tests match mapped #90 contracts/wire/core. #61 wrapper and #72 capacity-only/no paging acknowledged; topology uses actual unpaged ListNodes."
+    },
+    {
+      "id": "SEC62-R1-05",
+      "status": "fixed",
+      "evidence": "spec S4 and counting-contract #90 owner map use exact captured ref/G/incarnation/session/profile before physical-node aggregation. Current and composed ALPN4 profiles0..4, HelloIdentity0x32/FencedIdentity0x51 and real codec prefix-inclusive length tests match mapped #90 contracts/wire/core. #61 wrapper and #72 capacity-only/no paging acknowledged; topology uses actual unpaged ListNodes."
+    },
+    {
+      "id": "R1-C6",
+      "status": "fixed",
+      "evidence": "intent Why2, spec S9 and counting-contract Payload floors require actual per-chunk known distinct zones. Requested zone/bestEffort alone establishes no floor; mixed RF2 fallback fixture yields0 and1, weighted0.5. Matches mapped #18 spec and actual domain.resolveDomain fallback. Unknown labels leave comparison incomplete."
+    }
+  ],
+  "findings": [],
+  "report": {
+    "scope": "Incremental f920db069130df65d57874d88ea729ce9f4d56d8..e637c0b9a0c9e05590fd6ae28e50b4a1668d6512 scoped issue62 diff excluding report.md. Read actual R1 code/security artifacts and issue report, current intent/spec/design/decisions and both new normative appendices, cached issue body/comments, reviewer/supervisor/repository instructions. Inspected changed fallout and affected real target construction/attach/dispatch/inflight, net outgoing receive/refusal/session codec, metadata queue/timeouts, proto ListNodes, ublk final completion, domain placement paths. Read relevant current dependencies only, at recorded mapped hashes.",
+    "results": "Zero comments including Nits. All six prior C findings and five shared security roots fixed. Exact schema/field/compatibility constraints, line size and capture/topology work/memory budgets are coherent. Reconstructed compact envelope46,075 for inherited schema2 and60,615 for schema3; optional ordinal exhaustion cannot use a non-null instance and yields a shorter line. Current decoded-receipt and target-instance hooks are feasible. No new replication/membership/recovery authority rule requires a simulator mutant for this observation slice; future observer-enabled/disabled equivalence and contract fixtures are specified. Historical measurement-only boundaries and approvals retained separately from proposed revisions.",
+    "provenance": "Dependency hashes are actual read HEADs, not approvals. #90 technical-clear331f337d3b847ff2d4faabc572f4ceae74837cd7, report HEADc9231b243dceb196a0eccb615055887c9879bb73. #47 technical-clear3bb708eec85f3a1a9476b57cfa8843e2e0a3fac7, report HEAD189305c8c757ca3e3d956a254a0857be6c4b1599. Clear dependency plans read-only.",
+    "limits": "Static review and compact-JSON arithmetic only; no implementation/runtime test or lab/disk/deploy/benchmark/fault action, no repository/dependency mutation, no children. Planned implementation tests remain future checks. Only this /tmp JSON report written.",
+    "snapshot_verification": "Exact HEAD e637c0b9a0c9e05590fd6ae28e50b4a1668d6512 and clean working tree rechecked after reads; git diff --check clean. Dependency hashes matched actual prior expected snapshots."
+  }
+}

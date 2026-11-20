@@ -1,7 +1,8 @@
 # Issue #62: Per-volume target traffic, grouped by node and zone — design
 
-[Spec](spec.md), existing [intent](intent.md), [decisions](decisions.md). Approved 2026-11-13;
-not implemented.
+[Spec](spec.md), existing [intent](intent.md), [decisions](decisions.md). Historical approval:
+2026-11-13; not implemented. R1 revisions and both normative appendices are **proposed and
+unapproved**: [counting contract](counting-contract.md), [observer contract](observer-contract.md).
 Measurement-first step3 only: **#62 stays open** for placement scoring, zone read/copy source
 preference and cloud defaults. Assumes #18's placement constraints without changing them.
 
@@ -15,8 +16,13 @@ The facts it starts from:
   captured before removal and survive WriteOp completion for late joiner acknowledgements.
 - Target keeps addresses but discards node labels; current label refresh only fills missing
   addresses (`engine.rs:1558–1590`). Zones added later need a separate observation refresh.
-- #47 proposes root stats v1 traffic/latency siblings. #61/#72 propose ReplicaRef(node,UUID)
-  and paged disk/capacity state, not a cost model. These are drafts, not implemented facilities.
+- Outgoing `net.rs:282` converts decoded Refused directly to Lost; ordinary Reply accounting
+  alone misses it. `start_target` constructs a runtime (`engine.rs:1596,1665`), and standalone
+  detach/reattach can retain the same metadata epoch (`:640,1859`). Epoch is not instance identity.
+- #71 owns bounded telemetry `observe`; #47 extends it to schema2 latency. #90 alone owns
+  ReplicaRef/store lifetime and composed replication v4; #61 is its tracker wrapper and #72
+  capacity accounting. #18 bestEffort fallback is per chunk; #83 refuses current lab VMs.
+  These reviewed dependency plans are drafts, not implemented facilities.
 
 ## Classify and count at the transport boundary (S1, S2, S4, S6)
 
@@ -44,17 +50,26 @@ acceptance is not counted. Local service dispatch adds zero network bytes. Compu
 with checked nonallocating Frame::encoded_len sharing codec size rules; never encode payload
 a second time just to count. Write/Copy/Data length alone contributes payload, not tokens.
 
-Receive path exposes validated prefix/body byte length beside decoded Frame, without a wire
-change. NetEvent for outgoing sessions carries immutable target-volume/epoch/peer attribution,
-so a late old-session frame can count Other for the still-current target without a growing
-retired-session map. Drop attribution to ended target generations, never transfer totals to a
-new epoch. Do not count accepted incoming replica-role traffic: its own remote target counts
-that exchange. Undecodable/TLS bytes are outside this declared measurement boundary.
+The [counting contract](counting-contract.md) fixes the receive/lifetime adapter. Allocate a
+fresh opaque shared `TargetInstance` marker at each TargetRt construction. Carry it with the
+validated immutable outgoing route through NetCommand, session and receipt; compare the current
+runtime's marker before flow lookup or any addition, including TX and initial Hello. Never
+infer it from volume/epoch. Old sessions of that same live instance count unmatched replies as
+Other; detached generations add nothing, including same-volume/same-epoch reattach.
 
-#61/#72 multi-disk routes preserve UUID/ref validation and current read-ready/fence gates.
-Group observer rows by physical node only, even when two refs on that host exist; count each
-actual frame handoff/receipt, not an inferred replica vote. In-process local disk dispatch is
-still zero network bytes. No node/disk proto field or allocation/reservation ledger is added.
+Expose actual decoded prefix/body lengths from Conn::recv, without wire changes. The outgoing
+receive hook emits exactly one receipt per decoded frame before dispatch or Refused-to-Lost.
+Refused contributes one RX Other frame, its actual framed bytes and zero payload; it still
+returns the same SessionError and Lost. Loss itself adds no frame. No second receipt is emitted
+by the normal Reply path. Accepted incoming replica-role traffic remains excluded.
+
+#90 exact-ref/store-generation/incarnation/profile/session validation stays ahead of flow
+matching and physical-node aggregation. The adapter uses the captured admitted route, never a
+current node-name lookup, to group actual bytes. Invalid decoded replies can count Other on that
+route without gaining storage authority. Each actual send/receipt counts once even for two refs
+on one physical node; local disk dispatch still contributes zero network bytes. #62 owns this
+hook whichever implementation lands second, including the active ordinary/snapshot/root v4
+profiles and legacy profiles permitted by #90. No authority field or allocation ledger is added.
 
 ## Successful client denominator and immutable snapshots (S3, S4, S6)
 
@@ -74,86 +89,98 @@ outside the engine lock. Expose snapshot capture interval, not a fictitious simu
 instant across queue threads. Quiescent before/after deltas give exact benchmark totals; live
 mixed snapshots are observations over that interval, not an amortized provider bill.
 
-## Topology cache and shared stats v1 (S5, S7, S8)
+## Isolated topology and shared observation (S5, S7, S8)
 
-One engine-wide ListNodes refresh every5s, independent of volume count and foreground I/O.
-Coalesce with an already useful ListNodes result; additional observer reply updates zone cache
-only, never endpoint choice, read source, liveness admission or placement. Existing address
-update semantics remain unchanged. Failed/oversized list retains last labels with visible age.
-Future #72 paging can feed a complete consistent node-label snapshot; device class/UUID is
-never substituted for a zone. Mark absent/empty target or peer zone as Unknown.
+The [observer contract](observer-contract.md) is normative for topology schedule/cache limits,
+`observe` schema3, nullable exact #47 latency, strict Rust/Go decoders and upgrade order. It
+extends #71's separate telemetry socket with its 64KiB line, four-target limit, one pending
+capture, one capture/second and two-second engine wait. It supplies exact peer/byte refusals;
+traffic rows or totals are never truncated. There is no root `stats` command.
 
-Use report-time cached topology to classify all historical counters; labels added/corrected
-later can reclassify earlier bytes. Report classification_basis=report_time_labels and cache
-source/age. This is intentionally not historical location/billing evidence. Unknown is not
-placement's shared empty-zone domain and never equals Same merely because both labels are empty.
+Topology uses the appendix's bounded isolated observer worker, never the serial authoritative
+metadata queue or Engine::meta_call wait map. Only one refresh can be outstanding; ticks cannot
+queue. Last-good labels install atomically after full bounds/generation checks. There is no
+promised #72 paging facility. Failure/oversize/timeout retains the last good labels with visible
+age and cannot change addresses, liveness admission, reads, placement or foreground scheduling.
 
-Root `stats [VOLUME]` keeps #47 syntax/latency fields and adds exactly:
-```
-{version:1,counter_domain:"target_engine_v1",capture:{start_ns,end_ns},
- topology:{observed_ns,age_ns,classification_basis:"report_time_labels"},
- volumes:[{id,epoch,target_node,target_zone,client:{read_bytes,write_bytes,completion_basis:"frontend_success_offered"},
- valid,reason,nodes:[{id,zone,zone_relation,latency:null_or_47_object,
- traffic:{tx:{client_write:C,client_read:C,copy:C,other:C},rx:same}}],
- zone_totals:{same:TRAFFIC,other:TRAFFIC,unknown:TRAFFIC},ratios:R}]}
-```
-C={frames,framed_bytes,payload_bytes}; counters are decimal u64 strings, not lossy JSON numbers.
-TRAFFIC has the same tx/rx shape. R contains per-flow known_other/unknown payload and framed
-numerator/appropriate successful-client denominator strings; zero denominator→null. Copy has
-no false client ratio: report raw hop bytes and workload-supplied copied-data denominator later.
-Zones are string or null; absent latency stays null. Keep #47's existing latency scalar encoding.
-
-Deterministic volume/node order, immutable captured values. Bound raw snapshot to1024 peer
-rows and encoded reply4MiB; reject too-large before lengthy formatting, no truncation. Unknown
-ID/extra arguments are errors. Existing status/list device identities remain unchanged; stats
-never exposes payload, token, wrapped key or a new authority. No metrics exporter/new API.
+All history is classified using the report-time label snapshot. Later labels can reclassify
+earlier bytes; missing/empty target or peer labels are Unknown, including two empty endpoints.
+This remains observation rather than historical location, a bill, or storage authority. The
+appendix fixes capture intervals, raw string counters, nullable ratios/latency, secret exclusion,
+telemetry-off/privsep behavior and bounded cache/rate/refusal handling for concurrent readers.
 
 ## Floors, lab and restoration (S9–S12)
 
-Write down payload floors with locality assumptions: zone RF=R has≥R−1 crossings when a replica
-is in consumer zone; node/rack can reach0. Reads need0 with a usable same-zone copy else1;
-direct source→joiner copy needs0/1; current target path can add a second crossing. Framed bytes
-include response/control overhead, retransmission and attempted sends; never compare them as
-if they were the payload floor. Unknown bytes make the cost bound incomplete, never cheap.
+Use actual per-chunk placement and known labels for payload floors, as the
+[counting contract](counting-contract.md) details. R replicas in R distinct known zones need
+at least R−1 crossings with one in the target's known zone; node/rack or zone bestEffort fallback
+can reach0. Requested zone/bestEffort does not establish a zone-separated floor. Reads need0
+with a usable same-zone copy else1; direct source→joiner copy needs0/1 and today's target path
+can add a crossing. Framing/control/retries/attempts are not that payload floor. Unknown-zone
+bytes leave the comparison incomplete, never cheap.
 
-Later authorized `scripts/checks/zone-traffic.sh`, exclusive known fl-a/fl-b/fl-c, no other
-workload/volume or operator moves. Private16GiB≤64-chunk RF2 node/zone volumes, deterministic
-aligned write/read phases and pre/post stats after all operations drain. Exercise target-local
-and nonlocal placements; temporary draining can exclude target from initial placement, then
-restore before attach. Verify actual replica sets/domain before load, never infer selection.
-Do not relabel fl-c: unknown rows are a required test, so measured cross-zone claims are partial.
-One ordinary drain of a private replica measures source/joiner hops, digests/probes separately
-from payload. Lab's three-node topology cannot demonstrate every possible two-remote-hop case;
-unit tests use four nodes. No fault, formatting, price query or claimed optimal policy.
+Later separately authorized `scripts/checks/zone-traffic.sh` first inspects exact binaries and
+#83 admission/profile/provenance before creating volumes, changing eligibility, starting loads
+or draining. With physical-boottime-v1 active, current fl-a/fl-b/fl-c VMs yield
+blocked/uncollected and no setup mutation. Only a separately authorized explicitly pre-#83
+exploratory campaign may use those VMs; it is not supported-profile evidence. The supported
+alternative is an equivalently labelled, qualified disposable physical fixture. No synthetic
+physical attestation, forced admission or clock-policy relaxation is allowed. If absent, the
+baseline remains uncollected. Exact fixture, preflight outcomes and cleanup are in the appendix.
 
-Require no I/O errors and offered totals equal the job
-completed bytes. Wire framed-minus-payload matches codec and observed messages. Copy payload matches differences/mapped content, not whole capacity.
-Retain raw stats/workload/placement/cached zones and binaries, report counts/ratios beside
-floors and limits in docs/benchmarks. Trap stops only owned loads, detaches/deletes private
-volumes and restores own drain marks; do not overwrite a changed operator state. fl-c cleanup
-uses #14's explicitly authorized operator procedure if needed, never auto-confirm tombstones.
-Incomplete collection/healing is a failed check with named pending actions.
+On an admitted exclusive fixture, use private16GiB≤64-chunk RF2 node/zone volumes,
+deterministic aligned write/read phases and quiescent pre/post observations. Exercise target-local
+and nonlocal placements; restore any owned temporary exclusion before attach. Validate each
+actual replica set/domain; include an unknown-zone node without permanent relabeling. One
+ordinary private-replica drain measures both target-mediated hops and control flow. Three hosts
+cannot demonstrate every two-remote-hop case; deterministic unit tests use four nodes.
+
+Require no I/O errors, offered totals equal completed workload bytes, actual codec framing
+matches observed frames, and copy payload matches differences/mapped content, not whole capacity.
+Retain exact binary/profile/admission evidence, raw observations, workload, placements and labels
+in docs/benchmarks beside per-chunk floors and limits. No fault, format, price query or claimed
+optimal policy. Trap stops only owned loads, detaches/deletes private volumes and restores only
+owned unchanged eligibility marks. Report incomplete healing/cleanup with named pending actions;
+no automatic tombstone confirmation or overwrite of concurrent operator changes.
 
 ## Files and every-rule tests
 
 | Rules | Concrete proof |
 |---|---|
-| S1, S2 | repl traffic-class/inflight tests cover every purpose, reply after WriteOp gone, duplicate/unmatched/retry; engine/net codec tests compare encoded bytes to counted lengths for Hello/Fenced/data/control and future v2 frames, failed enqueue vs attempted connect. |
+| S1, S2 | repl traffic-class/inflight tests cover every purpose, late joiner, duplicate/unmatched/retry. `net.rs` codec/session tests count initial/established Refused once before unchanged Lost, and failed enqueue versus attempted Connect; actual current and #90 v4 profile lengths (counting appendix). |
 | S1, S3 | Node/ublk completion tests local fast/slow, zero-copy/staged, remote/cross-chunk read, successful/failed/reissued write; exact once per full-success offer (even when next fetch is held/idle), zero local-network bytes, no incoming replica-role double count. |
-| S4 | Engine tests detach/failover/new epoch with late net/device callbacks, move source retained row and multiple UUID refs on one physical node; no counter-based voting/selection. |
-| S5 | Fake ListNodes clock/caches: labels added after attach, target missing, empty/changed peer labels, failure/staleness/recovery, snapshot-basis reclassification; no endpoint or read/placement change. |
-| S6 | Enabled/disabled observer twin has identical messages/meta requests/ordering and I/O outcomes apart from scheduled topology observations; fixed counters at different completed I/O rates, no completed-request history or new hot-path lock. |
-| S7, S8 | Control/engine report tests with/without #47, exact strings/nulls/order/capture age, unknown ID,1024-row/4MiB refusal, overflow validity, zero/mixed denominators and no secret content. |
-| S9–S11 | scripts/tools/zone-traffic-test.sh: floors/unknown cases, actual-placement validation, known bytes, one-/two-hop fixture, setup/load/report errors, every cleanup branch, hostile IDs/paths and no format/automatic confirm. Add to make lint. |
+| S4 | Engine tests queue old Reply/Refused, detach and reattach with the same volume/epoch, then prove no additions/flow lookup. Same live instance/replaced session counts Other. Test move-retained rows, #90 wrong UUID/G/session/incarnation/profile admission and node grouping; no votes/selection change. |
+| S5 | Observer appendix: exact cache/node/zone bounds, atomic last-good install, delayed/missing/empty/changed labels, failure/stale completion/recovery and reclassification; no endpoint/read/placement change. |
+| S6 | Enabled/disabled observer twins have identical authoritative messages/order and I/O outcomes; stalled endpoints/repeated ticks/concurrent readers prove isolated bounded observation work. Fixed per-peer/inflight state, no per-completed-request history or hot-path lock. |
+| S7, S8 | Observer appendix golden/invalid Rust/Go schema3 fixtures with/without #47; strict fields, line/row/pending/rate/deadline refusals, capture/staleness, overflow, null denominators and no secret content. |
+| S9–S11 | `scripts/tools/zone-traffic-test.sh`: actual chunk floors including #18 zone/bestEffort RF2 same-zone fallback, unknowns, known bytes/hops, #83 VM/unknown-profile refusal before mutation, qualified physical setup, all load/report/cleanup errors and hostile inputs. Add to make lint. |
 | S12 | Docs/help contract and retained artifact fixtures; no placement/source-policy API added. Existing sim/fencing tests unchanged. |
 
-Touched: repl target/inflight classification; net frame length/recv metadata; node engine/net
-traffic module and tests; ublk final commit hook/control stats; scripts/checks/tools, Makefile
-and docs. No proto/on-disk/token change or new dependency. Implementation `make test lint race
-contracts sim`; performance-plan no-fault baseline before claiming overhead within spread.
-No test, measurement, fault or lab operation ran while drafting. No new ADR needed: observation
-never alters authority. Direct destination copiers introduced later must extend this measurement
-boundary explicitly; today counters cover target-mediated transport only. #47/#72 integration
-and actual minimal-cost policy remain reviewed future work, not accepted by this draft.
+Touched: `dataplane/crates/flaminio-repl/src/target.rs` for flow/inflight;
+`flaminio-net/src/{frame,session}.rs` for checked length/decoded receipt;
+`flaminio-node/src/{engine,net}.rs` and traffic tests for instance/session attribution;
+`flaminio-io/src/ublk.rs` for final client hook and #71 telemetry encoder for schema3;
+`control/observe/` strict decoder/fixtures; isolated metaclient observer worker;
+`scripts/{checks/zone-traffic.sh,tools/zone-traffic-test.sh}`, Makefile and docs. No proto,
+on-disk, token or wire-authority change; no dependency-plan edits. `make test lint race contracts
+sim` are future implementation checks. Run the separately authorized no-fault baseline before
+claiming overhead within spread.
+
+## Contracts, risks and ADRs
+
+Both appendices define the observer-only in-process attribution, topology lane, telemetry ABI
+and planned tests. Existing administrative socket, replication bytes and authority are unchanged;
+#90 remains sole exact identity/profile owner. Accepted ADRs0001–0006 remain consistent,
+especially0005 replica-confirmed leases: observations cannot renew, admit or depose. No new
+safety policy or architectural authority choice needs an ADR or simulator mutant; observer
+isolation/equivalence tests prove this slice. No tests, measurements or lab operations ran
+while drafting. Direct destination copiers must extend measurement explicitly in their own
+plan. Later cost/read/placement policy and its values remain outside this unapproved revision.
+
+## Parallelizable?
+
+Rust/Go observation units can build against the appendix schema/fixtures; whichever of #62,
+#47/#71 and #90 lands second installs its named adapters and shared golden tests. Physical
+baseline collection remains separately authorized and unavailable until preflight succeeds.
 Settled 2026-11-13 (user's instruction): values for a later cost or latency policy are set by the
 later steps from this step's lab baseline, none in this step (see decisions.md).

@@ -1,0 +1,94 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review63_r2_combined (fresh composition-only design-code and design-security)",
+  "reviewed_commit": "51a34351d589eca96b51206c95e8df5187a5135a",
+  "dependency_commits": {
+    "91_technical": "f6220b5eefbb0092979327465d2bd9d3aa58039d",
+    "91_report": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/admission-contract.md:12-26,65-129,133-203 and adr-proposal.md:16-53 specify synchronous Fail-policy Node precommit enrollment, authenticated requests, mandatory finalizer anchors, fresh reads and durable slot CAS. No stored permissive PDB or asynchronous expiry supplies authority. Actual 91 R1 full reports identify the transferred root correction and new enrollment/authentication defects; R2 closes those new defects, and R6 code/security both return zero findings at f6220b5."
+    },
+    {
+      "id": "R1-C2",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/admission-contract.md:54-73 uses supported spec.nodeName and independent actual immutable Node/Pod UID checks, rather than unsupported UID affinity. identity-contract.md:9-35,69-109 preserves same-name/new-UID and saved old-store retirement evidence. Actual full R1 code/security reports recognize this correction, report lifecycle/join defects, and actual R2 reports close them; final R6 code/security clear the resulting contract."
+    },
+    {
+      "id": "R1-C3",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/admission-contract.md:30-50,65-73,165-203 replaces Deployment/PDB pod-count credit with one durable resourceVersion CAS slot per immutable node/anchor ownership. Enrollment denominator and retirement never depend on readiness/surge, and qualification.md requires real three-node concurrent-drain/duplicate-ready/rollout counterexamples. Actual full R1 reports recognize the replacement and identify the lifecycle defects closed in R2; actual R6 code/security return zero findings."
+    },
+    {
+      "id": "R1-C4",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/reader-contract.md:7-70 specifies additive require_complete/complete strict enumeration, bounded linearizable candidate-header validation before publication filtering, no success-as-empty fallback and explicit errors. :268-277 requires actual service-through-gRPC malformed sole/mixed-header and backend/compatibility fixtures. Actual full R1 code/security reports recognize correction of the transferred silent-omission root; actual incremental R2-R6 reports address subsequent bounded-reader defects through final zero findings, without calling fixtures executed."
+    },
+    {
+      "id": "R1-C5",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/reader-contract.md:87-93,235-261 and identity-contract.md:9-109 define coherent full/paged exact earned-store observation, pending/unknown refusal, physical-node deduplication and the whoever-lands-second read-only Reader page allowlist hook. :278-283 names exact UUID-return, replacement, full/paged and changed-predicate fixtures. Actual full R1 reports recognize the adapter correction and identify exact-name/retirement gaps, closed in R2; final R6 reports retain the contract and zero findings. Dependencies are proposed plans and remain read-only."
+    },
+    {
+      "id": "R1-C6",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/security-contract.md separate namespace/credentials and Kubernetes RBAC/status sections specify owned ConfigMap and events.k8s.io publication rights, bounded diagnostics and positive/negative authorizer fixtures; qualification.md requires those real authorizer checks. Both actual full R1 reports explicitly recognize correction of the transferred missing-status/Event-rights root; actual R2-R6 review trail ends clear. These permissions are future deployment requirements, not deployed rights."
+    },
+    {
+      "id": "R1-C7",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/qualification.md Storage preflight, composed physical-host path and Original RF2 data sequence preserve stop-A/hold-B/return-A/same-drain/re-admission/data verification. Current post-83 VMs record expected refusal and blocked evidence before disruption; pinned real API evidence is separate, historical pre-83 VM exploration cannot certify composition. Actual full R1 code/security reports explicitly recognize this transferred correction and R6 retains it. Wrapper63/spec.md S2 keeps outcome7 and the uncollected/blocked obligation."
+    },
+    {
+      "id": "SEC63-R1-01",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/security-contract.md:8-35,38-62 replaces privileged flaminio-system with separate Restricted flaminio-disruption-guard, no stronger local SA/admin credentials and no cross-namespace rights, explicitly accounting for workload-creation Secret/SA escalation. Qualification requires hostile credential/SA/host and foreign-namespace negatives. Actual full R1 security report explicitly recognizes the transferred correction, separately reports API-server-client authentication defects closed by actual R2; actual R6 code/security clear the final proposal."
+    },
+    {
+      "id": "SEC63-R1-02",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/admission-contract.md:30-50,65-73,165-203 replaces Deployment/PDB pod-count credit with one durable resourceVersion CAS slot per immutable node/anchor ownership. Enrollment denominator and retirement never depend on readiness/surge, and qualification.md requires real three-node concurrent-drain/duplicate-ready/rollout counterexamples. Actual full R1 reports recognize the replacement and identify the lifecycle defects closed in R2; actual R6 code/security return zero findings."
+    },
+    {
+      "id": "SEC63-R1-03",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/admission-contract.md:12-26,65-129,133-203 and adr-proposal.md:16-53 specify synchronous Fail-policy Node precommit enrollment, authenticated requests, mandatory finalizer anchors, fresh reads and durable slot CAS. No stored permissive PDB or asynchronous expiry supplies authority. Actual 91 R1 full reports identify the transferred root correction and new enrollment/authentication defects; R2 closes those new defects, and R6 code/security both return zero findings at f6220b5."
+    },
+    {
+      "id": "SEC63-R1-04",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/reader-contract.md:7-70 specifies additive require_complete/complete strict enumeration, bounded linearizable candidate-header validation before publication filtering, no success-as-empty fallback and explicit errors. :268-277 requires actual service-through-gRPC malformed sole/mixed-header and backend/compatibility fixtures. Actual full R1 code/security reports recognize correction of the transferred silent-omission root; actual incremental R2-R6 reports address subsequent bounded-reader defects through final zero findings, without calling fixtures executed."
+    },
+    {
+      "id": "SEC63-R1-05",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/admission-contract.md:54-73 uses supported spec.nodeName and independent actual immutable Node/Pod UID checks, rather than unsupported UID affinity. identity-contract.md:9-35,69-109 preserves same-name/new-UID and saved old-store retirement evidence. Actual full R1 code/security reports recognize this correction, report lifecycle/join defects, and actual R2 reports close them; final R6 code/security clear the resulting contract."
+    },
+    {
+      "id": "SEC63-R1-06",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/reader-contract.md:87-93,235-261 and identity-contract.md:9-109 define coherent full/paged exact earned-store observation, pending/unknown refusal, physical-node deduplication and the whoever-lands-second read-only Reader page allowlist hook. :278-283 names exact UUID-return, replacement, full/paged and changed-predicate fixtures. Actual full R1 reports recognize the adapter correction and identify exact-name/retirement gaps, closed in R2; final R6 reports retain the contract and zero findings. Dependencies are proposed plans and remain read-only."
+    },
+    {
+      "id": "SEC63-R1-07",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/qualification.md Storage preflight, composed physical-host path and Original RF2 data sequence preserve stop-A/hold-B/return-A/same-drain/re-admission/data verification. Current post-83 VMs record expected refusal and blocked evidence before disruption; pinned real API evidence is separate, historical pre-83 VM exploration cannot certify composition. Actual full R1 code/security reports explicitly recognize this transferred correction and R6 retains it. Wrapper63/spec.md S2 keeps outcome7 and the uncollected/blocked obligation."
+    },
+    {
+      "id": "SEC63-R1-08",
+      "status": "addressed in delegated review-clear proposed plan; not implemented or human-approved",
+      "evidence": "91/security-contract.md separate namespace/credentials and Kubernetes RBAC/status sections specify owned ConfigMap and events.k8s.io publication rights, bounded diagnostics and positive/negative authorizer fixtures; qualification.md requires those real authorizer checks. Both actual full R1 reports explicitly recognize correction of the transferred missing-status/Event-rights root; actual R2-R6 review trail ends clear. These permissions are future deployment requirements, not deployed rights."
+    }
+  ],
+  "findings": [],
+  "report": {
+    "scope": "Incremental 1a4a14df1a8b1ae6c2762bbaabf4ba5489305d31..51a34351d589eca96b51206c95e8df5187a5135a, five63technical documents; report.md excluded. Both design-code and design-security composition/reference/acceptance/provenance review, not a full unchanged91reaudit. Read AGENTS, plan-reviewer and supervisor instructions; original63intent and historical decisions; all five current63documents; actual63R1code/security artifacts; all actual91R1-R6artifact findings/prior dispositions and report trail, R6full artifacts; targeted final91authority and qualification sections affected by delegation.",
+    "results": "Zero comments including Nits. All15original63R1IDs map individually to reviewed91authority and actual review evidence. The15IDs remain predecessor inputs, never fake91rounds. Actual owner full R1 found additional defects; actual incrementalR2-R6 addressed them, with bothR6reviewers clear at exact technicalf6220b5. Report-only3d9e0fe changes only91/report.md. Closure here means addressed in a delegated reviewed proposed plan, not runtime delivery or human acceptance.",
+    "acceptance": "All8original63acceptance outcomes preserved in63/spec.md S2: automatic coverage, unsafe drain hold/eligible progress, jointly unsafe concurrency prevention, unknown/controller/metadata failure hold and explicit bypasses, visible reasons, read-only availability authority, full RF2stop/return/drain/re-admission/data proof, truthful docs/manifests/permissions. Node UID and real API race/failure fixtures remain explicit owner obligations. API qualification cannot substitute for83qualified physical storage evidence; blocked/uncollected remains valid missing evidence, never a pass.",
+    "history_and_scope": "63/decisions.md original approval/settlement prefix is byte-preserved by append-only change, including2026-11-13 approvals and user neither(a)nor(b) choice. New91ProposedADR(b) and verified-cgroup hard-cap/process-restart/backoff costs remain unapproved; they do not retroactively select63choice or deliver guard runtime. Wrapper retains original guard-only first half of step1, leaves later63replica draining/autoscaler/scale-up/claims/capacity/maintenance work open, and adds no platform stage. No accepted ADR or cleared dependency is reopened.",
+    "validation": "Both snapshots exact and clean before and after review.91technical-to-report diff lists only docs/issues/91/report.md.63incremental git diff --check passes; all9relative Markdown links in its five technical documents resolve. Actual91artifacts for every R1-R6 code/security pair exist and finalR6reviewed_commit matches technicalf6220b5 with empty findings.",
+    "limits": "Read-only except this actual /tmp JSON artifact. No repository/dependency/tracker edits, children, runtime/API/gRPC/cgroup/lab/disk/deploy/benchmark/fault actions. Every service/auth/real-API/physical/restart fixture remains a future implementation obligation, not an executed result. No runtime coverage, data proof, cloud done-when, human approval or implementation permission is claimed."
+  }
+}

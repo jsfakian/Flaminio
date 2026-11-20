@@ -1,0 +1,73 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r3_security (fresh incremental design-security / changed-spec)",
+  "reviewed_commit": "69a53a22da548ade96b0dfa292a0c644193facc5",
+  "dependency_commits": {},
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 code/security JSON and report record the concrete both-plugin API-server client-authentication correction. R3 changes only outgoing reader transport; this authentication contract is unchanged."
+    },
+    {
+      "id": "R1-C2",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 artifacts record ProvenNonStorage admission/recovery backed by permanent history. No identity/admission/recovery lines change in this diff."
+    },
+    {
+      "id": "R1-C3",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 artifacts record exact metadata-ID/Kubernetes-name join and immutable enrolled UID. R3 leaves that contract unchanged."
+    },
+    {
+      "id": "SEC91-R1-01",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 security report confirms dedicated authenticated API-server origin before enrollment/actionable allocation; R3 adds only outgoing-gRPC budget language to security fixtures."
+    },
+    {
+      "id": "SEC91-R1-02",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 security report confirms early AlreadyExists denial and durable serialized name claim; no relevant CREATE/admission line changes."
+    },
+    {
+      "id": "SEC91-R1-03",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 security report confirms all-Node/nonstorage recovery. Identity and slot rules are unchanged."
+    },
+    {
+      "id": "SEC91-R1-04",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 security report confirms persisted exact old-store evidence and returned/moved-away retirement. No reference/lifetime/dependency rule changes."
+    },
+    {
+      "id": "SEC91-R1-05",
+      "status": "partially_resolved",
+      "evidence": "The R2 production CodecV2 structural preflight/direct-construction correction is unchanged. R3 concretely adds transport controls, but the remaining transport allocation-accounting defect is described in SEC91-R3-01."
+    },
+    {
+      "id": "SEC91-R1-06",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R2 security report confirms bounded authenticated HTTP1 admission serving, including pre-handler storage and deadlines. Its contract is unchanged; outgoing-gRPC scope is explicitly separated."
+    },
+    {
+      "id": "SEC91-R2-01",
+      "status": "partially_resolved",
+      "evidence": "reader-contract.md:120-160 adds real public static windows, header/read/write limits, four single-endpoint single-call leases, a feasible proposed post-TLS net.Conn frame wrapper, and real pinned compaction/control-buffer environment behavior. These address BDP/header/unbounded-frame roots. However :167-189 still assumes allocation capacity and cleanup not provided by the default grpc pool; SEC91-R3-01 remains."
+    }
+  ],
+  "findings": [
+    {
+      "id": "SEC91-R3-01",
+      "severity": "Medium",
+      "summary": "The transport reservation releases pooled response memory from its accounting while grpc still retains it, and its DATA-capacity proof also omits padding.",
+      "evidence": "docs/issues/91/reader-contract.md:167-184 defines 4*Q+256KiB from retained payload/object capacity and an exact invariant containing only live leases, calls and decoded candidates; :186-190 returns call/lease credit once codec buffers are free and ConnEnd arrives. None of the listed options replaces grpc's default buffer pool. Pinned grpc1.85.0 dialoptions.go:726 selects mem.DefaultBufferPool(); mem/buffer_pool.go:42-47 has 4KiB/16KiB tiers; internal/mem/buffer_pool.go:240-261 allocates tier capacity and Put stores it in sync.Pool. mem/buffers.go:155-180 shows Free returns the response backing slice to that pool, rather than releasing retained storage. ConnEnd in internal/transport/http2_client.go:1108-1112 neither purges nor accounts for it. A full response fragmented into approximately4093 1025-byte DATA frames fits the4096-frame ingress cap and can leave approximately16MiB of 4KiB-tier backing after the call unwinds. Subsequent16KiB-frame page calls use another tier, while the invariant admits retained D and new calls as though the old tier had disappeared; no GC/pool-drain condition or persistent cache reservation is specified. Separately, http_util.go:549-594 allocates from fh.Length before stripping padding: a length1025 padded frame with padSize255 retains769 bytes in4096 capacity. transport.go:155-162 evaluates Len, so these frames reset compaction instead of being coalesced. A source-flow arithmetic trace for a512KiB message plus permitted backlog retains752 such roots: backing plus root/handle, raw-fragment and queue-entry minima total3,159,520 bytes versus the stated raw+4Q+256KiB component3,145,728 bytes, before rounding/extra capacity. This disproves that component's claimed proof; it alone is not asserted to prove a whole64MiB overflow because other reserved slack can mask it.",
+      "fix": "Specify an explicit allocation policy for the pinned client, rather than assuming Free/ConnEnd removes pool retention. The existing exported experimental.WithBufferPool accepts a guard-local mem.BufferPool without a fork/internal import: use an exact-capacity noncaching policy or keep bounded cached capacities charged globally across calls and cleanup until actually dropped/reused. Re-derive DATA/fragment/backlog and compaction charges using actual allocated capacity including padding; update E(R)/concurrency only as needed. Add the future real-HTTP2 fixture for alternating1025-byte/16KiB frame tiers across completed calls, and padded1025-byte frames with255 padding, with charged cached/live capacity and subsequent credit reuse asserted. Preserve the existing receive caps and authority rules."
+    }
+  ],
+  "report": {
+    "scope": "Incremental 885cc5e2429653fc85b3d7af49ebe5600f6a2f9c..69a53a22da548ade96b0dfa292a0c644193facc5. Actual changed technical paths: docs/issues/91/{reader-contract,security-contract,qualification,decisions}.md. report.md excluded from technical scope but read as historical evidence. Read actual91-r2-code.json and91-r2-security.json and confirmed the historical dispositions without re-auditing their unchanged unrelated scopes. Followed only affected grpc transport/codec/deadline/pool/cleanup paths.",
+    "results": "One Medium comment, zero additional High/Low/Nit comments. Not review-clear. The public static-window/header/read/write controls exist; environment throttling/compaction are pinned experimental existing behavior; boundedH2Conn remains a proposed guard wrapper and is implementable after delegated TransportCredentials.ClientHandshake while preserving AuthInfo. Static flow control still permits maybeAdjust as documented. One-byte DATA bypasses BufferPool at <=1024 bytes, so no false256-byte-minimum assertion was made;16KiB DATA uses the16KiB tier. Compaction is real but estimates buffer Len rather than capacity. Four-page, full and two-full/two-page stated reservation arithmetic is numerically correct conditional on E(R), and full concurrency is correctly reduced; the unresolved allocation policy prevents treating that arithmetic as a memory proof.",
+    "sources": "Local pinned google.golang.org/grpc@v1.85.0: dialoptions.go; experimental/experimental.go:34-59; mem/{buffer_pool,buffers,buffer_slice}.go; internal/mem/buffer_pool.go; internal/envconfig/envconfig.go; internal/transport/{http_util,http2_client,transport,flowcontrol,controlbuf,client_stream}.go; rpc_util.go; stream.go; credentials/{credentials,tls}.go. go.mod pins grpc1.85.0, protobuf1.36.12 and x/net0.61.0. grpc Close waits writerDone or a5s fallback, then reader/keepalive; counter-only ConnEnd is feasible but is not pool purge. Owner source/dependencies outside this transport fallout were not re-read or changed; therefore no new repository dependency commits are claimed.",
+    "limits": "Read-only plan/source review except this actual /tmp JSON. No repository/dependency edits, children, tracker actions, runtime/gRPC/API/lab/disk/benchmark/deploy/fault tests. Flow/allocation figures are static source-derived arithmetic, not executed runtime measurements. All fixture additions remain future implementation obligations. No approval-only finding or unrelated replication/simulator authority was introduced.",
+    "snapshot_verification": "Final git rev-parse HEAD remained69a53a22da548ade96b0dfa292a0c644193facc5; git status --short empty. git diff --check on the incremental issue scope passed. All scoped technical paths remained unchanged during review."
+  }
+}

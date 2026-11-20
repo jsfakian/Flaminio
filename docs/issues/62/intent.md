@@ -4,7 +4,8 @@
 and ARCHITECTURE §1.1, §7.2, §9, §11.4 and §20.5. This change is the issue's step 3, taken
 first: a volume's target counts what it exchanges with each node, and reports it by zone. It
 moves no replica and redirects no read. Steps 1, 2 and 4 follow, judged by this step's numbers:
-issue #62 stays open. Assumes #18 as planned.
+issue #62 stays open. Assumes #18 as planned. R1 contract corrections are proposed and
+unapproved; historical approvals are preserved in [decisions](decisions.md).
 
 ## Why
 
@@ -23,13 +24,17 @@ placement or read choice can be judged yet.
 
    | Flow | On the network today | Crosses zones when | Least possible |
    |---|---|---|---|
-   | Write | one copy to each ISR member and joiner but T's own (`start_write`, `target.rs:1378`) | that node is outside T's zone | `zone`: replicas − 1, with a replica in T's zone. `node`, `rack`: 0, with all of them there |
+   | Write | one copy to each ISR member and joiner but T's own (`start_write`, `target.rs:1378`) | that node is outside T's zone | R replicas in distinct known zones: R − 1, with a replica in T's known zone. `node`, `rack`, or zone fallback: 0, with all of them there |
    | Read | none from T's usable replica; else one copy from the source | the source is outside T's zone | 0 with an ISR member in T's zone, else 1 |
    | Resync, move, rebuild (#45) | source to T, unless T is the source; T to joiner, unless T is the joiner | each hop on its own: up to twice per byte | a direct copy's: 0 with a source in the joiner's zone, else 1 |
    | Reconciliation, heartbeats (1 s per node), probes | small | the node is outside T's zone | not data |
 
-   Under `zone` every write crosses zones replicas − 1 times at least. That is the
-   failure-domain rule, which #18 keeps through moves and which no cost term may override. What
+   With R actual replicas in R distinct known zones and one in T's known zone, each steady
+   write crosses at least R − 1 times. Strict zone placement implies that only while its
+   label/domain assumptions hold. The requested `zone`/`bestEffort` header alone does not:
+   #18 can fall back per chunk to rack or node, even placing all replicas in one zone. Compare
+   each chunk's actual placement and labels, never the requested level alone. No cost term
+   overrides #18's rule. What
    can change is the rest: where the other replicas of a `node` or `rack` volume go, which
    member a target without a local replica reads from, and the second crossing of a copy.
 3. **`Place` has no cost term, and no score to put one in.** It orders the candidates by: the
@@ -71,11 +76,14 @@ placement or read choice can be judged yet.
    its whole volume, every chunk record, every 2 s (`refresh`, `flaminio-repl/src/types.rs:63`;
    `GetVolume`, `service.go:501`), from the first endpoint that answers, in whatever zone. The
    answer grows with the volume, up to 2^20 chunks (`domain.go:184`).
-9. **The lab can count, not bill.** fl-a is in zone lab-a, fl-b in lab-b, fl-c in none
+9. **The historical VM lab can count, not bill, before #83.** fl-a is in zone lab-a, fl-b in lab-b, fl-c in none
    (`scripts/lab.sh:609`), on one network. volb's second replicas were on fl-a and on fl-c, as
    `Place` orders them by load
    ([results](../../benchmarks/2026-10-29-reads-qd1-queues.md)). No result in
-   `docs/benchmarks/` records bytes between nodes.
+   `docs/benchmarks/` records bytes between nodes. With #83 physical admission active these
+   VMs refuse startup; they are not a supported future baseline. Separate authorization may
+   permit an explicitly pre-#83 exploratory campaign, or the equivalent qualified disposable
+   physical fixture. Otherwise record blocked/uncollected before mutation, without a bypass.
 10. **§20.5 waits for the same figure:** what two replicas across zones cost per GiB written,
     against one replica on a provider disk.
 
@@ -88,15 +96,20 @@ placement or read choice can be judged yet.
 2. **Each node's bytes are reported as same zone, another zone or zone unknown,** from the zone
    labels the metadata service holds for the target's node and for that node. A missing label is
    unknown, never guessed. A label set after the attach shows in a later report.
-3. **An operator can read it from the node on request,** per volume, since the attach.
+3. **An operator can read it from the node on request,** per volume, since the target instance
+   started, through #71's bounded telemetry observation and the [observer contract](observer-contract.md).
 4. **Counting changes nothing else.** No read source, placement, ISR or timeout depends on it.
    The I/O path gains the additions only: no lock, no metadata round trip, no request.
-5. **The floor is written down:** for each level and replica count, the fewest cross-zone bytes
-   per byte written, read and copied (Why 2), where the report can be held against it.
-6. **A lab check, and the baseline.** Known loads on a `zone` volume and on a `node` volume,
+5. **The floor is written down:** for each actual chunk placement and replica count, the
+   fewest cross-zone bytes per byte written, read and copied (Why 2), including the requested
+   level/policy and known-zone assumptions against which the report is compared.
+6. **An admitted, separately authorized check, and the baseline.** Preflight #83 before any
+   mutation; current VMs with that profile are blocked/uncollected. A qualified disposable
+   physical fixture retains the same geometry, flows and unknown-zone case. Known loads on a
+   `zone` volume and on a `node` volume,
    with the target on a replica's node and on a node without one, and one drain. The counted
    bytes match what the load wrote and read, within the framing. The figures go in
-   `docs/benchmarks/`, beside the floor: what steps 1 and 2 must then reduce.
+   `docs/benchmarks/`, beside actual per-chunk floors: what steps 1 and 2 must then reduce.
 7. **Docs:** `docs/lab.md`: how to read the counts, and what the lab's zones can show.
 
 ## Out of scope

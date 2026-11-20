@@ -60,3 +60,18 @@ Nothing is implemented. Approved before its plan review cleared (status: pending
   release is claimed until the same tests pass on it. Recommended by Claude, no recommendation in
   the plan: it is the one real API server the project runs, and the plan requires qualification
   on an actual release rather than a named guess.
+
+
+## Approved tracker move carried out — 2026-11-20
+
+The approved shared guard move is now [issue91](https://github.com/jsfakian/Flaminio/issues/91),
+source `1a4a14df1a8b1ae6c2762bbaabf4ba5489305d31`. All approvals/settlements above remain
+exact historical records, including neither(a) nor(b) selected in this plan and the original
+promise remaining unnarrowed. #91 owns the technical guard authority and may supply its own
+concrete Proposed ADR/research; no new acceptance or retroactive source choice is invented.
+
+This folder is only the original-slice composition/acceptance wrapper; no new autoscaler/cloud/
+claim/evacuation stage. Current wrapper and substantive owner revisions are unapproved.
+Original15 R1 findings remain transferred and unresolved until #91's actual full fresh loop
+clears, then this reference diff receives its own fresh review. Runtime/evidence is separate.
+The #48/#63 tracker bodies preserve their existing text and append the owner dependency.

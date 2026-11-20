@@ -1,0 +1,86 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r1_security (fresh FULL design-security/full-plan review)",
+  "reviewed_commit": "86b1255a419d24fb021548e50cdb2271b450e962",
+  "dependency_commits": {
+    "69": "3d53c0b61924923d51b9568ec6f1fa56a95e8518",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73"
+  },
+  "prior_findings": [],
+  "findings": [
+    {
+      "id": "SEC91-R1-01",
+      "severity": "High",
+      "summary": "The webhook authenticates its server but accepts unauthenticated callers that can allocate permanent enrollment state.",
+      "evidence": "security-contract.md:48-61 supplies only the serving leaf/key and explicitly treats fake reviews as at worst consuming a slot. admission-contract.md:75-89 instead accepts a precommit Node UID which cannot yet be checked against a live Node, creates a finalizer-bearing nodeName-bound Pod and nonreclaimable Staging enrollment, and consumes the lifetime4096 counter. A caller reaching9443 can forge successive CREATE reviews with syntactically valid nonexistent UIDs, consume all allocations, and plant blocking Staging anchors on an existing node. Actual-object rereads do not authenticate this precommit request. No API-server client credential, listener client-CA/identity rule or k3s admission-plugin credential configuration is specified. Pinned Kubernetes authentication.go:130-132,148-150,204-205 uses anonymous webhook client configuration when no matching credentials are installed; caBundle authenticates the opposite direction. Source: https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/apiserver/pkg/util/webhook/authentication.go .",
+      "fix": "Specify and provision authenticated API-server-to-webhook TLS for every pinned control-plane instance and both admission plugins, including exact credential selection, trust/identity verification, rotation and fail-closed startup. Authenticate before parsing or durable side effects; network policy and AdmissionReview fields remain insufficient. Add real transport fixtures proving no-client/wrong-client/expired-client and forged/replayed direct reviews cannot allocate enrollments, create anchors or reserve a slot, while the actual API server can perform all three paths."
+    },
+    {
+      "id": "SEC91-R1-02",
+      "severity": "High",
+      "summary": "An ordinary kubelet re-registration can create a permanent uncommitted anchor that blocks its node drain.",
+      "evidence": "admission-contract.md:75-89 allocates a new UID-owned anchor for every validating Node CREATE and retains Staging until that exact UID has been observed and later deleted; :109-110 rejects its eviction unless its enrollment committed. Kubernetes generic store assigns the new UID and runs createValidation before Storage.Create checks the existing key (store.go:445-490). Pinned kubelet_node_status.go:84-104 starts registration with Nodes().Create even when the name already exists, then handles AlreadyExists by reading/reconciling the existing Node. A routine kubelet restart therefore generates a different never-committed UID, leaves its Staging anchor bound to the real existing nodeName, and later drain encounters a Pod whose NodeUID can never match. This is more than the documented lifetime-counter saturation cost. Sources: https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go#L445-L490 and https://github.com/kubernetes/kubernetes/blob/v1.36.5/pkg/kubelet/kubelet_node_status.go#L84-L104 .",
+      "fix": "Handle already-existing Node names and overlapping creates before allocating new permanent staging state, preserving the pinned kubelet AlreadyExists/reconciliation behavior without allowing an uncovered create to commit. Define the durable same-name contention/error branch and its response semantics. Add real API kubelet-equivalent repeated POSTs against an existing Node, kubelet restart, concurrent creates and a delayed original create; unchanged existing nodes must retain one usable interlock and remain ordinarily drainable. Do not timeout-reclaim a possibly committing create."
+    },
+    {
+      "id": "SEC91-R1-03",
+      "severity": "High",
+      "summary": "All-Node coverage has no recovery branch for nodes that correctly have no metadata store.",
+      "evidence": "admission-contract.md:75-81 intentionally anchors every Node, not only storage members. :127-141 then requires a live metadata store and full relevant earned ISR to retire/release any reserved slot. design.md:86 explicitly requires nonstorage management nodes; ordinary nonstorage workers are also enrolled. A candidate with no relevant chunks can pass the eligibility reduction, but after its drain, cancellation, or required anchor refresh, it can never satisfy the unconditional live-store recovery predicate. One such reservation permanently occupies the global slot and blocks subsequent storage drains even after the node is healthy and uncordoned. If absence is instead classified as Unknown, its own ordinary drain cannot progress at all. No nonstorage path or corresponding fixture is defined.",
+      "fix": "Define exact classification and slot lifecycle for an enrolled Node with no metadata store/holdings, including later storage registration and conservative identity ambiguity. Permit safe ordinary nonstorage retirement/recovery without inventing store liveness, while preserving precommit all-Node coverage. Add nonstorage-node drain, uncordon/cancel, terminal/image refresh and later-storage-registration fixtures showing slot release and no coverage gap."
+    },
+    {
+      "id": "SEC91-R1-04",
+      "severity": "Medium",
+      "summary": "Old-Node retirement asks metadata to distinguish an old Kubernetes UID that its records do not carry.",
+      "evidence": "reader-contract.md:107-115 requires a unique metadata-node-to-Kubernetes-UID mapping, and admission-contract.md:143-148 releases a deleted/recreated Node only when no exact earned/current/move reference to the old node identity remains. The enrollment representation at admission-contract.md:37-39 stores name/NodeUID/current anchor but no metadata ID or observed store identity. Actual meta.proto:63-75 contains a node ID and labels without Kubernetes UID; current CSI node.go:20-21 equates that ID with the Kubernetes name. Reviewed #90 adds exact (node,device_uuid) refs and current store generation, but no Kubernetes UID. With old and new enrollments sharing a name, and a replacement store on the new UID retaining legitimate current refs under that metadata ID, the specified reader has no defined join or saved old-store predicate to evaluate the release condition. A node-name test holds forever on the new refs; simply binding to the new UID does not prove old refs absent.",
+      "fix": "Define the canonical metadata/Kubernetes identity join and persist the information actually needed for old-enrollment retirement, including how same-name new-UID and same/different returning stores are classified. Express the absence proof in fields actually supplied by metadata and retain conservative handling of unknown mappings. Add old/new same-name UIDs with old earned refs, successful replacement/move away from the old exact store, returning original store, restart and external-ID conflict fixtures; the legitimate replacement must have an explicit eventual release path."
+    },
+    {
+      "id": "SEC91-R1-05",
+      "severity": "Medium",
+      "summary": "The encoded receive caps do not enforce the promised decoded-memory bound before generated protobuf allocation.",
+      "evidence": "reader-contract.md:70-78 promises4096-node/64MiB encoded-plus-decoded bounds checked before allocation, but specifies only ordinary4MiB gRPC and512KiB page receive caps. Actual pinned grpc1.85.0 rpc_util.go:1051-1064 calls codec.Unmarshal after its encoded/decompressed size check; encoding/proto/proto.go:85-97 materializes the payload and calls proto.Unmarshal. Protobuf1.36.12 internal/impl/codec_field.go:568-588 creates/appends each repeated message while decoding, before the collector sees the response. A <=4MiB ListNodesResponse containing repeated empty nodes can instantiate roughly two million Node objects, far past4096 and64MiB before semantic rejection. Four in-flight decodes can multiply the excess. ListNodes still uses unbounded KV.List on the server (service.go:239-270); no predecode cardinality/allocation mechanism is defined for any response. Local dependency sources were read at the versions pinned in go.mod.",
+      "fix": "Specify a bounded production decoding/transport path that checks nested counts, lengths and an allocation charge before generated message construction and reserves transient decode memory within the process-wide budget. Cover all four permitted response types and full/paged nested messages, not just retained accumulator entries. Add real gRPC boundary/+1 malformed repeated-message and nested-message expansion fixtures asserting bounded allocations and no partial eligibility; retain existing receive limits."
+    },
+    {
+      "id": "SEC91-R1-06",
+      "severity": "Medium",
+      "summary": "The admission bounds leave pre-handler connections and slow request-body waits unspecified.",
+      "evidence": "design.md:69-74 bounds active HTTP handlers, body bytes and validator work, and security-contract.md:59-60 bounds decoded review depth. Neither defines accepted connection/TLS-handshake limits, header/idle/body read deadlines, maximum headers or HTTP/2 stream handling. A handler semaphore does not bound idle/pre-header sockets or concurrent TLS handshakes. A byte cap and request-context cancellation do not themselves impose a deadline on a peer that keeps a connection open while slowly sending its body. This exposes a new cluster-wide fail-closed listener to socket/worker exhaustion. Go1.27.4 net/http Server documents independent ReadHeaderTimeout, ReadTimeout, WriteTimeout and IdleTimeout with no timeout for zero values: https://pkg.go.dev/net/http#Server . Existing control/failover/kube.go is an outgoing client, not an inherited bounded HTTPS admission server.",
+      "fix": "Define bounded listener/handshake/connection and protocol settings plus finite header/body/write/idle deadlines that include decode and unwind work within the admission timeout. Keep rejection nonblocking and cancellation able to terminate actual reads, with bounded outstanding goroutines/buffers under HTTP/1 and any enabled HTTP/2. Add slow TLS/header/body, idle-connection and stream/concurrency boundary fixtures proving resource reclamation and recovery of legitimate API requests. Authentication remains separately required."
+    }
+  ],
+  "report": {
+    "scope": "First actual #91 full security review of all ten issue files: intent, spec, design, decisions, Proposed ADR, admission, reader, security, qualification and report. Read transferred actual #63 R1 code/security artifacts as inputs only; read source tracker bodies/comments cache. Checked actual metadata service/auth/domain/proto/KV/PKI, Go gRPC client/dependency decoder, CSI node identity, Kubernetes REST client, accepted ADR0001-0004/0006 and applicable architecture trust/maintenance principles. Read mapped #69 Reader, #77 coherent view, #83 physical-only qualification and #90 exact-store/full/paged/version4 contracts. Checked precommit UID, eviction admission/UID deletion, finalizers/PodGC, kubectl filters/retry/wait, denial429 preservation, webhook authentication and kubelet registration against pinned primary Kubernetes1.36.5 sources. No autoscaler, cloud, evacuation or capacity-policy stage was inferred.",
+    "results": "6 actionable comments:3 High and3 Medium; zero additional Low or Nit comments. Not review-clear. This new owner may propose option(b); no finding is based only on missing human approval. All current technical drafts remain proposed/unapproved. Pure availability observation changes no replication/membership/recovery authority, so no new replication simulator obligation was invented.",
+    "transferred_input_roots": {
+      "namespace-and-credentials (SEC63-R1-01)": "New isolated Restricted namespace, honest workload-create boundary and exact reader credential contract now specify the original correction; API-server client authentication is a distinct new boundary still open in SEC91-R1-01.",
+      "pod-count and UID placement (R1-C2/C3; SEC63-R1-02/05)": "New design uses supported nodeName placement, independent UID checks and a single durable CAS slot rather than Deployment/PDB Ready counts. Lifecycle and identity release gaps are reported above; no earlier #63 report is relabeled resolved as a #91 round.",
+      "coverage/failure mechanism (R1-C1; SEC63-R1-03)": "Concrete synchronous webhook proposal, precommit anchors, mandatory finalizers and UID-conditioned retirement replace the unspecified PDB permission. New enrollment/recovery/transport defects prevent clearance.",
+      "strict enumeration (R1-C4; SEC63-R1-04)": "New require_complete/complete compatibility, bounded both-backend strict header validation and sole/mixed corrupt-header fixtures address the silent-omission root at the proposal level.",
+      "exact-store/page composition (R1-C5; SEC63-R1-06)": "New #90 earned-ref/current UUID/G adapter, pending-initial refusal, ACTIVE quarantine hold, coherent full/paged predicates and last-to-land Reader page allowlist are explicit. Metadata/Kubernetes identity retirement remains SEC91-R1-04.",
+      "physical evidence (R1-C7; SEC63-R1-07)": "Separate pinned API qualification, expected current-VM refusal and later qualified physical RF2 acceptance preserve the original evidence obligation without fabricating results.",
+      "status/event permissions (R1-C6; SEC63-R1-08)": "Exact ConfigMap and events.k8s.io RBAC, bounded diagnostics and real-authorizer positive/negative fixtures now cover the original missing-rights root."
+    },
+    "dependency_snapshot_notes": "#90 actual report HEAD c9231b243dceb196a0eccb615055887c9879bb73 records technical clearance at331f337d3b847ff2d4faabc572f4ceae74837cd7. #83 actual mapped checkout remains67862ad667ac3121b453c9227cef1e8ec5248138; later ledger technical/report commits were not silently substituted. All dependencies remain proposals, not installed source. No dependency was edited or reopened.",
+    "external_primary_sources": [
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/pkg/registry/core/pod/storage/eviction.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/kubectl/pkg/drain/drain.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/kubectl/pkg/drain/filters.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/pkg/controller/podgc/gc_controller.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/dispatcher.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/errors/statuserror.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/staging/src/k8s.io/apiserver/pkg/util/webhook/authentication.go",
+      "https://github.com/kubernetes/kubernetes/blob/v1.36.5/pkg/kubelet/kubelet_node_status.go",
+      "https://kubernetes.io/docs/reference/access-authn-authz/extensible-admission-controllers/#authenticate-apiservers",
+      "https://github.com/k3s-io/k3s/releases/tag/v1.36.5%2Bk3s1",
+      "https://pkg.go.dev/net/http#Server (go1.27.4)"
+    ],
+    "limits": "Read-only except this actual /tmp JSON artifact. No source/repository/dependency edits, subagents, tracker actions, runtime tests, cluster/API/lab/disk/deploy/benchmark/fault actions. All fixtures are proposed future implementation tests. No approval or executed qualification was claimed.",
+    "snapshot_verification": "Final checks confirmed clean owner HEAD86b1255a419d24fb021548e50cdb2271b450e962, no working/index changes to scoped documents or source, and all four dependency HEADs unchanged at the hashes recorded above."
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r2_security (fresh incremental design-security / changed-spec)",
+  "reviewed_commit": "885cc5e2429653fc85b3d7af49ebe5600f6a2f9c",
+  "dependency_commits": {
+    "69": "3d53c0b61924923d51b9568ec6f1fa56a95e8518",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "resolved",
+      "evidence": "security-contract.md:61-131 specifies both-plugin AdmissionConfiguration/kubeconfig, exact service-DNS:443 matching, dedicated client CA/EKU/URI verification before actionable decode/allocation, each-HA-instance qualification, and atomic staged rotation. Pinned Kubernetes resolver and k3s forwarding sources support the configuration; security fixtures:279-284,290-291 cover rejection and actual clients."
+    },
+    {
+      "id": "R1-C2",
+      "status": "resolved",
+      "evidence": "identity-contract.md:37-67 defines complete history-backed ProvenNonStorage admission/recovery without store liveness; admission-contract.md:168-180 composes this with retiring exact old Pod UID and Ready replacement. Permanent #90 lifetime history prevents formerly-storage downgrade. Identity required fixtures:113-119 explicitly cover management/worker refresh, drain/uncordon/release and storage registration during recovery."
+    },
+    {
+      "id": "R1-C3",
+      "status": "resolved",
+      "evidence": "identity-contract.md:9-35 fixes exact byte metadataID==Kubernetes Node.name, intersection grammar/128-byte bound, persisted immutable UID, explicit external exclusivity and conservative unknown joins. Existing control/csi/node.go:20-21, topology.go and deploy/csi/driver.yaml:112 support the name convention; no address/label alias authority is inferred."
+    },
+    {
+      "id": "SEC91-R1-01",
+      "status": "resolved",
+      "evidence": "Same origin-auth correction as R1-C1: security-contract.md:88-123 selects the concrete API-server credential for service port443 and requires dedicated mTLS peer authentication before claim/counter/anchor/slot effects. Actual-origin and wrong-role/missing/expired/rotation fixtures are specified at:279-291. AdmissionReview contents no longer substitute for authentication."
+    },
+    {
+      "id": "SEC91-R1-02",
+      "status": "resolved",
+      "evidence": "admission-contract.md:82-122 distinguishes existing-name CREATE before request-UID allocation, returns allowed=false status409/reason AlreadyExists, serializes absent-name contenders with durable unique nameclaim, retains delayed owner without timeout takeover and advances only previously observed names. Pinned webhook ToStatusErr preserves reason/code and apierrors.IsAlreadyExists checks the reason. Existing-name/overlap/delayed-create fixtures at:203-210,239-242 explicitly exercise stock kubelet behavior."
+    },
+    {
+      "id": "SEC91-R1-03",
+      "status": "resolved",
+      "evidence": "Same nonstorage root as R1-C2: identity-contract.md:48-67 requires no metadata Node, permanent lifetime absence, complete no-reference inputs, sticky everStorage=false and exact coverage; defines Ready/schedulable replacement recovery and transition to Storage/Unknown. No missing old storage record is treated as harmless."
+    },
+    {
+      "id": "SEC91-R1-04",
+      "status": "resolved",
+      "evidence": "identity-contract.md:25-35,79-109 stores exact old UUID evidence independent of Kubernetes UID and freezes retirementStores in slot. It defines old-UID cleanup reservation, returned-original-store/new-generation recovery, moved-away active-ref absence, independent new-UID coverage and conservative unbound/history/schema failures. Required fixtures include A/B old-earned hold, move-away release, original-A return, same-generation UID recreation and restart. No metadata KubernetesUID field is invented."
+    },
+    {
+      "id": "SEC91-R1-05",
+      "status": "partially_resolved",
+      "evidence": "reader-contract.md:98-155 now specifies real per-call ForceCodecV2, nonallocating structural scan and charged direct construction for all four responses, rejecting generated Unmarshal, nested expansion and compression; actual-gRPC fixtures:245-251 cover the original protobuf expansion. However its new transport reservation does not constrain pre-codec HTTP2 queues/header allocations; SEC91-R2-01 remains."
+    },
+    {
+      "id": "SEC91-R1-06",
+      "status": "resolved",
+      "evidence": "security-contract.md:133-186 now bounds accepted connections32, simultaneous handshakes4, handshake bytes/scratch, preheader storage, HTTP1-only protocol, headers/count, workers8, body/projected JSON and absolute request/read/write/idle/shutdown deadlines. Go1.27.4 primary source confirms Server.Protocols/MaxHeaderValueCount and TLS Certificate message ceiling. Real slow-client/cancellation/saturation/ALPN fixtures at:285-291 are explicit. No unauthenticated network health exception remains."
+    }
+  ],
+  "findings": [
+    {
+      "id": "SEC91-R2-01",
+      "severity": "Medium",
+      "summary": "The new predecode memory reservation still leaves gRPC HTTP/2 transport allocations outside its bound.",
+      "evidence": "docs/issues/91/reader-contract.md:109-117 reserves 2*receiveLimit+64KiB+1MiB per call and promises all four raw/decoded calls plus retained views remain in the same64MiB pool, but specifies neither client flow-control windows nor received header-list limits. In pinned grpc1.85.0, internal/transport/http2_client.go:405-411 enables BDP growth by default; bdp_estimator.go:27-30 permits16MiB windows; http2_client.go:1199-1217,1222-1301 grows each stream and queues incoming DATA before CodecV2 runs; transport.go:90-139 stores this in recvBuffer. A hostile metadata peer can send additional unary-response DATA while a valid first response is decoding, so the 4MiB/512KiB message cap does not cap queued transport bytes. Four warmed16MiB stream backlogs alone consume the entire pool before raw messages/retained views. Independently, defaults.go:47 permits16MiB received header lists before the codec, exceeding even a full-response reservation and far exceeding a page reservation. Structural Pass1 cannot prevent these prior allocations. Primary sources: [BDP limit](https://github.com/grpc/grpc-go/blob/v1.85.0/internal/transport/bdp_estimator.go), [transport queue and flow control](https://github.com/grpc/grpc-go/blob/v1.85.0/internal/transport/http2_client.go), [header defaults](https://github.com/grpc/grpc-go/blob/v1.85.0/internal/transport/defaults.go).",
+      "fix": "Specify concrete client transport limits and account their maximum live memory in the existing pool: disable BDP with pinned grpc.WithStaticStreamWindowSize/WithStaticConnWindowSize (including the per-message adjustWindow allowance), set a small explicit grpc.WithMaxHeaderListSize, and bound/count live transports and frame/HPACK/queue scratch. Keep receive caps and fail before opening a call when reserved credit is unavailable. Add malicious real-HTTP2/gRPC fixtures that warm BDP, send extra unary-response DATA while decode is paused, and hit header/trailer-list boundary/+1; assert combined transport/decoded/retained high-water usage and reclamation, including512KiB pages and four calls. The [pinned public dial options](https://github.com/grpc/grpc-go/blob/v1.85.0/dialoptions.go) supply the necessary controls; no dependency plan needs reopening."
+    }
+  ],
+  "report": {
+    "scope": "Fresh incremental design-security and changed-spec review of 86b1255a419d24fb021548e50cdb2271b450e962..885cc5e2429653fc85b3d7af49ebe5600f6a2f9c. Technical diff reviewed: docs/issues/91/{admission-contract,adr-proposal,decisions,design,identity-contract,intent,qualification,reader-contract,security-contract,spec}.md. report.md excluded from technical diff, read as historical evidence. Read both actual91-R1 reviewer JSON artifacts and confirmed all9 actual IDs; did not substitute63 predecessor IDs. Only changed rules and affected identity/admission/auth/codec/transport/dependency paths were inspected.",
+    "results": "1 Medium comment; zero additional High/Low/Nit comments. Eight earlier IDs resolved at proposed-contract level; SEC91-R1-05 partially resolved with remaining transport-budget issue SEC91-R2-01. Not review-clear. No approval-only defect, new autoscaler/cloud/evacuation stage, dependency reopening or arbitrary quota was introduced.",
+    "composition": "Read current #90 contracts.md/migration.md/core-design.md/budgets.md for never-deleted lifetimes, atomic enrollment/registration, ACTIVE and exact earned refs. Actual dependency report HEADc9231b2 is report-only following technical-clear331f337d3b847ff2d4faabc572f4ceae74837cd7. #91 concretely requires ACTIVE identity-v4 and owns strict read-only candidate-history proof without pretending #90 is implemented. Read current #69 Reader allowlist and #77 coherent read contract; new page read remains explicit last-to-land Reader allowlist only, never writer/grant privilege. Checked mapped #83 physical-only qualification and VM refusal against changed qualification references. #61/#72 are not owners of ReplicaRef and were not reopened. Original shared guard intent, source63 history, and Proposed owner ADR(b) remain distinct/unapproved; no source63 or accepted ADR changed.",
+    "code_and_primary_sources": "Affected current source: metadata Node/strict enumeration gap, ValidID, CSI name/registration/deployment, pinned grpc1.85.0 CodecV2/ForceCodecV2/rpc_util/stream/transport/dialoptions and protobuf dependency path; checked Go1.27.4 net/http and crypto/tls primary sources because installed local /usr/local/go is1.27.3. Pinned Kubernetes1.36.5 webhook auth resolver/client HTTP1, admission configuration types, denial status conversion, IsAlreadyExists, and k3s1.36.5+k3s1 API argument forwarding were verified through primary source browsing. Configuration success/transport bounds remain future fixture obligations. Pure observation changes no replication/membership/recovery authority, so no invented simulator assertion/mutant obligation was added.",
+    "limits": "Read-only except /tmp/flaminio-91-r2-security.json. No repository/dependency edits, children, runtime/API/lab/disk/deploy/benchmark/fault actions, tests, tracker messages or writes. Future fixture descriptions are not executed evidence. git diff --check passed as a docs check; no runtime pass is claimed.",
+    "snapshot_verification": "Final owner check confirmed exact HEAD885cc5e2429653fc85b3d7af49ebe5600f6a2f9c and empty git status; dependency HEADs actually read are recorded below. report.md excluded from technical review. No concurrent technical mutation was observed."
+  }
+}

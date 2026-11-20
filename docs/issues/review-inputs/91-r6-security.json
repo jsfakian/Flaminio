@@ -1,0 +1,33 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r6_security (fresh incremental design-security / changed-spec)",
+  "reviewed_commit": "f6220b5eefbb0092979327465d2bd9d3aa58039d",
+  "dependency_commits": {
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [
+    {
+      "id": "R5-C1",
+      "status": "resolved at proposed-contract level",
+      "evidence": "admission-contract.md:133-139,157-170 replaces the stale 28s/+8s allowance with fixed H, A=H+23s and D=H+24s. Body/decode/initial reads, the reader, every RPC/API attempt and retries share remaining time. qualification.md:98-103 requires nonzero earlier work, a reader exhausting its remaining allowance, no dispatch at/after A, bounded response/unwind by D and conservative unknown-CAS recovery."
+    },
+    {
+      "id": "SEC91-R5-01",
+      "status": "resolved at proposed-contract level",
+      "evidence": "design.md:85, security-contract.md:171-185 and admission-contract.md:133-139,157-170 agree on the absolute whole-handler deadline, cutoff and actual per-stage subdeadlines. The dispatch rule includes durable create/update/CAS, retries and Node-enrollment writes. Already-submitted writes may commit after cancellation; their possible occupancy is retained through ordinary durable re-read/reconciliation and process replacement. qualification.md:98-103 covers the affected timing and ambiguity paths."
+    },
+    {
+      "id": "SEC91-R5-02",
+      "status": "resolved at proposed-contract level",
+      "evidence": "qualification.md:72-78 explicitly accepts supported compressed responses within encoded/decompressed receive and cardinality caps, while unsupported compressed encoding, malformed compression and decompressed boundary+1 hold/recycle. This composes with reader-contract.md:125-154,284-302 and pinned grpc1.85.0 rpc_util.go recvMsg/checkRecvPayload/recvAndDecompress/decompress. It neither restores identity-only transport nor requires a custom transport or whole-library memory proof."
+    }
+  ],
+  "findings": [],
+  "report": {
+    "scope": "Incremental 366b4ce780be29c60469ec92227969b913d41aad..f6220b5eefbb0092979327465d2bd9d3aa58039d, excluding report.md from technical scope. Read both actual R5 reviewer artifacts and issue report R5 findings/resolutions; reviewed all five changed technical documents and only affected admission/body/reader/RPC/API/CAS/reply/unwind and stock compression paths. Read current owner intent/spec/decisions and cached issue91 body. Consulted mapped #90 budgets.md bounded page/full-to-page contract at c9231b2, distinguished technical-clear331f337 and verified the intervening dependency change is report-only. No dependency was reopened or edited.",
+    "results": "Zero comments including Nits. All three actual R5 finding IDs are resolved at the proposed-contract level. One H-derived remaining budget now controls work before, within and after the reader; durable dispatch stops at A, reply/unwind finishes by D, and cancellation never certifies that a submitted remote write failed. The future fixture exercises nonzero earlier work plus full remaining reader time and dispatch timestamps, including a pre-cutoff lost CAS reply. Compression qualification consistently distinguishes supported bounded responses from unsupported/malformed/oversized compressed responses under stock gRPC. No newly introduced authentication, durable-state, restart or input-bound contradiction was found in the changed scope. The previously closed resource/synchronous-guard roots and withdrawn whole-library memory proof were not re-audited. No new replication/membership/recovery authority or simulator obligation, metadata hot-path round trip or lock is introduced.",
+    "source_checks": "Owner go.mod pins grpc1.85.0 and protobuf1.36.12. Read local pinned grpc rpc_util.go:783-806,906-1040 and stream.go:1271-1303,1612-1654: wire length is checked before payload read; compressed payload format/encoding is validated; supported decompression respects the receive limit and returns an error for malformed or decompressed size+1 data. The bounded codec/cardinality and fail-closed hold/recycle paths remain the existing owner contract. Read only the affected resource-lifecycle-contract.md cancellation, watchdog, remote-write ambiguity and fresh-process recovery contract, without reopening its settled resource proposal.",
+    "limits": "Read-only plan review except this actual /tmp JSON artifact. No repository/dependency edits, subagents, tracker writes or runtime/gRPC/API/cgroup/lab/disk/deploy/benchmark/fault actions. All deadline/codec/compression/restart/real-API/physical qualification fixtures remain future obligations, not executed tests. Proposed revisions remain unapproved; missing human acceptance alone is not a technical finding.",
+    "snapshot_verification": "Final owner git rev-parse HEAD remained f6220b5eefbb0092979327465d2bd9d3aa58039d; git status --porcelain was empty. Incremental git diff --check for docs/issues/91 excluding report.md passed. Mapped #90 was clean at c9231b243dceb196a0eccb615055887c9879bb73; git diff --name-only from its technical-clear331f337d3b847ff2d4faabc572f4ceae74837cd7 lists only docs/issues/90/report.md."
+  }
+}

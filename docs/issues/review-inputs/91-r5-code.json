@@ -1,0 +1,40 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r5_code (fresh incremental design-code / changed-spec)",
+  "reviewed_commit": "366b4ce780be29c60469ec92227969b913d41aad",
+  "dependency_commits": {
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC91-R4-01",
+      "status": "resolved at proposed-contract level",
+      "evidence": "resource-lifecycle-contract.md:9-33 accurately acknowledges stock itemNode/incomingSettings/cleanupStream retained references; reader-contract.md:115-149 withdraws whole-stock64MiB/cleared-cache proof and custom exactPool/frame machinery. Stock references remain subject to verified cgroup memory.max and are reclaimed by observed process death, without ConnEnd/GC/Put purge assumptions."
+    },
+    {
+      "id": "SEC91-R4-02",
+      "status": "resolved at proposed-contract level",
+      "evidence": "resource-lifecycle-contract.md:17-20 names exact1025/R+1 unread-root path; :55-100 defines Quiescing, bounded exit75 watchdog, supervised fresh process and durable-state/unknown-write recovery. reader-contract.md:292-303 requires hostile unread-root/cancel/codec fixtures and healthy call across observed restart. No empty-Put ledger or forced in-process cleanup is required. Actual R4 code artifact had zero findings; actual R4 security artifact had these two Medium findings."
+    }
+  ],
+  "findings": [
+    {
+      "id": "R5-C1",
+      "severity": "Low",
+      "summary": "The changed24s validator contract leaves its normative admission procedure budgeting28s.",
+      "evidence": "Changed design.md:85 now specifies validator\u226424s. Its normative admission-contract.md:150-153 still prescribes20s reader plus remaining\u22648s of validator28s. security-contract.md:171-178 instead makes24s cover body/decode/validation/reply/unwind and stops actionable work by23s. An implementer following admission step3 can continue Kubernetes reads/CAS after the reply/cleanup deadline; the new design limit has not been propagated to its dependent procedure.",
+      "fix": "Align admission step3 with the existing absolute24s whole-request deadline and23s action cutoff: all initial reads, body/decode time, reader work and subsequent API/CAS attempts consume remaining budget, with\u22641s reply/unwind reserve. Remove the stale28s/+8s promise and add or extend the future deadline fixture to include a reader consuming its full allowance after nonzero earlier work; assert no new CAS starts after the action cutoff and an already-submitted unknown CAS remains held."
+    }
+  ],
+  "report": {
+    "scope": "Incremental13e6f180bd4dc51507eb089df8384d6761d9a83b..366b4ce780be29c60469ec92227969b913d41aad excluding report.md technically. Read actual R4 code/security JSON and issue report history. Checked all nine changed documents and affected admission deadline, stock transport/codec, process lifecycle/CAS, health and qualification paths. Unchanged identity/enrollment/replica guard rules were not re-audited. Read mapped #90 budgets.md discovery/full\u2192page contract at report HEADc9231b2, distinguished technical-clear331f337; no dependency was edited/reopened.",
+    "results": "One Low comment; no additional Medium/High/Critical/Nit comments. Not zero-comment clear. The simplified stock-gRPC solution addresses both actual R4 resource-lifetime defects at proposal level without a maintained fork, private drain API or invented byte-exact library cleanup proof.64MiB explicitly means application credits; verified numeric cgroup-v2 memory.max\u2264256MiB and swap0 are the separate containment boundary, honestly documenting temporary overage/reclaim/OOM. Quiescing stops new allow/collection; bounded watchdog exits even with paused cleanup; actual process termination precedes replacement ownership. Submitted remote writes may still commit; fresh reads, UID/resourceVersion/token preconditions and conservative durable slot occupancy remain required. Health uses bounded local exec state, without authentication exceptions. Proposed restart/backoff cost is explicit and does not silently relax S1/S4, read-only metadata, durable single-slot accounting or physical-only S8 qualification. #90 no-payload expected discovery status is exempted so healthy paged reads need not restart. No new replication/membership/recovery authority, simulator obligation, per-I/O metadata trip or lock is introduced.",
+    "source_checks": "Owner go.mod/go.sum pins grpc1.85.0 with documented checksum/protobuf1.36.12/x-net0.61.0. Local grpc internal/transport/controlbuf.go:42-87 and http2_client.go:1005-1020 substantiate cached node/captured transport reference chains; rpc_util.go:783-806 substantiates R+1 rejection after header before body consumption. Existing meta/service/service.go:GetVolume and control/csi/meta.go:DialMeta/metaCall distinguish current source from proposed guard-only reader behavior. Verified Linux primary cgroup-v2 memory.max/swap.max documentation and pinned Kubernetes1.36 lifecycle Always/backoff semantics through web.",
+    "external_primary_sources": [
+      "https://docs.kernel.org/admin-guide/cgroup-v2.html#memory",
+      "https://v1-36.docs.kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#container-restarts"
+    ],
+    "limits": "Read-only plan review except actual /tmp JSON artifact. No repository/dependency mutation, subagents, tracker messages, runtime/cgroup/API/gRPC/lab/disk/deploy/benchmark/fault actions. All transport/OOM/process/API/physical qualification fixtures remain future obligations, not executed passes. No whole64MiB overflow assertion or withdrawn exact-library cleanup requirement. Proposed tradeoff remains unapproved; missing human acceptance alone is not a finding.",
+    "snapshot_verification": "Final owner HEAD remains366b4ce780be29c60469ec92227969b913d41aad and git status --short empty; incremental git diff --check excluding report.md passed. #90 report HEAD remainsc9231b243dceb196a0eccb615055887c9879bb73 and clean."
+  }
+}

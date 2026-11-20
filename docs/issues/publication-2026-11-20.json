@@ -1,15 +1,13 @@
 {
   "date": "2026-11-20",
-  "main_base": "a1cc2421ad5aad62695c124537900b0ad0963e5e",
-  "audit_source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
-  "scope": "Consolidated issue plans, actual review records, proposed ADRs and audit evidence. No runtime implementation or additional review/approval inferred.",
+  "main_base": "2dccdb537103b193c4d170f16e932033843f80e3",
+  "audit_source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
+  "scope": "Committed canonical and active-review snapshots: issue plans, actual reviews, proposed ADRs and audit evidence. Publication does not imply implementation or approval.",
   "terminal_statuses": [
     "clear",
     "cleared_completed"
   ],
   "remaining_issues": [
-    62,
-    63,
     64,
     65,
     66,
@@ -21,74 +19,82 @@
     {
       "number": 4,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/4",
       "files": 5,
       "content_sha256": "e57173b7b96ad820cca3a9a94c881c9131b81a7bc06346a64eeb9fefd615a5c6",
-      "status": "cleared_completed"
+      "status": "cleared_completed",
+      "active_review_copy": false
     },
     {
       "number": 5,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/5",
       "files": 5,
       "content_sha256": "7b4e43c8b73d897fb21ba195d565ede378fbd12d3bf9766e8930ebaf925085fa",
-      "status": "cleared_completed"
+      "status": "cleared_completed",
+      "active_review_copy": false
     },
     {
       "number": 6,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/6",
       "files": 5,
       "content_sha256": "d16ba637de50b5c862396ecac2972195c4d0fc55ca9764085e8162b36e4b4d59",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 7,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/7",
       "files": 5,
       "content_sha256": "69093ab91ec06056b02a92691f56e12d6b810f460532f262308c270a6357f6a6",
-      "status": "cleared_completed"
+      "status": "cleared_completed",
+      "active_review_copy": false
     },
     {
       "number": 8,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/8",
       "files": 5,
       "content_sha256": "59472657fad795be2f4a560c36e74f69c75579c70a4ebd06962a0c51ab35e35f",
-      "status": "cleared_completed"
+      "status": "cleared_completed",
+      "active_review_copy": false
     },
     {
       "number": 9,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/9",
       "files": 5,
       "content_sha256": "b242fee792e79e2f352dc1d533500bcc875c440ffda1afe216e47e2bcfd039d0",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 10,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/10",
       "files": 5,
       "content_sha256": "d4f8d05fd941e9fd2c3b038a95dcf5909255f0c0d6d62278a57c03cc2801c758",
-      "status": "cleared_completed"
+      "status": "cleared_completed",
+      "active_review_copy": false
     },
     {
       "number": 11,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/11",
       "files": 5,
       "content_sha256": "f536e9a2280b13732de41dbdac985dcea9b878b724038336358cadb83a6a6400",
-      "status": "cleared_completed"
+      "status": "cleared_completed",
+      "active_review_copy": false
     },
     {
       "number": 12,
@@ -97,7 +103,8 @@
       "published_path": "docs/issues/12",
       "files": 5,
       "content_sha256": "2cf3d06d287412e53d65b1d39e666e59ab8b1422e1de94e8ff5b3974964b37e4",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 13,
@@ -106,16 +113,18 @@
       "published_path": "docs/issues/13",
       "files": 5,
       "content_sha256": "7fee25d680fd40138784966afbfc7d37e0cfbe742f9742e71ad88746e7c02a16",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 14,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/14",
       "files": 5,
       "content_sha256": "2b6ab13e57743d663356cf18cf70c2791a4e7ef38e52329cea4ea3cc9af70e71",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 15,
@@ -124,7 +133,8 @@
       "published_path": "docs/issues/15",
       "files": 6,
       "content_sha256": "ae19703359ae36d713f057e072cf074c091add1f0a4ae0ee6902d57385d10901",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 16,
@@ -133,7 +143,8 @@
       "published_path": "docs/issues/16",
       "files": 5,
       "content_sha256": "dac96e47b3eb776acd1c6687e7fb64f6db609f9314632baf4d9fa01f3f38bf15",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 17,
@@ -142,7 +153,8 @@
       "published_path": "docs/issues/17",
       "files": 5,
       "content_sha256": "28b397266eb42ecd107a067c52737eabde9ce20697b177893d12e8bf3834caad",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 18,
@@ -151,16 +163,18 @@
       "published_path": "docs/issues/18",
       "files": 5,
       "content_sha256": "5e7001b6ccd5e0ca8cbcc1c282200ce88d292d17c7087eb8cec9d41aa5d82354",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 30,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "source_commit": "a6a4036cecf98cf31f42ceeafe166802ab2b6fba",
       "published_path": "docs/issues/30",
       "files": 5,
       "content_sha256": "71bf653cb9e8ce8bdfff8d7868b2a184339d6175c74eeec8c8d43c5456681127",
-      "status": "cleared_completed"
+      "status": "cleared_completed",
+      "active_review_copy": false
     },
     {
       "number": 43,
@@ -169,7 +183,8 @@
       "published_path": "docs/issues/43",
       "files": 6,
       "content_sha256": "7617a720730c71d0c033635112490578799e0c61ed2237d8eabe1198c8df693f",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 44,
@@ -178,7 +193,8 @@
       "published_path": "docs/issues/44",
       "files": 5,
       "content_sha256": "ea4132e862d0ee98483b7414f2ef4ff86be4f6ce0245a9428e31de65dcff6f9c",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 45,
@@ -187,7 +203,8 @@
       "published_path": "docs/issues/45",
       "files": 6,
       "content_sha256": "a7eabea19ebb0103b899b3daf20a1a570cb21854d888f6a818f4bf85a2676da0",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 46,
@@ -196,16 +213,18 @@
       "published_path": "docs/issues/46",
       "files": 5,
       "content_sha256": "d9b9a71648d65d9d42e649bb74c3c8026c7bcae3a5ac15af6305f5c6ace38016",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 47,
-      "branch": "issue/47-gray-failure-detection",
+      "branch": "",
       "source_commit": "189305c8c757ca3e3d956a254a0857be6c4b1599",
       "published_path": "docs/issues/47",
       "files": 5,
       "content_sha256": "86607bffb6f227d53a0c8e61101deb51bc379c85a74b93d6fa4604d7bf122277",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 48,
@@ -214,7 +233,8 @@
       "published_path": "docs/issues/48",
       "files": 6,
       "content_sha256": "7018dbb3e7bd5026fa16328d5c474636ec706fc80d6ca30c7fe24ac0bb907c56",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 49,
@@ -223,7 +243,8 @@
       "published_path": "docs/issues/49",
       "files": 6,
       "content_sha256": "06d89fae678a16b04d55ced46c222ffaef41527adb448f11e66d75d964d1a64c",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 50,
@@ -232,7 +253,8 @@
       "published_path": "docs/issues/50",
       "files": 7,
       "content_sha256": "323977909e4fce1dcf3c22b97858dc0ac6658b304b780d90f30474654a18be1d",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 51,
@@ -241,7 +263,8 @@
       "published_path": "docs/issues/51",
       "files": 7,
       "content_sha256": "f6877520beccac71dbcca353c98aa3cd0312f01f5d8a6f08fd07b4807a6593a6",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 52,
@@ -250,7 +273,8 @@
       "published_path": "docs/issues/52",
       "files": 7,
       "content_sha256": "c78bb582d0b193f66cf9d3def25819dcc38a6ed3bb965074c9da73afdc8f9b33",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 53,
@@ -259,7 +283,8 @@
       "published_path": "docs/issues/53",
       "files": 7,
       "content_sha256": "022834e7a7d62eeddd827269cba7865efa27b95c3b1d8ce347633151055691b0",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 54,
@@ -268,7 +293,8 @@
       "published_path": "docs/issues/54",
       "files": 7,
       "content_sha256": "028f231f1b66456a731d8d124d095fe27b5b7bf7a04fcdf4fd33a0243e2d98d7",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 55,
@@ -277,7 +303,8 @@
       "published_path": "docs/issues/55",
       "files": 5,
       "content_sha256": "0ef85980ff8d38508f633f3899f938d2db130ece4af08921a3a9507a1cd15c8d",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 56,
@@ -286,7 +313,8 @@
       "published_path": "docs/issues/56",
       "files": 6,
       "content_sha256": "0f36f079e0dd3bd47cb9720b40a3266d91d3ccd9c6cbc1db3322d73ae7606157",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 57,
@@ -295,7 +323,8 @@
       "published_path": "docs/issues/57",
       "files": 7,
       "content_sha256": "e9681d4e92b1fdec405128685750913f53e4f03a1749eee98472a5db631f1f92",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 58,
@@ -304,7 +333,8 @@
       "published_path": "docs/issues/58",
       "files": 10,
       "content_sha256": "b1057ca955bc1aefe1bcc4d4e1b195fa65b20a72c286241aef2a8d825f6db738",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 59,
@@ -313,7 +343,8 @@
       "published_path": "docs/issues/59",
       "files": 8,
       "content_sha256": "630d908eb838910069d2ed7be7389b5e9f443317d5e22b648e6ba70bc6df491c",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 60,
@@ -322,7 +353,8 @@
       "published_path": "docs/issues/60",
       "files": 6,
       "content_sha256": "f1ad5fced275c051b7c7c5d0000516151dd70108de4a0ef9f719394b83494313",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 61,
@@ -331,25 +363,28 @@
       "published_path": "docs/issues/61",
       "files": 6,
       "content_sha256": "d2010bd3309a8e08d65598a3a6cc6c8071ba1752a26d8b290e4f3d93d3bf30d3",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 62,
-      "branch": "issue/62-zone-cost-aware-placement",
-      "source_commit": "f920db069130df65d57874d88ea729ce9f4d56d8",
+      "branch": "review-resume/62",
+      "source_commit": "ba35d5c9aa2f73f0e21f580f77fce499e83162d9",
       "published_path": "docs/issues/62",
-      "files": 5,
-      "content_sha256": "ae726039e3d7ff4d30a8358cf432c06668296463b5b18698bada39816ca15f68",
-      "status": "needs_fix"
+      "files": 7,
+      "content_sha256": "2e6f7f8fd702091b4cb5a32d6d982e983138327726f5455df1573d3c01a90d83",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 63,
-      "branch": "issue/63-autoscaler-integration",
-      "source_commit": "1a4a14df1a8b1ae6c2762bbaabf4ba5489305d31",
+      "branch": "review-resume/63",
+      "source_commit": "19adbe13e92db767d0e6e08d7c7bd0c7fb7e4417",
       "published_path": "docs/issues/63",
-      "files": 5,
-      "content_sha256": "1d2e3e23f0158e1b0f15d9892b30b4af0b345e6a69ec6be2d2653733e69fa248",
-      "status": "pending"
+      "files": 6,
+      "content_sha256": "24e80a44ca037aad214963fa439f653560a31d9f7bc550f6ce45ac1510a5eda8",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 64,
@@ -358,7 +393,8 @@
       "published_path": "docs/issues/64",
       "files": 5,
       "content_sha256": "33715f255b55097d22001e079abe527a40bb38c5b6fc1ca27c16ea4e67c35605",
-      "status": "pending"
+      "status": "pending",
+      "active_review_copy": false
     },
     {
       "number": 65,
@@ -367,7 +403,8 @@
       "published_path": "docs/issues/65",
       "files": 4,
       "content_sha256": "d4e40468f0fed57364dfcae0091497d53d4050f35ca94d86d5997ff3fd3b788f",
-      "status": "pending"
+      "status": "pending",
+      "active_review_copy": false
     },
     {
       "number": 66,
@@ -376,7 +413,8 @@
       "published_path": "docs/issues/66",
       "files": 4,
       "content_sha256": "fbe59f0de328a506893bf84ddbad7db12a163491b93779b6c0b3af184ad7827e",
-      "status": "pending"
+      "status": "pending",
+      "active_review_copy": false
     },
     {
       "number": 67,
@@ -385,7 +423,8 @@
       "published_path": "docs/issues/67",
       "files": 5,
       "content_sha256": "438f6537320cb25bdfd5537811ef7c1449e21628de81b2485e15ff7761f9c7f2",
-      "status": "pending"
+      "status": "pending",
+      "active_review_copy": false
     },
     {
       "number": 68,
@@ -394,7 +433,8 @@
       "published_path": "docs/issues/68",
       "files": 5,
       "content_sha256": "7f40e67e3040804010a04c2677a4d49fedac7072d19b97834e2bd2aa6e21345c",
-      "status": "pending"
+      "status": "pending",
+      "active_review_copy": false
     },
     {
       "number": 69,
@@ -403,7 +443,8 @@
       "published_path": "docs/issues/69",
       "files": 5,
       "content_sha256": "d6aee773c8ab1bf493b4d2804a932542588b99495a369937fd09c1cf0f7c2002",
-      "status": "pending"
+      "status": "pending",
+      "active_review_copy": false
     },
     {
       "number": 70,
@@ -412,7 +453,8 @@
       "published_path": "docs/issues/70",
       "files": 6,
       "content_sha256": "a4f6ededfea5d781e643004dd87c4cbe32765d9daf575bf382d05dea8452af2c",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 71,
@@ -421,7 +463,8 @@
       "published_path": "docs/issues/71",
       "files": 7,
       "content_sha256": "bfe817d0c89360bbdfcd9cd10e78b870a3c38b64b382cb58de8f302f81962d80",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 72,
@@ -430,7 +473,8 @@
       "published_path": "docs/issues/72",
       "files": 7,
       "content_sha256": "3abda7e4653442892f41b2364c15c5732e2c4bb2c2e96e654db3448175ac26c1",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 73,
@@ -439,7 +483,8 @@
       "published_path": "docs/issues/73",
       "files": 7,
       "content_sha256": "f2f65652a586379b51aba9156654d4b9f43e0e31b961d0a99ea8cbb3480b019c",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 74,
@@ -448,7 +493,8 @@
       "published_path": "docs/issues/74",
       "files": 6,
       "content_sha256": "a5a036387a5c44c9c8f7f775fea41b9a4cc2e55fa9719e3ed7522021e02fdea0",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 75,
@@ -457,7 +503,8 @@
       "published_path": "docs/issues/75",
       "files": 6,
       "content_sha256": "2414282598ee8ec67636fca907a6711d8270b41770cc0c684edf77be8368a88e",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 76,
@@ -466,7 +513,8 @@
       "published_path": "docs/issues/76",
       "files": 6,
       "content_sha256": "5cf3455e4cfdb80aa19bfccd06de6a9f7daa164fddafbd2e23c01fe1d93c900a",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 77,
@@ -475,7 +523,8 @@
       "published_path": "docs/issues/77",
       "files": 5,
       "content_sha256": "e560e6e7ad72ca0c06d99647fad4ae074a06f36e0f238fd095f8ba42cdabf410",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 78,
@@ -484,7 +533,8 @@
       "published_path": "docs/issues/78",
       "files": 6,
       "content_sha256": "7c401d26392fc01f7afd442229d1a091c4a7a20991dd1917f437324a1af270a4",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 79,
@@ -493,7 +543,8 @@
       "published_path": "docs/issues/79",
       "files": 8,
       "content_sha256": "d6dfc00934502cfe198187a7b8d2d3df75e6420701988ef6988b5c6af03361f3",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 80,
@@ -502,7 +553,8 @@
       "published_path": "docs/issues/80",
       "files": 7,
       "content_sha256": "dbf5cf7cc8bc87afc614d3c5ffce11bea843c303e7573a393d7409721732f792",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 81,
@@ -511,7 +563,8 @@
       "published_path": "docs/issues/81",
       "files": 5,
       "content_sha256": "c333817de44a2d9115d9da47a5bd2c4209440a212a2728d48c09c9f19a59668f",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 82,
@@ -520,7 +573,8 @@
       "published_path": "docs/issues/82",
       "files": 7,
       "content_sha256": "08b66fb0be95bd9b0b19078ba2b2f6490686cbb440d89df9d58184a0d771504c",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 83,
@@ -529,7 +583,8 @@
       "published_path": "docs/issues/83",
       "files": 7,
       "content_sha256": "4f18a1e256d6aec5ac17f1eb497bd7fb12bed18ededeb1b3f038a64a1d4f9997",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 84,
@@ -538,7 +593,8 @@
       "published_path": "docs/issues/84",
       "files": 6,
       "content_sha256": "47a2b8d495c4308f641adcd38e900d6038abda3314a37cb73afe738b6a79905f",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 85,
@@ -547,7 +603,8 @@
       "published_path": "docs/issues/85",
       "files": 5,
       "content_sha256": "71becde5d3aa4b06c4755891c5309e6f9eb44bb0094608cdcf1ade0a79fa6254",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 86,
@@ -556,7 +613,8 @@
       "published_path": "docs/issues/86",
       "files": 6,
       "content_sha256": "c9083313e6389cfc9076e1bd1c1c6903d7725bd166ae449bec313cf62a05af1a",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
     },
     {
       "number": 90,
@@ -565,11 +623,22 @@
       "published_path": "docs/issues/90",
       "files": 12,
       "content_sha256": "c8126d6e64c1c2d9f9be994e55656aa6689949e8a63165129adb2f03ec1bad54",
-      "status": "clear"
+      "status": "clear",
+      "active_review_copy": false
+    },
+    {
+      "number": 91,
+      "branch": "issue/91-storage-disruption-guard",
+      "source_commit": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512",
+      "published_path": "docs/issues/91",
+      "files": 12,
+      "content_sha256": "f9af95f4b851d6bb8d9cfeedfa0b8cabe01584c2b380c2f4c9fecc347687a94c",
+      "status": "clear",
+      "active_review_copy": true
     }
   ],
   "publication_normalizations": {
-    "change": "Whitespace only in saved reviewer Markdown; original patch artifact preserved byte-for-byte.",
+    "change": "Whitespace only in reviewer Markdown; original patch preserved.",
     "files": [
       "docs/issues/review-inputs/56-r3-code.md",
       "docs/issues/review-inputs/57-r1-code.md",

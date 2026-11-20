@@ -1,0 +1,63 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r2_code (fresh incremental design-code / changed-spec correctness)",
+  "reviewed_commit": "885cc5e2429653fc85b3d7af49ebe5600f6a2f9c",
+  "dependency_commits": {
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "Fixed at proposal level: security-contract API-server client authentication specifies both admission plugins, exact service DNS:443 credential lookup, dedicated client CA/EKU/URI allowlist, TLS verification before actionable decoding/allocation, HA startup and rotation; admission-contract applies this before enrollment."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "Fixed at proposal level: identity-contract defines ProvenNonStorage using permanent #90 ACTIVE lifetime absence plus repeated complete nodes/reference reads and sticky everStorage, with ordinary drain/refresh recovery and transition-to-storage refusal; admission/spec/design and future fixtures compose these branches."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "Fixed at proposal level: identity-contract mandates exact metadata Node.id == Kubernetes name under both grammars and <=128 bytes, immutable enrolled UID, no aliases/address/label inference, and external collision refusal. Existing deploy/csi/driver.yaml --node-id=$(NODE_NAME) and domain.ValidID agree."
+    },
+    {
+      "id": "SEC91-R1-01",
+      "status": "fixed",
+      "evidence": "Fixed in shared code-review focus: explicit authenticated API-server origin and zero-action handshake rejection replace caBundle-only server authentication; wrong/no client and rotation fixtures cover both plugins."
+    },
+    {
+      "id": "SEC91-R1-02",
+      "status": "fixed",
+      "evidence": "Fixed in shared code-review focus: existing-name CREATE returns status409/reason AlreadyExists without request-UID allocation; durable exact-name claim serializes absent-name overlap and retains delayed possible commits. Pinned statuserror.go preserves supplied code/reason; real kubelet/API status and contention fixtures are required."
+    },
+    {
+      "id": "SEC91-R1-03",
+      "status": "fixed",
+      "evidence": "Fixed in shared code-review focus: ProvenNonStorage recovery needs no nonexistent store and retains the single slot on storage appearance, ambiguous history or failed observations. It retains all-Node coverage."
+    },
+    {
+      "id": "SEC91-R1-04",
+      "status": "fixed",
+      "evidence": "Fixed in shared code-review focus: persisted metadataID/observedStores and immutable slot retirementStores express returned-exact-store and moved-away predicates in actual #90 UUID/generation fields; old/new UID evidence is never rebound, unknown unsaved UUIDs hold, and no-current-UID retirement requires no active refs under the metadata ID."
+    },
+    {
+      "id": "SEC91-R1-05",
+      "status": "fixed",
+      "evidence": "Fixed in shared code-review focus: four explicit response types use production ForceCodecV2 with nonallocating structural preflight, bounded allocation plan, charged direct construction, no generated response Unmarshal and a shared 64MiB transient/retained pool. Local grpc1.85.0 supports ForceCodecV2 and fragment-backed CodecV2.Unmarshal. Malicious real-gRPC expansion/cancellation fixtures are specified."
+    },
+    {
+      "id": "SEC91-R1-06",
+      "status": "fixed",
+      "evidence": "Fixed in shared code-review focus: bounded authenticated HTTP1-only listener accounts for pre-handler sockets/TLS/header state and workers, with finite handshake/header/body/request/write/idle waits and actual read cancellation. Pinned local net/http supports the named controls; slow-client/limit+1/recovery fixtures are required."
+    }
+  ],
+  "findings": [],
+  "report": {
+    "scope": "Incremental diff 86b1255a419d24fb021548e50cdb2271b450e962..885cc5e2429653fc85b3d7af49ebe5600f6a2f9c across docs/issues/91 excluding report.md from technical changed-line scope. Read actual audit 91-r1-code.json, 91-r1-security.json and issue report for all nine prior IDs. Reviewed changed intent/spec/design/decisions/Proposed ADR/admission/reader/security/qualification plus new normative identity-contract; followed only affected metadata identity/history, API admission status, client authentication, codec and listener paths. Read current #90 contracts/budgets/migration in mapped checkout and recorded its actual report HEAD separately from technical-clear hash. No unchanged unrelated re-audit.",
+    "results": "Zero comments including Nits. All nine actual owner R1 findings have concrete proposed corrections in this focus/shared roots. Current #90 ACTIVE identity-v4 and permanent lifetime/history composition are explicit prerequisite and read-only composition, not deployed source or an approval substitute. #63 historical approvals/source choice remain untouched; owner Proposed ADR and substantive revisions remain unapproved. No new replication/membership/recovery authority or per-I/O metadata/lock path was introduced, so no invented simulator obligation was added.",
+    "sources": "Current owner metadata service nodes()/ListNodes, domain.ValidID, CSI deployment identity, local grpc v1.85.0 ForceCodecV2/CodecV2 and pinned Go net/http controls; Kubernetes v1.36.5 primary statuserror.go and authentication.go confirm preservation of 409/reason and exact service host:port credentials. https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/errors/statuserror.go ; https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/staging/src/k8s.io/apiserver/pkg/util/webhook/authentication.go ; https://pkg.go.dev/net/http#Server .",
+    "limits": "Plan review only. All proposed API/gRPC/TLS/allocation/identity/physical fixtures remain future implementation requirements, not executed tests. No source/dependency/repository/tracker/runtime/API/lab/disk/benchmark/deploy/fault actions, children, or mutations except this actual /tmp JSON. Security-specific independent review remains separate.",
+    "snapshot_verification": "Final owner git rev-parse HEAD is exact reviewed885cc5e2429653fc85b3d7af49ebe5600f6a2f9c and git status --short is empty; mapped #90 HEAD c9231b243dceb196a0eccb615055887c9879bb73 is unchanged with empty git status."
+  }
+}

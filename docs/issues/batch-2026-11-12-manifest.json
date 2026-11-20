@@ -820,5 +820,20 @@
     "missing": [],
     "origin_issue": 61,
     "origin_commit": "5696573a126c0abe26347d3c9700e557489613cf"
+  },
+  {
+    "number": 91,
+    "title": "Add the shared storage disruption guard for voluntary node drains",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-91-review",
+    "branch": "issue/91-storage-disruption-guard",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": [],
+    "origin_issue": 63,
+    "origin_commit": "1a4a14df1a8b1ae6c2762bbaabf4ba5489305d31"
   }
 ]

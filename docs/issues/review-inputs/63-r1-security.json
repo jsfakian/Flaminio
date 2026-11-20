@@ -1,0 +1,86 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review63_r1_security (fresh full-plan and design-security R1)",
+  "reviewed_commit": "1a4a14df1a8b1ae6c2762bbaabf4ba5489305d31",
+  "dependency_commits": {
+    "69": "3d53c0b61924923d51b9568ec6f1fa56a95e8518",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73"
+  },
+  "prior_findings": [],
+  "findings": [
+    {
+      "id": "SEC63-R1-01",
+      "severity": "High",
+      "summary": "The proposed namespace gives the read-only guard a path to administrator credentials and privileged hosts.",
+      "evidence": "design.md:102-115 proposes --namespace flaminio-system and Pod/Deployment create/update/patch/delete while relying on a dedicated namespace and lack of Secrets read/impersonate to enforce S6. The actual deploy/csi/rbac.yaml:5-11 defines flaminio-system with Pod Security enforce=privileged, and deploy/csi/driver.yaml:17-30,175-220 puts stronger CSI/failover service accounts and flaminio-csi-controller-tls there. scripts/lab.sh:1003-1018 issues that Secret an admin/csi-controller identity; meta/service/auth.go:64-70 lets it create/delete/move/drain/attach. A compromised guard can create a pod mounting this Secret, select a stronger serviceAccountName, or request privileged host access. Denying direct Secrets reads and impersonate does not constrain pod specs. Kubernetes documents the workload-creation escalation explicitly: https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation .",
+      "fix": "In the dedicated shared owner, use an actually separate guard namespace with enforced restricted pod admission, no stronger service accounts/admin credentials and no write rights in flaminio-system. Specify the exact allowed namespace/SA/credential boundary and test pod/Deployment attempts to mount CSI admin credentials, select stronger SAs, or request host/privileged access. Preserve the historical command decision as history and record the technical correction as unapproved."
+    },
+    {
+      "id": "SEC63-R1-02",
+      "severity": "High",
+      "summary": "The integer global PDB does not establish one disruption per node UID during marker rollouts.",
+      "evidence": "design.md:47-67 uses one replicas=1 Deployment per node and global integer minAvailable=N-1, but fixes neither rollout strategy nor an atomic one-counted-pod-per-UID invariant. Kubernetes v1.36.5 defaults Deployments to RollingUpdate/maxSurge=25% (pkg/apis/apps/v1/defaults.go:34-58), and its PDB controller counts every healthy matching pod, not distinct nodes (pkg/controller/disruption/disruption.go:778-781,855-866,927-935). With three enrolled nodes and C temporarily having two healthy slot pods during rollout, currentHealthy=4 and minAvailable=2 allow A and B slots to be evicted, leaving the two C pods. A/B permission pods may both already be eligible from one RF2/minISR1 reading. Thus both drains can finish; the global slot has not serialized nodes. A later reducer drift check cannot revoke eviction credit already exposed by PDB status. N being described as registered ready deployments also needs a durable membership definition so a consumed/unready slot does not shrink N and return capacity. Sources: https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/apis/apps/v1/defaults.go and https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/controller/disruption/disruption.go .",
+      "fix": "Require the shared owner to define a stable enrolled-UID denominator, the exact marker rollout/replacement policy, and a proof that no rollout/recreation/surge or coverage-removal sequence can contribute two healthy credits for one UID or release a consumed UID early. Include a real API three-node rollout-plus-two-drains counterexample test and readiness/registration/removal transitions. This requirement applies independently of which deferred S1/S4 option is eventually chosen."
+    },
+    {
+      "id": "SEC63-R1-03",
+      "severity": "High",
+      "summary": "Absolute fail-closed coverage and controller-loss behavior still have no implementable admission mechanism.",
+      "evidence": "intent.md:92-104 and spec.md:S1/S4 retain automatic coverage and absolute denial while the controller cannot run/read metadata. design.md:76-98 explicitly leaves both mechanisms undefined. This is a technical gap, not missing human approval: installed minAvailable=0 does not expire, and the pinned v1.36.5 eviction handler bypasses PDB checks entirely for Pending/Succeeded/Failed/deleting pods (eviction.go:155-187,356-363), regardless of IfHealthyBudget. A newly enrolled node can also be drained before any marker exists. The planned tests at design.md:139 only demonstrate the candidate gap; no selected variant closes it or specifies a bounded failure window. Source: https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/registry/core/pod/storage/eviction.go .",
+      "fix": "Carry this unresolved technical finding, the unchanged original intent and the explicit neither-a-nor-b decision into the approved dedicated guard owner. That owner's later ADR/design must supply the concrete selected contract, API matching/failure/enrollment behavior and race/failure proof, with real API tests that fail on the candidate bypasses. #63's future composition wrapper must wait for that owner rather than treating the move or an approval gate as a mechanism. Do not select a/b or narrow the intent in this R1 fix."
+    },
+    {
+      "id": "SEC63-R1-04",
+      "severity": "Medium",
+      "summary": "Successful ListVolumes can hide malformed metadata, defeating S2's unknown-data denial.",
+      "evidence": "spec.md:35-38 requires complete metadata reads and says malformed/missing data denies new permission; design.md:27-38 assumes complete bounded views while design.md:122 excludes metadata API changes. In the actual meta/service/service.go:845-857, ListVolumes silently omits any header whose JSON cannot be unmarshaled. The controller receives a successful list with no identifier to GetVolume or report Unknown for. Corrupting the header of an RF2/minISR1 volume whose other member is down therefore hides the very chunk that should hold the remaining node. #77 at bb8df5b fixes consistency of named GetVolume/Attach/ISR views; its design does not fix this enumeration omission.",
+      "fix": "Give the shared owner a concrete strict enumeration/completeness contract that returns an explicit error/unknown on malformed candidate headers, with bounded decoding and no success-as-empty fallback. Specify the minimal read API/service integration needed instead of promising unchanged APIs can detect information they omit. Test malformed header JSON/identifier/publication records plus backend errors using the actual service and guard collector; keep intentional unpublished/deleted-volume treatment explicit."
+    },
+    {
+      "id": "SEC63-R1-05",
+      "severity": "Medium",
+      "summary": "Required affinity cannot target an immutable Node UID as currently specified.",
+      "evidence": "spec.md:14-15,30-31 and design.md:47-49 require guards identified by Node UID and required affinity to that exact identity, while design.md:110-115 grants only node reads. Kubernetes v1.36.5 ValidateNodeFieldSelectorRequirement supports metadata.name only, not metadata.uid (pkg/apis/core/validation/validation.go:4610-4633). No actual deployment/controller in this checkout installs an immutable UID label. Matching a node name or hostname is not the stated immutable binding and can schedule an old guard on a same-name replacement node, accidentally restoring global healthy credit. Source: https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/apis/core/validation/validation.go .",
+      "fix": "Specify the actual supported placement selector and separately define how Node UID ownership/admission state prevents a same-name recreated node or surviving old Deployment from returning accounting credit. Include deletion/recreation while the controller is absent and scheduling/GC races in real API tests. Avoid inventing a metadata.uid affinity field or silently granting node mutation; retain S7's no inherited permission."
+    },
+    {
+      "id": "SEC63-R1-06",
+      "severity": "Medium",
+      "summary": "The guard has no concrete observer contract for the already-clear store-identity composition.",
+      "evidence": "design.md:27-35 counts surviving node IDs from complete GetVolume views; no #90 adapter is specified. At the actual #90 report HEAD c9231b2 (technical-clear 331f337), contracts.md:12-43,65-88 defines exact ReplicaRef(node,device_uuid), current store generation, and schema2 responses that OMIT legacy replicas/isr/move fields. spec.md:54-56 retains an old earned ref as unavailable when its node reports a replacement store. An alive node name therefore cannot establish that the old ISR store is present. budgets.md:59-80,106-110 additionally requires coherent ReadIdentityVolumePage for paged legacy volumes, for which ordinary GetVolume refuses. The current #69 draft's Reader allowlist has only four methods and will reject that additional method unless composition is installed. These are future contracts, not implemented current behavior, but the plan has no whoever-lands-second hook to preserve the guard's promise when they land.",
+      "fix": "Add the minimal shared-owner composition: validate active identity schema/profiles, count only earned exact ISR refs matching the observed current store, deduplicate physical nodes, exclude pending/unknown/mismatched identity, and define full/paged coherent collection within the existing bounds. Coordinate the explicit Reader allowlist with the required read-only method, without granting any mutation or replica authority. Add old-UUID/new-alive-node, schema2-empty-legacy-fields, INITIAL pending and paged-view failure/success fixtures; leave #69/#90 dependency plans read-only."
+    },
+    {
+      "id": "SEC63-R1-07",
+      "severity": "Medium",
+      "summary": "The required storage lab proof has no compatible execution/result contract after #83.",
+      "evidence": "intent.md:87-88,110-115 and decisions.md:58-62 pin the RF2 data proof to the current VM lab's k3s release; design.md:148-155 proposes stopping/restarting data planes there and merely says #82/#83 constraints remain. The actually read #83 snapshot 67862ad has physical-boottime-v1 admission in spec.md:31-41 and startup refusal before device/listen/register in design.md:161; design.md:174-177 explicitly states that current VMs cannot certify that profile. Once #83 is deployed, authorization and the guard-mechanism choice alone cannot make this VM RF2 test runnable. The #63 plan currently gives no preflight refusal/blocked outcome or distinction between Kubernetes API qualification and storage safety qualification.",
+      "fix": "Preserve the original S8 evidence obligation, but require preflight recording of the actual clock/profile/dependency versions before any stop/cordon action. Define current-VM post-#83 refusal as unmet/blocked S8 evidence, never pass or a reason to bypass admission. Distinguish pinned real-API accounting tests from the storage proof, and specify a later qualified physical execution path, or clearly labeled pre-#83 exploration, without claiming either as an executed result or silently narrowing the original intent."
+    },
+    {
+      "id": "SEC63-R1-08",
+      "severity": "Low",
+      "summary": "The enumerated Kubernetes permissions cannot publish the promised status and events.",
+      "evidence": "design.md:110-116 enumerates the namespace Role as deployments/pods/PDBs/Lease only, but design.md:118-121 requires owned ConfigMap status and rate-limited Events; spec.md:S6 requires Kubernetes-visible held reasons. Neither ConfigMaps nor Events occur in the proposed role. The suggested role therefore returns Forbidden for the controller's own status/event writes even if the admission mechanism works.",
+      "fix": "Include the exact minimal namespaced ConfigMap and chosen Event API permissions in the shared owner's RBAC contract, with bounded object content, ownership and named-resource restrictions where supported. Test allowed writes to owned status/events and denials for foreign namespace objects, while keeping status-write failure conservative and visible."
+    }
+  ],
+  "report": {
+    "scope": "Read all five scoped #63 documents (intent, spec, design, decisions, local ADR), actual metadata authorization/PKI/protobuf/read/list/drain/domain paths, CSI/failover deployment namespace and credential/RBAC paths, accepted environment/lease/edge ADRs, architecture maintenance/security sections, mapped #69 Reader, #77 coherent-read, #83 clock-admission and #90 identity/full/paged contracts. Reviewed current first-half-of-step-1 shared guard only, with the approved dedicated tracker move still pending; no autoscaler/evacuation/cloud/claim stages inferred.",
+    "results": "8 actionable findings (3 High, 4 Medium, 1 Low), zero additional Nits. No zero-comment clearance. Historical approvals and the user's explicit neither-(a)-nor-(b) decision are preserved; the original intent remains unnarrowed. No new replication authority/rule was proposed, so no new simulator requirement is invented for pure observation.",
+    "external_primary_sources": [
+      "https://github.com/k3s-io/k3s/releases/tag/v1.36.5%2Bk3s1 (release identifies embedded Kubernetes v1.36.5)",
+      "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/registry/core/pod/storage/eviction.go",
+      "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/controller/disruption/disruption.go",
+      "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/apis/apps/v1/defaults.go",
+      "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/controller/deployment/rolling.go",
+      "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/pkg/apis/core/validation/validation.go",
+      "https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.5/staging/src/k8s.io/api/core/v1/types.go",
+      "https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation"
+    ],
+    "dependency_snapshot_notes": "#90 current report HEAD c9231b243dceb196a0eccb615055887c9879bb73 records technical clearance at331f337d3b847ff2d4faabc572f4ceae74837cd7. #83 was read at the actual mapped checkout HEAD67862ad667ac3121b453c9227cef1e8ec5248138, which differs from later report/latest-fix entries in the ledger; no unread later snapshot is claimed. #69 is a draft, not a deployed Reader role; #77/#90 are also plans, not implemented source.",
+    "limits": "Read-only review plus report artifact only. No repository/dependency edits, tracker actions, children, runtime tests, real API/cluster/lab actions, disks, deployment, benchmark or fault injection. All implementation/API/lab tests discussed are future tests. Master URLs in the existing plan were not used to establish pinned behavior.",
+    "snapshot_verification": "Final checks confirmed exact clean #63 HEAD1a4a14df1a8b1ae6c2762bbaabf4ba5489305d31 (no working/index diff); all four read dependency HEADs remain the recorded hashes."
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review91_r4_security (fresh incremental design-security / changed-spec)",
+  "reviewed_commit": "13e6f180bd4dc51507eb089df8384d6761d9a83b",
+  "dependency_commits": {},
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 security artifact preserves the R2 both-plugin API-server client-authentication resolution; R4 changes only outgoing reader allocation/padding/lifetime language, leaving authentication unchanged."
+    },
+    {
+      "id": "R1-C2",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 artifact records permanent-history-backed ProvenNonStorage admission/recovery. R4 does not change that contract."
+    },
+    {
+      "id": "R1-C3",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 artifact records exact metadataID/Kubernetes-name joining and immutable enrolled UID; R4 does not change identity/admission."
+    },
+    {
+      "id": "SEC91-R1-01",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 artifact records dedicated authenticated API-server origin before actionable allocation. R4 does not change that boundary."
+    },
+    {
+      "id": "SEC91-R1-02",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 artifact records early AlreadyExists denial and durable serialized name claim; no CREATE/admission line changes."
+    },
+    {
+      "id": "SEC91-R1-03",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 artifact records all-Node/nonstorage recovery; no identity/slot rule changes."
+    },
+    {
+      "id": "SEC91-R1-04",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 artifact records persisted old-store evidence and returned/moved-away retirement; R4 does not change reference/lifetime dependency contracts."
+    },
+    {
+      "id": "SEC91-R1-05",
+      "status": "partially_resolved",
+      "evidence": "The R2 bounded production CodecV2 construction remains unchanged. R4 corrects DATA tier inflation and padding, but its changed transport lifetime/capacity proof still has the two findings below."
+    },
+    {
+      "id": "SEC91-R1-06",
+      "status": "resolved_unchanged",
+      "evidence": "Actual R3 artifact records authenticated bounded HTTP1 admission serving; R4 does not change the admission listener."
+    },
+    {
+      "id": "SEC91-R2-01",
+      "status": "partially_resolved",
+      "evidence": "R3 window/header/frame/lease/control-throttle/compaction correction remains unchanged. R4 concretely selects the exported per-client response pool and pre-parser padding rejection, but residual cached reference accounting and deterministic ledger retirement remain incomplete below."
+    },
+    {
+      "id": "SEC91-R3-01",
+      "status": "partially_resolved",
+      "evidence": "reader-contract.md:120-143 now explicitly uses real experimental.WithBufferPool with proposed exact noncaching Get/Put, and :165-171 rejects every PADDED DATA header before gRPC allocation; pinned source supports both. However :140-141 incorrectly assumes internal cached bookkeeping is cleared, while :219-224 adds a ledger-empty reclamation condition without handling unread roots which never call Put. SEC91-R4-01/02 describe the changed fallout. The old component counterexample was not a proven whole64MiB overflow."
+    }
+  ],
+  "findings": [
+    {
+      "id": "SEC91-R4-01",
+      "severity": "Medium",
+      "summary": "The new cache-free cleanup claim overlooks gRPC control-item pools that retain payloads and entire transport/stream reference chains after ConnEnd.",
+      "evidence": "docs/issues/91/reader-contract.md:139-141 says fixed cached bookkeeping is cleared and has no payload references; :207-224 charges scratch only to live leases and permits reuse after ConnEnd/call unwind/empty exactPool ledger. Pinned grpc1.85.0 internal/transport/controlbuf.go:42-87 instead returns itemNode to a process-global sync.Pool without clearing temp.it or temp.next. incomingSettingsHandler (:743-745) leaves incomingSettings.ss intact, so settings arrays from http2_client.go:1341-1365 remain reachable through cached nodes independently of exactPool. More substantially, a cached cleanupStream retains onWrite: http2_client.go:1005-1020 captures t and s, and cleanupStreamHandler (controlbuf.go:883-909) invokes but never clears it. Those closures can retain the old transport, stream, framer and receive-buffer references after ConnEnd. For <=1024 DATA, SliceBuffer.Free is a no-op (mem/buffers.go:306-317), so framer.dataFrame.data can still point to payload backing while the exact-pool ledger is empty. Replacing the response BufferPool and disabling shared transport buffers does not replace itemNodePool. This disproves the claimed cleared-bookkeeping/cleanup component; no whole64MiB overflow is asserted.",
+      "fix": "Account for pinned internal cached nodes and their full reference chains across completed call/lease-credit reuse, using a concrete process-wide persistent reservation/lifetime rule, or specify a concrete integration change that truly clears those references. Do not assume the exported response pool controls this separate cache or that ConnEnd purges it. Reconcile the retained capacity with D and the same64MiB invariant, and add a future stock-transport fixture covering cached incomingSettings/cleanupStream after success/error and <=1024 DATA, including a subsequent rotated call while prior cached references remain reachable. Preserve the no-internal-import/no-fork statement only for the mechanism actually specified."
+    },
+    {
+      "id": "SEC91-R4-02",
+      "severity": "Medium",
+      "summary": "Waiting for a Put-empty exactPool ledger permanently strands credits when stock gRPC abandons an unread response root.",
+      "evidence": "docs/issues/91/reader-contract.md:134-138 retires ledger entries only in Put, and :219-224 requires the ledger to be empty before releasing the call/lease; :373-381 expects error/cancel cleanup and later reuse. A permitted unpadded1025-byte DATA frame whose first5 bytes advertise a gRPC message length R+1 is a concrete counterexample. http_util.go:549-552 allocates it through exactPool.Get; transport.go:353-365 and mem/buffers.go:228-240 consume only the5-byte message header and retain the rest in recvBufferReader.last. rpc_util.go:783-797 then returns ResourceExhausted before reading the body. stream.go:1333-1347 closes the transport stream; http2_client.go:981-1036 merely queues the terminal error/cleanup and closes done, and :1039-1113 closes the connection and reports ConnEnd. None drains r.last or invokes its Free/Put, and there is no root finalizer in mem/buffers.go. Thus call unwind and transport cleanup can finish with an entry which will never receive Put; if the ownership ledger retains its handle, that ledger also keeps the backing alive. Four such completed failures can permanently consume all four leases even after a healthy metadata peer returns. This is a deterministic abandoned-root path, rather than an unknown or still-running cleanup.",
+      "fix": "Specify an implementable terminal per-call ownership-retirement/drain mechanism for roots abandoned by stock gRPC, with explicit quiescence conditions that exclude late reads/Get/Put and a safe late-Put policy; ordinary last-reference Put remains the normal path. Merely keeping credits forever or assuming every allocated root eventually calls Put does not satisfy the promised recovered normal call. Add the future real-HTTP2 R+1 length/1025-byte single-frame fixture, plus cancellation/codec rejection with queued or partially consumed DATA, and assert actual reclaim/reuse within the stated lifecycle while retaining credit for genuinely active references."
+    }
+  ],
+  "report": {
+    "scope": "Incremental69a53a22da548ade96b0dfa292a0c644193facc5..13e6f180bd4dc51507eb089df8384d6761d9a83b. Reviewed changed reader-contract.md, qualification.md, security-contract.md and decisions.md and their affected pool/framer/compactor/call/transport-cleanup paths only; report.md excluded technically and read as historical evidence. Read actual main-checkout91-r3-code.json and91-r3-security.json, owner intent/spec/decisions, issue91 cached body, and batch mapping context. Historical unchanged roots are preserved from actual artifacts rather than re-audited or claimed freshly proven. No other issue dependency contract needed fresh inspection in this narrow change, so dependency_commits is empty.",
+    "results": "Two Medium comments; zero additional High/Low/Nit comments. Not review-clear. Public experimental.WithBufferPool and mem.BufferPool exist and per-client configuration reaches DATA allocation, parser and receive-queue compaction. exactPool and boundedH2Conn remain proposed guard code, not existing library features or an implemented fork. Zero read/write buffers and shared-write=false really bypass independent transport buffer arrays. Rejected PADDED headers can be withheld by the post-TLS net.Conn wrapper before gRPC readDataFrame allocates. Stock grpc1.85.0 writeData emits only END_STREAM, so the explicit direct unmodified metadata-peer compatibility claim is source-supported; actual peer tests remain future. Compaction uses the selected pool; unpadded retained roots above1024 can use exact requested capacity rather than4KiB/16KiB tiers. <=1024 DATA bypasses the pool entirely and must retain its direct allowance. The changed normal DATA capacity argument is materially improved, but the process-global internal cache/reference lifetime and abandoned-root cleanup prevent accepting the complete credit-reuse proof. No new replication/membership/recovery authority or simulator obligation was invented.",
+    "sources": "Local pinned google.golang.org/grpc@v1.85.0 experimental/experimental.go:34-60; dialoptions.go:64,175-262,719-726,808; mem/buffer_pool.go:28-89; mem/buffers.go:67-121,155-240,300-329; mem/buffer_slice.go:45-116; internal/transport/http_util.go:301-365,428-464,476-505,535-599; internal/transport/transport.go:53-227,229-381,465-535; internal/transport/http2_client.go:351-376,491-527,981-1113,1222-1305,1337-1383,1723-1808; internal/transport/controlbuf.go:42-95,190-223,440-550,743-745,883-909; stream.go:679,1192-1209,1298-1309,1333-1382; rpc_util.go:783-806,1051-1067; credentials/tls.go:112-165. Owner go.mod pins grpc1.85.0, protobuf1.36.12, x/net0.61.0. Claims are grounded in local pinned primary source; no external source/version assumption or executed runtime measurement.",
+    "limits": "Read-only plan/source review except this /tmp JSON artifact. No repository/dependency edits, children, runtime/API/gRPC/lab/disk/benchmark/deploy/fault tests or tracker actions. Future allocation/high-water, stock-peer, malformed-frame and cleanup fixtures have not run. Component-source counterexamples and proposed accounting are not proven whole64MiB overflow or runtime high-water measurements. Lack of human approval is not a technical finding.",
+    "snapshot_verification": "Final git rev-parse HEAD remained13e6f180bd4dc51507eb089df8384d6761d9a83b, git status --short was empty, and incremental git diff --check for docs/issues/91 excluding report.md passed. No scoped technical mutation was observed."
+  }
+}
