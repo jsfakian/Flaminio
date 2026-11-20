@@ -38,3 +38,8 @@ No comments from the requested review scopes, including Nits.
 Changes/resolution: Both fresh reviewers confirmed Review85-R1-C1/C2 resolved, checked changed teardown/reaper/coalescing paths and planned regressions, and reported no new comments including Nits. Only plan changes were reviewed; runtime implementation/testing/approval remain separate.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+### Code loop, round 2 (reviewed `f747f4e`, diff `22a66d6..HEAD`)
+
+Code-reviewer and security-reviewer: **CLEAR** (nothing Low or worse).
+Prior round-1 findings confirmed fixed; no ownership/fail-stop weakening.
