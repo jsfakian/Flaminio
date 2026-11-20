@@ -659,6 +659,14 @@ func (k *interleaveKV) List(ctx context.Context, prefix string) ([]kv.Entry, err
 	return es, err
 }
 
+func (k *interleaveKV) ScanKeys(ctx context.Context, prefix, after string, limit int) (kv.ScanPage, error) {
+	page, err := k.KV.ScanKeys(ctx, prefix, after, limit)
+	if k.prefix != "" && prefix == k.prefix {
+		k.runHook()
+	}
+	return page, err
+}
+
 func (k *interleaveKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
 	_, ok, err := k.TxnRev(ctx, cmps, ops)
 	return ok, err

@@ -155,6 +155,18 @@ func TestAuthorization(t *testing.T) {
 	expect("agent drains its node", err, codes.PermissionDenied)
 	_, err = admin.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a"})
 	expect("admin undrains", err, codes.OK)
+	// CheckDrain is administrator-only (docs/issues/78 S7).
+	_, err = agentA.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("agent CheckDrain", err, codes.PermissionDenied)
+	_, err = nodeA.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("io CheckDrain", err, codes.PermissionDenied)
+	_, err = agentB.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("other-node agent CheckDrain", err, codes.PermissionDenied)
+	_, err = admin.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	// Node is not draining: FailedPrecondition is still an authorized call.
+	if code(err) != codes.OK && code(err) != codes.FailedPrecondition && code(err) != codes.InvalidArgument {
+		t.Fatalf("admin CheckDrain: %v", err)
+	}
 	_, err = nodeB.ListVolumes(ctx, &metav1.ListVolumesRequest{})
 	expect("node lists volumes", err, codes.OK)
 

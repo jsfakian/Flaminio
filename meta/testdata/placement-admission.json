@@ -1,0 +1,85 @@
+{
+  "schedules": [
+    {
+      "name": "clean_mark_admit_elsewhere",
+      "mutant": "none",
+      "steps": [
+        { "action": "register", "node": "a" },
+        { "action": "register", "node": "b" },
+        { "action": "mark", "node": "a" },
+        { "action": "admit", "volume": "v1", "nodes": ["a", "b"] },
+        { "action": "publish", "volume": "v1" }
+      ]
+    },
+    {
+      "name": "omitted_admission_compare_counterexample",
+      "mutant": "omitted_admission_compare",
+      "expect_violation": "PostMarkAdmission",
+      "steps": [
+        { "action": "register", "node": "a" },
+        {
+          "action": "mark_then_admit",
+          "mark_node": "a",
+          "volume": "v",
+          "nodes": ["a"]
+        }
+      ]
+    },
+    {
+      "name": "omitted_reservation_count_counterexample",
+      "mutant": "omitted_reservation_count",
+      "expect_violation": "PrematureOrStaleCompletion",
+      "steps": [
+        { "action": "register", "node": "a" },
+        { "action": "register", "node": "b" },
+        { "action": "admit", "volume": "old", "nodes": ["b"] },
+        { "action": "mark", "node": "a" },
+        { "action": "check_start", "node": "a", "generation": 0 },
+        { "action": "header_scan" },
+        { "action": "chunk_scan", "node": "a" },
+        { "action": "final_validation", "node": "a", "generation": 0 }
+      ]
+    },
+    {
+      "name": "omitted_final_marker_compare_counterexample",
+      "mutant": "omitted_final_marker_compare",
+      "expect_violation": "PrematureOrStaleCompletion",
+      "steps": [
+        { "action": "register", "node": "a" },
+        { "action": "mark", "node": "a" },
+        { "action": "check_start", "node": "a", "generation": 0 },
+        { "action": "header_scan" },
+        { "action": "chunk_scan", "node": "a" },
+        { "action": "unmark", "node": "a" },
+        { "action": "final_validation", "node": "a", "generation": 0 }
+      ]
+    },
+    {
+      "name": "empty_scan_unmark_before_validation",
+      "mutant": "none",
+      "steps": [
+        { "action": "register", "node": "a" },
+        { "action": "mark", "node": "a" },
+        { "action": "check_start", "node": "a", "generation": 0 },
+        { "action": "header_scan" },
+        { "action": "chunk_scan", "node": "a" },
+        { "action": "unmark", "node": "a" },
+        { "action": "final_validation", "node": "a", "generation": 0 }
+      ]
+    },
+    {
+      "name": "empty_scan_unmark_remark_before_validation",
+      "mutant": "none",
+      "steps": [
+        { "action": "register", "node": "a" },
+        { "action": "mark", "node": "a" },
+        { "action": "check_start", "node": "a", "generation": 0 },
+        { "action": "header_scan" },
+        { "action": "chunk_scan", "node": "a" },
+        { "action": "unmark", "node": "a" },
+        { "action": "mark", "node": "a" },
+        { "action": "final_validation", "node": "a", "generation": 0 }
+      ]
+    }
+  ]
+}

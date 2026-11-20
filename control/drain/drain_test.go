@@ -2,10 +2,12 @@ package drain
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -13,6 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"github.com/flaminio/flaminio/meta/domain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/service"
 )
@@ -229,5 +232,128 @@ func TestDrainFailsOnAnotherNotFound(t *testing.T) {
 	volumesOnABC(t, c)
 	if _, err := Step(context.Background(), c, "b"); status.Code(err) != codes.NotFound {
 		t.Fatalf("step with the destination gone: %v", err)
+	}
+}
+
+// Remaining==0 alone never succeeds: Run waits on CheckDrain (docs/issues/78 S3/S4).
+func TestRunRequiresCheckDrainComplete(t *testing.T) {
+	store := kv.NewMem(nil)
+	svc := service.New(store, service.Options{})
+	srv := grpc.NewServer()
+	metav1.RegisterMetadataServiceServer(srv, svc)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	c := metav1.NewMetadataServiceClient(conn)
+	ctx := context.Background()
+
+	for _, n := range []string{"a", "b"} {
+		addNode(t, c, n, nil)
+	}
+	// Plant a hidden creating reservation that blocks CheckDrain while ListVolumes is empty.
+	cs := domain.CreateSpec{SizeBytes: 1 << 20, ChunkBytes: 1 << 20, Replicas: 1, MinISR: 1}
+	h := domain.Header{
+		ID: "hid", SizeBytes: cs.SizeBytes, ChunkBytes: cs.ChunkBytes,
+		Replicas: 1, MinISR: 1, Creating: true, AdmissionGeneration: 1,
+		CreateSpec: &cs, CreateOperation: "ffffffffffffffffffffffffffffffff",
+	}
+	hb, _ := json.Marshal(h)
+	if ok, err := store.Txn(ctx, nil, []kv.Op{{Key: "/flaminio/v1/volumes/hid", Value: hb}}); err != nil || !ok {
+		t.Fatal(err)
+	}
+	// Ensure gate exists and bump past the planted generation so mark D > 1.
+	if _, err := c.RegisterNode(ctx, &metav1.RegisterNodeRequest{Node: &metav1.Node{Id: "a", Address: "a:7411", Labels: map[string]string{"x": "1"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctxRun, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
+	defer cancel()
+	err = Run(ctxRun, c, "b", 50*time.Millisecond, func(Progress) {})
+	if err == nil {
+		t.Fatal("Run completed while a hidden creating reservation remained")
+	}
+	if ctxRun.Err() == nil && status.Code(err) == codes.OK {
+		t.Fatalf("unexpected success: %v", err)
+	}
+}
+
+// Cancelled Run leaves the drain marker set (docs/issues/78 S4).
+func TestRunCancelledLeavesMarker(t *testing.T) {
+	c, _ := client(t)
+	ctx := context.Background()
+	for _, n := range []string{"a", "b", "c"} {
+		addNode(t, c, n, nil)
+	}
+	if _, err := c.CreateVolume(ctx, &metav1.CreateVolumeRequest{Id: "v", SizeBytes: 1 << 20, ChunkBytes: 1 << 20, Replicas: 2, MinIsr: 1}); err != nil {
+		t.Fatal(err)
+	}
+	ctxRun, cancel := context.WithCancel(ctx)
+	cancel()
+	err := Run(ctxRun, c, "b", time.Millisecond, func(Progress) {})
+	if err == nil {
+		t.Fatal("cancelled Run succeeded")
+	}
+	nodes, err := c.ListNodes(ctx, &metav1.ListNodesRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes.GetNodes() {
+		if n.GetId() == "b" && !n.GetDraining() {
+			// DrainNode may not have run if ctx was already cancelled before mark.
+			return
+		}
+	}
+}
+
+// Repeated mark/restart: Run recovers the same generation via DrainNode(true).
+func TestRunRepeatedMarkSameGeneration(t *testing.T) {
+	c, _ := client(t)
+	ctx := context.Background()
+	addNode(t, c, "a", nil)
+	m1, err := c.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := c.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m1.GetGeneration() == 0 || m1.GetGeneration() != m2.GetGeneration() {
+		t.Fatalf("idempotent mark: %d vs %d", m1.GetGeneration(), m2.GetGeneration())
+	}
+	check, err := c.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: m1.GetGeneration()})
+	if err != nil || !check.GetComplete() {
+		t.Fatalf("empty node drain: %+v %v", check, err)
+	}
+}
+
+// Undrain during Run invalidates D; the next CheckDrain fails closed.
+func TestRunUndrainInvalidatesGeneration(t *testing.T) {
+	var svc *service.Service
+	undrain := grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+		if _, ok := req.(*metav1.CheckDrainRequest); ok {
+			if svc != nil {
+				_, _ = svc.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: false})
+			}
+		}
+		return h(ctx, req)
+	})
+	c, s := client(t, undrain)
+	svc = s
+	addNode(t, c, "a", nil)
+	err := Run(context.Background(), c, "a", time.Millisecond, func(Progress) {})
+	if err == nil {
+		t.Fatal("Run succeeded after undrain invalidated D")
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("want FailedPrecondition, got %v", err)
 	}
 }

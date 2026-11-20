@@ -596,8 +596,15 @@ pub fn run_schedule(sched: &Schedule) -> Result<Option<InvariantViolation>, Stri
                 Ok(())
             }
             Step::FinalValidation { node, generation } => {
+                // generation 0 means the drain generation captured at check-start (or the last
+                // mark if the check never started). Re-mark must not silently validate D2 when
+                // the schedule is certifying the original D.
                 let drain_gen = if *generation == 0 {
-                    last_drain_gen.get(node).copied().unwrap_or(check.d)
+                    if check.started && check.d != 0 {
+                        check.d
+                    } else {
+                        last_drain_gen.get(node).copied().unwrap_or(0)
+                    }
                 } else {
                     *generation
                 };
@@ -642,6 +649,17 @@ fn violation_name(v: &InvariantViolation) -> &'static str {
         InvariantViolation::PostMarkAdmission { .. } => "PostMarkAdmission",
         InvariantViolation::PrematureOrStaleCompletion { .. } => "PrematureOrStaleCompletion",
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduleFile {
+    pub schedules: Vec<Schedule>,
+}
+
+/// Load schedules from the shared JSON fixture.
+pub fn load_schedules(path: &std::path::Path) -> Result<ScheduleFile, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
 
 /// Built-in short schedules (no external fixture required for the model itself).
@@ -722,6 +740,49 @@ pub fn builtin_schedules() -> Vec<Schedule> {
             ],
             expect_violation: Some("PrematureOrStaleCompletion".into()),
         },
+        // Clean model: empty scan then unmark before validation must not succeed for D.
+        Schedule {
+            name: "empty_scan_unmark_before_validation".into(),
+            mutant: Mutant::None,
+            steps: vec![
+                Step::Register { node: "a".into() },
+                Step::Mark { node: "a".into() },
+                Step::CheckStart {
+                    node: "a".into(),
+                    generation: 0,
+                },
+                Step::HeaderScan,
+                Step::ChunkScan { node: "a".into() },
+                Step::Unmark { node: "a".into() },
+                Step::FinalValidation {
+                    node: "a".into(),
+                    generation: 0,
+                },
+            ],
+            expect_violation: None,
+        },
+        // Clean model: unmark then re-mark D2; validating original D must fail closed.
+        Schedule {
+            name: "empty_scan_unmark_remark_before_validation".into(),
+            mutant: Mutant::None,
+            steps: vec![
+                Step::Register { node: "a".into() },
+                Step::Mark { node: "a".into() },
+                Step::CheckStart {
+                    node: "a".into(),
+                    generation: 0,
+                },
+                Step::HeaderScan,
+                Step::ChunkScan { node: "a".into() },
+                Step::Unmark { node: "a".into() },
+                Step::Mark { node: "a".into() },
+                Step::FinalValidation {
+                    node: "a".into(),
+                    generation: 0,
+                },
+            ],
+            expect_violation: None,
+        },
     ]
 }
 
@@ -736,10 +797,29 @@ pub fn run_builtin_schedules() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../meta/testdata/placement-admission.json")
+    }
 
     #[test]
     fn builtin_schedules_catch_injected_bugs() {
         run_builtin_schedules().unwrap();
+    }
+
+    #[test]
+    fn fixture_schedules_match_model() {
+        let file = load_schedules(&fixture_path()).expect("load placement-admission.json");
+        assert!(
+            file.schedules.len() >= 6,
+            "expected clean + mutant + unmark schedules, got {}",
+            file.schedules.len()
+        );
+        for sched in &file.schedules {
+            run_schedule(sched).unwrap_or_else(|e| panic!("schedule {}: {e}", sched.name));
+        }
     }
 
     #[test]
@@ -753,5 +833,21 @@ mod tests {
             .final_validation("a", d, 0, 0, 0, Mutant::None)
             .unwrap();
         assert!(!complete);
+    }
+
+    #[test]
+    fn each_injected_bug_yields_counterexample() {
+        for name in [
+            "omitted_admission_compare_counterexample",
+            "omitted_reservation_count_counterexample",
+            "omitted_final_marker_compare_counterexample",
+        ] {
+            let sched = builtin_schedules()
+                .into_iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(sched.expect_violation.is_some());
+            run_schedule(&sched).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
     }
 }
