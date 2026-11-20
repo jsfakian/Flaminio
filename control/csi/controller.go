@@ -237,14 +237,10 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	switch status.Code(err) {
 	case codes.OK:
 	case codes.AlreadyExists:
-		// A retry of the same request succeeds; a different volume of the same name does not.
-		v, gerr := c.Meta.GetVolume(ctx, req.GetName())
-		if gerr != nil {
-			return nil, gerr
-		}
-		if v.GetSizeBytes() != size || v.GetChunkBytes() != p.chunk || v.GetReplicas() != p.replicas || v.GetMinIsr() != p.minISR {
-			return nil, status.Errorf(codes.AlreadyExists, "volume %s exists with other properties", req.GetName())
-		}
+		// Metadata returns OK for an identical create (new-format or legacy scalar). AlreadyExists
+		// is therefore a real conflict — including policy-only mismatches on visible new-format
+		// volumes. Preserve it; do not re-interpret via GetVolume scalar matching (docs/issues/76 S9).
+		return nil, err
 	case codes.FailedPrecondition:
 		return nil, status.Error(codes.ResourceExhausted, status.Convert(err).Message())
 	default:

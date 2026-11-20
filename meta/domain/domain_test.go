@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -133,12 +134,48 @@ func TestSpecValidate(t *testing.T) {
 		"six replicas":    func(s *Spec) { s.Replicas = 6 },
 		"min above rf":    func(s *Spec) { s.MinISR = 4 },
 		"min zero":        func(s *Spec) { s.MinISR = 0 },
+		"bad prefer":      func(s *Spec) { s.PreferNode = "../x" },
+		"prefer too long": func(s *Spec) { s.PreferNode = strings.Repeat("a", 129) },
 	} {
 		s := good
 		mutate(&s)
 		if s.Validate() == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	prefer128 := good
+	prefer128.PreferNode = strings.Repeat("n", 128)
+	if err := prefer128.Validate(); err != nil {
+		t.Fatalf("128-char prefer node: %v", err)
+	}
+}
+
+// CreateSpec normalizes defaults and bounds PreferNode / encoded identity (docs/issues/76 S1).
+func TestCreateSpecIdentity(t *testing.T) {
+	const mib = 1 << 20
+	a := CreateSpecFrom(Spec{SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinISR: 1})
+	b := CreateSpecFrom(Spec{SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinISR: 1, Domain: DomainNode, Policy: PolicyStrict})
+	if !a.Equal(b) {
+		t.Fatalf("empty domain/policy must equal defaults: %+v vs %+v", a, b)
+	}
+	if a.ScalarEqual(CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinISR: 1, Domain: DomainZone}) != true {
+		t.Fatal("scalar equal ignores domain")
+	}
+	if a.Equal(CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinISR: 1, Domain: DomainZone}) {
+		t.Fatal("full equal must include domain")
+	}
+	bad := a
+	bad.PreferNode = strings.Repeat("x", 300)
+	if bad.Validate() == nil {
+		t.Fatal("oversized prefer accepted")
+	}
+	raw, _ := json.Marshal(a)
+	got, err := DecodeCreateSpec(raw)
+	if err != nil || !got.Equal(a) {
+		t.Fatalf("decode: %+v %v", got, err)
+	}
+	if _, err := DecodeCreateSpec([]byte(strings.Repeat("x", MaxCreateIdentityBytes+1))); err == nil {
+		t.Fatal("oversized decode accepted")
 	}
 }
 

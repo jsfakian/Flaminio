@@ -20,6 +20,7 @@
 //! - a full ISR everywhere.
 
 pub mod check;
+pub mod create_recovery;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
