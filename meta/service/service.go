@@ -5,7 +5,8 @@
 //
 //	volumes/<id>             volume header (JSON); its first_epoch is the revision of the claim
 //	                         that created the volume, above every epoch an earlier volume of
-//	                         the name reached (docs/issues/30)
+//	                         the name reached (docs/issues/30); admission_generation is the
+//	                         placement-gate revision of the winning claim (docs/issues/78)
 //	chunks/<id>/<index>      one chunk's placement and ISR (JSON), index as 8 digits
 //	create-roots/<op>        durable create progress (docs/issues/76)
 //	create-plans/<op>/<i>    immutable initial chunk plan for that operation
@@ -13,7 +14,9 @@
 //	nodes/<id>               registered node (JSON)
 //	alive/<id>               liveness record, expires without heartbeats
 //	tombstones/<id>          deleted volume awaiting replica cleanup (JSON)
-//	drain/<node>             node being drained: no new replicas go there
+//	drain/<node>             node being drained: no new replicas go there; marker mod rev is
+//	                         the drain generation (docs/issues/78)
+//	placement-gate           value "1"; mod revision is the placement generation (docs/issues/78)
 //
 // Every update is an optimistic transaction: read, check with the domain rules, then write
 // conditional on the revisions read. A conflict means a concurrent update; the operation is
@@ -182,12 +185,18 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 	// wipe failure-domain labels the agent set, and the agent can overlay zone/rack without
 	// clearing other labels (e.g. witness). The two register the same node, maybe at once: the
 	// merged record is written only if the record is still the one read (docs/issues/7).
+	// A changed registration advances the placement gate atomically with the node write
+	// (docs/issues/78). No-ops still ensure the gate is initialized, but do not bump it.
 	key := nodeKey(n.GetId())
 	for attempt := range retries {
 		if attempt > 0 {
 			if err := backoff(ctx, attempt); err != nil {
 				return nil, errStatus(err)
 			}
+		}
+		gateRev, err := s.ensurePlacementGate(ctx)
+		if err != nil {
+			return nil, errStatus(err)
 		}
 		e, ok, err := s.kv.Get(ctx, key)
 		if err != nil {
@@ -215,7 +224,7 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		labels := map[string]string{}
 		maps.Copy(labels, rec.Labels)
 		maps.Copy(labels, n.GetLabels())
-		// Nothing to change: no write, so no other registration in flight has to retry.
+		// Nothing to change: no write and no gate advance (docs/issues/78).
 		if ok && rec.Address == address && maps.Equal(rec.Labels, labels) {
 			return &metav1.RegisterNodeResponse{}, nil
 		}
@@ -223,8 +232,20 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		if corrupt {
 			slog.Warn("node record does not parse: overwriting it", "node", n.GetId())
 		}
+		// Re-read the gate so the compare matches the revision we bump from.
+		ge, gok, err := s.kv.Get(ctx, placementGateKey)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if !gok {
+			continue
+		}
+		gateRev = ge.Rev
 		// e.Rev is 0 when it read none: the record must then still be absent.
-		applied, err := s.kv.Txn(ctx, []kv.Cmp{{Key: key, Rev: e.Rev}}, []kv.Op{{Key: key, Value: b}})
+		applied, err := s.kv.Txn(ctx,
+			[]kv.Cmp{{Key: key, Rev: e.Rev}, {Key: placementGateKey, Rev: gateRev}},
+			[]kv.Op{{Key: key, Value: b}, bumpPlacementGateOp()},
+		)
 		if err != nil {
 			return nil, errStatus(err)
 		}
@@ -752,18 +773,121 @@ func (s *Service) DrainNode(ctx context.Context, r *metav1.DrainNodeRequest) (*m
 	if !domain.ValidID(r.GetNode()) {
 		return nil, errStatus(fmt.Errorf("%w: node id %q", domain.ErrInvalid, r.GetNode()))
 	}
-	op := kv.Op{Key: drainKey(r.GetNode()), Delete: !r.GetDraining()}
+	node := r.GetNode()
 	if r.GetDraining() {
-		if _, ok, err := s.kv.Get(ctx, nodeKey(r.GetNode())); err != nil || !ok {
-			if err == nil {
-				err = fmt.Errorf("%w: node %q is not registered", domain.ErrNotFound, r.GetNode())
+		return s.markDrain(ctx, node)
+	}
+	return s.unmarkDrain(ctx, node)
+}
+
+// markDrain ensures the placement gate, then marks the node draining. An existing marker is
+// idempotent: its modification revision is returned after initialization. Otherwise the marker
+// and gate advance together; the drain generation is the marker's modification revision.
+func (s *Service) markDrain(ctx context.Context, node string) (*metav1.DrainNodeResponse, error) {
+	for attempt := range retries {
+		if attempt > 0 {
+			if err := backoff(ctx, attempt); err != nil {
+				return nil, errStatus(err)
 			}
+		}
+		if _, err := s.ensurePlacementGate(ctx); err != nil {
 			return nil, errStatus(err)
 		}
-		op.Value = []byte("1")
+		ne, nok, err := s.kv.Get(ctx, nodeKey(node))
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if !nok {
+			return nil, errStatus(fmt.Errorf("%w: node %q is not registered", domain.ErrNotFound, node))
+		}
+		de, dok, err := s.kv.Get(ctx, drainKey(node))
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if dok {
+			gen, err := generationToUint64(de.Rev)
+			if err != nil {
+				return nil, errStatus(err)
+			}
+			return &metav1.DrainNodeResponse{Generation: gen}, nil
+		}
+		ge, gok, err := s.kv.Get(ctx, placementGateKey)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if !gok {
+			continue
+		}
+		rev, applied, err := s.kv.TxnRev(ctx,
+			[]kv.Cmp{
+				{Key: nodeKey(node), Rev: ne.Rev},
+				{Key: placementGateKey, Rev: ge.Rev},
+				{Key: drainKey(node), Rev: 0},
+			},
+			[]kv.Op{
+				{Key: drainKey(node), Value: []byte("1")},
+				bumpPlacementGateOp(),
+			},
+		)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if applied {
+			// Marker and gate share the transaction revision.
+			gen, err := generationToUint64(rev)
+			if err != nil {
+				return nil, errStatus(err)
+			}
+			return &metav1.DrainNodeResponse{Generation: gen}, nil
+		}
 	}
-	_, err := s.kv.Txn(ctx, nil, []kv.Op{op})
-	return &metav1.DrainNodeResponse{}, errStatus(err)
+	return nil, status.Error(codes.Aborted, "too much contention")
+}
+
+// unmarkDrain deletes the drain marker and advances the placement gate together. Already absent
+// is a no-op (generation 0). It does not cancel creations.
+func (s *Service) unmarkDrain(ctx context.Context, node string) (*metav1.DrainNodeResponse, error) {
+	for attempt := range retries {
+		if attempt > 0 {
+			if err := backoff(ctx, attempt); err != nil {
+				return nil, errStatus(err)
+			}
+		}
+		if _, err := s.ensurePlacementGate(ctx); err != nil {
+			return nil, errStatus(err)
+		}
+		de, dok, err := s.kv.Get(ctx, drainKey(node))
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if !dok {
+			return &metav1.DrainNodeResponse{}, nil
+		}
+		ge, gok, err := s.kv.Get(ctx, placementGateKey)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if !gok {
+			continue
+		}
+		applied, err := s.kv.Txn(ctx,
+			[]kv.Cmp{
+				{Key: drainKey(node), Rev: de.Rev},
+				{Key: placementGateKey, Rev: ge.Rev},
+			},
+			[]kv.Op{
+				{Key: drainKey(node), Delete: true},
+				bumpPlacementGateOp(),
+			},
+		)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if applied {
+			return &metav1.DrainNodeResponse{}, nil
+		}
+	}
+	return nil, status.Error(codes.Aborted, "too much contention")
 }
 
 func (s *Service) ListVolumes(ctx context.Context, _ *metav1.ListVolumesRequest) (*metav1.ListVolumesResponse, error) {
@@ -781,27 +905,40 @@ func (s *Service) ListVolumes(ctx context.Context, _ *metav1.ListVolumesRequest)
 	return out, nil
 }
 
-// MoveReplica records a requested move on the chunk, conditional on the chunk record and the
-// volume header it read. It changes neither replicas nor ISR, and bumps no version: the target
-// does that, under its epoch, and a concurrent ISR change of the target's fails its compare and
-// is tried again. Comparing the header fences the move off a volume being deleted (docs/issues/8):
-// a deletion marks the header first, so the move then finds the volume gone (NotFound). An attach
-// meanwhile makes the move read again.
+// MoveReplica records a requested move on the chunk, conditional on the chunk record, the
+// volume header and the placement gate it read (docs/issues/78). It changes neither replicas
+// nor ISR, and bumps no version: the target does that, under its epoch, and a concurrent ISR
+// change of the target's fails its compare and is tried again. Comparing the header fences the
+// move off a volume being deleted (docs/issues/8): a deletion marks the header first, so the
+// move then finds the volume gone (NotFound). An attach meanwhile makes the move read again.
+// A currently draining destination is refused before any CheckMove no-op.
 func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest) (*metav1.MoveReplicaResponse, error) {
 	if !domain.ValidID(r.GetFrom()) || !domain.ValidID(r.GetTo()) {
 		return nil, errStatus(fmt.Errorf("%w: node ids %q, %q", domain.ErrInvalid, r.GetFrom(), r.GetTo()))
 	}
-	if _, ok, err := s.kv.Get(ctx, nodeKey(r.GetTo())); err != nil || !ok {
-		if err == nil {
-			err = fmt.Errorf("%w: node %q is not registered", domain.ErrNotFound, r.GetTo())
-		}
-		return nil, errStatus(err)
-	}
+	to := r.GetTo()
 	for attempt := range retries {
 		if attempt > 0 {
 			if err := backoff(ctx, attempt); err != nil {
 				return nil, errStatus(err)
 			}
+		}
+		gateRev, err := s.readPlacementGate(ctx)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if _, ok, err := s.kv.Get(ctx, nodeKey(to)); err != nil || !ok {
+			if err == nil {
+				err = fmt.Errorf("%w: node %q is not registered", domain.ErrNotFound, to)
+			}
+			return nil, errStatus(err)
+		}
+		draining, err := s.nodeIsDraining(ctx, to)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		if draining {
+			return nil, status.Errorf(codes.FailedPrecondition, "destination %q is draining", to)
 		}
 		h, hrev, err := s.readHeader(ctx, r.GetVolume())
 		if err != nil {
@@ -821,15 +958,19 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 		if err := json.Unmarshal(e.Value, &c); err != nil {
 			return nil, errStatus(err)
 		}
-		if !domain.CheckMove(&c, r.GetFrom(), r.GetTo()) {
+		if !domain.CheckMove(&c, r.GetFrom(), to) {
 			return &metav1.MoveReplicaResponse{Applied: false, Chunk: chunkPB(c)}, nil
 		}
-		domain.ApplyMove(&c, r.GetFrom(), r.GetTo())
+		domain.ApplyMove(&c, r.GetFrom(), to)
 		b, _ := json.Marshal(c)
-		// The header must be as read: a deletion marks it before it lists the chunks, so no move
-		// is recorded after that listing (docs/issues/8).
+		// Gate + header + chunk: a concurrent mark/undrain or registration invalidates a stale
+		// admission pass (docs/issues/78). The header compare also fences deletion (#8).
 		ok, err = s.kv.Txn(ctx,
-			[]kv.Cmp{{Key: e.Key, Rev: e.Rev}, {Key: volumeKey(h.ID), Rev: hrev}},
+			[]kv.Cmp{
+				{Key: placementGateKey, Rev: gateRev},
+				{Key: e.Key, Rev: e.Rev},
+				{Key: volumeKey(h.ID), Rev: hrev},
+			},
 			[]kv.Op{{Key: e.Key, Value: b}})
 		if err != nil {
 			return nil, errStatus(err)

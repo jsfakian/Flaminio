@@ -23,9 +23,14 @@ service MetadataService {
   rpc NodeHeartbeat(NodeHeartbeatRequest) returns (NodeHeartbeatResponse);
   // Caller: any authenticated identity.
   rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
-  // Marks a node as draining, or not: new volumes are not placed on a draining node. Moving its
-  // replicas away is up to the caller (MoveReplica). Caller: an administrator.
+  // Marks a node as draining, or not: new volumes and direct moves are not admitted there while
+  // the mark remains. Response.generation is the drain marker's modification revision (0 for
+  // undrain). Moving its replicas away is up to the caller (MoveReplica). Caller: an administrator.
   rpc DrainNode(DrainNodeRequest) returns (DrainNodeResponse);
+  // Whether a drain generation may complete: no earlier creating reservations, no chunk replicas
+  // and no incoming moves remain for that continuously marked interval. Does not move data or
+  // delete reservations. Caller: an administrator.
+  rpc CheckDrain(CheckDrainRequest) returns (CheckDrainResponse);
 
   // Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
   // administrator.
@@ -78,7 +83,24 @@ message DrainNodeRequest {
   bool draining = 2;
 }
 
-message DrainNodeResponse {}
+message DrainNodeResponse {
+  // Modification revision of the drain marker for this mark (0 only for undrain).
+  // An etcd revision: must fit a positive int64 when set.
+  uint64 generation = 1;
+}
+
+message CheckDrainRequest {
+  string node = 1;
+  // Drain generation returned by DrainNode when marking. Must be a positive int64.
+  uint64 generation = 2;
+}
+
+message CheckDrainResponse {
+  bool complete = 1;
+  uint64 pending_creations = 2;
+  uint64 placement_chunks = 3;
+  uint64 incoming_moves = 4;
+}
 
 message RegisterNodeRequest {
   Node node = 1;

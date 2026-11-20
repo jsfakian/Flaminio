@@ -182,15 +182,22 @@ block devices and applies the claim policy:
 - otherwise the one blank device is formatted, and the node starts on it.
 
 **Drains** (`flaminio-meta drain <node>`, [`control/drain`](../control/drain)):
-1. The node is marked draining, so no new volume is placed on it.
+1. The node is marked draining (drain generation = marker revision). New creates and direct
+   moves cannot admit that node while the generation remains marked
+   ([docs/issues/78](issues/78/spec.md)).
 2. A move is requested for each of its chunk replicas, to the least loaded node that may take
-   it.
+   it (destinations that are draining are refused).
 3. Each volume's target carries the moves out, under its epoch: it adds the destination,
    resyncs it, and drops the source once the destination is in sync
    ([protocol](replication-protocol.md) §7, moves).
+4. Each iteration calls `CheckDrain` for the retained generation before success. Progress may
+   show pending creations (earlier hidden reservations) and incoming moves; a zero visible
+   replica count alone never finishes the drain.
 
-The command waits until the node holds nothing. A volume that is not attached has no target to
-move it, and waits for its next attach.
+The command waits until `CheckDrain` reports complete. A volume that is not attached has no
+target to move it, and waits for its next attach. An interrupted creator can block completion
+until fenced `DeleteVolume` or create recovery resolves it; undrain/re-drain invalidates the
+old generation.
 
 **`make drain-test`:**
 1. fio writes 4 GiB of verified data to vol1 on fl-a while fl-b is drained into fl-c.

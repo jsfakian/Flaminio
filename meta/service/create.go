@@ -18,8 +18,9 @@ import (
 )
 
 // Create-plan and progress keyspaces (docs/issues/76). The root index holds no plan values.
-// Without #78 there is no placement-admission gate or admission_generation field: creation does
-// not serialize against drains.
+// Placement admission compares the placement gate and records admission_generation on the
+// header (docs/issues/78); publication batches keep the original claim compare and do not
+// recheck the drain mark.
 const (
 	createRootPrefix  = prefix + "create-roots/"
 	createPlanPrefix  = prefix + "create-plans/"
@@ -124,6 +125,7 @@ func decodeChunkBounded(b []byte) (domain.Chunk, error) {
 
 // createVolume persists an immutable plan, admits a Creating header, then cleans/copies/finalizes
 // under the claim revision. Identical callers and recovery helpers resume the same operation.
+// A placement-gate conflict retries the entire planning pass (docs/issues/78).
 func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.Volume, error) {
 	cs := domain.CreateSpecFrom(spec)
 	if err := spec.Validate(); err != nil {
@@ -138,13 +140,33 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		return v, err
 	}
 
-	placement, err := s.planPlacement(ctx, spec)
+	for attempt := range retries {
+		if attempt > 0 {
+			if err := backoff(ctx, attempt); err != nil {
+				return nil, err
+			}
+			if v, err := s.resumeOrRefuse(ctx, spec.ID, cs); err != nil || v != nil {
+				return v, err
+			}
+		}
+		v, err := s.createVolumeAttempt(ctx, spec, cs)
+		if errors.Is(err, errGateConflict) {
+			continue
+		}
+		return v, err
+	}
+	return nil, status.Error(codes.Aborted, "too much contention")
+}
+
+func (s *Service) createVolumeAttempt(ctx context.Context, spec domain.Spec, cs domain.CreateSpec) (*domain.Volume, error) {
+	placement, gateRev, err := s.planPlacement(ctx, spec)
 	if err != nil {
 		return nil, err
 	}
 	v := domain.NewVolume(spec, placement)
 	v.Creating = true
 	v.CreateOperation = "" // set at admission
+	v.AdmissionGeneration = gateRev
 	specCopy := cs
 	v.CreateSpec = &specCopy
 
@@ -219,7 +241,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		rootRev = e.Rev
 	}
 
-	claim, _, err := s.admitCreate(ctx, op, root, rootRev, v)
+	claim, _, err := s.admitCreate(ctx, op, root, rootRev, gateRev, v)
 	if err != nil {
 		var done errResumeDone
 		if errors.As(err, &done) {
@@ -301,14 +323,20 @@ func (s *Service) resumeOrRefuse(ctx context.Context, id string, want domain.Cre
 	return s.readVolume(ctx, id)
 }
 
-func (s *Service) planPlacement(ctx context.Context, spec domain.Spec) ([][]string, error) {
+// planPlacement reads the placement gate first, then nodes and load, and computes placement.
+// The returned gate revision must be compared by the winning claim (docs/issues/78).
+func (s *Service) planPlacement(ctx context.Context, spec domain.Spec) ([][]string, int64, error) {
+	gateRev, err := s.readPlacementGate(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
 	nodes, err := s.nodes(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	load, err := s.replicaLoad(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var candidates []domain.NodeLoad
 	for _, n := range nodes {
@@ -317,7 +345,8 @@ func (s *Service) planPlacement(ctx context.Context, spec domain.Spec) ([][]stri
 		}
 	}
 	h := domain.Header{ID: spec.ID, SizeBytes: spec.SizeBytes, ChunkBytes: spec.ChunkBytes}
-	return domain.Place(candidates, h.ChunkCount(), int(spec.Replicas), spec.PreferNode, spec.Domain, spec.Policy)
+	placement, err := domain.Place(candidates, h.ChunkCount(), int(spec.Replicas), spec.PreferNode, spec.Domain, spec.Policy)
+	return placement, gateRev, err
 }
 
 // replicaLoad pages public chunk keys and counts replicas. Private create-plans are not listed.
@@ -451,12 +480,12 @@ func (s *Service) stagePlans(ctx context.Context, op string, root createRoot, ro
 	return root, rootRev, nil
 }
 
-func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, rootRev int64, v *domain.Volume) (claim int64, newRootRev int64, err error) {
+func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, rootRev, gateRev int64, v *domain.Volume) (claim int64, newRootRev int64, err error) {
 	if root.State != rootSealed && root.State != rootCleaning && root.State != rootCopying && root.State != rootComplete {
 		return 0, 0, status.Errorf(codes.Aborted, "create operation %s not sealed", truncID(op))
 	}
 	if root.State != rootSealed {
-		// Already admitted: discover header.
+		// Already admitted: discover header; keep its recorded admission generation.
 		e, ok, err := s.kv.GetBounded(ctx, volumeKey(root.Volume), domain.MaxCreateRecordBytes)
 		if err != nil {
 			return 0, 0, err
@@ -473,6 +502,9 @@ func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, r
 		}
 		return e.Rev, rootRev, nil
 	}
+	if gateRev <= 0 {
+		return 0, 0, status.Error(codes.FailedPrecondition, "placement gate is unavailable")
+	}
 	v.CreateOperation = op
 	spec := root.Spec
 	v.CreateSpec = &spec
@@ -480,6 +512,7 @@ func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, r
 	v.Epoch = 0
 	v.Target = ""
 	v.FirstEpoch = 0
+	v.AdmissionGeneration = gateRev
 	hb, err := encodeRecord(v.Header)
 	if err != nil {
 		return 0, 0, err
@@ -495,6 +528,7 @@ func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, r
 		{Key: createRootKey(op), Rev: rootRev},
 		{Key: volumeKey(root.Volume), Rev: 0},
 		{Key: tombstoneKey(root.Volume), Rev: 0},
+		{Key: placementGateKey, Rev: gateRev},
 	}
 	ops := []kv.Op{
 		{Key: volumeKey(root.Volume), Value: hb},
@@ -506,11 +540,19 @@ func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, r
 	}
 	if !ok {
 		// Discover: never infer uncommitted admission from a failed reply.
+		// Taken id before gate conflict (docs/issues/78).
 		if v2, err := s.resumeOrRefuse(ctx, root.Volume, root.Spec); err != nil || v2 != nil {
 			if v2 != nil {
 				return 0, 0, errResumeDone{v: v2}
 			}
 			return 0, 0, err
+		}
+		ge, gok, err := s.kv.Get(ctx, placementGateKey)
+		if err != nil {
+			return 0, 0, err
+		}
+		if !gok || ge.Rev != gateRev {
+			return 0, 0, errGateConflict
 		}
 		e, found, err := s.kv.GetBounded(ctx, createRootKey(op), domain.MaxCreateRecordBytes)
 		if err != nil {
@@ -524,7 +566,7 @@ func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, r
 			return 0, 0, err
 		}
 		if root.State == rootSealed {
-			// Gate/name conflict before admission: discard unadmitted work by GC eligibility later;
+			// Name/root conflict before admission: discard unadmitted work by GC eligibility later;
 			// this caller replans under a fresh op.
 			return 0, 0, status.Errorf(codes.Aborted, "volume %q could not be admitted; retry", root.Volume)
 		}

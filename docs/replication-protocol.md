@@ -279,10 +279,17 @@ set and tries again later.
 
 Draining a node moves its chunk replicas elsewhere, one chunk at a time, while the volume
 serves I/O.
+- **Drain mark and admission.** Marking a node draining advances the shared placement gate and
+  assigns a drain generation (the marker's modification revision). Create and `MoveReplica`
+  claims compare that gate; a currently draining destination is refused
+  (`destination "…" is draining`). Earlier creating reservations keep their
+  `admission_generation` and may finish publishing. `CheckDrain` accounts for those reservations,
+  chunk replicas and incoming `moving.to`, then validates the same generation before completion
+  (docs/issues/78).
 - **An administrator only requests a move.** `MoveReplica{chunk, from, to}` records
   `moving = (from, to)` on the chunk. It is refused unless `from` holds a replica, `to` does
-  not, and no move is pending. It changes neither the replica set nor the ISR, and bumps no
-  version.
+  not, no move is pending, and `to` is not draining. It changes neither the replica set nor the
+  ISR, and bumps no version.
 - **The target carries it out, under its epoch,** with conditional `ChangeIsr` requests (§2),
   which may now also change the replica set. It polls its volume (`refresh`, 2 s) to learn of
   requests; the poll has its own slot, so an ISR change never waits behind it.

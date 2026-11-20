@@ -32,6 +32,7 @@ const (
 	MetadataService_NodeHeartbeat_FullMethodName   = "/flaminio.meta.v1.MetadataService/NodeHeartbeat"
 	MetadataService_ListNodes_FullMethodName       = "/flaminio.meta.v1.MetadataService/ListNodes"
 	MetadataService_DrainNode_FullMethodName       = "/flaminio.meta.v1.MetadataService/DrainNode"
+	MetadataService_CheckDrain_FullMethodName      = "/flaminio.meta.v1.MetadataService/CheckDrain"
 	MetadataService_CreateVolume_FullMethodName    = "/flaminio.meta.v1.MetadataService/CreateVolume"
 	MetadataService_GetVolume_FullMethodName       = "/flaminio.meta.v1.MetadataService/GetVolume"
 	MetadataService_ListVolumes_FullMethodName     = "/flaminio.meta.v1.MetadataService/ListVolumes"
@@ -60,6 +61,10 @@ type MetadataServiceClient interface {
 	// Marks a node as draining, or not: new volumes are not placed on a draining node. Moving its
 	// replicas away is up to the caller (MoveReplica). Caller: an administrator.
 	DrainNode(ctx context.Context, in *DrainNodeRequest, opts ...grpc.CallOption) (*DrainNodeResponse, error)
+	// Whether a drain generation may complete: no earlier creating reservations, no chunk replicas
+	// and no incoming moves remain for that continuously marked interval. Does not move data or
+	// delete reservations. Caller: an administrator.
+	CheckDrain(ctx context.Context, in *CheckDrainRequest, opts ...grpc.CallOption) (*CheckDrainResponse, error)
 	// Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
 	// administrator.
 	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
@@ -134,6 +139,16 @@ func (c *metadataServiceClient) DrainNode(ctx context.Context, in *DrainNodeRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DrainNodeResponse)
 	err := c.cc.Invoke(ctx, MetadataService_DrainNode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *metadataServiceClient) CheckDrain(ctx context.Context, in *CheckDrainRequest, opts ...grpc.CallOption) (*CheckDrainResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckDrainResponse)
+	err := c.cc.Invoke(ctx, MetadataService_CheckDrain_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -247,6 +262,10 @@ type MetadataServiceServer interface {
 	// Marks a node as draining, or not: new volumes are not placed on a draining node. Moving its
 	// replicas away is up to the caller (MoveReplica). Caller: an administrator.
 	DrainNode(context.Context, *DrainNodeRequest) (*DrainNodeResponse, error)
+	// Whether a drain generation may complete: no earlier creating reservations, no chunk replicas
+	// and no incoming moves remain for that continuously marked interval. Does not move data or
+	// delete reservations. Caller: an administrator.
+	CheckDrain(context.Context, *CheckDrainRequest) (*CheckDrainResponse, error)
 	// Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
 	// administrator.
 	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
@@ -298,6 +317,9 @@ func (UnimplementedMetadataServiceServer) ListNodes(context.Context, *ListNodesR
 }
 func (UnimplementedMetadataServiceServer) DrainNode(context.Context, *DrainNodeRequest) (*DrainNodeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DrainNode not implemented")
+}
+func (UnimplementedMetadataServiceServer) CheckDrain(context.Context, *CheckDrainRequest) (*CheckDrainResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckDrain not implemented")
 }
 func (UnimplementedMetadataServiceServer) CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateVolume not implemented")
@@ -415,6 +437,24 @@ func _MetadataService_DrainNode_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(MetadataServiceServer).DrainNode(ctx, req.(*DrainNodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MetadataService_CheckDrain_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckDrainRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetadataServiceServer).CheckDrain(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetadataService_CheckDrain_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetadataServiceServer).CheckDrain(ctx, req.(*CheckDrainRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -603,6 +643,10 @@ var MetadataService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DrainNode",
 			Handler:    _MetadataService_DrainNode_Handler,
+		},
+		{
+			MethodName: "CheckDrain",
+			Handler:    _MetadataService_CheckDrain_Handler,
 		},
 		{
 			MethodName: "CreateVolume",
