@@ -64,12 +64,16 @@ fn ownership_fail(what: &str) -> ! {
 thread_local! {
     /// Fail preparation of the operation at this index (before any SQ publication).
     static TEST_PREPARE_FAIL_AT: Cell<Option<usize>> = const { Cell::new(None) };
+    /// When set with `TEST_PREPARE_FAIL_AT`, only fail on this 0-based window index.
+    static TEST_PREPARE_FAIL_WINDOW: Cell<Option<usize>> = const { Cell::new(None) };
     /// Inject one submit errno (taken once). Retryable vs fatal follows the real errno rules.
     static TEST_SUBMIT_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
     /// Injected (user_data, result) CQEs, consumed before reading the real completion queue.
     static TEST_CQE_SEQ: RefCell<VecDeque<(u64, i32)>> = const { RefCell::new(VecDeque::new()) };
     /// Panic once after the ownership guard is armed (publication/drain path).
     static TEST_PANIC_WHEN_ARMED: Cell<bool> = const { Cell::new(false) };
+    /// Fail SQ push at this index once (taken when matched), after any earlier pushes.
+    static TEST_PUSH_FAIL_AT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 /// A file or block device driven through io_uring.
@@ -228,14 +232,21 @@ impl UringDevice {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut ring = self.ring.borrow_mut();
         let mut first_error = None;
-        for window in ops.chunks_mut(QUEUE_DEPTH as usize) {
+        for (window_idx, window) in ops.chunks_mut(QUEUE_DEPTH as usize).enumerate() {
             // --- Preparation (no SQ publication) -------------------------------------------
             // Lengths first: an unsupported length never allocates a bounce buffer.
+            // If an earlier window already recorded a device/short error, keep it (S7).
             let mut lens: Vec<u32> = Vec::with_capacity(window.len());
             for op in window.iter() {
                 match op {
-                    Op::Read(_, buf) => lens.push(len32(buf.len())?),
-                    Op::Write(_, data) => lens.push(len32(data.len())?),
+                    Op::Read(_, buf) => match len32(buf.len()) {
+                        Ok(n) => lens.push(n),
+                        Err(e) => return Err(prior_or(first_error, e)),
+                    },
+                    Op::Write(_, data) => match len32(data.len()) {
+                        Ok(n) => lens.push(n),
+                        Err(e) => return Err(prior_or(first_error, e)),
+                    },
                     Op::Fsync => lens.push(0),
                 }
             }
@@ -243,11 +254,19 @@ impl UringDevice {
             let mut bounce: Vec<Option<AlignedBuf>> = Vec::with_capacity(window.len());
             for (i, op) in window.iter().enumerate() {
                 #[cfg(test)]
-                if TEST_PREPARE_FAIL_AT.with(|c| c.get()) == Some(i) {
-                    return Err(io::Error::other("injected preparation failure"));
+                if TEST_PREPARE_FAIL_AT.with(|c| c.get()) == Some(i)
+                    && TEST_PREPARE_FAIL_WINDOW.with(|w| match w.get() {
+                        None => true,
+                        Some(want) => want == window_idx,
+                    })
+                {
+                    return Err(prior_or(
+                        first_error,
+                        io::Error::other("injected preparation failure"),
+                    ));
                 }
                 #[cfg(not(test))]
-                let _ = i;
+                let _ = (i, window_idx);
                 match op {
                     Op::Read(_, buf) if self.needs_bounce(buf) => {
                         bounce.push(Some(AlignedBuf::zeroed(buf.len())));
@@ -318,7 +337,7 @@ impl UringDevice {
                     // the `AlignedBuf` does not move those bytes). `guard` stays armed until
                     // every CQE for this window has been consumed below, then is disarmed
                     // before read copyback — the exact release point for these borrows.
-                    if unsafe { sq.push(entry) }.is_err() {
+                    if push_sqe(&mut sq, entry, i) {
                         ownership_fail(if i == 0 {
                             "unexpected SQ push failure before any entry was published"
                         } else {
@@ -399,6 +418,31 @@ fn clone_err(e: &io::Error) -> io::Error {
     io::Error::new(e.kind(), e.to_string())
 }
 
+/// Prefer an earlier drained device/short error over a later-window preparation failure (S7).
+fn prior_or(first_error: Option<io::Error>, e: io::Error) -> io::Error {
+    first_error.unwrap_or(e)
+}
+
+/// Pushes `entry` onto `sq`. Returns true when the push failed (real or injected).
+/// `index` is the position within the current publication window.
+fn push_sqe(sq: &mut io_uring::squeue::SubmissionQueue<'_>, entry: &Entry, index: usize) -> bool {
+    #[cfg(test)]
+    if TEST_PUSH_FAIL_AT.with(|c| {
+        if c.get() == Some(index) {
+            c.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        return true;
+    }
+    #[cfg(not(test))]
+    let _ = index;
+    // SAFETY: caller guarantees buffer lifetimes for this entry through drain/ownership.
+    unsafe { sq.push(entry) }.is_err()
+}
+
 fn submit_and_wait_or_inject(ring: &mut IoUring, want: usize) -> io::Result<()> {
     #[cfg(test)]
     if let Some(errno) = TEST_SUBMIT_ERRNO.take() {
@@ -449,15 +493,22 @@ impl UringDevice {
             ));
         }
 
-        // Prepare Held buffers and tags before any SQ mutation or ownership install.
-        let mut prepared: Vec<(u64, u64, Held, u32)> = Vec::with_capacity(writes.len());
+        // Prepare Held buffers, tags and SQEs before any SQ mutation or ownership install.
+        let mut prepared: Vec<(u64, Held, Entry)> = Vec::with_capacity(writes.len());
+        let fd = types::Fd(self.file.as_raw_fd());
         for (i, ((offset, data), &len)) in writes.iter().zip(&lens).enumerate() {
             #[cfg(test)]
             if TEST_PREPARE_FAIL_AT.with(|c| c.get()) == Some(i) {
                 return Err(io::Error::other("injected preparation failure"));
             }
             let tag = st.next_tag + i as u64;
-            prepared.push((tag, *offset, Held::new(data, self.direct), len));
+            let buf = Held::new(data, self.direct);
+            let ptr = buf.bytes().as_ptr();
+            let entry = opcode::Write::new(fd, ptr, len)
+                .offset(*offset)
+                .build()
+                .user_data(tag);
+            prepared.push((tag, buf, entry));
         }
         st.writes.reserve(writes.len());
 
@@ -471,7 +522,6 @@ impl UringDevice {
             }
         }
 
-        let fd = types::Fd(self.file.as_raw_fd());
         let mut guard = OwnershipGuard::new();
         guard.arm();
         #[cfg(test)]
@@ -481,12 +531,7 @@ impl UringDevice {
 
         {
             let mut sq = ring.submission();
-            for (i, (tag, offset, buf, len)) in prepared.into_iter().enumerate() {
-                let ptr = buf.bytes().as_ptr();
-                let entry = opcode::Write::new(fd, ptr, len)
-                    .offset(offset)
-                    .build()
-                    .user_data(tag);
+            for (i, (tag, buf, entry)) in prepared.into_iter().enumerate() {
                 // Install ownership before the entry can reach the kernel.
                 st.writes.insert(tag, (buf, generation));
                 st.next_tag = tag + 1;
@@ -495,7 +540,8 @@ impl UringDevice {
                 // (`reap_commits`, also on drop under an armed `OwnershipGuard`); moving a
                 // `Held` does not move the bytes it points to. `guard` stays armed through
                 // `submit_or_abort` below — the release point for this publication window.
-                if unsafe { sq.push(&entry) }.is_err() {
+                // SQEs were built above before arming; the publish loop only installs and pushes.
+                if push_sqe(&mut sq, &entry, i) {
                     ownership_fail(if i == 0 {
                         "unexpected commit SQ push failure before any entry was published"
                     } else {
@@ -775,11 +821,12 @@ impl BlockDevice for UringDevice {
                 return Err(e);
             }
             drop((st, ring));
-            // Sync acceptance of this generation (mirrors advancing before I/O previously).
-            self.commits.borrow_mut().next_gen = generation + 1;
+            // Full prep/layout/I/O before generation change: a rejected sync fallback must
+            // not consume next_gen or strand early writes under a skipped generation.
             let views: Vec<(u64, &[u8])> = writes.iter().map(|(o, d)| (*o, &d[..])).collect();
             self.write_many(&views)?;
             self.flush()?;
+            self.commits.borrow_mut().next_gen = generation + 1;
             return Ok(true);
         }
         st.current.reserve(1);
@@ -841,12 +888,17 @@ impl BlockDevice for UringDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// Test-only: fail preparation at `index` (before SQ publication). Clear with `None`.
     fn inject_prepare_fail_at(index: Option<usize>) {
         TEST_PREPARE_FAIL_AT.with(|c| c.set(index));
+    }
+
+    /// Test-only: restrict `inject_prepare_fail_at` to this 0-based window. `None` = any window.
+    fn inject_prepare_fail_window(window: Option<usize>) {
+        TEST_PREPARE_FAIL_WINDOW.with(|c| c.set(window));
     }
 
     /// Test-only: next submit returns this errno once.
@@ -868,14 +920,21 @@ mod tests {
         TEST_PANIC_WHEN_ARMED.with(|c| c.set(panic));
     }
 
+    /// Test-only: fail SQ push at `index` once (after any earlier pushes in the window).
+    fn inject_push_fail_at(index: Option<usize>) {
+        TEST_PUSH_FAIL_AT.with(|c| c.set(index));
+    }
+
     /// Clears every injection seam when dropped (including on assertion failure).
     struct ClearInjects;
     impl Drop for ClearInjects {
         fn drop(&mut self) {
             inject_prepare_fail_at(None);
+            inject_prepare_fail_window(None);
             inject_submit_errno(None);
             inject_cqe_seq(std::iter::empty());
             inject_panic_when_armed(false);
+            inject_push_fail_at(None);
         }
     }
 
@@ -1239,8 +1298,7 @@ mod tests {
                     let n = reject_idx + 1;
                     let size = (n as u64) * 8192;
                     let (dev, path) = temp_device(size.max(1 << 20), direct);
-                    let smalls: Vec<Vec<u8>> =
-                        (0..n).map(|_| vec![0xABu8; 4096]).collect();
+                    let smalls: Vec<Vec<u8>> = (0..n).map(|_| vec![0xABu8; 4096]).collect();
                     // Aligned path: keep AlignedBuf allocations so slices stay 4 KiB aligned.
                     let aligned_smalls: Vec<AlignedBuf> = (0..n)
                         .map(|_| AlignedBuf::copy_of(&[0xABu8; 4096]))
@@ -1299,15 +1357,11 @@ mod tests {
                     let rhuge =
                         unsafe { std::slice::from_raw_parts_mut(rhuge_ptr.cast::<u8>(), huge_len) };
                     let mut storage = vec![0u8; reject_idx * 4096];
-                    let mut chunks: Vec<&mut [u8]> = if reject_idx == 0 {
-                        Vec::new()
-                    } else {
-                        storage.chunks_exact_mut(4096).collect()
-                    };
-                    let mut reads: Vec<(u64, &mut [u8])> = chunks
+                    let (chunk_arrs, _) = storage.as_chunks_mut::<4096>();
+                    let mut reads: Vec<(u64, &mut [u8])> = chunk_arrs
                         .iter_mut()
                         .enumerate()
-                        .map(|(i, c)| (i as u64 * 8192, &mut **c))
+                        .map(|(i, c)| (i as u64 * 8192, c.as_mut_slice()))
                         .collect();
                     reads.push((reject_idx as u64 * 8192, rhuge));
                     let rerr = dev.read_many(&mut reads).unwrap_err();
@@ -1342,9 +1396,101 @@ mod tests {
             "bad_cqe_id",
             "dup_cqe",
             "dirty_sq",
+            "sync_push_prefix",
+            "commit_push_prefix",
         ] {
             spawn_abort_case(case);
         }
+    }
+
+    #[test]
+    fn later_window_prep_failure_preserves_earlier_device_error() {
+        let _clear = ClearInjects;
+        let (dev, path) = temp_device(1 << 20, false);
+        let huge_len = (u32::MAX as usize) + 1;
+        let huge_ptr = map_anon(huge_len, true);
+        // SAFETY: writable anonymous mapping used only as a length-invalid read destination.
+        let huge = unsafe { std::slice::from_raw_parts_mut(huge_ptr.cast::<u8>(), huge_len) };
+        // First window: short read past EOF, then valid reads. Second window: invalid length.
+        let mut storage = vec![0u8; QUEUE_DEPTH as usize * 4096];
+        let (chunk_arrs, _) = storage.as_chunks_mut::<4096>();
+        let mut reads: Vec<(u64, &mut [u8])> = chunk_arrs
+            .iter_mut()
+            .enumerate()
+            .map(|(i, c)| {
+                let off = if i == 0 { 2 << 20 } else { (i as u64) * 4096 };
+                (off, c.as_mut_slice())
+            })
+            .collect();
+        reads.push((0, huge));
+        let err = dev.read_many(&mut reads).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::UnexpectedEof,
+            "earlier short/device error must outrank later-window prep failure: {err}"
+        );
+        assert!(
+            err.to_string().contains("short transfer"),
+            "expected short-transfer error, got {err}"
+        );
+        // Same shape with injected prep failure on the later window only (skip first window).
+        let mut storage2 = vec![0u8; QUEUE_DEPTH as usize * 4096];
+        let (chunk_arrs2, _) = storage2.as_chunks_mut::<4096>();
+        let mut reads2: Vec<(u64, &mut [u8])> = chunk_arrs2
+            .iter_mut()
+            .enumerate()
+            .map(|(i, c)| {
+                let off = if i == 0 { 2 << 20 } else { (i as u64) * 4096 };
+                (off, c.as_mut_slice())
+            })
+            .collect();
+        let mut extra = vec![0u8; 4096];
+        reads2.push((4096, &mut extra[..]));
+        inject_prepare_fail_window(Some(1));
+        inject_prepare_fail_at(Some(0));
+        let err2 = dev.read_many(&mut reads2).unwrap_err();
+        inject_prepare_fail_at(None);
+        inject_prepare_fail_window(None);
+        assert_eq!(err2.kind(), io::ErrorKind::UnexpectedEof, "{err2}");
+        assert!(
+            !err2.to_string().contains("injected preparation failure"),
+            "must not drop earlier device error for inject: {err2}"
+        );
+        unmap(huge_ptr, huge_len);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn oversized_commit_sync_fallback_prep_failure_keeps_next_gen() {
+        let _clear = ClearInjects;
+        let (dev, path) = temp_device(16 << 20, false);
+        let early = Bytes::from(vec![0xE1u8; 4096]);
+        dev.start_writes(&[(0, early)]).unwrap();
+        let gen_before = dev.commits.borrow().next_gen;
+        // n + 1 > QUEUE_DEPTH with nothing in flight => synchronous fallback.
+        let writes: Vec<(u64, Bytes)> = (0..QUEUE_DEPTH as usize)
+            .map(|i| ((i as u64 + 1) * 8192, Bytes::from(vec![0xCCu8; 4096])))
+            .collect();
+        inject_prepare_fail_at(Some(0));
+        let err = dev.start_commit(&writes).unwrap_err();
+        assert!(
+            err.to_string().contains("injected preparation failure"),
+            "{err}"
+        );
+        inject_prepare_fail_at(None);
+        assert_eq!(
+            dev.commits.borrow().next_gen,
+            gen_before,
+            "sync-fallback prep failure must not advance next_gen"
+        );
+        // Next successful commit covers the early write under the same generation.
+        let next = Bytes::from(vec![0xC1u8; 4096]);
+        assert!(!dev.start_commit(&[(8192, next)]).unwrap());
+        assert!(dev.poll_commit(true).unwrap().is_ok());
+        let mut buf = vec![0u8; 4096];
+        dev.read_at(0, &mut buf).unwrap();
+        assert!(buf.iter().all(|&x| x == 0xE1));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1519,10 +1665,8 @@ mod tests {
 
     #[test]
     fn panicking_owner_during_drop_aborts_before_release() {
-        let marker = std::env::temp_dir().join(format!(
-            "flaminio-uring85-release-{}",
-            std::process::id()
-        ));
+        let marker =
+            std::env::temp_dir().join(format!("flaminio-uring85-release-{}", std::process::id()));
         let _ = std::fs::remove_file(&marker);
         spawn_abort_case("panic_owner_drop");
         assert!(
@@ -1574,6 +1718,19 @@ mod tests {
                 }
                 let _ = dev.write_at(0, &vec![1u8; 4096]);
             }
+            "sync_push_prefix" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                inject_push_fail_at(Some(1));
+                let data = vec![1u8; 4096];
+                let _ = dev.write_many(&[(0, &data[..]), (4096, &data[..])]);
+            }
+            "commit_push_prefix" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                inject_push_fail_at(Some(1));
+                let a = Bytes::from(vec![1u8; 4096]);
+                let b = Bytes::from(vec![2u8; 4096]);
+                let _ = dev.start_commit(&[(0, a), (4096, b)]);
+            }
             "flush_waiting" => {
                 let (dev, _path) = temp_device(1 << 20, false);
                 {
@@ -1599,8 +1756,7 @@ mod tests {
                 {
                     let mut st = dev.commits.borrow_mut();
                     let mut ring = dev.commit_ring.borrow_mut();
-                    st.current
-                        .push_back((0, Flush::Done(None)));
+                    st.current.push_back((0, Flush::Done(None)));
                     inject_cqe_seq([(FLUSH_TAG, 0)]);
                     UringDevice::reap_commits(&mut st, &mut ring);
                 }
@@ -1657,9 +1813,8 @@ mod tests {
                 let marker = std::env::temp_dir().join(format!(
                     "flaminio-uring85-release-{}",
                     // Parent uses the parent's pid; child must use the same path.
-                    std::env::var("FLAMINIO_URING85_PARENT_PID").unwrap_or_else(|_| {
-                        std::process::id().to_string()
-                    })
+                    std::env::var("FLAMINIO_URING85_PARENT_PID")
+                        .unwrap_or_else(|_| { std::process::id().to_string() })
                 ));
                 let panic_data = Arc::new(vec![1u8; 4096]);
                 let other_data = Arc::new(vec![2u8; 4096]);
@@ -1678,14 +1833,10 @@ mod tests {
                 let (dev, _path) = temp_device(1 << 20, false);
                 {
                     let mut st = dev.commits.borrow_mut();
-                    st.writes.insert(
-                        0,
-                        (Held::Shared(Bytes::from_owner(panic_owner)), 0),
-                    );
-                    st.writes.insert(
-                        1,
-                        (Held::Shared(Bytes::from_owner(other_owner)), 0),
-                    );
+                    st.writes
+                        .insert(0, (Held::Shared(Bytes::from_owner(panic_owner)), 0));
+                    st.writes
+                        .insert(1, (Held::Shared(Bytes::from_owner(other_owner)), 0));
                     st.current.push_back((0, Flush::Waiting));
                 }
                 inject_cqe_seq([(0, 4096)]);

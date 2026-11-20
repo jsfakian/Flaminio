@@ -2,6 +2,20 @@
 
 ## Review rounds
 
+
+### Code loop, round 1 (reviewed `22a66d6`)
+
+Code-reviewer and security-reviewer on the whole change.
+
+Findings:
+- Medium: oversized `start_commit` sync fallback advanced `next_gen` before layout/I/O
+- Medium/Low: design-required publication-failure abort path untested
+- Low: later-window preparation failure could hide an earlier window's device/short error
+- Nit: commit SQEs built inside the armed publish loop
+
+Addressed in the following fix commit (see decisions Review85-R2-F1…F4).
+
+
 ### Plan review round 1 — 6e877dfe213ce756d84984e11f5c35f99e64e456
 
 Scope: correctness against code and security of the draft plan; no runtime implementation.
