@@ -34,7 +34,7 @@ follow-ups: [#76](https://github.com/jsfakian/Flaminio/issues/76) interrupted cr
 [#79](https://github.com/jsfakian/Flaminio/issues/79) CSI mount ownership,
 [#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation,
 [#81](https://github.com/jsfakian/Flaminio/issues/81) ISR RPC batching,
-[#82](https://github.com/jsfakian/Flaminio/issues/82) node-wide shutdown assertions and
+[#82](https://github.com/jsfakian/Flaminio/issues/82) node-wide shutdown assertions (fixed: evidence-gated marks, ADR 0015; lab refuse pending) and
 [#85](https://github.com/jsfakian/Flaminio/issues/85) io_uring buffer lifetime on error.
 The subsequent issue-plan review reproduced Fenced uncertainty framing overflow, tracked by
 [#86](https://github.com/jsfakian/Flaminio/issues/86); bounded geometry alone does not fix it.

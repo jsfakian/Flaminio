@@ -1136,71 +1136,12 @@ csi_test() {
 # Seconds since the test started, for the timeline.
 since() { echo "$((SECONDS - ${1:?}))s"; }
 
-# The test pod's data VM is powered off. The failover controller must mark it out of service,
-# and the pod come back on the other data VM with its data. Then the VM is started again, its
-# node rejoins, and the mark comes off.
+# CSI VM power-off failover. Issue #82: lab VMs have no supported shutdown authority
+# (manual-lockout-v1 requires physical lockout). Refuse before any power or mutation command.
+# Separately authorized physical-host qualification and #49 live-partition checks are outside
+# this target. Never unlock an old installation in a cleanup trap or auto-delete foreign marks.
 csi_failover() {
-    local lost other start vol taint
-    if ! kubectl_lab get pod -n flaminio-test data-0 >/dev/null 2>&1; then
-        release_lab_volume
-        kubectl_apply <"$REPO_ROOT/deploy/lab/csi-test.yaml" >/dev/null
-    fi
-    wait_data_pod 300
-    lost=$(data_pod_node)
-    other=$(vms_of all | tr ' ' '\n' | grep -vx "$lost")
-    vol=$(kubectl_lab get pvc -n flaminio-test data-data-0 -o jsonpath='{.spec.volumeName}')
-    log "pod on $lost ($(data_pod_says)); volume $vol"
-
-    log "powering $lost off (virsh destroy: no shutdown, no flush)"
-    hsh "$(vmvar "$lost" HOST)" "virsh -c qemu:///system destroy $lost" >/dev/null
-    start=$SECONDS
-    # Restore the lab whatever happens.
-    trap 'warn "starting $lost again after a failure"; hsh "$(vmvar "'"$lost"'" HOST)" "virsh -c qemu:///system start '"$lost"'" >/dev/null 2>&1' EXIT
-
-    until [[ $(kubectl_lab get node "$lost" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}') != True ]]; do
-        ((SECONDS - start < 300)) || die "$lost still Ready after 300 s"
-        sleep 2
-    done
-    log "$(since "$start"): Kubernetes sees $lost not Ready"
-    until taint=$(kubectl_lab get node "$lost" -o jsonpath='{.spec.taints[*].key}') && [[ $taint == *out-of-service* ]]; do
-        ((SECONDS - start < 400)) || die "$lost not marked out of service after 400 s"
-        sleep 2
-    done
-    log "$(since "$start"): the failover controller marked $lost out of service"
-    until [[ $(data_pod_node 2>/dev/null) == "$other" ]] &&
-        kubectl_lab wait -n flaminio-test --for=condition=Ready pod/data-0 --timeout=5s >/dev/null 2>&1; do
-        ((SECONDS - start < 900)) || {
-            kubectl_lab describe pod -n flaminio-test data-0 | tail -15
-            die "the pod is not Ready on $other after 900 s"
-        }
-        sleep 3
-    done
-    log "$(since "$start"): pod Ready on $other: $(data_pod_says)"
-    [[ $(data_pod_says) == "verified on $other" ]] || die "after the failover: $(data_pod_says)"
-    log "volume $vol: $(metactl "$VM_W" "$VM_W" get "$vol" | jq -r '"epoch \(.volume.epoch), target \(.volume.target), ISR \([.volume.chunks[].isr | join("+")] | unique | join(" "))"')"
-
-    log "starting $lost again"
-    hsh "$(vmvar "$lost" HOST)" "virsh -c qemu:///system start $lost" >/dev/null
-    trap - EXIT
-    wait_for "SSH on $lost" 300 vssh "$lost" true
-    cmd_node up "$(vms_of "$lost")"
-    start=$SECONDS
-    until [[ $(kubectl_lab get node "$lost" -o jsonpath='{.spec.taints[*].key}') != *out-of-service* ]]; do
-        ((SECONDS - start < 300)) || die "the out-of-service mark is still on $lost after 300 s"
-        sleep 3
-    done
-    log "$(since "$start"): $lost is back, and the mark is off"
-    until metactl "$VM_W" "$VM_W" get "$vol" |
-        jq -e '[.volume.chunks[] | select((.isr | length) < (.replicas | length))] | length == 0' >/dev/null; do
-        ((SECONDS - start < 900)) || die "$vol's ISRs are not full after 900 s"
-        sleep 5
-    done
-    log "$(since "$start"): $lost's replicas of $vol are back in every ISR"
-    log "OK: $lost lost without warning; the pod came back on $other with its data; $lost rejoined"
-    [[ ${KEEP:-0} == 1 ]] || {
-        kubectl_lab delete namespace flaminio-test --wait=true >/dev/null
-        log "test namespace and volume deleted"
-    }
+    die "csi-failover refused (issue #82): lab VMs are not a supported failover authority (manual-lockout-v1 only). No power or node mutation is performed. Use a separately authorized physical-host qualification, or #49 for live partition with zero recovery mutations."
 }
 
 # --- Phase 1 step 6: the node agent's disks, and drains ---

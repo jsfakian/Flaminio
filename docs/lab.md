@@ -340,7 +340,7 @@ make node-up                      # the data plane on fl-a and fl-b (outside Kub
 make csi-deploy                   # build the image, import it on every VM, apply deploy/csi
 make csi-status                   # pods, StorageClass, PVs, VolumeAttachments
 make csi-test                     # a PVC is written on one node, then verified on the other
-make csi-failover                 # a data VM powered off: the pod comes back on the other node
+make csi-failover                 # refused on lab VMs (issue #82): no supported shutdown authority
 make csi-logs
 ```
 
@@ -361,14 +361,12 @@ The driver is one binary, `flaminio-csi` ([`control/csi`](../control/csi),
 
   A node serves one volume at a time (`MaxVolumesPerNode: 1`), so `csi-test` first detaches
   the lab volume vol1.
-- **Failover controller** (a Deployment on fl-w). It sets the standard
-  `node.kubernetes.io/out-of-service` taint on a data node only when both signals agree:
-  - Kubernetes has seen the node not Ready for 40 s;
-  - the node's data plane has stopped heartbeating to the metadata service.
-
-  Kubernetes then deletes the node's pods and detaches their volumes, and they start on the
-  other node. The controller removes its taint once the node is back. Fencing is what makes
-  this safe for the data, whatever the lost node still does (see `make partition-test`).
+- **Failover controller** (a Deployment on fl-w). Default is **observe-only**: NotReady plus
+  missing metadata heartbeat may select candidates, but without
+  `--failover-authority-config` no out-of-service taint is written (`evidence-unavailable`).
+  The only supported authority is `manual-lockout-v1` (physical lockout; lab VMs unsupported).
+  Scoped partition recovery is unavailable. `make csi-failover` refuses before power or
+  mutation. Epoch fencing still protects Flaminio volumes on attach (see `make partition-test`).
 
 The StorageClass `flaminio` takes `replicas` (default 2), `minIsr` (1), `chunkSize` (256Mi),
 `failureDomain` (`node`|`rack`|`zone`) and `failureDomainPolicy` (`strict`|`bestEffort`).
@@ -426,7 +424,7 @@ driver.
 | `make drain-test` | lab | 15–25 min | a node drained under a verified write load; the destination then serves every byte alone (needs `make data-node-up`) |
 | `make k8s-smoke` | lab | 1 min | Kubernetes over the overlay |
 | `make csi-test` | lab | 3 min | a PVC provisioned, formatted, written, moved to the other node, verified |
-| `make csi-failover` | lab | 10 min | a data VM powered off: the failover controller marks it, the pod moves with its data; the VM comes back and rejoins |
+| `make csi-failover` | lab | — | refused (issue #82): lab VMs have no supported shutdown authority; physical-host qualification is separate |
 | `make lab-test` | lab | about 30 min | every lab test above, in order |
 
 From an empty lab, before the lab tests:
