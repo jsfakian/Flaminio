@@ -2,8 +2,8 @@
 //!
 //! Models create roots, birth fences, plan keys, headers and delete-only GC. Schedules in
 //! `meta/testdata/create-recovery.json` drive transitions. Invariants:
-//! - [`NoRootResurrection`]: a GC'd operation id never exists again.
-//! - [`NoUnprovedTombstoneBypass`]: skipping a tombstone requires the unpublished proof.
+//! - `NoRootResurrection`: a GC'd operation id never exists again.
+//! - `NoUnprovedTombstoneBypass`: skipping a tombstone requires the unpublished proof.
 
 use std::collections::{BTreeMap, BTreeSet};
 
