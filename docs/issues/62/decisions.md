@@ -4,10 +4,10 @@
 
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-13.
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-13.
+- **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`2e6f7f8fd702091b4cb5a32d6d982e983138327726f5455df1573d3c01a90d83`).
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
 
-Approved with the recommended answer to each open question (see Settled at approval). The plan's
-review loop continues after approval; later fixes are recorded as changes made after approval.
-Nothing is implemented. Approved before its plan review cleared (status: pending). The R1
+Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet. Earlier approval preceded plan-review clearance; the 2026-11-20 lines cover the cleared text. The R1
 revisions below and both new appendices are **proposed and unapproved**; the dated approvals
 above remain historical provenance, not approval of revised contracts.
 
