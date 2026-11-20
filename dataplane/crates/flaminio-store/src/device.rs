@@ -14,6 +14,11 @@ use flaminio_format::consts::{BLOCK_SIZE, BLOCK_SIZE_U64};
 ///
 /// Writes are only durable after [`flush`](Self::flush) returns. Implementations must not
 /// reorder a flush with the writes issued before it.
+///
+/// Synchronous methods may return only when no queued or submitted operation can still access
+/// the caller buffers that return would release. A preparation failure publishes nothing from
+/// its rejected window; when a call spans several submission windows, earlier windows may
+/// already have completed — the batch is not transactional across windows.
 pub trait BlockDevice {
     /// Size in bytes.
     fn size(&self) -> u64;
@@ -25,20 +30,27 @@ pub trait BlockDevice {
     fn flush(&self) -> io::Result<()>;
 
     /// Writes several buffers, possibly concurrently and in any order. Returns when all are
-    /// complete. The ranges must not overlap.
+    /// complete (every published operation drained); caller buffers are then unused by the
+    /// device. The ranges must not overlap. A preparation error leaves that window's buffers
+    /// untouched by its I/O; earlier windows of the same call may already have landed.
     fn write_many(&self, writes: &[(u64, &[u8])]) -> io::Result<()> {
         writes.iter().try_for_each(|(o, d)| self.write_at(*o, d))
     }
 
-    /// Reads several buffers, possibly concurrently. Returns when all are complete.
+    /// Reads several buffers, possibly concurrently. Returns when all are complete (every
+    /// published operation drained); caller buffers are then unused by the device. A
+    /// preparation error leaves that window's buffers untouched by its I/O; earlier windows
+    /// of the same call may already have landed.
     fn read_many(&self, reads: &mut [(u64, &mut [u8])]) -> io::Result<()> {
         reads.iter_mut().try_for_each(|(o, b)| self.read_at(*o, b))
     }
 
     /// Starts writing data that the next commit will make durable (the store's early writes,
-    /// to clusters no durable batch references), without waiting. The device keeps its own copy
-    /// of the data. The next [`start_commit`](Self::start_commit)'s flush covers them, and the
-    /// flush of a commit already in flight need not wait for them.
+    /// to clusters no durable batch references), without waiting. The device retains ownership
+    /// of every allocation the kernel may access until completion or safe teardown. The next
+    /// [`start_commit`](Self::start_commit)'s flush covers them, and the flush of a commit
+    /// already in flight need not wait for them. A pre-publication error leaves no new queued
+    /// work.
     ///
     /// The default writes them before returning.
     fn start_writes(&self, writes: &[(u64, Bytes)]) -> io::Result<()> {
@@ -47,11 +59,12 @@ pub trait BlockDevice {
 
     /// Starts a commit's I/O: writes `writes` (as [`write_many`](Self::write_many)), then
     /// flushes, without waiting for either. The flush also covers the early writes started
-    /// before ([`start_writes`](Self::start_writes)). The device keeps its own copy of the
-    /// data. Returns true if the commit is already complete and durable; otherwise
-    /// [`poll_commit`](Self::poll_commit) reports its outcome. Several commits may be in
-    /// flight; they land in order, and [`poll_commit`](Self::poll_commit) reports the oldest
-    /// first.
+    /// before ([`start_writes`](Self::start_writes)). The device retains ownership of every
+    /// allocation the kernel may access until completion or safe teardown. Returns true if the
+    /// commit is already complete and durable; otherwise [`poll_commit`](Self::poll_commit)
+    /// reports its outcome. Several commits may be in flight; they land in order, and
+    /// [`poll_commit`](Self::poll_commit) reports the oldest first. A pre-publication rejection
+    /// leaves accounting usable (no generation skip that strands early writes).
     ///
     /// The default does it all before returning.
     fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {

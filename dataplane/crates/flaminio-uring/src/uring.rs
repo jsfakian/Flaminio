@@ -11,6 +11,7 @@ use std::path::Path;
 
 use bytes::Bytes;
 use flaminio_store::BlockDevice;
+use io_uring::squeue::Entry;
 use io_uring::{IoUring, opcode, types};
 
 use crate::aligned::{AlignedBuf, is_aligned};
@@ -21,6 +22,55 @@ const QUEUE_DEPTH: u32 = 256;
 /// A commit's flush is tagged with this bit and the commit's generation (writes are tagged by
 /// a counter, which never reaches it).
 const FLUSH_TAG: u64 = 1 << 63;
+
+/// While armed, dropping this aborts: the kernel may still access buffers the unwind would
+/// free. Arm immediately before the first SQ mutation; disarm only after every published
+/// completion has been consumed (or after every owned commit write/flush has drained).
+/// Declare after prepared buffers so this Drop runs before theirs.
+struct OwnershipGuard {
+    armed: bool,
+}
+
+impl OwnershipGuard {
+    fn new() -> Self {
+        Self { armed: false }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for OwnershipGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            eprintln!("flaminio-uring: ownership outstanding during unwind; aborting");
+            std::process::abort();
+        }
+    }
+}
+
+/// Unrecoverable ownership: do not return an ordinary error.
+fn ownership_fail(what: &str) -> ! {
+    eprintln!("flaminio-uring: {what}; aborting");
+    std::process::abort();
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Fail preparation of the operation at this index (before any SQ publication).
+    static TEST_PREPARE_FAIL_AT: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Inject one submit errno (taken once). Retryable vs fatal follows the real errno rules.
+    static TEST_SUBMIT_ERRNO: Cell<Option<i32>> = const { Cell::new(None) };
+    /// Injected (user_data, result) CQEs, consumed before reading the real completion queue.
+    static TEST_CQE_SEQ: RefCell<VecDeque<(u64, i32)>> = const { RefCell::new(VecDeque::new()) };
+    /// Panic once after the ownership guard is armed (publication/drain path).
+    static TEST_PANIC_WHEN_ARMED: Cell<bool> = const { Cell::new(false) };
+}
 
 /// A file or block device driven through io_uring.
 ///
@@ -171,84 +221,139 @@ impl UringDevice {
     }
 
     /// Runs operations, `QUEUE_DEPTH` at a time, and waits for all of them. Returns the first
-    /// error, but only after every submitted operation has completed.
+    /// error, but only after every submitted operation has completed. A preparation failure
+    /// leaves that window unpublished; earlier windows of the same call may already have
+    /// completed (not transactional across windows).
     fn run(&self, ops: &mut [Op<'_>]) -> io::Result<()> {
         let fd = types::Fd(self.file.as_raw_fd());
         let mut ring = self.ring.borrow_mut();
         let mut first_error = None;
         for window in ops.chunks_mut(QUEUE_DEPTH as usize) {
-            // Bounce buffers for unaligned operations. They, and the caller's buffers, outlive
-            // the operations: nothing below returns before every completion is reaped.
-            let mut bounce: Vec<Option<AlignedBuf>> = Vec::with_capacity(window.len());
-            {
-                let mut sq = ring.submission();
-                for (i, op) in window.iter_mut().enumerate() {
-                    let entry = match op {
-                        Op::Read(offset, buf) => {
-                            let ptr = if self.needs_bounce(buf) {
-                                bounce.push(Some(AlignedBuf::zeroed(buf.len())));
-                                bounce[i].as_mut().expect("just pushed").as_mut_ptr()
-                            } else {
-                                bounce.push(None);
-                                buf.as_mut_ptr()
-                            };
-                            opcode::Read::new(fd, ptr, len32(buf.len())?)
-                                .offset(*offset)
-                                .build()
-                        }
-                        Op::Write(offset, data) => {
-                            let ptr = if self.needs_bounce(data) {
-                                bounce.push(Some(AlignedBuf::copy_of(data)));
-                                bounce[i].as_ref().expect("just pushed").as_ptr()
-                            } else {
-                                bounce.push(None);
-                                data.as_ptr()
-                            };
-                            opcode::Write::new(fd, ptr, len32(data.len())?)
-                                .offset(*offset)
-                                .build()
-                        }
-                        Op::Fsync => {
-                            bounce.push(None);
-                            opcode::Fsync::new(fd)
-                                .flags(types::FsyncFlags::DATASYNC)
-                                .build()
-                        }
-                    };
-                    // SAFETY: every buffer referenced by the entry (a caller buffer borrowed for
-                    // the whole call, or a bounce buffer in `bounce`, whose heap allocation does
-                    // not move when the Vec grows) stays alive and is not otherwise accessed
-                    // until this window's completions have all been reaped below. The window is
-                    // at most QUEUE_DEPTH entries, so the queue cannot be full.
-                    unsafe {
-                        sq.push(&entry.user_data(i as u64))
-                            .expect("window fits the ring")
-                    };
+            // --- Preparation (no SQ publication) -------------------------------------------
+            // Lengths first: an unsupported length never allocates a bounce buffer.
+            let mut lens: Vec<u32> = Vec::with_capacity(window.len());
+            for op in window.iter() {
+                match op {
+                    Op::Read(_, buf) => lens.push(len32(buf.len())?),
+                    Op::Write(_, data) => lens.push(len32(data.len())?),
+                    Op::Fsync => lens.push(0),
                 }
             }
 
+            let mut bounce: Vec<Option<AlignedBuf>> = Vec::with_capacity(window.len());
+            for (i, op) in window.iter().enumerate() {
+                #[cfg(test)]
+                if TEST_PREPARE_FAIL_AT.with(|c| c.get()) == Some(i) {
+                    return Err(io::Error::other("injected preparation failure"));
+                }
+                #[cfg(not(test))]
+                let _ = i;
+                match op {
+                    Op::Read(_, buf) if self.needs_bounce(buf) => {
+                        bounce.push(Some(AlignedBuf::zeroed(buf.len())));
+                    }
+                    Op::Write(_, data) if self.needs_bounce(data) => {
+                        bounce.push(Some(AlignedBuf::copy_of(data)));
+                    }
+                    _ => bounce.push(None),
+                }
+            }
+
+            let mut entries: Vec<Entry> = Vec::with_capacity(window.len());
+            for (i, op) in window.iter_mut().enumerate() {
+                let entry = match op {
+                    Op::Read(offset, buf) => {
+                        let ptr = match bounce[i].as_mut() {
+                            Some(b) => b.as_mut_ptr(),
+                            None => buf.as_mut_ptr(),
+                        };
+                        opcode::Read::new(fd, ptr, lens[i])
+                            .offset(*offset)
+                            .build()
+                            .user_data(i as u64)
+                    }
+                    Op::Write(offset, data) => {
+                        let ptr = match bounce[i].as_ref() {
+                            Some(b) => b.as_ptr(),
+                            None => data.as_ptr(),
+                        };
+                        opcode::Write::new(fd, ptr, lens[i])
+                            .offset(*offset)
+                            .build()
+                            .user_data(i as u64)
+                    }
+                    Op::Fsync => opcode::Fsync::new(fd)
+                        .flags(types::FsyncFlags::DATASYNC)
+                        .build()
+                        .user_data(i as u64),
+                };
+                entries.push(entry);
+            }
+            let mut seen = vec![false; window.len()];
+
+            {
+                let sq = ring.submission();
+                if !sq.is_empty() {
+                    ownership_fail("synchronous ring has leftover SQEs before publication");
+                }
+                if sq.capacity() < window.len() {
+                    ownership_fail("synchronous window exceeds ring capacity");
+                }
+            }
+
+            // Guard after prepared buffers: on unwind it aborts before `bounce` is dropped.
+            let mut guard = OwnershipGuard::new();
+            guard.arm();
+            #[cfg(test)]
+            if TEST_PANIC_WHEN_ARMED.with(|c| c.replace(false)) {
+                panic!("injected panic while ownership guard armed");
+            }
+
+            // --- Publication: no allocation, length conversion, `?`, or expect --------------
+            {
+                let mut sq = ring.submission();
+                for (i, entry) in entries.iter().enumerate() {
+                    // SAFETY: each entry references either a caller buffer borrowed for the
+                    // whole `run` call, or a bounce buffer in `bounce` (heap allocation; moving
+                    // the `AlignedBuf` does not move those bytes). `guard` stays armed until
+                    // every CQE for this window has been consumed below, then is disarmed
+                    // before read copyback — the exact release point for these borrows.
+                    if unsafe { sq.push(entry) }.is_err() {
+                        ownership_fail(if i == 0 {
+                            "unexpected SQ push failure before any entry was published"
+                        } else {
+                            "SQ push failed after publishing a prefix of the window"
+                        });
+                    }
+                }
+            }
+
+            // --- Drain: every published op gets exactly one completion --------------------
             let mut done = 0;
             while done < window.len() {
-                if let Err(e) = ring.submit_and_wait(window.len() - done) {
+                if let Err(e) = submit_and_wait_or_inject(&mut ring, window.len() - done) {
                     match e.raw_os_error() {
                         Some(libc::EINTR | libc::EAGAIN | libc::EBUSY) => {}
                         // The kernel may still own our buffers; returning would let them be
                         // freed under it. Stop the process instead (fail-stop).
-                        _ => {
-                            eprintln!("flaminio-uring: io_uring_enter failed: {e}; aborting");
-                            std::process::abort();
-                        }
+                        _ => ownership_fail(&format!("io_uring_enter failed: {e}")),
                     }
                 }
-                for cqe in ring.completion() {
+                for_each_cqe(&mut ring, |user_data, res| {
+                    if user_data >= window.len() as u64 {
+                        ownership_fail("CQE user_data outside the published window");
+                    }
+                    let i = user_data as usize;
+                    if seen[i] {
+                        ownership_fail("duplicate CQE for a window operation");
+                    }
+                    seen[i] = true;
                     done += 1;
-                    let i = cqe.user_data() as usize;
                     let expected = match &window[i] {
                         Op::Read(_, buf) => buf.len(),
                         Op::Write(_, data) => data.len(),
                         Op::Fsync => 0,
                     };
-                    let res = cqe.result();
                     let error = if res < 0 {
                         Some(io::Error::from_raw_os_error(-res))
                     } else if res as usize != expected {
@@ -262,8 +367,18 @@ impl UringDevice {
                     if first_error.is_none() {
                         first_error = error;
                     }
-                }
+                });
             }
+
+            if ring.completion().next().is_some() {
+                ownership_fail("leftover CQEs after draining a synchronous window");
+            }
+            if !ring.submission().is_empty() {
+                ownership_fail("leftover SQEs after draining a synchronous window");
+            }
+
+            // Kernel owns no buffers from this window; disarm before copyback/drop of bounce.
+            guard.disarm();
 
             for (op, b) in window.iter_mut().zip(&bounce) {
                 if let (Op::Read(_, buf), Some(b)) = (op, b) {
@@ -284,6 +399,26 @@ fn clone_err(e: &io::Error) -> io::Error {
     io::Error::new(e.kind(), e.to_string())
 }
 
+fn submit_and_wait_or_inject(ring: &mut IoUring, want: usize) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(errno) = TEST_SUBMIT_ERRNO.take() {
+        return Err(io::Error::from_raw_os_error(errno));
+    }
+    ring.submit_and_wait(want).map(|_| ())
+}
+
+fn for_each_cqe(ring: &mut IoUring, mut f: impl FnMut(u64, i32)) {
+    #[cfg(test)]
+    {
+        while let Some((user_data, result)) = TEST_CQE_SEQ.with(|q| q.borrow_mut().pop_front()) {
+            f(user_data, result);
+        }
+    }
+    for cqe in ring.completion() {
+        f(cqe.user_data(), cqe.result());
+    }
+}
+
 impl std::os::fd::AsRawFd for UringDevice {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.file.as_raw_fd()
@@ -293,7 +428,8 @@ impl std::os::fd::AsRawFd for UringDevice {
 impl UringDevice {
     /// Submits `writes` on the commit ring, as part of commit `generation`. Aligned shared
     /// buffers are written as they are (a reference is held until completion); others are
-    /// copied into aligned buffers.
+    /// copied into aligned buffers. Preparation failures leave no new queued work and do not
+    /// mutate generation accounting owned by the caller.
     fn submit_commit_writes(
         &self,
         st: &mut Commits,
@@ -305,58 +441,109 @@ impl UringDevice {
             .iter()
             .map(|(_, d)| len32(d.len()))
             .collect::<io::Result<Vec<u32>>>()?;
+        let n = writes.len() as u64;
+        if n > 0 && (st.next_tag >= FLUSH_TAG || FLUSH_TAG - st.next_tag < n) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "commit write tag space exhausted",
+            ));
+        }
+
+        // Prepare Held buffers and tags before any SQ mutation or ownership install.
+        let mut prepared: Vec<(u64, u64, Held, u32)> = Vec::with_capacity(writes.len());
+        for (i, ((offset, data), &len)) in writes.iter().zip(&lens).enumerate() {
+            #[cfg(test)]
+            if TEST_PREPARE_FAIL_AT.with(|c| c.get()) == Some(i) {
+                return Err(io::Error::other("injected preparation failure"));
+            }
+            let tag = st.next_tag + i as u64;
+            prepared.push((tag, *offset, Held::new(data, self.direct), len));
+        }
+        st.writes.reserve(writes.len());
+
+        {
+            let sq = ring.submission();
+            if !sq.is_empty() {
+                ownership_fail("commit ring has leftover SQEs before publication");
+            }
+            if sq.capacity() < writes.len() {
+                ownership_fail("commit writes exceed ring capacity");
+            }
+        }
+
         let fd = types::Fd(self.file.as_raw_fd());
+        let mut guard = OwnershipGuard::new();
+        guard.arm();
+        #[cfg(test)]
+        if TEST_PANIC_WHEN_ARMED.with(|c| c.replace(false)) {
+            panic!("injected panic while ownership guard armed");
+        }
+
         {
             let mut sq = ring.submission();
-            for ((offset, data), len) in writes.iter().zip(lens) {
-                let buf = Held::new(data, self.direct);
-                let tag = st.next_tag;
-                st.next_tag += 1;
-                let entry = opcode::Write::new(fd, buf.bytes().as_ptr(), len)
-                    .offset(*offset)
+            for (i, (tag, offset, buf, len)) in prepared.into_iter().enumerate() {
+                let ptr = buf.bytes().as_ptr();
+                let entry = opcode::Write::new(fd, ptr, len)
+                    .offset(offset)
                     .build()
                     .user_data(tag);
-                // SAFETY: the buffer (an owned copy, or a reference to immutable shared bytes)
-                // moves into `st.writes` below and stays there until this operation's
-                // completion is reaped (`reap_commits`, also on drop); moving a `Held` does not
-                // move the bytes it points to. The callers keep fewer than QUEUE_DEPTH
-                // operations in flight on this ring: it fits.
-                unsafe { sq.push(&entry).expect("fits the commit ring") };
+                // Install ownership before the entry can reach the kernel.
                 st.writes.insert(tag, (buf, generation));
+                st.next_tag = tag + 1;
+                // SAFETY: the buffer (an owned copy, or a reference to immutable shared bytes)
+                // is in `st.writes` and stays there until this operation's completion is reaped
+                // (`reap_commits`, also on drop under an armed `OwnershipGuard`); moving a
+                // `Held` does not move the bytes it points to. `guard` stays armed through
+                // `submit_or_abort` below — the release point for this publication window.
+                if unsafe { sq.push(&entry) }.is_err() {
+                    ownership_fail(if i == 0 {
+                        "unexpected commit SQ push failure before any entry was published"
+                    } else {
+                        "commit SQ push failed after publishing a prefix"
+                    });
+                }
             }
         }
         submit_or_abort(ring, "a commit's writes");
+        guard.disarm();
         Ok(())
     }
 
-    /// Takes the commit ring's completions.
+    /// Takes the commit ring's completions. Unknown, duplicate or impossible CQEs fail-stop.
     fn reap_commits(st: &mut Commits, ring: &mut IoUring) {
-        for cqe in ring.completion() {
-            let tag = cqe.user_data();
-            let res = cqe.result();
+        for_each_cqe(ring, |tag, res| {
             if tag & FLUSH_TAG != 0 {
                 let generation = tag & !FLUSH_TAG;
-                let error = (res < 0).then(|| io::Error::from_raw_os_error(-res));
+                let Some(pos) = st.current.iter().position(|(g, _)| *g == generation) else {
+                    ownership_fail("flush CQE for unknown commit generation");
+                };
+                match &st.current[pos].1 {
+                    Flush::Submitted => {}
+                    Flush::Waiting => ownership_fail("flush CQE for a Waiting commit"),
+                    Flush::Covered => ownership_fail("flush CQE for a Covered commit"),
+                    Flush::Done(_) => ownership_fail("duplicate flush CQE"),
+                }
+                // Only result 0 is successful fsync; negative is an error; positive is impossible.
+                let error = if res < 0 {
+                    Some(io::Error::from_raw_os_error(-res))
+                } else if res == 0 {
+                    None
+                } else {
+                    ownership_fail("flush CQE with positive result");
+                };
                 // The tagged commit and any Covered partners that share this fsync.
-                let mut marking = false;
-                for (g, flush) in st.current.iter_mut() {
-                    if *g == generation {
+                st.current[pos].1 = Flush::Done(error.as_ref().map(clone_err));
+                for (_, flush) in st.current.iter_mut().skip(pos + 1) {
+                    if matches!(flush, Flush::Covered) {
                         *flush = Flush::Done(error.as_ref().map(clone_err));
-                        marking = true;
-                        continue;
-                    }
-                    if marking && matches!(flush, Flush::Covered) {
-                        *flush = Flush::Done(error.as_ref().map(clone_err));
-                        continue;
-                    }
-                    if marking {
+                    } else {
                         break;
                     }
                 }
-                continue;
+                return;
             }
             let Some((buf, generation)) = st.writes.remove(&tag) else {
-                continue;
+                ownership_fail("write CQE for unknown or already-reaped tag");
             };
             let len = buf.bytes().len();
             let error = if res < 0 {
@@ -372,7 +559,11 @@ impl UringDevice {
             if let Some(e) = error {
                 st.errors.entry(generation).or_insert(e);
             }
-        }
+            // `buf` drops here. If a Shared owner's destructor panics while other writes remain
+            // outstanding, an armed Drop/publication guard aborts; ordinary poll keeps the
+            // remaining Held values in `st.writes`.
+            drop(buf);
+        });
     }
 
     /// Submits each commit's flush, in order, once every write that belongs to it or to an
@@ -433,12 +624,11 @@ impl UringDevice {
             .flags(types::FsyncFlags::DATASYNC)
             .build()
             .user_data(FLUSH_TAG | tag_gen);
-        // SAFETY: references no memory. make_room keeps the ring from filling.
-        unsafe {
-            ring.submission()
-                .push(&entry)
-                .expect("fits the commit ring")
-        };
+        // SAFETY: references no buffer memory. make_room keeps the ring from filling; a push
+        // failure here is an internal ownership failure and fail-stops.
+        if unsafe { ring.submission().push(&entry) }.is_err() {
+            ownership_fail("commit flush SQ push failed");
+        }
         st.current[start].1 = Flush::Submitted;
         for i in 1..take {
             st.current[start + i].1 = Flush::Covered;
@@ -462,14 +652,13 @@ impl UringDevice {
 
     /// Waits for at least one completion on the commit ring.
     fn wait_commits(ring: &mut IoUring) {
-        if let Err(e) = ring.submit_and_wait(1)
+        if let Err(e) = submit_and_wait_or_inject(ring, 1)
             && !matches!(
                 e.raw_os_error(),
                 Some(libc::EINTR | libc::EAGAIN | libc::EBUSY)
             )
         {
-            eprintln!("flaminio-uring: io_uring_enter failed waiting for a commit: {e}; aborting");
-            std::process::abort();
+            ownership_fail(&format!("io_uring_enter failed waiting for a commit: {e}"));
         }
     }
 }
@@ -478,29 +667,39 @@ impl UringDevice {
 /// included, so the process stops (fail-stop).
 fn submit_or_abort(ring: &mut IoUring, what: &str) {
     loop {
-        match ring.submit() {
+        #[cfg(test)]
+        let result = if let Some(errno) = TEST_SUBMIT_ERRNO.take() {
+            Err(io::Error::from_raw_os_error(errno))
+        } else {
+            ring.submit()
+        };
+        #[cfg(not(test))]
+        let result = ring.submit();
+        match result {
             Ok(_) => return,
             Err(e)
                 if matches!(
                     e.raw_os_error(),
                     Some(libc::EINTR | libc::EAGAIN | libc::EBUSY)
                 ) => {}
-            Err(e) => {
-                eprintln!("flaminio-uring: io_uring_enter failed for {what}: {e}; aborting");
-                std::process::abort();
-            }
+            Err(e) => ownership_fail(&format!("io_uring_enter failed for {what}: {e}")),
         }
     }
 }
 
 impl Drop for UringDevice {
     fn drop(&mut self) {
-        // The kernel may still read the buffers of writes in flight: wait for them first.
+        // Arm before any Held destructor can run: a panicking Bytes owner must not unwind
+        // into destruction of remaining kernel-owned allocations. Disarm only after both
+        // queues and all accepted writes/commits are drained.
+        let mut guard = OwnershipGuard::new();
+        guard.arm();
         let st = self.commits.get_mut();
         let ring = self.commit_ring.get_mut();
         loop {
             Self::reap_commits(st, ring);
             if st.in_flight() == 0 {
+                guard.disarm();
                 return;
             }
             Self::wait_commits(ring);
@@ -538,6 +737,10 @@ impl BlockDevice for UringDevice {
     /// Early writes go on the commit ring, as part of the next commit: its flush waits for
     /// them. Too many for the ring even when empty: written at once instead.
     fn start_writes(&self, writes: &[(u64, Bytes)]) -> io::Result<()> {
+        // Length preflight before any ownership or ring mutation for this request.
+        for (_, d) in writes {
+            let _ = len32(d.len())?;
+        }
         let mut st = self.commits.borrow_mut();
         let mut ring = self.commit_ring.borrow_mut();
         if !self.make_room(&mut st, &mut ring, writes.len()) {
@@ -552,25 +755,37 @@ impl BlockDevice for UringDevice {
     /// The writes on the commit ring, then an `fdatasync` once they, the early writes that
     /// belong to this commit, and the writes of every commit before it have completed. Commits
     /// already in flight stay so (pipelined commits); they complete in order. A commit too big
-    /// for the ring even when empty is done synchronously.
+    /// for the ring even when empty is done synchronously. A pre-publication rejection does
+    /// not advance `next_gen`, erase early-write errors, or strand early writes.
     fn start_commit(&self, writes: &[(u64, Bytes)]) -> io::Result<bool> {
+        // Length/layout preflight before changing this request's generation.
+        for (_, d) in writes {
+            let _ = len32(d.len())?;
+        }
         let mut st = self.commits.borrow_mut();
         let generation = st.next_gen;
-        st.next_gen += 1;
         let mut ring = self.commit_ring.borrow_mut();
         if !self.make_room(&mut st, &mut ring, writes.len()) {
             // Nothing in flight: no earlier commit to stay ahead of.
             let early = st.errors.remove(&generation);
-            drop((st, ring));
             if let Some(e) = early {
+                // Sync path still accepts this generation as failed so early writes are not
+                // stranded; only pre-publication rejection leaves next_gen unchanged.
+                st.next_gen = generation + 1;
                 return Err(e);
             }
+            drop((st, ring));
+            // Sync acceptance of this generation (mirrors advancing before I/O previously).
+            self.commits.borrow_mut().next_gen = generation + 1;
             let views: Vec<(u64, &[u8])> = writes.iter().map(|(o, d)| (*o, &d[..])).collect();
             self.write_many(&views)?;
             self.flush()?;
             return Ok(true);
         }
+        st.current.reserve(1);
         self.submit_commit_writes(&mut st, &mut ring, writes, generation)?;
+        // Publication accepted: advance generation and record the waiting flush.
+        st.next_gen = generation + 1;
         st.current.push_back((generation, Flush::Waiting));
         self.advance_commit(&mut st, &mut ring);
         Ok(false)
@@ -626,6 +841,34 @@ impl BlockDevice for UringDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test-only: fail preparation at `index` (before SQ publication). Clear with `None`.
+    #[allow(dead_code)]
+    fn inject_prepare_fail_at(index: Option<usize>) {
+        TEST_PREPARE_FAIL_AT.with(|c| c.set(index));
+    }
+
+    /// Test-only: next submit returns this errno once.
+    #[allow(dead_code)]
+    fn inject_submit_errno(errno: Option<i32>) {
+        TEST_SUBMIT_ERRNO.with(|c| c.set(errno));
+    }
+
+    /// Test-only: prepend injected CQEs consumed before the real completion queue.
+    #[allow(dead_code)]
+    fn inject_cqe_seq(seq: impl IntoIterator<Item = (u64, i32)>) {
+        TEST_CQE_SEQ.with(|q| {
+            let mut q = q.borrow_mut();
+            q.clear();
+            q.extend(seq);
+        });
+    }
+
+    /// Test-only: panic once after the ownership guard is armed.
+    #[allow(dead_code)]
+    fn inject_panic_when_armed(panic: bool) {
+        TEST_PANIC_WHEN_ARMED.with(|c| c.set(panic));
+    }
 
     fn temp_device(size: u64, direct: bool) -> (UringDevice, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!(
