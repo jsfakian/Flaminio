@@ -4,6 +4,10 @@
 
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-13.
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-13.
+- **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`b242fee792e79e2f352dc1d533500bcc875c440ffda1afe216e47e2bcfd039d0`).
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
+
+The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
 - Plan review round 1 (2026-11-14) fixes, made after approval: see below.
 - Plan review round 2 (2026-11-14) fixes, made after approval: see below.
 - Plan review round 3 (2026-11-14) fixes, made after approval: see below.
@@ -15,7 +19,7 @@
 Approved with the recommended answer to each open question (see Settled at approval). The plan's
 review loop continues after approval; later fixes are recorded as changes made after approval.
 Work on this issue merged before this approval was recorded (pull request #28); the issue is
-still open. Approved before its plan review cleared (status: pending).
+still open. Earlier approval preceded plan-review clearance; the 2026-11-20 lines cover the cleared text.
 
 ## Settled at approval
 

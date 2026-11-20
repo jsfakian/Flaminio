@@ -1,9 +1,17 @@
 # Issue #91 — decisions
 
+## Approvals
+
+- **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`f9af95f4b851d6bb8d9cfeedfa0b8cabe01584c2b380c2f4c9fecc347687a94c`).
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
+
+The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
+
 ## Current status
 
-Dedicated tracker move authorized; all current technical drafts Proposed and unapproved.
-No #63 approval or reviewer round is transferred as a new #91 approval/round.
+Dedicated tracker move authorized. Spec and design of the published clear snapshot are
+approved 2026-11-20 (see Approvals). No #63 approval or reviewer round is transferred as a
+new #91 approval/round.
 
 ## Historical source provenance
 

@@ -1,21 +1,17 @@
 # Review-batch supervisor instructions
 
 Current status, 2026-11-20: **62 issues, 55 recorded plan-review clearances, 7 user-cleared
-completed implementations, zero pending**. The remaining loops completed in this continuation
-ended with the required fresh zero-comment reviews, including Nits. Preserve earlier clear
-dispositions and their exact reports/snapshots without inventing additional rounds.
-The terminal statuses are `clear` and
-`cleared_completed`; the batch review queue is finished, with no automatic runtime work.
-The user excluded completed/merged #4, #5, #7, #8, #10, #11 and #30; preserve their historical
-reviews/approvals and verified disposition without claiming a new review. Historical counts
-and unfinished findings in the progress log describe their earlier checkpoints.
+completed implementations, zero pending**. All 55 clear plans are human-approved (Spec and
+Design, 2026-11-20) against the published clear snapshots. The batch review queue is finished;
+ship-spec may proceed. Preserve earlier clear dispositions and their exact reports/snapshots
+without inventing additional rounds. The terminal statuses are `clear` and
+`cleared_completed`. The user excluded completed/merged #4, #5, #7, #8, #10, #11 and #30;
+preserve their historical reviews/approvals and verified disposition without claiming a new
+review.
 
-The ledger's `active_review_checkout` and authoritative published `main` snapshot can be newer
-than a canonical original branch. Use recorded technical/report hashes and publication
-provenance; do not silently implement from older approved text. Review clearance is separate
-from human approval: historical approvals/accepted local ADRs remain, and subsequent technical
-revisions are unapproved. Later approval/settlement records on earlier clear plans are not a
-fresh review of every later HEAD. Runtime feature issues remain open as their plans require.
+Implement from the published clear text on `main` (and the 2026-11-20 approval commits), not
+from stale worktree copies. ADR acceptance remains a separate ship-spec step when a design
+proposes one. Runtime feature issues remain open until implemented.
 
 This continues the user's task: after creating every missing intent/spec/design, run incremental
 correctness/codebase-consistency and security review/address loops for **each issue** until

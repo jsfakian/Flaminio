@@ -6,6 +6,10 @@ Settled in the plan reviews (seven rounds). Reviewers treat these as given.
 
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-13.
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-13.
+- **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`2b6ab13e57743d663356cf18cf70c2791a4e7ef38e52329cea4ea3cc9af70e71`).
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
+
+The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
 - Plan review round 1 (2026-11-13) fixes, made after approval: see below.
 - Plan review round 2 (2026-11-14) fixes, made after approval: see below. The two risks named in
   round 1 are accepted under the user's instruction of 2026-11-13 (continue unattended, choose
@@ -15,7 +19,7 @@ Settled in the plan reviews (seven rounds). Reviewers treat these as given.
 Approved with the recommended answer to each open question (see Settled at approval). The plan's
 review loop continues after approval; later fixes are recorded as changes made after approval.
 Work on this issue merged before this approval was recorded (pull request #31); the issue is
-still open. Approved before its plan review cleared (status: pending).
+still open. Earlier approval preceded plan-review clearance; the 2026-11-20 lines cover the cleared text.
 
 ## Settled at approval
 

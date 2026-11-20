@@ -1,11 +1,18 @@
 # Issue #90 — decisions
 
+## Approvals
+
+- **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`c8126d6e64c1c2d9f9be994e55656aa6689949e8a63165129adb2f03ec1bad54`).
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
+
+The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
+
 ## Current status
 
-The dedicated tracker move was authorized by the user; #90 exists. These revised identity,
-bootstrap, migration and composed contracts are **proposed/unapproved**, not implementation
-permission or ADR acceptance. A fresh whole-scope #90 review starts after the draft commit.
-No #61 review round is relabeled as a #90 review.
+The dedicated tracker move was authorized by the user; #90 exists. Spec and design of the
+published clear snapshot are approved 2026-11-20 (see Approvals). That approval is
+implementation permission for this issue's plan; accepting any ADR remains a separate
+ship-spec step. No #61 review round is relabeled as a #90 review.
 
 ## Historical source approvals — provenance only
 

@@ -1,7 +1,7 @@
 {
   "date": "2026-11-12",
   "scope": "62 issue plans: 59 original issues plus audit follow-up #86, approved store-identity split #90 and shared disruption-guard split #91; draft review only",
-  "clearance": "Zero unresolved comments including Nits; approvals remain separate",
+  "clearance": "Zero unresolved comments including Nits; all clear plans approved 2026-11-20 (implementation permission). cleared_completed issues unchanged.",
   "issues": [
     {
       "number": 4,
@@ -43,13 +43,14 @@
       "branch": "audit/2026-11-12-correctness",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "6c9f32e",
+      "approved": "2026-11-20",
+      "approval_commit": "1230919",
       "round": "1",
       "authoritative_report": "docs/issues/6/report.md",
       "latest_fix_commit": "4642aaa788ffb5c9ea653b8f4aef48732233e0fb",
       "clear_round": 6,
-      "clear_report_commit": "0ccece8"
+      "clear_report_commit": "0ccece8",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 7,
@@ -91,13 +92,14 @@
       "branch": "audit/2026-11-12-correctness",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "13b57e8",
+      "approved": "2026-11-20",
+      "approval_commit": "b485e63",
       "round": "1",
       "authoritative_report": "docs/issues/9/report.md",
       "latest_fix_commit": "0b109f302eba87281ee7d61d454ae5db4d25cc4a",
       "clear_round": 8,
-      "clear_report_commit": "0d06536"
+      "clear_report_commit": "0d06536",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 10,
@@ -139,13 +141,14 @@
       "branch": "issue/12-data-plane-in-kubernetes",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "6f70e98",
+      "approved": "2026-11-20",
+      "approval_commit": "d4e351e",
       "round": "1",
       "authoritative_report": "docs/issues/12/report.md",
       "latest_fix_commit": "1d200c96b367192ade6e3d819ee7ba1b070c444f",
       "clear_round": 5,
-      "clear_report_commit": "314e82f"
+      "clear_report_commit": "314e82f",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 13,
@@ -153,13 +156,14 @@
       "branch": "issue/13-replicas-left-by-moves",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "7defc59",
+      "approved": "2026-11-20",
+      "approval_commit": "9f584db",
       "round": "1",
       "authoritative_report": "docs/issues/13/report.md",
       "latest_fix_commit": "612979176e245b00b74d58aa94c41b2d2989c8d8",
       "clear_round": 9,
-      "clear_report_commit": "db7b194"
+      "clear_report_commit": "db7b194",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 14,
@@ -167,13 +171,14 @@
       "branch": "audit/2026-11-12-correctness",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "9365a4a",
+      "approved": "2026-11-20",
+      "approval_commit": "4cf059a",
       "round": "1",
       "authoritative_report": "docs/issues/14/report.md",
       "latest_fix_commit": "5dfe0230471a67cfee487a9ae3bb8ecfb9af56fd",
       "clear_round": 3,
-      "clear_report_commit": "cdc9bcb"
+      "clear_report_commit": "cdc9bcb",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 15,
@@ -181,13 +186,14 @@
       "branch": "issue/15-volumes-per-node",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "15dad9c 976e7d5",
+      "approved": "2026-11-20",
+      "approval_commit": "b6cd7f1",
       "round": "1",
       "authoritative_report": "docs/issues/15/report.md",
       "latest_fix_commit": "3592050cc4da3cacf4c9a759692907534fbcccb3",
       "clear_round": 9,
-      "clear_report_commit": "e36882b"
+      "clear_report_commit": "e36882b",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 16,
@@ -195,13 +201,14 @@
       "branch": "issue/16-short-lived-certificates",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "f7a13cd 89a6cc6",
+      "approved": "2026-11-20",
+      "approval_commit": "58dd1a5",
       "round": "1",
       "authoritative_report": "docs/issues/16/report.md",
       "latest_fix_commit": "46fec33449fe49042ab4f457e89efc1a49ebd5dc",
       "clear_round": 9,
-      "clear_report_commit": "71a473a"
+      "clear_report_commit": "71a473a",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 17,
@@ -209,13 +216,14 @@
       "branch": "issue/17-drain-unattached-volumes",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "5172cc2 b904a18",
+      "approved": "2026-11-20",
+      "approval_commit": "5072dc3",
       "round": "1",
       "authoritative_report": "docs/issues/17/report.md",
       "latest_fix_commit": "43d1ec2807f31d46aded1c494e5d5d730979476f",
       "clear_round": 21,
-      "clear_report_commit": "4154dfd"
+      "clear_report_commit": "4154dfd",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 18,
@@ -223,13 +231,14 @@
       "branch": "issue/18-failure-domain-in-moves",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "2e1d3a0 1287453",
+      "approved": "2026-11-20",
+      "approval_commit": "c41c76e",
       "round": "1",
       "authoritative_report": "docs/issues/18/report.md",
       "latest_fix_commit": "d333ca864431b68125007881476fdfdc8149217a",
       "clear_round": 7,
-      "clear_report_commit": "b00ac22"
+      "clear_report_commit": "b00ac22",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 30,
@@ -259,8 +268,9 @@
       "latest_fix_commit": "f23ee17c30ba8a00c575a15a42ca0737d864fd9d",
       "clear_round": 11,
       "clear_report_commit": "a06aaf5",
-      "approved": "2026-11-13",
-      "approval_commit": "d2acdb6 ec6ed55"
+      "approved": "2026-11-20",
+      "approval_commit": "9628cec",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 44,
@@ -273,8 +283,9 @@
       "latest_fix_commit": "aa0457b7601c7ce03f4e17d8ebcfa49dc22c6c6e",
       "clear_round": 7,
       "clear_report_commit": "e329113",
-      "approved": "2026-11-13",
-      "approval_commit": "9c22aa8 670c275"
+      "approved": "2026-11-20",
+      "approval_commit": "6ccd75d",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 45,
@@ -282,13 +293,14 @@
       "branch": "issue/45-many-to-many-rebuild",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "0766990",
+      "approved": "2026-11-20",
+      "approval_commit": "693d3ee",
       "round": "1",
       "authoritative_report": "docs/issues/45/report.md",
       "latest_fix_commit": "e7dc21462ccc4f121569641a24f3bd64dd01e240",
       "clear_round": 14,
-      "clear_report_commit": "eae9ecc"
+      "clear_report_commit": "eae9ecc",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 46,
@@ -296,13 +308,14 @@
       "branch": "issue/46-scrubbing-and-repair",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "f6bb583",
+      "approved": "2026-11-20",
+      "approval_commit": "5957e80",
       "round": "1",
       "authoritative_report": "docs/issues/46/report.md",
       "latest_fix_commit": "d3cf93dcaa07819d444ce9794974a206559e62e7",
       "clear_round": 6,
-      "clear_report_commit": "d04aa6f"
+      "clear_report_commit": "d04aa6f",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 47,
@@ -310,13 +323,14 @@
       "branch": "issue/47-gray-failure-detection",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "c60ba6a",
+      "approved": "2026-11-20",
+      "approval_commit": "50bea6e",
       "round": "1",
       "authoritative_report": "docs/issues/47/report.md",
       "latest_fix_commit": "3bb708eec85f3a1a9476b57cfa8843e2e0a3fac7",
       "clear_round": 6,
-      "clear_report_commit": "635ad15"
+      "clear_report_commit": "635ad15",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 48,
@@ -324,13 +338,14 @@
       "branch": "issue/48-live-data-plane-upgrade",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "ace563a f7db824",
+      "approved": "2026-11-20",
+      "approval_commit": "5510134",
       "round": "1",
       "authoritative_report": "docs/issues/48/report.md",
       "latest_fix_commit": "75316ba625c43ed64581957dec8f8b95bd2d6d2d",
       "clear_round": 5,
-      "clear_report_commit": "6886634"
+      "clear_report_commit": "6886634",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 49,
@@ -338,13 +353,14 @@
       "branch": "issue/49-chaos-test-suite",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "243596e dde1d79",
+      "approved": "2026-11-20",
+      "approval_commit": "c81dbf8",
       "round": "14",
       "authoritative_report": "docs/issues/49/report.md",
       "latest_fix_commit": "70f1816",
       "clear_round": 14,
-      "clear_report_commit": "de46aef"
+      "clear_report_commit": "de46aef",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 50,
@@ -352,13 +368,14 @@
       "branch": "issue/50-encryption-at-rest",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "d08f71b 9edd590",
+      "approved": "2026-11-20",
+      "approval_commit": "7e6dd69",
       "round": "5",
       "authoritative_report": "docs/issues/50/report.md",
       "latest_fix_commit": "6b65a96",
       "clear_round": 5,
-      "clear_report_commit": "e8f0fe2"
+      "clear_report_commit": "e8f0fe2",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 51,
@@ -366,13 +383,14 @@
       "branch": "issue/51-snapshots-and-clones",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "512c43a c8908eb",
+      "approved": "2026-11-20",
+      "approval_commit": "6305da0",
       "round": "4",
       "latest_fix_commit": "a450dc6",
       "authoritative_report": "docs/issues/51/report.md",
       "clear_round": 4,
-      "clear_report_commit": "a822bb9"
+      "clear_report_commit": "a822bb9",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 52,
@@ -380,13 +398,14 @@
       "branch": "issue/52-incremental-s3-backups",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "420486a c44a190 0edaee1",
+      "approved": "2026-11-20",
+      "approval_commit": "46c32ed",
       "round": "8",
       "latest_fix_commit": "48d4d82",
       "authoritative_report": "docs/issues/52/report.md",
       "clear_round": 8,
-      "clear_report_commit": "96067ab"
+      "clear_report_commit": "96067ab",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 53,
@@ -394,13 +413,14 @@
       "branch": "issue/53-immutable-backups",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "1f5d87a e362517",
+      "approved": "2026-11-20",
+      "approval_commit": "b185c71",
       "round": "10",
       "latest_fix_commit": "a461a6b",
       "authoritative_report": "docs/issues/53/report.md",
       "clear_round": 10,
-      "clear_report_commit": "105dac0"
+      "clear_report_commit": "105dac0",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 54,
@@ -408,13 +428,14 @@
       "branch": "issue/54-restore-to-another-cluster",
       "status": "clear",
       "rounds": [],
-      "approved": "2026-11-13",
-      "approval_commit": "8986ef4 52df1de",
+      "approved": "2026-11-20",
+      "approval_commit": "d913400",
       "round": "8",
       "latest_fix_commit": "3fd4cef",
       "authoritative_report": "docs/issues/54/report.md",
       "clear_round": 8,
-      "clear_report_commit": "5ffa0c2"
+      "clear_report_commit": "5ffa0c2",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 55,
@@ -484,14 +505,15 @@
           "status": "clear"
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "ec47eba",
+      "approved": "2026-11-20",
+      "approval_commit": "ea7a2bf",
       "round": "3",
       "reviewed_commit": "47b183ebbabf2d1629644cff33cb2c0eaa033b4f",
       "latest_fix_commit": "47b183ebbabf2d1629644cff33cb2c0eaa033b4f",
       "authoritative_report": "docs/issues/55/report.md",
       "clear_round": 3,
-      "clear_report_commit": "5b140f05a4c9d40ecf8332114283b2d1a3860770"
+      "clear_report_commit": "5b140f05a4c9d40ecf8332114283b2d1a3860770",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 56,
@@ -659,14 +681,15 @@
           "status": "clear"
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "513b973",
+      "approved": "2026-11-20",
+      "approval_commit": "1d06677",
       "round": "4",
       "reviewed_commit": "b43ee508e00949524907309e931b5d954f442918",
       "authoritative_report": "docs/issues/56/report.md",
       "latest_fix_commit": "b43ee508e00949524907309e931b5d954f442918",
       "clear_round": 4,
-      "clear_report_commit": "ec6e352948c2df8d2240c67dcbec26addfe694f4"
+      "clear_report_commit": "ec6e352948c2df8d2240c67dcbec26addfe694f4",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 57,
@@ -842,14 +865,15 @@
           "status": "clear"
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "eb38cba",
+      "approved": "2026-11-20",
+      "approval_commit": "79230d7",
       "round": "4",
       "reviewed_commit": "55dff2b45c7cb6751d98ad65df58864f88a85913",
       "authoritative_report": "docs/issues/57/report.md",
       "latest_fix_commit": "55dff2b45c7cb6751d98ad65df58864f88a85913",
       "clear_round": 4,
-      "clear_report_commit": "6b60c20335ff2c64466d717b3de1e66a1a073436"
+      "clear_report_commit": "6b60c20335ff2c64466d717b3de1e66a1a073436",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 58,
@@ -1080,14 +1104,15 @@
           "resolution": "Both fresh reviewers returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "ce035c3",
+      "approved": "2026-11-20",
+      "approval_commit": "10bb841",
       "round": "4",
       "reviewed_commit": "d557e13636bc647090c81dfa78eecfb699958cb2",
       "authoritative_report": "docs/issues/58/report.md",
       "latest_fix_commit": "d557e13636bc647090c81dfa78eecfb699958cb2",
       "clear_round": 4,
-      "clear_report_commit": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a"
+      "clear_report_commit": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 59,
@@ -1253,14 +1278,15 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "6653c8d 5c63d2c",
+      "approved": "2026-11-20",
+      "approval_commit": "8d9a0e1",
       "round": "3",
       "reviewed_commit": "32c70bf60b2957debe1c5b6a17ec3fbaeeb46f9d",
       "authoritative_report": "docs/issues/59/report.md",
       "latest_fix_commit": "32c70bf60b2957debe1c5b6a17ec3fbaeeb46f9d",
       "clear_round": 3,
-      "clear_report_commit": "dc1e0fd8d8fae099399b88d29fad3ab1bca2b440"
+      "clear_report_commit": "dc1e0fd8d8fae099399b88d29fad3ab1bca2b440",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 60,
@@ -1371,14 +1397,15 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "824acc4 a1dcb85",
+      "approved": "2026-11-20",
+      "approval_commit": "1c158ca",
       "round": "2",
       "reviewed_commit": "d72a998ea5e10602a2b0a747fc272bd1b32450f2",
       "authoritative_report": "docs/issues/60/report.md",
       "latest_fix_commit": "d72a998ea5e10602a2b0a747fc272bd1b32450f2",
       "clear_round": 2,
-      "clear_report_commit": "13646e04783a839dc9af8730bbd7abe2dd2b0207"
+      "clear_report_commit": "13646e04783a839dc9af8730bbd7abe2dd2b0207",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 61,
@@ -1550,8 +1577,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "0bee964 5696573",
+      "approved": "2026-11-20",
+      "approval_commit": "fdaad74",
       "round": "2",
       "reviewed_commit": "8caf6b13963917426b0e8cdf40b8afe6f51f7121",
       "authoritative_report": "docs/issues/61/report.md",
@@ -1560,7 +1587,8 @@
       "clear_round": 2,
       "clear_report_commit": "4fe0f143a4e8780ae5c0a861996f6b1d5a638646",
       "latest_fix_commit": "8caf6b13963917426b0e8cdf40b8afe6f51f7121",
-      "dependency_clear_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+      "dependency_clear_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 62,
@@ -1699,8 +1727,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "bb1aae5 f53fad2",
+      "approved": "2026-11-20",
+      "approval_commit": "6d6b94c",
       "round": "2",
       "reviewed_commit": "e637c0b9a0c9e05590fd6ae28e50b4a1668d6512",
       "authoritative_report": "docs/issues/62/report.md",
@@ -1711,7 +1739,8 @@
       "latest_fix_commit": "e637c0b9a0c9e05590fd6ae28e50b4a1668d6512",
       "active_review_commit": "ba35d5c9aa2f73f0e21f580f77fce499e83162d9",
       "clear_round": 2,
-      "clear_report_commit": "ba35d5c9aa2f73f0e21f580f77fce499e83162d9"
+      "clear_report_commit": "ba35d5c9aa2f73f0e21f580f77fce499e83162d9",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 63,
@@ -1864,8 +1893,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "90bb6e1 95a79eb",
+      "approved": "2026-11-20",
+      "approval_commit": "7d0c3c5",
       "active_review_checkout": "/tmp/flaminio-63-review-resume",
       "active_review_branch": "review-resume/63",
       "review_resume_reason": "Continue the user-authorized independent allowed-root review workflow; canonical source1a4a14d remains unchanged. No rejected63write is claimed.",
@@ -1878,7 +1907,8 @@
       "clear_round": 2,
       "clear_report_commit": "19adbe13e92db767d0e6e08d7c7bd0c7fb7e4417",
       "latest_fix_commit": "51a34351d589eca96b51206c95e8df5187a5135a",
-      "dependency_clear_commit": "f6220b5eefbb0092979327465d2bd9d3aa58039d"
+      "dependency_clear_commit": "f6220b5eefbb0092979327465d2bd9d3aa58039d",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 64,
@@ -1955,8 +1985,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "9c353f5 86307ff",
+      "approved": "2026-11-20",
+      "approval_commit": "17158c8",
       "active_review_checkout": "/tmp/flaminio-64-review-resume",
       "active_review_branch": "review-resume/64",
       "review_resume_reason": "Continue authorized allowed-root review workflow, preserving canonical source86307ff unchanged.",
@@ -1966,7 +1996,8 @@
       "latest_fix_commit": "67c03381e14cede0a476137a0a87aa0b029ec4eb",
       "active_review_commit": "085e3f48d72f56a0ae648297e2ee426defeee56a",
       "clear_round": 2,
-      "clear_report_commit": "085e3f48d72f56a0ae648297e2ee426defeee56a"
+      "clear_report_commit": "085e3f48d72f56a0ae648297e2ee426defeee56a",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 65,
@@ -2026,8 +2057,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "de191df 7b0094f",
+      "approved": "2026-11-20",
+      "approval_commit": "70f7f3f",
       "active_review_checkout": "/tmp/flaminio-65-review-resume",
       "active_review_branch": "review-resume/65",
       "active_review_commit": "e8511b5a26fe1c1ba832b90493feaf4f8c797bc5",
@@ -2036,7 +2067,8 @@
       "authoritative_report": "docs/issues/65/report.md",
       "latest_fix_commit": "ea0bda3952d61b8cc646b1275e54016bc4922381",
       "clear_round": 2,
-      "clear_report_commit": "e8511b5a26fe1c1ba832b90493feaf4f8c797bc5"
+      "clear_report_commit": "e8511b5a26fe1c1ba832b90493feaf4f8c797bc5",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 66,
@@ -2128,8 +2160,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "1d60b36",
+      "approved": "2026-11-20",
+      "approval_commit": "bf7e89b",
       "active_review_checkout": "/tmp/flaminio-66-review-resume",
       "active_review_branch": "review-resume/66",
       "active_review_commit": "9e9f15c8a33b6fcec21e7f34cb7d32f3a4a71a69",
@@ -2138,7 +2170,8 @@
       "authoritative_report": "docs/issues/66/report.md",
       "latest_fix_commit": "8d3068043b2bfd66d4ef988335f258669156d29a",
       "clear_round": 2,
-      "clear_report_commit": "9e9f15c8a33b6fcec21e7f34cb7d32f3a4a71a69"
+      "clear_report_commit": "9e9f15c8a33b6fcec21e7f34cb7d32f3a4a71a69",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 67,
@@ -2249,8 +2282,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "fd544c8",
+      "approved": "2026-11-20",
+      "approval_commit": "4f969ac",
       "active_review_checkout": "/tmp/flaminio-67-review-resume",
       "active_review_branch": "review-resume/67",
       "active_review_commit": "5ff126ac4a395f20885885feaefcf3302489b5fc",
@@ -2259,7 +2292,8 @@
       "authoritative_report": "docs/issues/67/report.md",
       "latest_fix_commit": "5bfd5945f4a960a9a2ad36b2c6b413ae6f1d2687",
       "clear_round": 3,
-      "clear_report_commit": "5ff126ac4a395f20885885feaefcf3302489b5fc"
+      "clear_report_commit": "5ff126ac4a395f20885885feaefcf3302489b5fc",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 68,
@@ -2332,8 +2366,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "b2413a2",
+      "approved": "2026-11-20",
+      "approval_commit": "5d8d555",
       "active_review_checkout": "/tmp/flaminio-68-review-resume",
       "active_review_branch": "review-resume/68",
       "active_review_commit": "1714ba9bef979a8cc3645d88848de821aafbe0e4",
@@ -2342,7 +2376,8 @@
       "authoritative_report": "docs/issues/68/report.md",
       "latest_fix_commit": "237cc71b674d28868c47a764bfe9f2f8ff501e15",
       "clear_round": 2,
-      "clear_report_commit": "1714ba9bef979a8cc3645d88848de821aafbe0e4"
+      "clear_report_commit": "1714ba9bef979a8cc3645d88848de821aafbe0e4",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 69,
@@ -2441,8 +2476,8 @@
           "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "11d86de",
+      "approved": "2026-11-20",
+      "approval_commit": "f74a822",
       "active_review_checkout": "/tmp/flaminio-69-review-resume",
       "active_review_branch": "review-resume/69",
       "active_review_commit": "b6ae8d6972a951562f00449e1b306a73fde6e177",
@@ -2451,7 +2486,8 @@
       "authoritative_report": "docs/issues/69/report.md",
       "latest_fix_commit": "30ba966fe49afad81922b5258bcff0995f7efe70",
       "clear_round": 2,
-      "clear_report_commit": "b6ae8d6972a951562f00449e1b306a73fde6e177"
+      "clear_report_commit": "b6ae8d6972a951562f00449e1b306a73fde6e177",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 70,
@@ -2462,10 +2498,11 @@
       "reviewed_commit": "c3df855",
       "authoritative_report": "docs/issues/70/report.md",
       "latest_fix_commit": "75fe538d1812c25173c91e4b2c3c2acdfc7858ff",
-      "approved": "2026-11-13",
-      "approval_commit": "a3dbb5c",
+      "approved": "2026-11-20",
+      "approval_commit": "fc1e142",
       "clear_round": 10,
-      "clear_report_commit": "54c44e8"
+      "clear_report_commit": "54c44e8",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 71,
@@ -2476,10 +2513,11 @@
       "reviewed_commit": "177339f",
       "authoritative_report": "docs/issues/71/report.md",
       "latest_fix_commit": "f68610a4c6fc3545454538cbf7305071c4e04315",
-      "approved": "2026-11-13",
-      "approval_commit": "215748e",
+      "approved": "2026-11-20",
+      "approval_commit": "b0a80b1",
       "clear_round": 8,
-      "clear_report_commit": "20af551"
+      "clear_report_commit": "20af551",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 72,
@@ -2490,11 +2528,12 @@
       "reviewed_commit": "8c718f4",
       "authoritative_report": "docs/issues/72/report.md",
       "latest_fix_commit": "186074fb9e04314cec4a6f735cc08ace734b3158",
-      "approved": "2026-11-13",
-      "approval_commit": "bbdb51d",
+      "approved": "2026-11-20",
+      "approval_commit": "b9ef486",
       "clear_round": 12,
       "clear_report_commit": "5c76e87",
-      "note": "reopened by the orchestrator's alignment with #70's ordering prerequisite (R7-C2 of #70's review)"
+      "note": "reopened by the orchestrator's alignment with #70's ordering prerequisite (R7-C2 of #70's review)",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 73,
@@ -2505,10 +2544,11 @@
       "reviewed_commit": "e2e87a7",
       "authoritative_report": "docs/issues/73/report.md",
       "latest_fix_commit": "b7b0b821ee8a2e6a13702126a294576b09e47da5",
-      "approved": "2026-11-13",
-      "approval_commit": "7a91186",
+      "approved": "2026-11-20",
+      "approval_commit": "3053105",
       "clear_round": 13,
-      "clear_report_commit": "e2ffe00"
+      "clear_report_commit": "e2ffe00",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 74,
@@ -2519,10 +2559,11 @@
       "reviewed_commit": "0564254",
       "authoritative_report": "docs/issues/74/report.md",
       "latest_fix_commit": "f40e9adafb5ff7cfc41b2b26d50875a5ab405705",
-      "approved": "2026-11-13",
-      "approval_commit": "7245c69",
+      "approved": "2026-11-20",
+      "approval_commit": "dac3258",
       "clear_round": 8,
-      "clear_report_commit": "1d0fdab"
+      "clear_report_commit": "1d0fdab",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 75,
@@ -2533,10 +2574,11 @@
       "reviewed_commit": "02853e8",
       "authoritative_report": "docs/issues/75/report.md",
       "latest_fix_commit": "9083e69231a9f41808501d07a61a4cd0a7af745a",
-      "approved": "2026-11-13",
-      "approval_commit": "1a0a7ed",
+      "approved": "2026-11-20",
+      "approval_commit": "2bff82d",
       "clear_round": 10,
-      "clear_report_commit": "06d161a"
+      "clear_report_commit": "06d161a",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 76,
@@ -2573,8 +2615,9 @@
       "latest_fix_commit": "9642649278ca6bced116d11f417ca27e45e6f025",
       "authoritative_report": "docs/issues/76/report.md",
       "clear_report_commit": "3f21c35",
-      "approved": "2026-11-13",
-      "approval_commit": "b9b1932 628e337"
+      "approved": "2026-11-20",
+      "approval_commit": "e00d95e",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 77,
@@ -2642,8 +2685,9 @@
           "status": "clear"
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "bb8df5b"
+      "approved": "2026-11-20",
+      "approval_commit": "734fc8b",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 78,
@@ -2687,8 +2731,9 @@
           "status": "clear"
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "84d87d0 16953ee"
+      "approved": "2026-11-20",
+      "approval_commit": "8fb7c91",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 79,
@@ -2794,8 +2839,9 @@
         "commit": "8af7aebf52e98de14cd70543f3aa6edc95ead142",
         "base": "48b0ae1"
       },
-      "approved": "2026-11-13",
-      "approval_commit": "367424c d21c1ca"
+      "approved": "2026-11-20",
+      "approval_commit": "044ad28",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 80,
@@ -2855,8 +2901,9 @@
           "status": "clear"
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "144eb26 f6834c3"
+      "approved": "2026-11-20",
+      "approval_commit": "7adc317",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 81,
@@ -2910,8 +2957,9 @@
       ],
       "latest_fix_commit": "0a8bfca",
       "clear_report_commit": "eeae23d",
-      "approved": "2026-11-13",
-      "approval_commit": "15b0c35"
+      "approved": "2026-11-20",
+      "approval_commit": "c2a2cb7",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 82,
@@ -2987,8 +3035,9 @@
       ],
       "latest_fix_commit": "6c858756ec7aa9ceabb4530aba3400f8acb62016",
       "clear_report_commit": "1ed5ed2",
-      "approved": "2026-11-13",
-      "approval_commit": "66184ce 18fb585"
+      "approved": "2026-11-20",
+      "approval_commit": "af6a401",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 83,
@@ -3062,8 +3111,9 @@
       ],
       "latest_fix_commit": "f9a0a519adf21d4ee2c9048f44139489446c94e7",
       "clear_report_commit": "0f97888",
-      "approved": "2026-11-13",
-      "approval_commit": "67862ad"
+      "approved": "2026-11-20",
+      "approval_commit": "365a53f",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 84,
@@ -3076,8 +3126,9 @@
       "reviewed_commit": "e342b46",
       "clear_round": 6,
       "clear_report_commit": "b75f28c",
-      "approved": "2026-11-13",
-      "approval_commit": "a2e0164"
+      "approved": "2026-11-20",
+      "approval_commit": "739688b",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 85,
@@ -3121,8 +3172,9 @@
           "status": "clear"
         }
       ],
-      "approved": "2026-11-13",
-      "approval_commit": "0d95430"
+      "approved": "2026-11-20",
+      "approval_commit": "6afbcd9",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 86,
@@ -3135,8 +3187,9 @@
       "latest_fix_commit": "3f063b838e53b02d1ffc511a63ae1ddeb1c525b4",
       "clear_round": 4,
       "clear_report_commit": "eaa43e8",
-      "approved": "2026-11-13",
-      "approval_commit": "0ad0612"
+      "approved": "2026-11-20",
+      "approval_commit": "f3b798c",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 90,
@@ -3310,7 +3363,10 @@
       "reviewed_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
       "latest_fix_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
       "clear_round": 3,
-      "clear_report_commit": "c9231b243dceb196a0eccb615055887c9879bb73"
+      "clear_report_commit": "c9231b243dceb196a0eccb615055887c9879bb73",
+      "approved": "2026-11-20",
+      "approval_commit": "3cc1d53",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     },
     {
       "number": 91,
@@ -3575,7 +3631,10 @@
       "reviewed_commit": "f6220b5eefbb0092979327465d2bd9d3aa58039d",
       "latest_fix_commit": "f6220b5eefbb0092979327465d2bd9d3aa58039d",
       "clear_round": 6,
-      "clear_report_commit": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512"
+      "clear_report_commit": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512",
+      "approved": "2026-11-20",
+      "approval_commit": "1d90a24",
+      "approval_note": "Human approval of the published clear post-review snapshot on 2026-11-20; covers plan-review revisions after any earlier 2026-11-13 approval."
     }
   ],
   "terminal_statuses": [
@@ -3585,5 +3644,11 @@
   "status_meanings": {
     "clear": "Recorded plan-review-clear disposition; actual report and reviewed technical snapshot are authoritative. Remaining loops completed in this continuation ended with fresh zero-comment reviews including Nits; earlier dispositions are preserved.",
     "cleared_completed": "User removed completed, merged implementation from the review queue; no new review round claimed."
+  },
+  "human_approval": {
+    "date": "2026-11-20",
+    "approver": "Ioannis Sfakianakis",
+    "scope": "All 55 status=clear published plans; Spec and Design",
+    "basis": "docs/issues/publication-2026-11-20.json"
   }
 }
