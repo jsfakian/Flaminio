@@ -465,7 +465,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../meta/testdata/create-recovery.json")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../meta/testdata/create-recovery.json")
     }
 
     #[test]
