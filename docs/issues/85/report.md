@@ -43,3 +43,46 @@ Status: clear. Approval remains separate; no approval is inferred.
 
 Code-reviewer and security-reviewer: **CLEAR** (nothing Low or worse).
 Prior round-1 findings confirmed fixed; no ownership/fail-stop weakening.
+
+## Tests
+
+| Rule | Result | Evidence |
+|---|---|---|
+| S1 | pass | `len32_boundary`, `window_preflight_rejects_before_allocation` |
+| S2 | pass | prep reject unpublished; `rejection_at_window_boundaries` |
+| S3 | pass | `errors_are_reported_after_draining`, `retryable_submit_errno_drains`, `drop_drains_owned_writes` |
+| S4 | pass | `submission_lifetime_failures` (fatal submit, panic-armed, bad/dup CQE, dirty SQ, sync/commit push-prefix) |
+| S5 | pass | boundary rejection + later I/O; flush CQE owner checks |
+| S6 | pass | early-write/commit prepare/reject/drop tests; oversized sync-fallback `next_gen` regression |
+| S7 | pass | aligned/bounced roundtrips; `prior_or` preserves earlier device errors |
+| S8 | pass | retained-buffer regression; 32-bit omit stub; abort harness without freed-buffer UAF |
+
+`make` targets:
+- `make lint test race hygiene contracts` — pass (2026-11-20)
+- `make miri` — pass (aligned-buffer helpers only; does **not** validate kernel io_uring)
+- `make sanitize QUICK=1` — pass
+- `cargo test -p flaminio-uring` — 26+ passed
+
+## Conformance
+
+PASS after report/followups update. Spec rules S1–S8 implemented and tested; public API unchanged; ADR 0001/0003 consistent; no open review findings.
+
+| Rule | Implemented | Tested | Evidence |
+|---|---|---|---|
+| S1 | yes | yes | length-before-bounce; boundary + prep inject |
+| S2 | yes | yes | unpublished reject windows |
+| S3 | yes | yes | OwnershipGuard drain-before-return |
+| S4 | yes | yes | ownership_fail / abort harness |
+| S5 | yes | yes | CQE bounds/dup; flush Submitted owner |
+| S6 | yes | yes | prep-before-next_gen; Drop abort-on-unwind |
+| S7 | yes | yes | prior_or; roundtrips |
+| S8 | yes | yes | safety comments; retained-buffer + platform stubs |
+
+## Lab
+
+None required by the design (disposable local files only). All lab checks: n/a / pending none.
+
+## ADRs
+
+Relies on accepted ADR 0001 and 0003. No new ADR.
+
