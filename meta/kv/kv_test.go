@@ -2,6 +2,9 @@ package kv_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,4 +110,84 @@ func TestEtcd(t *testing.T) {
 	if _, found, _ := e.Get(context.Background(), "/ttl"); found {
 		t.Fatal("ttl key did not expire")
 	}
+}
+
+func backends(t *testing.T, f func(t *testing.T, s kv.KV)) {
+	t.Run("mem", func(t *testing.T) { f(t, kv.NewMem(nil)) })
+	t.Run("etcd", func(t *testing.T) {
+		e := kvtest.Etcd(t)
+		defer e.Close()
+		f(t, e)
+	})
+}
+
+// ScanKeys pages keys only, continues after, and rejects out-of-range limits (docs/issues/76 S7).
+func TestScanKeys(t *testing.T) {
+	backends(t, func(t *testing.T, s kv.KV) {
+		ctx := context.Background()
+		ops := make([]kv.Op, 0, 10)
+		for i := 0; i < 10; i++ {
+			ops = append(ops, kv.Op{Key: fmt.Sprintf("/scan/k%02d", i), Value: []byte("v")})
+		}
+		if ok, err := s.Txn(ctx, nil, ops); err != nil || !ok {
+			t.Fatalf("seed: %v %v", ok, err)
+		}
+		page, err := s.ScanKeys(ctx, "/scan/", "", 4)
+		if err != nil || len(page.Entries) != 4 || page.Done || page.Next == "" {
+			t.Fatalf("first page: %+v %v", page, err)
+		}
+		if page.Entries[0].Key != "/scan/k00" || page.Entries[3].Key != "/scan/k03" {
+			t.Fatalf("order: %+v", page.Entries)
+		}
+		page2, err := s.ScanKeys(ctx, "/scan/", page.Next, 4)
+		if err != nil || len(page2.Entries) != 4 || page2.Entries[0].Key != "/scan/k04" {
+			t.Fatalf("second page: %+v %v", page2, err)
+		}
+		page3, err := s.ScanKeys(ctx, "/scan/", page2.Next, 4)
+		if err != nil || len(page3.Entries) != 2 || !page3.Done {
+			t.Fatalf("tail: %+v %v", page3, err)
+		}
+		if _, err := s.ScanKeys(ctx, "/scan/", "", 0); err == nil {
+			t.Fatal("limit 0 accepted")
+		}
+		if _, err := s.ScanKeys(ctx, "/scan/", "", 65); err == nil {
+			t.Fatal("limit 65 accepted")
+		}
+		empty, err := s.ScanKeys(ctx, "/missing/", "", 8)
+		if err != nil || len(empty.Entries) != 0 || !empty.Done {
+			t.Fatalf("empty: %+v %v", empty, err)
+		}
+	})
+}
+
+// GetBounded refuses oversized values and respects a work budget (docs/issues/76 S1/S7).
+func TestGetBounded(t *testing.T) {
+	backends(t, func(t *testing.T, s kv.KV) {
+		ctx := context.Background()
+		if ok, err := s.Txn(ctx, nil, []kv.Op{
+			{Key: "/b/ok", Value: []byte("small")},
+			{Key: "/b/big", Value: []byte(strings.Repeat("x", 100))},
+		}); err != nil || !ok {
+			t.Fatalf("seed: %v %v", ok, err)
+		}
+		e, ok, err := s.GetBounded(ctx, "/b/ok", 16)
+		if err != nil || !ok || string(e.Value) != "small" {
+			t.Fatalf("ok: %+v %v %v", e, ok, err)
+		}
+		_, ok, err = s.GetBounded(ctx, "/b/big", 16)
+		if ok || !errors.Is(err, kv.ErrOversized) {
+			t.Fatalf("oversized: ok=%v err=%v", ok, err)
+		}
+		_, ok, err = s.GetBounded(ctx, "/b/missing", 16)
+		if err != nil || ok {
+			t.Fatalf("missing: %v %v", ok, err)
+		}
+		budget := kv.WithWorkBudget(ctx, 1)
+		if _, _, err := s.GetBounded(budget, "/b/ok", 16); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.GetBounded(budget, "/b/ok", 16); !errors.Is(err, kv.ErrWorkBudget) {
+			t.Fatalf("budget: %v", err)
+		}
+	})
 }

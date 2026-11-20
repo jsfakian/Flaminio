@@ -458,3 +458,58 @@ pub fn load_schedules(path: &std::path::Path) -> Result<ScheduleFile, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../meta/testdata/create-recovery.json")
+    }
+
+    #[test]
+    fn create_recovery_schedules() {
+        let file = load_schedules(&fixture_path()).expect("load create-recovery.json");
+        assert!(
+            file.schedules.len() >= 4,
+            "expected birth/unpublished schedules, got {}",
+            file.schedules.len()
+        );
+        for sched in &file.schedules {
+            run_schedule(sched).unwrap_or_else(|e| panic!("schedule {}: {e}", sched.name));
+        }
+    }
+
+    #[test]
+    fn missing_birth_compare_is_required_counterexample() {
+        let file = load_schedules(&fixture_path()).expect("load");
+        let sched = file
+            .schedules
+            .iter()
+            .find(|s| s.name == "missing_birth_compare_counterexample")
+            .expect("missing_birth_compare_counterexample");
+        assert_eq!(sched.mutant, Mutant::MissingBirthCompare);
+        assert_eq!(
+            sched.expect_violation.as_deref(),
+            Some("NoRootResurrection")
+        );
+        run_schedule(sched).unwrap();
+    }
+
+    #[test]
+    fn weakened_unpublished_classifier_is_required_counterexample() {
+        let file = load_schedules(&fixture_path()).expect("load");
+        let sched = file
+            .schedules
+            .iter()
+            .find(|s| s.name == "weakened_unpublished_classifier_counterexample")
+            .expect("weakened_unpublished_classifier_counterexample");
+        assert_eq!(sched.mutant, Mutant::WeakenedUnpublishedClassifier);
+        assert_eq!(
+            sched.expect_violation.as_deref(),
+            Some("NoUnprovedTombstoneBypass")
+        );
+        run_schedule(sched).unwrap();
+    }
+}
