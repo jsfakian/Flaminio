@@ -169,7 +169,13 @@ func (n *apiNode) toNode() Node {
 	if ann := n.Metadata.Annotations[OwnerAnnotation]; ann != "" {
 		if rec, ok := ParseOperationRecord(ann); ok {
 			out.Record = rec
-			out.Owned = true
+			// Owned only when the record's NodeUID matches the live Node; otherwise foreign.
+			if rec.NodeUID == n.Metadata.UID {
+				if rec.MachineGeneration == "" || n.Spec.ProviderID == "" ||
+					rec.MachineGeneration == n.Spec.ProviderID {
+					out.Owned = true
+				}
+			}
 		}
 	}
 	return out
@@ -230,10 +236,13 @@ func (c *APIClient) Mark(ctx context.Context, req MarkRequest) error {
 	if req.OperationID != req.Proof.Reference {
 		return fmt.Errorf("%w: operation id does not match proof reference", ErrEvidenceInvalid)
 	}
+	if err := identityFieldsMatch(req.Identity, req.Proof.Identity); err != nil {
+		return fmt.Errorf("%w: proof identity does not match mark target: %v", ErrEvidenceInvalid, err)
+	}
 	if c.Authority == nil {
 		return fmt.Errorf("%s: no authority", OutcomeEvidenceUnavailable)
 	}
-	if err := c.Authority.ValidateShutdown(ctx, req.Proof); err != nil {
+	if err := c.Authority.ValidateShutdown(ctx, req.Identity, req.Proof); err != nil {
 		return fmt.Errorf("%w: %v", ErrEvidenceInvalid, err)
 	}
 	n, err := c.getAPINode(ctx, req.Identity.Name)
@@ -250,7 +259,7 @@ func (c *APIClient) Mark(ctx context.Context, req MarkRequest) error {
 			cur.Record.Authority == req.Proof.Authority {
 			return nil // identical operation already recorded (lost-PATCH retry)
 		}
-		return fmt.Errorf("foreign/conflicting out-of-service mark")
+		return fmt.Errorf("%w", ErrForeignMark)
 	}
 	rec := OperationRecord{
 		Version:           1,
@@ -269,7 +278,7 @@ func (c *APIClient) Mark(ctx context.Context, req MarkRequest) error {
 	taints := []json.RawMessage{}
 	for _, t := range n.Spec.Taints {
 		if isOutOfServiceTaint(t) {
-			return fmt.Errorf("foreign/conflicting out-of-service mark")
+			return fmt.Errorf("%w", ErrForeignMark)
 		}
 		taints = append(taints, t)
 	}
@@ -299,6 +308,12 @@ func (c *APIClient) Clear(ctx context.Context, req ClearRequest) error {
 	if req.OperationID == "" {
 		return fmt.Errorf("%w: missing operation id", ErrEvidenceInvalid)
 	}
+	if req.Permit.OperationID != req.OperationID {
+		return fmt.Errorf("%w: permit operation does not match clear request", ErrEvidenceInvalid)
+	}
+	if err := identityFieldsMatch(req.Identity, req.Permit.Identity); err != nil {
+		return fmt.Errorf("%w: permit identity does not match clear request: %v", ErrEvidenceInvalid, err)
+	}
 	if c.Authority == nil {
 		return fmt.Errorf("%s: no return policy", OutcomeCleanupBlocked)
 	}
@@ -317,7 +332,7 @@ func (c *APIClient) Clear(ctx context.Context, req ClearRequest) error {
 		return nil
 	}
 	if !cur.Owned || cur.Record.OperationID != req.OperationID || cur.Record.NodeUID != req.Identity.UID {
-		return fmt.Errorf("%s: mark is foreign, legacy, or does not match operation", OutcomeCleanupBlocked)
+		return fmt.Errorf("%s: %w", OutcomeCleanupBlocked, ErrForeignMark)
 	}
 	taints := []json.RawMessage{}
 	for _, t := range n.Spec.Taints {

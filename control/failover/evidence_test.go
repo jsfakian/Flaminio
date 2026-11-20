@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -17,7 +18,7 @@ import (
 type scriptAuthority struct {
 	resolveFn     func(context.Context, Node) (Identity, error)
 	verifyFn      func(context.Context, Identity) (ShutdownProof, error)
-	validateFn    func(context.Context, ShutdownProof) error
+	validateFn    func(context.Context, Identity, ShutdownProof) error
 	verifyRetFn   func(context.Context, Identity, string) (ReturnPermit, error)
 	validateRetFn func(context.Context, ReturnPermit) error
 	validateN     int
@@ -37,10 +38,13 @@ func (s *scriptAuthority) VerifyShutdown(ctx context.Context, id Identity) (Shut
 	return ShutdownProof{Identity: id, Authority: ManualLockoutProfile, Reference: opID("aa"), FenceGeneration: id.MachineGeneration}, nil
 }
 
-func (s *scriptAuthority) ValidateShutdown(ctx context.Context, proof ShutdownProof) error {
+func (s *scriptAuthority) ValidateShutdown(ctx context.Context, expected Identity, proof ShutdownProof) error {
 	s.validateN++
+	if err := identityFieldsMatch(expected, proof.Identity); err != nil {
+		return fmt.Errorf("%w: proof identity does not match mark target: %v", ErrEvidenceInvalid, err)
+	}
 	if s.validateFn != nil {
-		return s.validateFn(ctx, proof)
+		return s.validateFn(ctx, expected, proof)
 	}
 	return nil
 }
@@ -140,12 +144,12 @@ func TestShutdownEvidenceRefusals(t *testing.T) {
 			auth: &scriptAuthority{resolveFn: func(context.Context, Node) (Identity, error) {
 				return Identity{}, errors.Join(ErrEvidenceInvalid, errors.New("no inventory mapping"))
 			}},
-			out:  OutcomeEvidenceUnavailable,
+			out:  OutcomeEvidenceInvalid,
 			want: "inventory",
 		},
 		{
 			name: "wrong machine generation on validate",
-			auth: &scriptAuthority{validateFn: func(context.Context, ShutdownProof) error {
+			auth: &scriptAuthority{validateFn: func(context.Context, Identity, ShutdownProof) error {
 				return errors.Join(ErrEvidenceInvalid, errors.New("machine_id mismatch"))
 			}},
 			out:  OutcomeEvidenceInvalid,
@@ -175,7 +179,7 @@ func TestShutdownEvidenceRefusals(t *testing.T) {
 
 	t.Run("proof invalidated between observation and patch", func(t *testing.T) {
 		auth := &scriptAuthority{
-			validateFn: func(context.Context, ShutdownProof) error {
+			validateFn: func(context.Context, Identity, ShutdownProof) error {
 				// Controller validates once; Mark via fakeKube does not re-check. Fail Mark.
 				return nil
 			},
@@ -291,6 +295,54 @@ func TestParseOperationRecordForeign(t *testing.T) {
 	rec, ok := ParseOperationRecord(`{"version":1,"nodeUID":"u","operationID":"o","authority":"manual-lockout-v1"}`)
 	if !ok || rec.NodeUID != "u" {
 		t.Fatalf("got %+v ok=%v", rec, ok)
+	}
+}
+
+func TestOwnedRequiresLiveNodeUID(t *testing.T) {
+	annMatching, err := EncodeOperationRecord(OperationRecord{
+		Version: 1, NodeUID: "uid-a", OperationID: opID("ow"), Authority: ManualLockoutProfile,
+		MachineGeneration: "machine-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annStaleUID, err := EncodeOperationRecord(OperationRecord{
+		Version: 1, NodeUID: "uid-other", OperationID: opID("ow"), Authority: ManualLockoutProfile,
+		MachineGeneration: "machine-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annMachineMismatch, err := EncodeOperationRecord(OperationRecord{
+		Version: 1, NodeUID: "uid-a", OperationID: opID("ow"), Authority: ManualLockoutProfile,
+		MachineGeneration: "machine-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		ann     string
+		prov    string
+		wantOwn bool
+	}{
+		{"matching UID", annMatching, "machine-a", true},
+		{"matching UID empty provider", annMatching, "", true},
+		{"stale record UID", annStaleUID, "machine-a", false},
+		{"machine generation mismatch", annMachineMismatch, "machine-a", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := apiNode{}
+			n.Metadata.Name = "a"
+			n.Metadata.UID = "uid-a"
+			n.Metadata.Annotations = map[string]string{OwnerAnnotation: tc.ann}
+			n.Spec.ProviderID = tc.prov
+			got := n.toNode()
+			if got.Owned != tc.wantOwn {
+				t.Fatalf("Owned=%v want %v record=%+v", got.Owned, tc.wantOwn, got.Record)
+			}
+		})
 	}
 }
 

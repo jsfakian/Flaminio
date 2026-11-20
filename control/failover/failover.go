@@ -133,7 +133,11 @@ func (c *Controller) handleCandidate(ctx context.Context, listed Node, alive map
 	}
 	id, err := c.Authority.ResolveIdentity(ctx, current)
 	if err != nil {
-		logOutcome(current.Name, current.UID, "", "", OutcomeEvidenceUnavailable, "resolve identity: "+err.Error())
+		outcome := OutcomeEvidenceUnavailable
+		if errors.Is(err, ErrEvidenceInvalid) {
+			outcome = OutcomeEvidenceInvalid
+		}
+		logOutcome(current.Name, current.UID, "", "", outcome, "resolve identity: "+err.Error())
 		return nil
 	}
 	proof, err := c.Authority.VerifyShutdown(ctx, id)
@@ -145,7 +149,7 @@ func (c *Controller) handleCandidate(ctx context.Context, listed Node, alive map
 		logOutcome(current.Name, current.UID, "", "", outcome, err.Error())
 		return nil
 	}
-	if err := c.Authority.ValidateShutdown(ctx, proof); err != nil {
+	if err := c.Authority.ValidateShutdown(ctx, id, proof); err != nil {
 		logOutcome(current.Name, current.UID, proof.Reference, proof.Reference, OutcomeEvidenceInvalid, err.Error())
 		return nil
 	}
@@ -155,7 +159,7 @@ func (c *Controller) handleCandidate(ctx context.Context, listed Node, alive map
 		// Conflicts restart at observation next step; do not invent success. Leave other
 		// nodes alone when the mark is foreign/conflicting rather than a transport failure.
 		logOutcome(current.Name, current.UID, proof.Reference, proof.Reference, OutcomeEvidenceInvalid, "mark: "+err.Error())
-		if strings.Contains(err.Error(), "foreign/conflicting") {
+		if errors.Is(err, ErrForeignMark) || strings.Contains(err.Error(), "foreign/conflicting") {
 			return nil
 		}
 		return err
@@ -185,11 +189,16 @@ func (c *Controller) handleCleanup(ctx context.Context, listed Node) error {
 			OutcomeCleanupBlocked, "no return policy configured")
 		return nil
 	}
-	id := Identity{
-		Name:              current.Name,
-		UID:               current.UID,
-		ProviderID:        current.ProviderID,
-		MachineGeneration: current.Record.MachineGeneration,
+	id, err := c.Authority.ResolveIdentity(ctx, current)
+	if err != nil {
+		logOutcome(current.Name, current.UID, current.Record.OperationID, current.Record.EvidenceRef,
+			OutcomeCleanupBlocked, "resolve identity: "+err.Error())
+		return nil
+	}
+	if id.UID != current.Record.NodeUID {
+		logOutcome(current.Name, current.UID, current.Record.OperationID, current.Record.EvidenceRef,
+			OutcomeCleanupBlocked, "resolved identity does not match owned record")
+		return nil
 	}
 	permit, err := c.Authority.VerifyReturn(ctx, id, current.Record.OperationID)
 	if err != nil {

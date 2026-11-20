@@ -235,15 +235,28 @@ func (m *ManualLockout) VerifyShutdown(ctx context.Context, id Identity) (Shutdo
 	}, nil
 }
 
-func (m *ManualLockout) ValidateShutdown(_ context.Context, proof ShutdownProof) error {
+func (m *ManualLockout) ValidateShutdown(_ context.Context, expected Identity, proof ShutdownProof) error {
 	if proof.Authority != ManualLockoutProfile {
 		return fmt.Errorf("%w: authority %q", ErrEvidenceInvalid, proof.Authority)
 	}
-	raw, err := m.loadProof(proof.UID)
+	if err := identityFieldsMatch(expected, proof.Identity); err != nil {
+		return fmt.Errorf("%w: proof identity does not match mark target: %v", ErrEvidenceInvalid, err)
+	}
+	raw, err := m.loadProof(expected.UID)
 	if err != nil {
 		return err
 	}
-	return m.checkProof(raw, proof.Identity)
+	if err := m.checkProof(raw, expected); err != nil {
+		return err
+	}
+	// Re-bind opaque proof fields to the signed on-disk record (not caller-supplied alone).
+	if proof.Reference != raw.OperationID {
+		return fmt.Errorf("%w: proof reference does not match signed operation_id", ErrEvidenceInvalid)
+	}
+	if proof.FenceGeneration != raw.MachineID {
+		return fmt.Errorf("%w: fence generation does not match signed machine_id", ErrEvidenceInvalid)
+	}
+	return nil
 }
 
 func (m *ManualLockout) VerifyReturn(context.Context, Identity, string) (ReturnPermit, error) {
@@ -456,6 +469,10 @@ func LoadEd25519PKCS8(path string) (ed25519.PrivateKey, error) {
 	return priv, nil
 }
 
+// trustedFileOwnerUID is the required file owner for readTrustedFile. Production keeps 0
+// (root). Tests may set it to the current euid so CI can exercise file-backed verify without root.
+var trustedFileOwnerUID = uint32(0)
+
 func readTrustedFile(path string, max int) ([]byte, error) {
 	path = filepath.Clean(path)
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
@@ -473,7 +490,7 @@ func readTrustedFile(path string, max int) ([]byte, error) {
 	if st.Mode().Perm()&0o022 != 0 {
 		return nil, fmt.Errorf("%s: group/world writable (mode %04o)", path, st.Mode().Perm())
 	}
-	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Uid != 0 {
+	if sys, ok := st.Sys().(*syscall.Stat_t); ok && sys.Uid != trustedFileOwnerUID {
 		return nil, fmt.Errorf("%s: must be root-owned (uid %d)", path, sys.Uid)
 	}
 	if st.Size() > int64(max) {

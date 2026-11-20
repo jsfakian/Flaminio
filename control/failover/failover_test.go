@@ -72,7 +72,7 @@ func (f *fakeKube) Mark(_ context.Context, req MarkRequest) error {
 				f.calls = append(f.calls, "mark "+req.Identity.Name)
 				return nil // identical operation (lost-PATCH / concurrent winner)
 			}
-			return fmt.Errorf("foreign/conflicting out-of-service mark")
+			return fmt.Errorf("%w", ErrForeignMark)
 		}
 		f.nodes[i].OutOfService = true
 		f.nodes[i].Owned = true
@@ -444,7 +444,78 @@ func TestConditionalMarkOwnership(t *testing.T) {
 		defer srv.Close()
 		api := &APIClient{Base: srv.URL, Token: func() (string, error) { return "tok", nil }, Client: srv.Client(), Authority: auth}
 		err := api.Mark(ctx, MarkRequest{Identity: auth.id, Proof: auth.proof, OperationID: op})
-		if err == nil || !strings.Contains(err.Error(), "foreign/conflicting") {
+		if err == nil || !errors.Is(err, ErrForeignMark) {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("crossed proof identity refused", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("must not contact API with crossed proof")
+		}))
+		defer srv.Close()
+		crossed := auth.proof
+		crossed.Identity = Identity{Name: "a", UID: "uid-other", MachineGeneration: "m1"}
+		api := &APIClient{Base: srv.URL, Token: func() (string, error) { return "tok", nil }, Client: srv.Client(), Authority: auth}
+		err := api.Mark(ctx, MarkRequest{Identity: auth.id, Proof: crossed, OperationID: op})
+		if err == nil || !errors.Is(err, ErrEvidenceInvalid) || !strings.Contains(err.Error(), "proof identity") {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("owner annotation mid-flight for different operation", func(t *testing.T) {
+		otherOp := opID("dead") // distinct hex prefix from opID("own")
+		rec := OperationRecord{
+			Version: 1, NodeUID: "uid-a", OperationID: otherOp, Authority: ManualLockoutProfile,
+			EvidenceRef: otherOp, MachineGeneration: "m1", FenceGeneration: "m1",
+		}
+		ann, err := EncodeOperationRecord(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		taints := `[{"key":"keep-me","effect":"NoSchedule"},{"key":"node.kubernetes.io/out-of-service","value":"nodeshutdown","effect":"NoExecute"}]`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodGet:
+				_, _ = io.WriteString(w, baseNode("uid-a", "5", ann, taints))
+			case http.MethodPatch:
+				t.Fatal("must not patch over foreign owner annotation")
+			default:
+				http.Error(w, "bad", 400)
+			}
+		}))
+		defer srv.Close()
+		api := &APIClient{Base: srv.URL, Token: func() (string, error) { return "tok", nil }, Client: srv.Client(), Authority: auth}
+		err = api.Mark(ctx, MarkRequest{Identity: auth.id, Proof: auth.proof, OperationID: op})
+		if err == nil || !errors.Is(err, ErrForeignMark) {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("owner annotation NodeUID mismatch is foreign not owned", func(t *testing.T) {
+		rec := OperationRecord{
+			Version: 1, NodeUID: "uid-stale", OperationID: op, Authority: ManualLockoutProfile,
+			EvidenceRef: op, MachineGeneration: "m1", FenceGeneration: "m1",
+		}
+		ann, err := EncodeOperationRecord(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		taints := `[{"key":"node.kubernetes.io/out-of-service","value":"nodeshutdown","effect":"NoExecute"}]`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, baseNode("uid-a", "6", ann, taints))
+		}))
+		defer srv.Close()
+		api := &APIClient{Base: srv.URL, Token: func() (string, error) { return "tok", nil }, Client: srv.Client(), Authority: auth}
+		n, err := api.GetNode(ctx, "a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.Owned {
+			t.Fatal("UID-mismatched record must not be Owned")
+		}
+		err = api.Mark(ctx, MarkRequest{Identity: auth.id, Proof: auth.proof, OperationID: op})
+		if err == nil || !errors.Is(err, ErrForeignMark) {
 			t.Fatalf("got %v", err)
 		}
 	})
@@ -658,8 +729,39 @@ func TestCleanupRequiresReturnPermit(t *testing.T) {
 		}}
 		api := &APIClient{Base: srv.URL, Token: func() (string, error) { return "tok", nil }, Client: srv.Client(), Authority: auth}
 		err := api.Clear(ctx, ClearRequest{Identity: Identity{Name: "a", UID: "uid-a"}, OperationID: op, Permit: auth.permit})
-		if err == nil || !strings.Contains(err.Error(), OutcomeCleanupBlocked) {
+		if err == nil || !errors.Is(err, ErrForeignMark) || !strings.Contains(err.Error(), OutcomeCleanupBlocked) {
 			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("Clear binds permit identity and operation", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Fatal("must not contact API with mismatched permit")
+		}))
+		defer srv.Close()
+		auth := &permitAuthority{permit: ReturnPermit{
+			Identity: Identity{Name: "a", UID: "uid-a", MachineGeneration: "m1"}, OperationID: op, Reference: "ret",
+		}}
+		api := &APIClient{Base: srv.URL, Token: func() (string, error) { return "tok", nil }, Client: srv.Client(), Authority: auth}
+		err := api.Clear(ctx, ClearRequest{
+			Identity:    Identity{Name: "a", UID: "uid-a", MachineGeneration: "m1"},
+			OperationID: op,
+			Permit: ReturnPermit{
+				Identity: Identity{Name: "a", UID: "uid-other", MachineGeneration: "m1"}, OperationID: op, Reference: "ret",
+			},
+		})
+		if err == nil || !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("crossed permit identity: %v", err)
+		}
+		err = api.Clear(ctx, ClearRequest{
+			Identity:    Identity{Name: "a", UID: "uid-a", MachineGeneration: "m1"},
+			OperationID: op,
+			Permit: ReturnPermit{
+				Identity: Identity{Name: "a", UID: "uid-a", MachineGeneration: "m1"}, OperationID: opID("zz"), Reference: "ret",
+			},
+		})
+		if err == nil || !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("mismatched permit op: %v", err)
 		}
 	})
 }
@@ -755,7 +857,9 @@ func (s *staticAuthority) ResolveIdentity(context.Context, Node) (Identity, erro
 func (s *staticAuthority) VerifyShutdown(context.Context, Identity) (ShutdownProof, error) {
 	return s.proof, nil
 }
-func (s *staticAuthority) ValidateShutdown(context.Context, ShutdownProof) error { return nil }
+func (s *staticAuthority) ValidateShutdown(context.Context, Identity, ShutdownProof) error {
+	return nil
+}
 func (s *staticAuthority) VerifyReturn(context.Context, Identity, string) (ReturnPermit, error) {
 	return ReturnPermit{}, errTerminalRetirement
 }
@@ -774,7 +878,7 @@ func (p *permitAuthority) ResolveIdentity(_ context.Context, n Node) (Identity, 
 func (p *permitAuthority) VerifyShutdown(context.Context, Identity) (ShutdownProof, error) {
 	return ShutdownProof{}, errors.New("not used")
 }
-func (p *permitAuthority) ValidateShutdown(context.Context, ShutdownProof) error {
+func (p *permitAuthority) ValidateShutdown(context.Context, Identity, ShutdownProof) error {
 	return errors.New("not used")
 }
 func (p *permitAuthority) VerifyReturn(context.Context, Identity, string) (ReturnPermit, error) {

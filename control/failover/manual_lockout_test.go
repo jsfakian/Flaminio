@@ -378,3 +378,71 @@ func TestNewManualLockoutClusterMismatch(t *testing.T) {
 		t.Fatal("expected cluster mismatch")
 	}
 }
+
+// TestManualLockoutFileBackedVerifySuccess covers the full VerifyShutdown → ValidateShutdown
+// path against on-disk proof files (test hook relaxes root ownership for non-root CI).
+func TestManualLockoutFileBackedVerifySuccess(t *testing.T) {
+	pub, priv := testKeyPair(t)
+	cluster := "cluster-1"
+	op := opID("fb")
+	proofDir := t.TempDir()
+	cfg, err := ParseManualLockoutConfig(validConfigJSON(t, pub, proofDir, cluster))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManualLockout(cfg, cluster)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prevUID := trustedFileOwnerUID
+	uid := uint32(os.Geteuid())
+	trustedFileOwnerUID = uid
+	t.Cleanup(func() { trustedFileOwnerUID = prevUID })
+
+	proof := signedProof(t, priv, cluster, op)
+	path := ProofPathForUID(proofDir, "uid-a")
+	if err := WriteManualLockoutProof(path, proof); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	id, err := m.ResolveIdentity(context.Background(), Node{Name: "fl-a", UID: "uid-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.VerifyShutdown(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Reference != op || got.FenceGeneration != "machine-a" {
+		t.Fatalf("%+v", got)
+	}
+	if err := m.ValidateShutdown(context.Background(), id, got); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("crossed expected identity refused", func(t *testing.T) {
+		other := id
+		other.UID = "uid-other"
+		if err := m.ValidateShutdown(context.Background(), other, got); err == nil || !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("got %v", err)
+		}
+	})
+	t.Run("tampered reference refused", func(t *testing.T) {
+		bad := got
+		bad.Reference = opID("xx")
+		if err := m.ValidateShutdown(context.Background(), id, bad); err == nil || !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("got %v", err)
+		}
+	})
+	t.Run("tampered fence generation refused", func(t *testing.T) {
+		bad := got
+		bad.FenceGeneration = "other-machine"
+		if err := m.ValidateShutdown(context.Background(), id, bad); err == nil || !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("got %v", err)
+		}
+	})
+}

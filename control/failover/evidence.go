@@ -12,6 +12,9 @@ import (
 // ErrEvidenceInvalid marks a resolvable but invalid/revoked/mismatched proof.
 var ErrEvidenceInvalid = errors.New("evidence-invalid")
 
+// ErrForeignMark is a foreign or conflicting out-of-service mark (not owned by this operation).
+var ErrForeignMark = errors.New("foreign/conflicting out-of-service mark")
+
 // Outcomes for the structured "failover outcome" log (S9). No credentials or raw
 // provider bodies are logged.
 const (
@@ -54,9 +57,30 @@ type ReturnPermit struct {
 type Authority interface {
 	ResolveIdentity(ctx context.Context, n Node) (Identity, error)
 	VerifyShutdown(ctx context.Context, id Identity) (ShutdownProof, error)
-	ValidateShutdown(ctx context.Context, proof ShutdownProof) error
+	// ValidateShutdown re-checks proof against expected mark-target identity and the durable
+	// authority record. Callers must pass the incarnation they intend to mutate.
+	ValidateShutdown(ctx context.Context, expected Identity, proof ShutdownProof) error
 	VerifyReturn(ctx context.Context, id Identity, operationID string) (ReturnPermit, error)
 	ValidateReturn(ctx context.Context, permit ReturnPermit) error
+}
+
+// identityFieldsMatch reports whether a and b name the same incarnation for mark/clear binding.
+// Empty ProviderID on either side is ignored (physical nodes may omit it); MachineGeneration
+// must match when both are set.
+func identityFieldsMatch(a, b Identity) error {
+	if a.Name != b.Name {
+		return fmt.Errorf("name mismatch: have %q want %q", a.Name, b.Name)
+	}
+	if a.UID != b.UID {
+		return fmt.Errorf("UID mismatch: have %q want %q", a.UID, b.UID)
+	}
+	if a.ProviderID != "" && b.ProviderID != "" && a.ProviderID != b.ProviderID {
+		return fmt.Errorf("providerID mismatch: have %q want %q", a.ProviderID, b.ProviderID)
+	}
+	if a.MachineGeneration != "" && b.MachineGeneration != "" && a.MachineGeneration != b.MachineGeneration {
+		return fmt.Errorf("machine generation mismatch: have %q want %q", a.MachineGeneration, b.MachineGeneration)
+	}
+	return nil
 }
 
 // OperationRecord is the versioned owner annotation value under OwnerAnnotation.

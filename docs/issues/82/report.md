@@ -45,3 +45,7 @@ No comments from the requested review scopes, including Nits.
 Changes/resolution: Both fresh reviewers confirmed deployment-name Nit resolved against actual driver.yaml and reported zero comments including Nits. Earlier High production authority finding was confirmed resolved in R2; R2 mode Nit confirmed fixed in R3. No implementation/runtime/lab tests or approval inferred.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+### Code loop, round 1
+
+Code + security reviewers. Findings: High proof↔target bind; Medium ValidateShutdown re-bind, Owned incarnation, file-backed verify test, annotation race; Low S9 classify, cleanup ResolveIdentity, Clear bind. Fixed in following commit; ADR 0015 accepted.
