@@ -7,6 +7,10 @@
   after the round-1 fixes, before an incremental review of them. Nothing is implemented.
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-13.
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-13.
+- **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`a4f6ededfea5d781e643004dd87c4cbe32765d9daf575bf382d05dea8452af2c`).
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
+
+The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
 - **After approval:** the fixes of review rounds 2 to 9 came after the approval. They are listed
   under Changed after approval. Settled 2026-11-13 (user's instruction): accepted (see Settled at
   the user's instruction of 2026-11-13).
