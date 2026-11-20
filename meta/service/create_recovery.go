@@ -406,7 +406,7 @@ func (s *Service) recoverPlanOrphan(ctx context.Context, kr kv.KeyRev) (bool, er
 	cmps := []kv.Cmp{{Key: createRootKey(op), Rev: 0}}
 	ops := make([]kv.Op, 0, len(page.Entries))
 	for _, e := range page.Entries {
-		cmps = append(cmps, kv.Cmp{Key: e.Key, Rev: e.Rev})
+		cmps = append(cmps, kv.Cmp(e))
 		ops = append(ops, kv.Op{Key: e.Key, Delete: true})
 	}
 	applied, err := s.kv.Txn(ctx, cmps, ops)

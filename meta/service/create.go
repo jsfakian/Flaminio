@@ -219,7 +219,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		rootRev = e.Rev
 	}
 
-	claim, rootRev, err := s.admitCreate(ctx, op, root, rootRev, v)
+	claim, _, err := s.admitCreate(ctx, op, root, rootRev, v)
 	if err != nil {
 		var done errResumeDone
 		if errors.As(err, &done) {
@@ -824,7 +824,7 @@ func (s *Service) cleanupOrphanPublicChunks(ctx context.Context, id string) erro
 		cmps := []kv.Cmp{{Key: volumeKey(id), Rev: 0}}
 		ops := make([]kv.Op, 0, len(page.Entries))
 		for _, kr := range page.Entries {
-			cmps = append(cmps, kv.Cmp{Key: kr.Key, Rev: kr.Rev})
+			cmps = append(cmps, kv.Cmp(kr))
 			ops = append(ops, kv.Op{Key: kr.Key, Delete: true})
 		}
 		ok, err := s.kv.Txn(ctx, cmps, ops)
@@ -862,19 +862,6 @@ func (s *Service) finishLegacyCreate(ctx context.Context, id string, rev int64, 
 		return status.Errorf(codes.Aborted, "legacy create rollback for %q incomplete: %v", id, err)
 	}
 	return nil
-}
-
-// getRawHeader reads a volume header without Creating/Deleting filtering.
-func (s *Service) getRawHeader(ctx context.Context, id string) (domain.Header, int64, bool, error) {
-	e, ok, err := s.kv.GetBounded(ctx, volumeKey(id), domain.MaxCreateRecordBytes)
-	if err != nil || !ok {
-		return domain.Header{}, 0, false, err
-	}
-	h, err := decodeHeaderBounded(e.Value)
-	if err != nil {
-		return domain.Header{}, e.Rev, true, err
-	}
-	return h, e.Rev, true, nil
 }
 
 func parseCreateOpFromRootKey(key string) string {
