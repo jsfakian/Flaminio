@@ -1,0 +1,27 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review68_r2_code (fresh incremental design-code)",
+  "reviewed_commit": "237cc71b674d28868c47a764bfe9f2f8ff501e15",
+  "dependency_commits": {
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "model-checks.md:8-24 specifies immutable original Read/Replace/Patch operands, nonzero four-bit lane masks, an independent fixture-initialized register and a separate transition retaining unselected prior lanes; implementation merge helpers cannot be shared. Lines26-33 give nonzero-neighbor, concurrent partial/full and disjoint-partial histories, delayed hydration/failover, and a clean-passing zero-fill mutant case. design.md:78-81 and :164-179 bind this checker into the separate hydration driver. This resolves the plan gap; no implementation/test pass is asserted."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "design.md:15-25 explicitly selects isolated hydration target/replica/metadata/request/response/action types, leaves all existing production enums unchanged and provides no conversion into ordinary byte/hole operations. Lines131-137 and145-155 identify the new modules and example entrypoint; lines178-181 require ordinary/default workspace compilation and both simulator paths. Actual node engine to_frame (:2361-2411) and replica Action/response_frame matches (:355 onward/:954-962) remain compatible because their enum types receive no variants. Makefile:71-73 already runs examples/sim.rs and all tests with --include-ignored; changing that example to exercise both seed drivers is feasible without a Makefile or runtime-adapter change."
+    },
+    {
+      "id": "SEC68-R1-01",
+      "status": "fixed",
+      "evidence": "model-checks.md:37-61 defines immutable requested origin, durable exact (destination incarnation, BaseId) Pins and actual successful admission/Complete/deletion commit events; the independent monitor checks every transition/restart and never infers terminal permission from actor phase or repository availability. Lines63-70 specify acquire/admission crash windows, committed/uncommitted lost completion, failed CAS, deletion/recreation and paired omit_initial_pin/early_release_pin mutants that fail even with all objects readable. design.md:119-128 and spec S9/S10 adopt this monitor. #52 reader-grant pins remain distinct; #54 exact destination-incarnation/terminal-job retention contracts are not replaced or claimed implemented."
+    }
+  ],
+  "findings": [],
+  "report": "Fresh incremental correctness/codebase-consistency review of 4a52edbff62b2c5a06917c24d43c2c39691aa058..237cc71b674d28868c47a764bfe9f2f8ff501e15, excluding report.md and including new normative model-checks.md. Read actual R1 code/security artifacts and authoritative issue report; confirmed all three prior findings fixed in the proposed plan. Checked changed intent/spec/design/decisions, original Patch/checker independence, overlap serialization, optional-write handling against the existing checker/history, isolated facade feasibility against actual library/module/example/Makefile and exhaustive runtime adapter paths, and pin-monitor revision fallout against current #52/#54 contracts at recorded hashes. Zero comments including Nits. No unchanged whole-protocol re-audit, dependency reopening or runtime/format/worker credential expansion; preserved accepted historical settlements and explicit unapproved current revisions. Dependency drafts are not implementation. Scoped git diff --check passed; final HEAD remained the exact requested commit and status clean. No runtime/model/prototype tests, lab/disk/benchmark/deploy actions, child agents, repository/dependency edits or tracker writes executed. Checks and caught-mutant scenarios described by these documents remain future implementation requirements. Only this JSON review artifact was written."
+}

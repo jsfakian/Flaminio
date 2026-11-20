@@ -9,6 +9,21 @@ Settled at approval, 2026-11-13: the ADR and the recommended alternatives are ac
 plan (see decisions.md, Settled at approval).
 No store, API, networking, credentials or live restore implementation is included.
 
+Review revision, 2026-11-20: the delivery boundary and independent partial-write/pin
+oracles below are proposed changes after approval; they have not been approved.
+
+## Model delivery boundary (S10, S11)
+
+Deliver a separate `hydration` sans-I/O facade and `sim::hydration` driver in `flaminio-repl`.
+Its own target, replica, metadata, request/response and action types model Remote state;
+existing `target::Target`, `replica::ReplicaCore`, `msg::{Request, Response}` and
+`replica::Action` stay unchanged. No conversion to their ordinary byte/hole operations is
+provided. Production node/net adapters cannot construct, send or accept this model protocol.
+The facade may reuse extent/identity types, but owns hydration state transitions and runs the
+existing fencing, session, acknowledgement, lease and resync scenarios against those transitions.
+Runtime integration must later replace this isolated boundary with reviewed typed adapters.
+Ordinary/default workspace consumers must still compile; both simulator paths remain covered.
+
 ## The facts it starts from
 
 - `flaminio-repl/src/replica.rs:35–58` actions read bytes, digests and mapped extents;
@@ -17,20 +32,23 @@ No store, API, networking, credentials or live restore implementation is include
   unmapped layer resolves to zeros. It cannot encode this proposal safely.
 - `flaminio-repl/src/target.rs:1450` derives resync holes from mapped ranges; `:1644`
   selects a readable ISR source. Treating missing base data as holes loses it.
-- `flaminio-repl/src/sim/check.rs:32` checks registers initially zero;
-  `sim/mod.rs:1408` calls it for each block. Repository values must become initial values.
+- `flaminio-repl/src/sim/check.rs:23–25,113–116` supports only whole-value replacement from
+  zero; `sim/mod.rs:322–328,1370–1407` records only scalar writes. Partial writes need an
+  independent original-operand history/checker, not a recorded implementation merge.
+- `flaminio-node/src/engine.rs:2361–2411` and `replica/mod.rs:355–444,954–962` exhaustively
+  adapt the existing core enums; adding hydration variants would require runtime changes.
 - `meta/domain/domain.go:41` records Creating/Deleting but no restore/base state.
   #51/#52/#54's dependency intents describe future snapshot/repository/restore work.
   #54's scoped first step provides no general encrypted restore path.
 
 ## Representation and authority (S1, S2, S6)
 
-Add model/core types in `flaminio-repl/src/hydration.rs`:
+Add isolated model/core types in `flaminio-repl/src/hydration.rs`:
 `BaseId { repository, manifest, source_incarnation }`, `Presence::Remote(BaseId, Block)`
-and `Presence::Local`. Replica data is `BlockState::Remote(ref) | Local(Value)` in the
-simulator; runtime bytes remain generic. Explicit zero is `Local(0)`. A remote reference
+and `Presence::Local`. Replica data is `BlockState::Remote(ref) | Local(ModelBlock)`, with
+four symbolic lanes per block ([model checks](model-checks.md)). Explicit zero is `Local([0; 4])`. A remote reference
 is immutable and range-validated against a per-volume base; it is never an arbitrary URL.
-Ordinary chunks initialize Local(0); restored chunks initialize Remote with nonzero base.
+Ordinary model chunks initialize Local([0; 4]); restored chunks initialize Remote with nonzero base.
 
 Introduce typed state summaries separate from current CRC vectors: `StateDigest::Remote(ref)`
 or `Local(checksum)`. Equal content with different presence is still a state mismatch.
@@ -48,17 +66,20 @@ real durable format atomicity is a later gate, not inferred from model success.
 
 ## Fetch and writes (S3–S5, S7)
 
-Add core outputs `FetchBase { ticket, base, first_block, blocks }` and input
+Add facade outputs `FetchBase { ticket, base, first_block, blocks }` and input
 `on_fetch(ticket, Result<VerifiedBase, FetchFailure>)`. A ticket binds volume incarnation,
 epoch, chunk, session/generation and a monotonic per-target request id. The core never does I/O.
 The simulator's repository returns base values, unavailable, missing or corrupt; verification
 failure cannot construct `VerifiedBase`. The later worker authenticates the full repository
 object before producing that input. Its byte and concurrency budgets remain runtime gates.
 
-A remote client read locks its logical extent using the existing operation lock, obtains
+A remote client read locks its logical extent in the facade, using the current target's
+operation-lock admission/order rules, obtains
 verified bytes, installs base data durably on the current write set, then uses normal read
 lease/readiness checks before replying. A full 4 KiB client write supersedes Remote directly.
-The model represents smaller updates as a read/merge/write on that same locked block.
+The facade implements smaller updates as read/merge/write on that same locked block.
+Its driver records original `Patch { mask, lanes }` at invocation; the separate checker
+merges it into its own state, with concrete overlap cases in [model checks](model-checks.md).
 A background fetch need not hold a lock while awaiting the repository: on completion acquire
 the block lock, revalidate the ticket/epoch and state, and issue conditional hydration only for
 blocks still Remote with that exact reference. If changed, skip rather than overwrite.
@@ -103,10 +124,15 @@ adds no GC. Metadata deletion must not wait for the bucket. Only a read-only sco
 worker may resolve the pinned base; replicas/applications receive neither credentials nor
 arbitrary fetch capabilities. Model unauthorized/wrong-base inputs as rejected events.
 Snapshot/backup/ship requests reject Hydrating before creating a cut or reference.
+The independent per-transition [pin monitor](model-checks.md) binds admission and release to
+the immutable requested destination incarnation/base and actual successful durable commits.
+It checks the modeled durable pin state even while the repository retains every object.
 
 ## Contracts
 
 The named messages above are **sans-I/O model/core contracts**, not wire/proto schemas.
+They belong only to `hydration::{Target, Replica, Metadata, Request, Response, Action}`.
+The existing runtime enums have no new variants, conversions, feature flags or wire mappings.
 `FetchFailure = Unavailable | Missing | Corrupt | Unauthorized`; failures contain base identity
 and logical range, never credentials or plaintext. `VerifiedBase` construction belongs to the
 verified repository boundary. Runtime format, frame discriminants, byte limits, proto schemas,
@@ -118,9 +144,13 @@ input, its delivery and revocation fixed by the runtime design (see decisions.md
 
 ## Files touched
 
-- `dataplane/crates/flaminio-repl/src/{hydration.rs,lib.rs,msg.rs,types.rs}`: typed contracts.
-- `dataplane/crates/flaminio-repl/src/{target.rs,replica.rs}`: S2–S8 state transitions.
-- `dataplane/crates/flaminio-repl/src/sim/{mod.rs,check.rs}` and model metadata: S1–S10.
+- `dataplane/crates/flaminio-repl/src/hydration.rs`: separate facade types and target,
+  replica, metadata state transitions, including modeled durable pins (S1–S9).
+- `dataplane/crates/flaminio-repl/src/lib.rs` and `src/sim/mod.rs`: expose the separate modules.
+- `dataplane/crates/flaminio-repl/src/sim/hydration/{mod.rs,check.rs}`: driver, original
+  operand history, independent register/pin checks, scenarios and caught mutants (S1–S10).
+- `dataplane/crates/flaminio-repl/examples/sim.rs`: run both ordinary and hydration seed paths
+  through `make sim`; ignored mutation tests remain discovered by its existing second command.
 - `docs/replication-protocol.md`, `docs/ARCHITECTURE.md`, followups and issue docs: S11.
   Future store/format/node/net/metadata/CSI changes are explicitly not this increment.
 
@@ -129,21 +159,22 @@ input, its delivery and revocation fixed by the runtime design (see decisions.md
 | Rules | Concrete planned checks |
 |---|---|
 | S1–S3 | hydration module units: ordinary zero vs remote nonzero; wrong base; local-only fast permit; mixed state summary; no successful remote-zero read |
-| S4–S5 | deterministic simulator: partial merge, full overwrite without bucket, delayed fetch across live write/session/epoch, conditional hydration filter and ACK loss |
+| S4–S5 | independent operand-history checker: nonzero neighbors, concurrent partial/full/disjoint updates; full overwrite without bucket, delayed fetch across live write/session/epoch, conditional hydration filter and ACK loss |
 | S6 | simulator: crash before/after state ACK, uncertain mixed states, resync Remote reference, move during outage, ISR join before/after durable barrier |
-| S7, S9 | scripted repository unavailable/missing/corrupt/unauthorized; local reads continue; lifecycle events finish; no secret in diagnostics; forbid snapshot/backup |
+| S7, S9 | repository unavailable/missing/corrupt/unauthorized; local I/O/lifecycle progress; forbid snapshot/backup; independent exact destination/base pin monitor, crash/retry, failed/lost completion and deletion/recreation |
 | S8 | stale epoch/version completion, crash around CAS, lost CAS response, delayed Remote repair invalidates generation, post-completion no fetch events |
-| S10 | seeded chaos plus mutations listed below, initially nonzero register checker |
+| S10 | seeded chaos, independent register and per-transition pin checks, paired clean/mutant scenarios below |
 | S11 | protocol rule-to-test table and roadmap status distinguish model/runtime/lab |
 
-Extend `check_register` to take an initial value, retaining a zero-start wrapper for existing
-callers. A restore block's base supplies that value; hydration events are representation-only.
-Add checks for acknowledged state agreement and forbidden repository events after Complete.
+Implement the separate bounded lane-register and pin monitors in [model checks](model-checks.md).
+The existing scalar checker and ordinary history stay unchanged. Add acknowledged state
+agreement and forbidden repository events after Complete in the hydration driver.
 Each safety rule has a mutation: erase origin binding; remote-as-zero; unverified fetch;
-partial-update zero-fill; hydration overwrite; drop presence during resync; permit stale proof;
-serve before lease; authorize wrong base. Dedicated tests must fail with each mutation.
-Use `make test sim contracts` for model changes and existing regression behavior; `make lint
-race hygiene` for the PR. These tests are planned, not run by this drafting task.
+`partial_update_zero_fill`; hydration overwrite; drop presence during resync; permit stale proof;
+serve before lease; authorize wrong base; `omit_initial_pin`; `early_release_pin`. Dedicated
+paired clean/mutant tests must pass clean and fail each mutation against its independent check.
+Use `make build test sim contracts` to compile ordinary/default workspace consumers and cover
+both model paths; `make lint race hygiene` for the PR. These checks are planned, not run here.
 
 ## Lab
 
@@ -165,6 +196,8 @@ public I/O error mapping. No lab performance/availability evidence exists for in
 A protocol model does not certify durable commit ordering or filesystem behavior. The proposal
 retains metadata-free steady-state local I/O; remote I/O explicitly depends on the repository.
 Client writes must never inherit repository retries after they have committed.
+The isolated facade does not establish runtime enforcement; its fencing/lease/session and
+resync regressions must remain explicit, and later typed runtime integration is a separate gate.
 Settled 2026-11-13 (user's instruction): the credential protocol is #52's worker input; #52's
 and #54's repository contracts as their own approved plans settle them (see decisions.md).
 

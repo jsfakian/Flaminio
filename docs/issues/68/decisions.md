@@ -57,3 +57,25 @@ Nothing is implemented. Approved before its plan review cleared (status: pending
   Recommended by Claude, no recommendation in the plan: the plan defers these to those issues,
   whose plans were approved on 2026-11-13, and a second contract here could only conflict with
   theirs.
+
+## Proposed review revisions, 2026-11-20 — unapproved
+
+These clarify the model-only slice after the historical approvals above. They do not record
+new human approval or change the accepted issue-local ADR's protocol/worker/format decisions.
+
+- **R1-C1 — independent partial-write oracle.** A four-lane model block and immutable original
+  mask/operands in client history let a separate checker apply a patch to its own previous
+  register state. Recording the implementation's merged value would bless zero-filled
+  neighbors. Nonzero and overlapping partial/full-write scenarios catch the zero-fill mutant;
+  the exact transition and history rules are in [model checks](model-checks.md).
+- **R1-C2 — compiling isolated facade.** Put new hydration target/replica/metadata/message
+  types in their own facade, leaving existing production enums and exhaustive adapters
+  unchanged. The current wire cannot represent presence, and ordinary write/hole conversion
+  would lose it. Cover the ordinary workspace build and both simulator paths; runtime typed
+  adapters, durable layout, worker delivery/revocation and live integration remain later work.
+- **SEC68-R1-01 — independent destination/base pin monitor.** Keep immutable requested origin
+  and event-derived successful terminal commits outside metadata actors; after every model
+  transition compare their required exact pin with durable modeled state. Omitted acquisition
+  and early release must fail paired clean/mutant cases even with grow-only repository data.
+  Include restart, failed/lost completion and same-name recreation; #52's reader-grant pins
+  do not substitute for this destination dependency. No GC or credential protocol is added.

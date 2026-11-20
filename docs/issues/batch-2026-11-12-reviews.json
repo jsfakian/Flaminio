@@ -1,6 +1,6 @@
 {
   "date": "2026-11-12",
-  "scope": "61 issue plans:59 original issues plus audit follow-up86 and approved store-identity split90; draft review only",
+  "scope": "62 issue plans: 59 original issues plus audit follow-up #86, approved store-identity split #90 and shared disruption-guard split #91; draft review only",
   "clearance": "Zero unresolved comments including Nits; approvals remain separate",
   "issues": [
     {
@@ -2265,19 +2265,193 @@
       "number": 68,
       "worktree": "/home/jsfakian/Documents/src/flaminio-68",
       "branch": "issue/68-instant-restore",
-      "status": "pending",
-      "rounds": [],
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review68_r1_code (design-code)",
+            "/root/remaining_plan_reviews/review68_r1_security (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "High",
+              "summary": "Define an independent partial-update history/oracle; changing only the register's initial value cannot check S4.",
+              "evidence": "design.md:58\u201361 represents a smaller client update as read/merge/write, but :139\u2013144 specifies only adding an initial value to check_register and lists partial-update zero-fill as a caught mutation. Actual src/sim/mod.rs:322\u2013328 records write: Option<Value>; check_block (:1370\u20131407) converts it directly to CKind::Write(v). src/sim/check.rs:23\u201325/113\u2013116 supports only whole-value replacement, and types.rs defines Value=u64. Recording the target's merged value as that replacement would make a broken merge the expected client write: subsequent reads returning its zero-filled remainder remain linearizable. There is no concrete partial operand/range representation or independent expected-state transition in this plan, so the promised S4 safety mutation has no defined independent oracle.",
+              "fix": "Specify a bounded model block value and an original client partial-update input (mask/offset/length and replacement bytes/lanes), retain that input in HistOp, and define an independent checker transition that applies it to its own prior register state. Do not derive the expected full value from the implementation's read/merge result. Name deterministic concurrent partial/full-write and nonzero-neighbor cases and a zero-fill mutant that this oracle catches. If using an independent literal/reference expectation instead, specify how it remains correct under the modeled overlapping histories."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "The model-only increment needs a compile-safe boundary for its new shared core contracts.",
+              "evidence": "design.md:51\u201353 introduces core FetchBase outputs/on_fetch, :70 adds HydrateIfRemote, and :35\u201344 adds typed digest/range/copy contracts; :121\u2013125 changes flaminio-repl::{msg,target,replica} while expressly excluding node/net changes. In the actual workspace these are shared production types: flaminio-node/src/engine.rs:2361\u20132411 exhaustively translates Request<Payload> to existing Frame variants; replica/mod.rs:355\u2013444 exhaustively handles ReplicaCore Action, and :954\u2013962 exhaustively translates Response. The current simulator's Replica also exhaustively handles Action (replica.rs:345 onward). Adding the planned variants to those shared enums without adapter changes breaks the workspace build; silently projecting them onto ordinary writes/holes would defeat the approved model-only boundary. The plan does not select an isolated API/gating strategy or explicit rejecting adapter changes.",
+              "fix": "Choose and document a compiling delivery boundary: e.g. a separate hydration model/core facade with unchanged existing runtime enums, or explicit minimal fail-closed runtime adapter arms/feature admission that cannot emit or accept hydration on the existing wire. List the affected adapter files if that option is chosen. Specify workspace compilation of ordinary/default consumers plus simulator coverage of the hydration path. Keep actual store/wire/worker implementation in the already deferred runtime stages."
+            },
+            {
+              "id": "SEC68-R1-01",
+              "severity": "High",
+              "summary": "The new base-pin admission/lifetime safety rule has no independent model assertion or caught mutation.",
+              "evidence": "spec.md S9 (lines67-70) requires the pinned base to remain retained until completion or deletion; S10 (lines72-75) requires every new safety rule to have a caught mutation. design.md:100-104 introduces a durable pin before Hydrating exposure and permits release only after Complete/deletion commits. However its concrete independent checks at :139-144 cover initial-value linearizability, acknowledged state agreement and post-Complete repository events; the nine named mutations do not omit initial pin acquisition or release a pin early. In the explicitly grow-only/no-GC repository, removing a pin need not change any data, read result, presence state or post-Complete fetch event, so all of those oracles can still pass while S9 is violated. The existing simulator check path (sim/mod.rs:1345-1407 and sim/check.rs:32-61) has no repository/pin oracle to supply this implicitly. The mapped #52 design similarly treats its own reader-pin closure as an independent checker and catches premature_pin_release; that is a distinct grant/source lifecycle and does not establish #68 destination-base pin coverage.",
+              "fix": "Define the modeled base-pin state and an independent per-transition assertion relating the immutable requested destination-incarnation/base identity to pin admission and terminal commits: no Hydrating exposure without its exact live pin, and no pin release before that incarnation\u2019s Complete or deletion commit. Add deterministic/seeded cases for crash/retry, failed/lost completion and deletion/recreation, with at least omit-initial-pin and early-release mutations that each fail that assertion on a clean-passing scenario. Keep this in the protocol/model increment; no runtime repository collector, credential protocol, bucket mutation or wire-format implementation is required."
+            }
+          ],
+          "dependency_commits": {
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+            "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+            "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/68-r1-code.json",
+            "docs/issues/review-inputs/68-r1-security.json"
+          ],
+          "status": "needs_fix",
+          "resolution": "R1-C1: independent four-lane client history preserves original Patch mask/operands; separate checker applies them to its own prior register, with nonzero/overlap and zero-fill negative cases. R1-C2: isolated hydration facade/model enums and driver leave ordinary runtime enums/adapters unchanged, with both simulator paths and default workspace compilation planned. SEC68-R1-01: independent immutable requested-origin/commit-event pin monitor checks exact destination/base admission/lifetime and catches omit-initial/early-release mutants despite grow-only storage. Historical decisions/accepted ADR prefixes preserved; links, scoped whitespace and provenance checked. No runtime/model/prototype/lab tests executed; current revisions unapproved.",
+          "fix_commit": "237cc71b674d28868c47a764bfe9f2f8ff501e15"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "237cc71b674d28868c47a764bfe9f2f8ff501e15",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review68_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review68_r2_security (incremental design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/68-r2-code.json",
+            "docs/issues/review-inputs/68-r2-security.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
       "approved": "2026-11-13",
-      "approval_commit": "b2413a2"
+      "approval_commit": "b2413a2",
+      "active_review_checkout": "/tmp/flaminio-68-review-resume",
+      "active_review_branch": "review-resume/68",
+      "active_review_commit": "1714ba9bef979a8cc3645d88848de821aafbe0e4",
+      "round": "2",
+      "reviewed_commit": "237cc71b674d28868c47a764bfe9f2f8ff501e15",
+      "authoritative_report": "docs/issues/68/report.md",
+      "latest_fix_commit": "237cc71b674d28868c47a764bfe9f2f8ff501e15",
+      "clear_round": 2,
+      "clear_report_commit": "1714ba9bef979a8cc3645d88848de821aafbe0e4"
     },
     {
       "number": 69,
       "worktree": "/home/jsfakian/Documents/src/flaminio-69",
       "branch": "issue/69-ui",
-      "status": "pending",
-      "rounds": [],
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "3d53c0b61924923d51b9568ec6f1fa56a95e8518",
+          "reviewers": [
+            "review69_r1_code (design-code)",
+            "/root/remaining_plan_reviews/review69_r1_security (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "High",
+              "summary": "The collector/reducer has no concrete #90 exact-store or coherent paged-volume composition.",
+              "evidence": "#69 design.md:37-56 collects only GetVolume and derives holdings/redundancy/availability from legacy node membership. At mapped #90 contracts.md:12-28,47-55,65-88, ACTIVE Volume/ChunkMeta identity_schema=2 omit the legacy membership/move fields, expose exact ReplicaRef(node,device_uuid) and Node store_uuid/store_generation, and forbid fallback. An alive node with replacement B does not make its earned A ref available. core-design.md:61-73 also makes initial_pending_refs a planned rather than earned initial ISR, with a chunk-wide initial-I/O barrier; counting len(ISR) alone would label that initialization healthy. #90 budgets.md:45-81,106-110 retains legal paged_legacy volumes for which ordinary GetVolume explicitly refuses and defines ReadIdentityVolumePage with pinned incarnation/header/gate/mode predicates. #69's Client/Reader contract has no adapter/hook. #91 reader-contract.md:233-260 already owns the shared page allowlist extension, so this is a missing local consumer composition, not a request to reopen #91.",
+              "fix": "Add a proposed whoever-lands-second #69/#90 consumer adapter referencing #90's identity-v4 and #91's sole Reader page-auth owner. Define installed-schema/profile validation, exact incarnation and canonical refs, separate committed/planned/earned counts, pending-initial blocked hints, and current UUID/G-aware availability without converting registration into membership. Define coherent full/paged acquisition with exact initial/discovered and later pinned predicates, contiguous indices, final completion, no mixed attempts and existing aggregate/time/RPC limits; reject unsupported/invalid views explicitly. Add future fixtures with empty legacy projections, alive B/earned A, original-A return with new G, pending initial copies, full/paged equivalence, FE0/LID, predicate churn/missing/duplicate pages and late failure. Do not copy guard admission eligibility or its stricter NotFound policy."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "High",
+              "summary": "The tombstone collection contract is incompatible with #90 and can erase distinct cleanup observations.",
+              "evidence": "#69 design.md:39-40,67-68,87-89 calls node-only ListTombstones once per registered node and deduplicates by volume while preserving full Nodes/Pending sets. Current service.go:584-614 and meta.proto:169-184 implement that legacy shape. Mapped #90 contracts.md:95-163 instead requires an exact ref, explicit limit/cursor, current G for own-node IO or G=0 for administrator inspection, returns <=32 per-ref summaries and complete/next_cursor, omits legacy Nodes/Pending, and refuses node-only requests in ACTIVE. The list rule names IO/admin, not the new Reader. One registered node may have old-A and new-B pending refs and same-name volume reuse must be distinguished by first_epoch/LID/deletion_operation. A current UUID-only scan would hide the unplugged A tombstone, and volume-only dedup collapses distinct ref/incarnation observations. #91's shared extension adds only ReadIdentityVolumePage, not this tombstone inspection adapter.",
+              "fix": "Specify a concrete bounded read-only ListTombstones inspection composition for Readers that preserves the approved node-scoped administrative read intent, including how registered-node enumeration reaches retained historical UUID refs. For example, define a distinct read-only node-prefix inspection request/cursor over #90's existing node/uuid index, with fixed examined-key/page/byte limits and caller/node-scoped cursor validation; it grants no confirmation or current-store possession authority. Consume all bounded pages including empty nonfinal pages, reject repeated/nonprogress cursors and budget overflow, and key retained rows by volume+incarnation+deletion_operation+exact ref. State observed coverage and unknown totals precisely rather than reconstructing omitted full Nodes/Pending as complete; preserve a separately validated legacy adapter. Add actual-service future fixtures for Reader permission, old/new UUIDs on one registered node, >32 rows, skipped/empty pages, churn/name reuse and no successful partial view."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Medium",
+              "summary": "Bare ListVolumes can report a damaged cluster as an empty successful observation.",
+              "evidence": "#69 spec.md invariant/S5 forbids failed/incomplete observation becoming healthy empty; design.md:37-42 uses ordinary ListVolumes without a completeness contract. Actual meta/service/service.go:845-857 silently skips malformed header JSON, so a sole damaged published header gives success with zero IDs and no GetVolume to fail. #77 only fixes coherent named reads. The already-clear shared #91 reader-contract.md:7-70 owns additive require_complete/complete, bounded validation of every candidate header, and explicit old-server incompatibility; #69 does not consume it.",
+              "fix": "Add the local whoever-lands-second #69/#91 strict-list consumer hook, sending require_complete=true and requiring complete=true before a successful status view. Reference #91 as the single service-contract owner; do not fork/edit/reopen it. Treat old-server default false, malformed/contradictory headers or strict-list errors as visible command failure with empty stdout. Keep #69's allowed bounded NotFound omissions and snapshot:false: no guard-style bracketing, candidate history or eviction eligibility is required. Future actual-service-to-status fixtures must cover sole bad header, mixed good/bad, valid Creating/Deleting omission, old server false and a valid empty cluster."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Medium",
+              "summary": "Shared health and nested schema are still underspecified for mixed unknown and omitted observations.",
+              "evidence": "#69 intent.md What we want 2 asks for one definition of chunk/volume/node states; spec.md:S3 and design.md:51-56 only say compare ISR/RF and observed alive/minISR, mark unknown nodes, and count holdings/targets. The version1 output fixes only top-level names at design.md:66-74, with no nested state/count fields or chunk-to-volume reduction. For RF3/min2, one alive+one dead+one unknown and two alive+one unknown need different hints; 'unknown nodes explicitly' does not decide either. A listed volume omitted as NotFound also makes node holdings/target totals observational lower bounds, yet the plan has no completeness/denominator rule for these derived counts. #71 spec.md:50-56 and contracts.md:248-261 reuse #69 under-replicated chunk/volume counts, so that consumer needs a stable local contract rather than independently inventing reduction.",
+              "fix": "Define the nested version1 View fields and exact pure reductions once: validated RF/min/geometry/set/move inputs; committed redundancy per chunk; explicit earned/initial distinctions under R1-C1; availability with known-alive/known-dead/unknown counts and threshold rules; deterministic per-volume aggregation; node holdings/served-volume counts and their observation coverage. Preserve an omitted volume as an identified allowed omission, and mark totals that exclude it as incomplete/observed rather than complete zero. Reference #71's existing under-replicated metric meaning without importing telemetry, CRDs or a dashboard. Add table-driven fixtures for both threshold examples, mixed chunk states, unknown target, all/no omissions, and stable JSON/human equivalence."
+            },
+            {
+              "id": "SEC69-R1-01",
+              "severity": "Medium",
+              "summary": "Specify the exact metadata-server role/URI predicate and its configuration before trusting the status response.",
+              "evidence": "design.md:60-64 retains CA/hostname verification and says to verify server identity/trust domain through existing PKI helpers, but supplies only --trust-domain/--timeout and no expected metadata-server identity or role predicate. Actual pkg/pki/pki.go:301-314 ClientConfig checks the configured CA/hostname through TLS but installs no URI verifier; PeerIdentity at :244-260 checks a single parsed URI and trust domain, accepting any recognized node/admin role. A same-CA ServerAuth certificate for another component with the endpoint hostname/IP is therefore not excluded by the named helpers. The lab issues role certificates on shared node IPs (scripts/lab.sh:582-583), and generic CA tooling can issue ServerAuth for a validated identity. A node/io or admin server must not substitute a fabricated healthy view for the metadata service. Current #91 security-contract.md:45-49 already states the intended exact node/<configured-server-node>/meta predicate; #71 observer hostname isolation is narrower and does not supply it.",
+              "fix": "Define explicit configured expected metadata server node/URI (or a finite exact allowlist for configured endpoints), and require exactly one URI SAN in the configured trust domain with node and component=meta matching that endpoint, in addition to normal CA/hostname/EKU checks. State where the predicate runs before any response is trusted and reject missing/mismatched configuration without admin/insecure fallback. Reuse shared PKI helpers with a caller-specific predicate rather than granting generic same-domain trust. Add actual TLS fixtures with correct CA and endpoint hostname but wrong component/node/admin/reader URI, plus the exact valid metadata URI; wrong-role peers must fail before any status RPC result is accepted."
+            },
+            {
+              "id": "SEC69-R1-02",
+              "severity": "Medium",
+              "summary": "Turn the 64MiB collection/encoding requirement into a concrete before-allocation typed-data and output budget.",
+              "evidence": "design.md:44-48 names counts, existing per-RPC receive bound and post-response protobuf validation; :125-127 says pre-allocation bounds are needed but does not define their implementation. It gives no pre-Unmarshal cardinality admission, retained/temporary/encoded accounting or bounded encoder. Actual pinned grpc1.85.0 rpc_util.go:1051-1065 checks received/decompressed bytes then calls codec.Unmarshal; encoding/proto/proto.go:85-96 materializes input and calls proto.Unmarshal. Pinned protobuf1.36.12 internal/impl/codec_field.go:438-455 allocates a child and appends it for every repeated message before Collect can inspect its count. ListNodesResponse.nodes and ListTombstonesResponse.tombstones are repeated pointers (meta.pb.go:407-412,1137-1142): a valid-size stream of two-byte empty message entries can allocate millions of child objects while remaining within the 4MiB wire cap. Likewise a normal unbounded json.Marshal can allocate its complete escaped output before a 64MiB check. Thus the concrete design does not yet enforce S5 at the boundary it explicitly requires. #91 reader-contract.md:98-119 demonstrates compatible guard-local preflight/application credits, but its guard-only destination set excludes status tombstone responses and is not adopted here.",
+              "fix": "Specify the smallest concrete status-local or shared bounded decode/collection/encoding contract: preflight supported protobuf field/cardinality/string/nesting bounds before typed construction, reserve finite application credits before RPC/append, account retained views and temporary/encoded output without overlap/double-counting, and encode to a bounded owned result before stdout publication. Keep stock gRPC receive/header/client limits and distinguish application data credits from private Go/gRPC heap ownership; no whole-library 64MiB proof, fork, daemon cgroup or admission-guard restart machinery is required. Reuse the relevant #90 profiles/#91 preflight principle through an explicit whoever-lands-second helper where useful, preserving CLI omission semantics. Add repeated-empty-message, many small records, maximal escaping/encoding expansion, concurrent four-call budget, decode failure/cancellation and output-over-limit fixtures that prove refusal before excess typed/retained/output allocation and no stdout success."
+            }
+          ],
+          "dependency_commits": {
+            "71": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+            "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+            "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+            "91": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512",
+            "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+            "91_technical_clear": "f6220b5eefbb0092979327465d2bd9d3aa58039d"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/69-r1-code.json",
+            "docs/issues/review-inputs/69-r1-security.json"
+          ],
+          "status": "needs_fix",
+          "resolution": "R1-C1: concrete identity-v4/legacy full and coherent paged adapters, exact refs and committed/earned/initial/liveness reductions. R1-C2: bounded Reader/admin node-history inspection over the existing tombstone index with exact tags/cursors/row identities, retired UUID coverage and separately validated legacy observations. R1-C3: consume #91 sole strict-complete ListVolumes contract. R1-C4: nested schema1 and exact chunk/volume/node/unknown/omission reductions. SEC69-R1-01: mandatory configured metadata-node exact URI VerifyConnection retaining normal TLS. SEC69-R1-02: bounded preflight/direct charged decode and shared application credits/bounded owned encoder. Historical approvals/accepted ADR prefixes preserved; current read-only composition proposed/unapproved. 46 Markdown targets checked including 8 mapped dependency targets, staged whitespace and scope checked; no runtime/TLS/prototype/lab tests executed.",
+          "fix_commit": "30ba966fe49afad81922b5258bcff0995f7efe70"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "30ba966fe49afad81922b5258bcff0995f7efe70",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review69_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review69_r2_security (incremental design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "71": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+            "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+            "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+            "91": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512",
+            "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+            "91_technical_clear": "f6220b5eefbb0092979327465d2bd9d3aa58039d"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/69-r2-code.json",
+            "docs/issues/review-inputs/69-r2-security.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
       "approved": "2026-11-13",
-      "approval_commit": "11d86de"
+      "approval_commit": "11d86de",
+      "active_review_checkout": "/tmp/flaminio-69-review-resume",
+      "active_review_branch": "review-resume/69",
+      "active_review_commit": "b6ae8d6972a951562f00449e1b306a73fde6e177",
+      "round": "2",
+      "reviewed_commit": "30ba966fe49afad81922b5258bcff0995f7efe70",
+      "authoritative_report": "docs/issues/69/report.md",
+      "latest_fix_commit": "30ba966fe49afad81922b5258bcff0995f7efe70",
+      "clear_round": 2,
+      "clear_report_commit": "b6ae8d6972a951562f00449e1b306a73fde6e177"
     },
     {
       "number": 70,
@@ -3409,7 +3583,7 @@
     "cleared_completed"
   ],
   "status_meanings": {
-    "clear": "Actual plan review returned zero comments including Nits.",
+    "clear": "Recorded plan-review-clear disposition; actual report and reviewed technical snapshot are authoritative. Remaining loops completed in this continuation ended with fresh zero-comment reviews including Nits; earlier dispositions are preserved.",
     "cleared_completed": "User removed completed, merged implementation from the review queue; no new review round claimed."
   }
 }

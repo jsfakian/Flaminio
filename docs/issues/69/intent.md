@@ -100,9 +100,19 @@ a command. No page is served yet: issue #69 stays open after this change.
 - **Disks, capacity and rebuild progress.** They wait for records that do not exist.
 - **What only a node knows:** its attached device, and what #46, #47 and #62 add to the control
   socket. The socket stays root-only, and nothing exports it.
-- **New read RPCs:** a listing at one revision, or a summary the service computes. The existing
-  ones do for the lab's size. Their caller rules change only to admit the read-only identity.
+- **New aggregate/snapshot read RPCs:** no cluster snapshot or server-computed health summary.
+  Proposed R1 composition consumes #90's bounded read-only pages and #91's strict enumeration;
+  it adds only a bounded node-history tombstone inspection mode for the approved read intent.
 - **Narrowing what node identities read.** Any node still reads every volume's record.
 - **Issuing the identity in a cluster** (#16, #43). The lab issues it with `make pki-issue`.
 - **The lab's own waits** (`vol_degraded` and the like) stay as they are.
 - **Destructive or changing actions** (step 3): the command has none.
+
+## Proposed R1 corrections (unapproved)
+
+The original evidence/approval above is historical. Current dependency plans add exact store
+identity and bounded pages (#90), strict header enumeration (#91), and #71's shared committed-ISR
+under-replicated counts. The command consumes them through [view-contract](view-contract.md)
+and [tombstone inspection](tombstone-inspection-contract.md); the [security contract](security-contract.md)
+fixes exact metadata-server identity and before-allocation/output bounds. These six review fixes
+do not implement any feature or approve dashboard, CRD, metrics or admission-guard work.

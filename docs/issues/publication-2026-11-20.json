@@ -1,21 +1,18 @@
 {
   "date": "2026-11-20",
-  "main_base": "391a5666336b586239ffd7e3420d0df51f281f30",
-  "audit_source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+  "main_base": "5904ea509e464092500bdd8c06f4d8c8d2b1ed4f",
+  "audit_source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
   "scope": "Committed canonical and active-review snapshots: issue plans, actual reviews, proposed ADRs and audit evidence. Publication does not imply implementation or approval.",
   "terminal_statuses": [
     "clear",
     "cleared_completed"
   ],
-  "remaining_issues": [
-    68,
-    69
-  ],
+  "remaining_issues": [],
   "inputs": [
     {
       "number": 4,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/4",
       "files": 5,
       "content_sha256": "e57173b7b96ad820cca3a9a94c881c9131b81a7bc06346a64eeb9fefd615a5c6",
@@ -25,7 +22,7 @@
     {
       "number": 5,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/5",
       "files": 5,
       "content_sha256": "7b4e43c8b73d897fb21ba195d565ede378fbd12d3bf9766e8930ebaf925085fa",
@@ -35,7 +32,7 @@
     {
       "number": 6,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/6",
       "files": 5,
       "content_sha256": "d16ba637de50b5c862396ecac2972195c4d0fc55ca9764085e8162b36e4b4d59",
@@ -45,7 +42,7 @@
     {
       "number": 7,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/7",
       "files": 5,
       "content_sha256": "69093ab91ec06056b02a92691f56e12d6b810f460532f262308c270a6357f6a6",
@@ -55,7 +52,7 @@
     {
       "number": 8,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/8",
       "files": 5,
       "content_sha256": "59472657fad795be2f4a560c36e74f69c75579c70a4ebd06962a0c51ab35e35f",
@@ -65,7 +62,7 @@
     {
       "number": 9,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/9",
       "files": 5,
       "content_sha256": "b242fee792e79e2f352dc1d533500bcc875c440ffda1afe216e47e2bcfd039d0",
@@ -75,7 +72,7 @@
     {
       "number": 10,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/10",
       "files": 5,
       "content_sha256": "d4f8d05fd941e9fd2c3b038a95dcf5909255f0c0d6d62278a57c03cc2801c758",
@@ -85,7 +82,7 @@
     {
       "number": 11,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/11",
       "files": 5,
       "content_sha256": "f536e9a2280b13732de41dbdac985dcea9b878b724038336358cadb83a6a6400",
@@ -115,7 +112,7 @@
     {
       "number": 14,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/14",
       "files": 5,
       "content_sha256": "2b6ab13e57743d663356cf18cf70c2791a4e7ef38e52329cea4ea3cc9af70e71",
@@ -165,7 +162,7 @@
     {
       "number": 30,
       "branch": "audit/2026-11-12-correctness",
-      "source_commit": "357ad4516678fbf491b8db46da11560c24b8a5c0",
+      "source_commit": "0305b6ad45b7d82a27738989646906ae9576d7c0",
       "published_path": "docs/issues/30",
       "files": 5,
       "content_sha256": "71bf653cb9e8ce8bdfff8d7868b2a184339d6175c74eeec8c8d43c5456681127",
@@ -424,23 +421,23 @@
     },
     {
       "number": 68,
-      "branch": "issue/68-instant-restore",
-      "source_commit": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+      "branch": "review-resume/68",
+      "source_commit": "1714ba9bef979a8cc3645d88848de821aafbe0e4",
       "published_path": "docs/issues/68",
-      "files": 5,
-      "content_sha256": "7f40e67e3040804010a04c2677a4d49fedac7072d19b97834e2bd2aa6e21345c",
-      "status": "pending",
-      "active_review_copy": false
+      "files": 7,
+      "content_sha256": "b2f16aeaa73cc8ff68cfe9b631e5285c5277b15832fc09f00d8ddf9378788c40",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 69,
-      "branch": "issue/69-ui",
-      "source_commit": "3d53c0b61924923d51b9568ec6f1fa56a95e8518",
+      "branch": "review-resume/69",
+      "source_commit": "b6ae8d6972a951562f00449e1b306a73fde6e177",
       "published_path": "docs/issues/69",
-      "files": 5,
-      "content_sha256": "d6aee773c8ab1bf493b4d2804a932542588b99495a369937fd09c1cf0f7c2002",
-      "status": "pending",
-      "active_review_copy": false
+      "files": 9,
+      "content_sha256": "75c79b35f82641b620e3c20f18173e81ba155cd532e852a85ef536fe0beafb87",
+      "status": "clear",
+      "active_review_copy": true
     },
     {
       "number": 70,

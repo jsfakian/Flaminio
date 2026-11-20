@@ -49,3 +49,10 @@ protocol is #52's worker input, its delivery and revocation fixed by the runtime
 Use the [design](design.md) rule-to-test and mutation mapping. Later add decoder fuzzing,
 crash recovery, mixed-version refusal, credential revocation, filesystem and bucket-loss lab
 checks. The model increment alone does not close #68.
+
+## Proposed confirmation refinement, 2026-11-20 — unapproved
+
+The accepted text above remains historical. The review revision confines delivery to the
+isolated model facade and adds independent original-operand and destination/base pin checks
+in [model checks](model-checks.md), including zero-fill, omitted-pin and early-release mutants.
+It changes no accepted protocol, worker, credential or later-runtime-format decision.

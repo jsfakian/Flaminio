@@ -1,0 +1,29 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review68_r1_code",
+  "reviewed_commit": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+  "dependency_commits": {
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+  },
+  "prior_findings": [],
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "High",
+      "summary": "Define an independent partial-update history/oracle; changing only the register's initial value cannot check S4.",
+      "evidence": "design.md:58\u201361 represents a smaller client update as read/merge/write, but :139\u2013144 specifies only adding an initial value to check_register and lists partial-update zero-fill as a caught mutation. Actual src/sim/mod.rs:322\u2013328 records write: Option<Value>; check_block (:1370\u20131407) converts it directly to CKind::Write(v). src/sim/check.rs:23\u201325/113\u2013116 supports only whole-value replacement, and types.rs defines Value=u64. Recording the target's merged value as that replacement would make a broken merge the expected client write: subsequent reads returning its zero-filled remainder remain linearizable. There is no concrete partial operand/range representation or independent expected-state transition in this plan, so the promised S4 safety mutation has no defined independent oracle.",
+      "fix": "Specify a bounded model block value and an original client partial-update input (mask/offset/length and replacement bytes/lanes), retain that input in HistOp, and define an independent checker transition that applies it to its own prior register state. Do not derive the expected full value from the implementation's read/merge result. Name deterministic concurrent partial/full-write and nonzero-neighbor cases and a zero-fill mutant that this oracle catches. If using an independent literal/reference expectation instead, specify how it remains correct under the modeled overlapping histories."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "Medium",
+      "summary": "The model-only increment needs a compile-safe boundary for its new shared core contracts.",
+      "evidence": "design.md:51\u201353 introduces core FetchBase outputs/on_fetch, :70 adds HydrateIfRemote, and :35\u201344 adds typed digest/range/copy contracts; :121\u2013125 changes flaminio-repl::{msg,target,replica} while expressly excluding node/net changes. In the actual workspace these are shared production types: flaminio-node/src/engine.rs:2361\u20132411 exhaustively translates Request<Payload> to existing Frame variants; replica/mod.rs:355\u2013444 exhaustively handles ReplicaCore Action, and :954\u2013962 exhaustively translates Response. The current simulator's Replica also exhaustively handles Action (replica.rs:345 onward). Adding the planned variants to those shared enums without adapter changes breaks the workspace build; silently projecting them onto ordinary writes/holes would defeat the approved model-only boundary. The plan does not select an isolated API/gating strategy or explicit rejecting adapter changes.",
+      "fix": "Choose and document a compiling delivery boundary: e.g. a separate hydration model/core facade with unchanged existing runtime enums, or explicit minimal fail-closed runtime adapter arms/feature admission that cannot emit or accept hydration on the existing wire. List the affected adapter files if that option is chosen. Specify workspace compilation of ordinary/default consumers plus simulator coverage of the hydration path. Keep actual store/wire/worker implementation in the already deferred runtime stages."
+    }
+  ],
+  "report": "Fresh FULL correctness/codebase-consistency plan review of all five #68 documents (intent/spec/design/decisions/accepted issue-local ADR), actual flaminio-repl target/replica/message/type/metadata/simulator/checker paths, affected exhaustive flaminio-node adapters, accepted global ADRs 0001\u20130006, and relevant current #51/#52/#54/#90 dependency contracts at the hashes recorded above. Checked conditional hydration, current session/epoch and write/prune/ACK/resync semantics, typed reconciliation/copy state, completion/member-version and base-pin requirements, model oracle/mutant promises, and workspace delivery feasibility. Two findings (one High, one Medium); no additional Low or Nit comments. Settled target coordination, verified read-only worker, typed failures, explicit durable Remote, later concrete runtime format/credential delivery and accepted local ADR are preserved; this is only protocol/model/core groundwork. Dependency drafts are not treated as implemented. No code/model tests, prototypes, runtime, lab or disk actions ran; this report describes planned-test gaps, not executed failures. Final git HEAD remained 4a52edbff62b2c5a06917c24d43c2c39691aa058 and worktree status was clean."
+}

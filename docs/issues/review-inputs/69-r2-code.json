@@ -1,0 +1,52 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review69_r2_code (fresh incremental design-code)",
+  "reviewed_commit": "30ba966fe49afad81922b5258bcff0995f7efe70",
+  "dependency_commits": {
+    "71": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "91": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512",
+    "90_technical_clear": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+    "91_technical_clear": "f6220b5eefbb0092979327465d2bd9d3aa58039d"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "view-contract.md:23-62,98-117 installs explicit UNINSTALLED versus ACTIVE identity-v4 adapters, exact schema/incarnation/ref validation, committed C versus earned E versus pending P, UUID/G observations and blocked INITIAL. Full B90 and discovered/pinned page predicates, contiguous completion, final comparisons, no spliced attempts and named NotFound omission semantics match actual mapped #90 contracts/core-design/budgets and #91 sole page allowlist owner. Future fixtures at135-145 cover the requested replacement/INITIAL/FE0-LID/full-paged and error cases."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "tombstone-inspection-contract.md:10-97 defines additive request24/response22 on the existing RPC, Reader/admin-only node-history scope without possession/confirmation rights, all retained UUID index prefixes, <=32 examined keys, bounded root/row reads, <=68 backend calls and <=66 final compares, signed caller/node/mode cursors, every page including empty nonfinal pages, exact incarnation/operation/ref row keys and explicit registry-only/unknown-total coverage. Lines99-125 preserve separately validated legacy node observations and service-to-status fixtures. Tags and envelopes compose with actual #90 contracts.md:126-163."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "view-contract.md:16-27 and design.md Collection explicitly send require_complete20=true with candidate ID empty, require complete20=true, and consume #91 reader-contract.md strict enumeration as sole service owner. False/old/invalid responses fail before success, valid Creating/Deleting omissions remain service filtering, and future actual-service fixtures cover sole/mixed malformed headers, old server, and genuinely empty complete enumeration. No guard-only bracketing/history policy is copied."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "view-contract.md:64-133 defines nested schema1, nullable unavailable values, exact RF/min and A/D/U threshold examples, deterministic chunk-to-volume priority, committed under-replication matching mapped #71, separate placement/earned/pending holdings, target observations and node totals.complete=false for every allowed omitted volume. Lines135-145 require mixed-state/unknown/omission and human/JSON equivalence fixtures."
+    },
+    {
+      "id": "SEC69-R1-01",
+      "status": "fixed",
+      "evidence": "security-contract.md:9-34 adds mandatory --metadata-node and endpoint/trust-domain configuration, client Reader validation before dial, normal CA/hostname/ServerAuth/TLS1.3 and VerifyConnection single-URI exact node/component=meta predicate before RPC acceptance. This addresses actual pkg/pki ClientConfig/PeerIdentity behavior; wrong-role/hostname-valid TLS fixtures are specified at149-153."
+    },
+    {
+      "id": "SEC69-R1-02",
+      "status": "fixed",
+      "evidence": "security-contract.md:38-145 specifies supported pinned stock transport options, four-call shared pre-RPC reservations, direct BufferSlice preflight and complete charged typed construction before allocation, installed status/tombstone destinations, retained/derived/cursor ownership and a counting-pass bounded owned encoder before stdout. APIs and wrapping behavior checked against actual grpc1.85.0 rpc_util.go and encoding/proto/proto.go; requested cardinality/escaping/concurrent-credit/error fixtures at154-164. It explicitly bounds application credits rather than claiming whole-library heap ownership."
+    }
+  ],
+  "findings": [],
+  "report": {
+    "scope": "Fresh incremental correctness review of git diff 3d53c0b61924923d51b9568ec6f1fa56a95e8518..30ba966fe49afad81922b5258bcff0995f7efe70 excluding report.md, including all three new normative appendices. Read actual R1 code/security artifacts and issue report; checked affected metadata service/protobuf/PKI/CLI paths, pinned gRPC codec/options integration, mapped #90 identity/INITIAL/full-page/tombstone envelopes, #91 strict-list/page allowlist/preflight contracts, #71 committed-ISR metric meaning, and #77 coherent named reads.",
+    "results": "All four prior correctness findings and relevant two security findings are concretely addressed. Zero new comments including Nits. No new replication/membership/recovery authority is introduced; no invented simulator rule or guard-admission policy is required. Bounded registered-node history inspection remains administrative read-only observation and does not manufacture complete global pending totals.",
+    "dependency_snapshot_notes": "Actual dependency report HEADs above are the mapped snapshots read. #90 technical-clear331f337 and #91 technical-clearf6220b5 remain historical technical snapshots beneath their recorded report HEADs. The contracts are future implementation proposals; this review does not treat dependencies or #69 as installed runtime behavior or approval.",
+    "limits": "Read-only except this /tmp JSON. No children, repository/dependency edits, tracker messages, runtime/TLS/tests/prototypes/lab/disk/benchmark/deploy actions. Proposed implementation fixtures are not executed test results. No re-audit of unchanged dashboard/UI, whole #90/#91, guard admission/cgroup or whole-library heap proof. Static diff whitespace check passed.",
+    "snapshot_verification": "Reviewed issue HEAD rechecked as30ba966fe49afad81922b5258bcff0995f7efe70 with empty git status --short. Actual dependency HEADs were read as recorded; no scoped technical mutation performed."
+  }
+}

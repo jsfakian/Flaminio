@@ -10,6 +10,11 @@ it: issue #68 stays open after this change. It assumes the first steps of
 [#51](https://github.com/jsfakian/Flaminio/issues/51) (snapshots) as their intents plan them.
 Which step comes first is the planner's recommendation, for the reviewer to confirm.
 
+Review revision, 2026-11-20 (proposed, unapproved): the model increment uses an isolated
+hydration facade with unchanged production enums/adapters. Independent client-operand and
+destination/base pin monitors make its partial-write and retention rules checkable; this
+does not extend delivery into the runtime stages below.
+
 ## Why
 
 1. **The need is not measured.** #54 restores through the new volume's device, so its floor is

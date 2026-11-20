@@ -1,0 +1,43 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review69_r2_security (fresh incremental design-security)",
+  "reviewed_commit": "30ba966fe49afad81922b5258bcff0995f7efe70",
+  "dependency_commits": {
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "91": "3d9e0fe95c6f62bd3044842aeb612734ffd1e512",
+    "71": "35ad29f01e447354df04cf6295b260c4c5cc460c"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC69-R1-01",
+      "status": "fixed",
+      "evidence": "security-contract.md:9-34 requires configured --metadata-node and trust domain, complete Reader credentials before dialing, stock CA/hostname/ServerAuth verification with InsecureSkipVerify=false, and VerifyConnection requiring exactly one canonical node/<configured-node>/meta URI on every handshake before accepting responses. Missing configuration and same-CA wrong-role/node peers fail. Actual pki.Files.ClientConfig and PeerIdentity can be composed with this caller-specific predicate; main CLI generic plaintext branch is explicitly unreachable. Exact-role TLS fixtures are specified at security-contract.md:146-149."
+    },
+    {
+      "id": "SEC69-R1-02",
+      "status": "fixed",
+      "evidence": "security-contract.md:38-124 defines stock receive/header/request and four-call/30s bounds, per-call work reservations, status-local ForceCodecV2 preflight across BufferSlice fragments, bounded depth/field/entry/string/profile plan before typed allocation, charged direct construction without generated Unmarshal, and typed local-error preservation. Lines126-145 retain shared credits through copied/retained/derived ownership and complete bounded counting/encoding before stdout. Lines150-162 specify repeated-empty, allocation/escaping/concurrency/cancel/late-failure fixtures. Pinned grpc1.85.0 CodecV2/ForceCodecV2 and recv source support this boundary; byte buffers are borrowed until Unmarshal returns and the proposed owned direct construction avoids relying on private transport cleanup. The64MiB scope is explicitly application/work accounting, not Go/gRPC heap/RSS."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed in affected security scope",
+      "evidence": "view-contract.md:23-61 selects explicit installed legacy versus identity-v4 mode, validates exact ref/incarnation/profile and planned/earned INITIAL distinctions, consumes full or pinned contiguous pages without mixed-attempt fallback, and preserves allowed named NotFound omissions. Lines101-135 separate recorded membership from exact-current-store liveness and make all reductions observational. Checked affected current #90 exact lifetime/bootstrap and full/page contracts; no conversion of read evidence into replica authority."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed in affected security scope",
+      "evidence": "tombstone-inspection-contract.md:10-31 defines additive request24/response22 read-only inspection, Reader/admin-only authorization, registered-node scope and explicit marker refusal; it preserves existing exact-ref/confirmation authority. Lines35-69 bound retained-UUID index scanning, root/ref decode, compares, response and caller/node/mode/prefix-signed continuation with distinct FLTSHI01 domain. Lines73-113 consume every bounded page, retain exact incarnation/operation/ref row identity and honest registry-only/unknown global coverage, with a separate legacy adapter. Current capability FLCT and #90 FLTSCP01 encodings are distinct from this read cursor; no capability/confirmation privilege is minted."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed in affected security scope",
+      "evidence": "view-contract.md:15-29 and design.md Collection always request #91-owned require_complete and require explicit complete=true even for empty IDs; unsupported old/default modes or damaged strict enumeration fail. Valid Creating/Deleting omission and the explicit pre90/ACTIVE adapters match current #91 reader contract. No guard bracketing/eviction policy or admin fallback is imported."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed in affected security scope",
+      "evidence": "view-contract.md:65-135 supplies exact schema1 nested fields, committed/earned/pending counts, current-store A/D/U threshold rules, per-volume priority, registry-node observation totals and omission lower-bound completeness. Under-replicated metric meaning matches the relevant current #71 contract; liveness remains a hint and missing data cannot become complete zero or permission."
+    }
+  ],
+  "findings": [],
+  "report": "ZERO comments including Nits. Fresh independent incremental safety-security review of 3d53c0b61924923d51b9568ec6f1fa56a95e8518..30ba966fe49afad81922b5258bcff0995f7efe70 excluding report.md, INCLUDING all three new normative view/tombstone-inspection/security appendices. Read actual R1 security and correctness JSONs, current scope/settled decisions and changed intent/spec/design/decisions/local ADR. Independently confirmed both prior security findings and cross-checked all four code corrections in their affected security scope. Traced actual PKI Files.ClientConfig/PeerIdentity and CLI setup/plaintext exclusion, metadata per-method caller rules and existing Ed25519 capability-token format; verified pinned grpc1.85.0 CodecV2/ForceCodecV2/BufferSlice borrowing, receive-to-codec invocation, header/retry options and default protobuf allocation contrast. Checked current relevant #90 exact store/lifetime/INITIAL/tombstone/index/cursor/full-paged contracts, #91 strict-list/Reader page-auth/preflight/exact-meta-peer contracts, and #71 under-replicated reuse at the recorded hashes. New inspection remains administrative read-only, scopes cursor to caller/node/mode/key-prefix and cannot substitute for possession/confirmation; application bounds do not assert whole-library memory ownership. Exact-node/meta peer verification retains normal TLS. Historical accepted identity/read-only-status slice and accepted local ADR are preserved; current additions explicitly remain proposed/unapproved. No unchanged full UI/dependency/protocol re-audit, guard admission/cgroup/restart machinery, private transport proof/fork or new replication authority demanded. Committed diff whitespace passed in the actual active checkout; exact issue HEAD and clean status reverified. An earlier combined static check accidentally ran git status/diff in the dependency module cache and produced only not-a-repository errors; it was corrected by this actual-checkout verification and no check result was inferred from those errors. No repository/dependency edits, subagents, tracker writes, runtime/real-TLS/prototype/implementation tests, lab/disk/fault/benchmark/deploy actions; proposed fixture execution remains future validation. Only this JSON artifact written."
+}

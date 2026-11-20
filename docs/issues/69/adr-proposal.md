@@ -29,3 +29,22 @@ It does not supply Kubernetes/browser authorization or a consistent cluster snap
 
 Descriptor-driven every-method denial tests, Go/Rust URI vectors, actual TLS tests and replica
 handshake refusal; no tests claim the unimplemented browser dashboard exists.
+
+## Proposed follow-on read composition (2026-11-20; unapproved)
+
+The accepted ADR text above is preserved as historical approval. This **Proposed** follow-on
+would supersede only its exactly-four-read-method restriction when #90/#91 are installed;
+it does not supersede the accepted Reader URI, default deny, credential or replica boundaries.
+#91 is the sole owner of adding ReadIdentityVolumePage to that explicit Reader allowlist;
+#69 consumes that shared contract and never grants a token/grant/Attach or writer method.
+[#69's inspection mode](tombstone-inspection-contract.md) adds only bounded read-only
+node-history enumeration to the existing ListTombstones method, with no confirmation rights.
+
+Exact store identity/paging, strict complete enumeration and the local observational schema
+are composed in [view-contract](view-contract.md); exact metadata-role TLS and application
+allocation/output credits are fixed in [security-contract](security-contract.md). Their
+R1-C1–C4/SEC69-R1-01–02 provenance is recorded in [decisions](decisions.md). All additions
+remain unapproved future implementation contracts, with later approval and a numbered
+superseding ADR required before changing the accepted authorization policy. Existing accepted
+ADRs0001/0002 remain constraints. No new runtime, toolchain, disk/frame, dashboard or mutation
+authority is chosen here.

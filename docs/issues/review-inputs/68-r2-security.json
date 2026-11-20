@@ -1,0 +1,24 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review68_r2_security (fresh incremental design-security)",
+  "reviewed_commit": "237cc71b674d28868c47a764bfe9f2f8ff501e15",
+  "dependency_commits": {},
+  "prior_findings": [
+    {
+      "id": "SEC68-R1-01",
+      "status": "fixed",
+      "evidence": "model-checks.md:37-61 now keeps immutable requested destination-incarnation/base/geometry outside the actors, observes successful durable commit events independently, checks exact durable pin admission and lifetime after every transition/restart, and distinguishes lost committed replies from rejected/uncommitted completion. Lines63-70 define paired clean/mutant omit_initial_pin and early_release_pin scenarios, including all-Local/pre-Complete and failed-CAS states, with grow-only objects still available. Same-name recreation uses a fresh destination incarnation; old callbacks cannot supply terminal permission for the new pin. spec S9/S10 and design.md:124-127,164-177 reference this independent monitor and its caught mutations."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed in affected security scope",
+      "evidence": "model-checks.md:8-33 preserves original immutable Replace/Patch operands and masks at invocation, starts the separate checker from fixture base values, applies masks to its own preceding register without sharing implementation merge helpers, explores overlapping histories and retains indeterminate original writes as optional. Concrete nonzero/disjoint/overlapping partial/full-write and delayed-hydration cases catch partial_update_zero_fill independently of actor-installed values. Checked current scalar HistOp/check_register replacement-only behavior to confirm why the new separate model history is necessary."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed in affected security scope",
+      "evidence": "design.md:16-26,133-155 specifies separate hydration Target/Replica/Metadata/Request/Response/Action types and sim::hydration driver; existing target::Target, replica::ReplicaCore, msg Request/Response and replica Action remain unchanged with no conversion/feature/wire mapping. This avoids the actual exhaustive node to_frame/response_frame/action adapters. design.md:152-177 names both ordinary/hydration seed paths via the actual examples/sim.rs Make sim entry plus discovered mutation tests and ordinary workspace build checks; runtime integration remains later."
+    }
+  ],
+  "findings": [],
+  "report": "ZERO comments including Nits. Fresh independent incremental safety-security review of 4a52edbff62b2c5a06917c24d43c2c39691aa058..237cc71b674d28868c47a764bfe9f2f8ff501e15 excluding report.md, INCLUDING the complete new normative model-checks.md. Read actual R1 security and correctness JSON, confirmed they match canonical audit artifacts, and read the recorded report plus current intent/spec/settled decisions and changed design/ADR/appendix. Confirmed the sole prior security finding and both related correctness corrections, then checked changed oracle independence, failed/lost commit handling, restart/recreation lifetime, original partial-write operands and overlap semantics, isolated model authority boundary and ordinary-build/simulator dispatch fallout. Read affected actual sim HistOp/check_block/check_register, exhaustive node Request/Action/Response adapters, lib module exposure, Make sim and example entry points. The destination-pin monitor no longer relies on repository loss or actor phase/pin flags as its expected origin/terminal permission; omissions and early release remain observable even with grow-only data. The new facade introduces no runtime credential channel, wire conversion, repository collector or per-I/O metadata path. No current dependency plan needed rereading for this narrowly scoped oracle/delivery correction; dependency_commits is intentionally empty rather than copying historical hashes. Historical accepted protocol/model-first choices and explicit later runtime format/worker/credential decisions are preserved; current refinements remain unapproved. No unchanged whole-protocol or dependency re-audit, runtime-deferral-only finding or approval-only requirement. Committed diff whitespace check passed; exact HEAD and clean checkout verified unchanged before report creation. No repository edits, subagents, tracker writes, runtime/model/prototype/implementation tests, lab, disk or benchmark actions; all proposed tests remain future validation. Only this JSON artifact was written."
+}

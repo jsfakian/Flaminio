@@ -1,15 +1,30 @@
 # Review-batch supervisor instructions
 
-User scope update, 2026-11-20: #4, #5, #7, #8, #10, #11 and #30 are explicitly removed from
-the remaining review queue as completed merged implementations. Their verified disposition
-is `cleared_completed`; preserve historical reviews/approvals and do not claim a new review.
-The terminal statuses are `clear` and `cleared_completed`. Continue only #62–#69 (8 issues).
+Current status, 2026-11-20: **62 issues, 55 recorded plan-review clearances, 7 user-cleared
+completed implementations, zero pending**. The remaining loops completed in this continuation
+ended with the required fresh zero-comment reviews, including Nits. Preserve earlier clear
+dispositions and their exact reports/snapshots without inventing additional rounds.
+The terminal statuses are `clear` and
+`cleared_completed`; the batch review queue is finished, with no automatic runtime work.
+The user excluded completed/merged #4, #5, #7, #8, #10, #11 and #30; preserve their historical
+reviews/approvals and verified disposition without claiming a new review. Historical counts
+and unfinished findings in the progress log describe their earlier checkpoints.
+
+The ledger's `active_review_checkout` and authoritative published `main` snapshot can be newer
+than a canonical original branch. Use recorded technical/report hashes and publication
+provenance; do not silently implement from older approved text. Review clearance is separate
+from human approval: historical approvals/accepted local ADRs remain, and subsequent technical
+revisions are unapproved. Later approval/settlement records on earlier clear plans are not a
+fresh review of every later HEAD. Runtime feature issues remain open as their plans require.
 
 This continues the user's task: after creating every missing intent/spec/design, run incremental
 correctness/codebase-consistency and security review/address loops for **each issue** until
 there are zero comments, including Nits. The original59draft sets were completed before review;
-new confirmed F09 became #86 and receives the same drafts/reviews. These are draft-plan reviews,
-not authorization to implement runtime features, accept ADRs, push/merge or run shared lab.
+new confirmed F09 became #86, and approved shared-owner splits added #90/#91; all received
+drafts and actual fresh review loops. These are draft-plan reviews. The user subsequently
+authorized document publication, which the parent performs from committed snapshots. Review
+completion does not implement features, close runtime issues, accept post-approval revisions
+or authorize shared-lab actions. The parent handles final publication and its CI verification.
 
 Read AGENTS.md, `.claude/skills/issue-to-spec/SKILL.md`,
 `.claude/skills/spec-to-design/SKILL.md`, `.claude/skills/ship-issue/review-loop.md`,
@@ -24,12 +39,14 @@ use collaboration tools. Safety paths get separate correctness/security reviewer
 fresh combined reviewer is allowed. Never reuse a reviewer from an earlier round of that issue.
 No unavailable Claude model/Skill-tool claims: use the inherited available model and role files.
 
-Issue/worktree/branch mapping: `batch-2026-11-12-manifest.json`; source issue/comments cache:
+Canonical issue/worktree/branch mapping: `batch-2026-11-12-manifest.json`; prefer active checkout
+overrides and exact report commits in `batch-2026-11-12-reviews.json`. Source issue/comments cache:
 `/tmp/flaminio-batch-issues-comments.json` (`data.repository.issues.nodes`). Re-scan actual files
 and git status/HEAD. Read dependency plans in their mapped worktrees; they are not implemented
 or accepted merely because files exist. Audit source/evidence and Proposed0007–0011 live in the
-main checkout `docs/audits/2026-11-12/` and `docs/adr/`. Code is unchanged from8aaa7a3 except
-historical branch differences; verify current source facts rather than trusting any plan.
+main checkout `docs/audits/2026-11-12/` and `docs/adr/`. This review batch made no runtime code
+changes; unrelated user benchmark/deploy work was preserved and excluded. Verify source facts
+in the pinned checkout rather than trusting a plan or assuming every branch has the same source.
 
 Round1 reviews the whole intent/spec/design/local appendices and relevant code/dependencies.
 Later rounds review only `git diff <previous-reviewed>..HEAD` and affected call/dependency paths,

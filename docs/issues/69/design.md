@@ -1,6 +1,7 @@
 # Issue #69: Read-only cluster view before the UI — design
 
-[Specification](spec.md). Approved 2026-11-13; not implemented.
+[Specification](spec.md). Original design approved 2026-11-13; not implemented.
+The R1 corrections linked below are **Proposed, unapproved**; historical approval is retained.
 For the existing intent's identity/command slice only.
 
 The facts it starts from:
@@ -27,7 +28,9 @@ validation in ListTombstones and no broader node rights. Build a descriptor-driv
 so new methods are not accidentally granted. Replica session accept continues requiring
 `node_with("io")`: a reader cannot present itself as a target, even with a copied token.
 No token is signed for a reader. Update proto caller comments and regenerate/check contracts;
-there are no proto field/method additions or on-disk changes.
+the original four-method policy is historical. The proposed #91-owned page-read allowlist
+extension and #69-owned tombstone inspection mode are limited as described below; no on-disk
+change is introduced by #69.
 
 Server rollout precedes issuing reader credentials. An old server/parser may refuse the new
 role, which is a safe explicit error; do not fall back to administrator credentials.
@@ -35,25 +38,35 @@ role, which is a safe explicit error; do not fall back to administrator credenti
 ## Collection and derivation (S2–S5)
 
 Add Go package `control/status`: `Collect(ctx, Client, Limits) (View,error)` and pure `Derive`.
-Client exposes only the four read methods, not the mutation-capable MetadataService interface.
-Collect nodes and volume IDs, then GetVolume each and ListTombstones for each registered node.
-Deduplicate tombstones by volume, preserving their recorded Nodes/Pending sets and count.
-A NotFound volume is included in `omitted_volumes`; all other RPC errors fail the view. Use a
-30 s total context deadline and at most four in-flight RPCs. No unbounded goroutine fan-out.
+The local [view contract](view-contract.md) is normative for strict enumeration, legacy/exact
+identity adapters, coherent full/paged acquisition, nested schema1 fields and pure reductions.
+#91 alone owns the additive strict ListVolumes service contract and Reader page allowlist;
+#69 consumes them through a whoever-lands-second hook, without changing that dependency.
+ListVolumes always sends require_complete=true and accepts complete=true; old-server default
+false, damaged candidate headers and RPC errors fail visibly. It supplies no guard candidate
+ID and adds no admission bracketing, history proof or eviction authority.
 
-Proposed limits: 4096 registered nodes, 4096 volume IDs, 64 MiB collected/encoded response data
-and existing per-RPC receive bound; reject over-limit results with ResourceExhausted rather
-than truncating them. Validate protobuf lengths/counters with checked arithmetic. These are
-bounded initial CLI limits, not claims of supported cluster scale. Exact constants are tested.
-No successful output is printed until collection/derivation/encoding has finished within bounds.
-Settled at approval, 2026-11-13: these limits as proposed (see decisions.md, Settled at approval).
+Collect nodes and strict volume IDs, then each coherent full/paged volume. A named read's
+NotFound is an identified `omitted_volumes` entry; other errors discard the whole attempt.
+Collect tombstones for every registered node using the [inspection contract](tombstone-inspection-contract.md),
+including historical UUIDs, every bounded page and empty nonfinal pages. Never reconstruct
+unobserved full Nodes/Pending sets or deduplicate by volume name alone.
 
-Derive redundancy for each chunk from len(ISR) versus volume.Replicas. Reject contradictory
-geometry/sets/counts as invalid data; do not silently invent unavailable/healthy states. A
-moving chunk with RF current ISR members is not degraded solely because Replicas has RF+1.
-Node holdings count chunk membership; served volumes derive from target names. A separate
-`availability_hint` compares observed alive ISR members with MinIsr and marks unknown nodes
-explicitly. Every displayed hint is observational and never an input to mutation decisions.
+Retain the approved maximum4096 nodes,4096 volume IDs,30s total and four in-flight calls;
+add32768 application RPC invocations (including failed/page calls; retry details in the
+security contract), so cursor churn cannot cause
+unbounded work. Full RPC receive remains4MiB; identity pages512KiB; inspection pages32KiB.
+The64MiB application-data/encoding cap is enforced before allocation by the status-local
+[security contract](security-contract.md), including all live reservations and bounded output.
+No stdout is published before successful collection, derivation and bounded encoding.
+Original limits were settled2026-11-13; the concrete enforcement and attempt/page adapters
+are Proposed corrections. No automatic cross-attempt restart or partial view is published.
+
+Derive uses committed metadata redundancy separately from earned initial copies and observed
+exact-store availability. Pending INITIAL blocks the availability hint even when planned ISR
+is full. A live replacement UUID never inherits an earned old UUID's liveness. One pure
+reducer defines chunk→volume aggregation, node observational totals and omission coverage;
+#71 reuses that reducer's committed-ISR under-replicated meaning. None grants I/O authority.
 
 ## CLI and output contract (S2, S4–S7)
 
@@ -63,31 +76,37 @@ to the collector maximum. Hostname verification and the configured CA remain ena
 the server identity/trust domain through the existing pki helpers before trusting the response.
 Require reader client identity for this command; do not silently borrow an admin key.
 
-JSON top level: `schema_version:1`, `started_at`, `finished_at`, `snapshot:false`, `nodes`,
-`volumes`, `tombstones`, `omitted_volumes`, `unsupported_fields`, `tombstone_coverage`.
-The latter is `"registered_nodes_only"`, never `"complete"`; unsupported_fields includes disks,
-physical_capacity and rebuild_progress until their producers exist. Timestamp strings are UTC
-RFC3339Nano; order node/volume IDs and chunk indices deterministically. Reuse proto geometry
-as decimal integer JSON fields; preserve explicit unknown availability rather than zero values.
-Human output is derived from the same View and ends with the non-snapshot/coverage disclaimer.
-Successful command exit is 0, errors 1 with stderr diagnostic and no stdout JSON. Escape all
-untrusted identifiers; output is never a shell fragment or ANSI control sequence.
+The exact metadata-server peer configuration and before-response TLS predicate are in the
+[security contract](security-contract.md); use its required `--metadata-node` and `--trust-domain`
+configuration. Stock CA, hostname and ServerAuth checks remain enabled; no admin fallback.
+
+JSON schema1 top-level and nested fields, canonical ordering, unavailable fields and both
+human/JSON reductions are fixed in [view-contract.md](view-contract.md). The top-level
+`snapshot:false` and `tombstone_coverage.scope="registered_nodes_only"` remain explicit.
+Timestamps are UTC RFC3339Nano. Human output is derived from the same View and ends with
+non-snapshot/coverage disclaimers. Successful exit is0, errors1 with stderr diagnostic and
+empty stdout; untrusted identifiers are escaped, never shell fragments or terminal controls.
 
 ## Files touched
 
 - `pkg/pki/{pki,pki_test}.go`, CA CLI: Reader URI, validation and issuance S1/S6.
 - `dataplane/crates/flaminio-net/src/identity.rs`, session tests: parser agreement/refusal S1/S6.
-- `meta/service/auth.go`, auth tests and proto caller comments: explicit allowlist S1/S6/S7.
+- `meta/service/{auth,service}.go`, tests, `meta/kv`: allowlist/shared read hooks and bounded inspection S1/S4–S7.
+- `api/proto`, generated `api/gen`, Rust `flaminio-metaclient`: additive inspection/shared ABI compatibility.
 - `control/status/{status,status_test}.go`: bounded collector/pure derivation S2–S5.
 - `meta/cmd/flaminio-meta/main.go`, tests: status subcommand and output S2/S4–S7.
 - lab PKI/status scripts and fake-VM tests: explicit reader identity and no mutation S7.
 
 ## Contracts
 
-Reader URI and four-method allowlist above; existing node-scoped ListTombstones request shape
-is unchanged. New public command/output/limits are fixed above. Collect never exports a token
-or private key. No new metadata method, disk/frame/CRD/web contract. #71 may reuse `control/status`
-with a separate bounded summary API later, not reinterpret a non-snapshot CLI view as authority.
+Reader URI is the historically approved URI. Proposed normative local contracts are
+[view-contract](view-contract.md), [tombstone inspection](tombstone-inspection-contract.md),
+and [security](security-contract.md). #91 owns strict-list protobuf fields/service validation
+and the sole Reader ReadIdentityVolumePage allowlist addition; #90 owns identity-v4 and its
+page ABI. #69 owns only its consumers and additive read-only history-inspection mode.
+Regenerate Go/Rust bindings with `make proto`, check `make contracts` and method authorization
+when implemented. No new writer, on-disk/frame/CRD/web contract or token exposure. #71 may
+reuse pure derivation, never reinterpret this non-snapshot CLI view as mutation authority.
 
 ## Tests
 
@@ -95,8 +114,9 @@ with a separate bounded summary API later, not reinterpret a non-snapshot CLI vi
   attach, ISR change, move, drain, delete and confirm; unknown method/role refused.
 - S1/S6: Go/Rust Reader URI and single-SAN vectors, wrong trust domain/CA, replica accept refusal;
   reader cannot gain node privileges by setting a request node field or attaching a token.
-- S2/S3: `TestDeriveMoveIsNotDegraded`, mixed chunk health, invalid ISR, unknown node, holdings,
-  target counts; no RPCs or mutations from Derive.
+- S2–S5: the exact adapter/reducer and service-to-status fixtures in both local contracts cover
+  empty legacy projections, replacement UUID, INITIAL, full/paged equivalence, strict damaged
+  enumeration, all inspection pages and omission coverage; Derive performs no RPC or mutation.
 - S4/S5: `TestCollectNotSnapshot`, concurrent deletion/recreation, registry-limited coverage,
   cap/deadline/cancel cases; oversized protobuf or JSON never yields partial success/stdout.
 - S6/S7: old-server refusal, no admin fallback, output JSON escaping/control characters,
@@ -123,8 +143,9 @@ Settled 2026-11-13 (user's instruction): dashboard authorization and toolchain a
 ## Risks
 
 Reader output exposes admin operational information; issue/distribute its credentials as admin
-read access, not to tenants. A 64 MiB cap needs pre-allocation/protobuf receive bounds, not only
-a check after an unbounded marshal. Credential issuance and URI extension require review.
+read access, not to tenants. The security contract enforces64MiB application credits before
+typed allocation and bounded encoding; stock-library private heap is outside that accounting. Credential issuance and URI
+extension require review.
 Settled at approval, 2026-11-13: the URI extension and credential issuance as proposed (see
 decisions.md, Settled at approval).
 Registry-only enumeration cannot guarantee tombstone completeness. No liveness-derived label

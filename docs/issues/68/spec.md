@@ -9,6 +9,10 @@ runtime and lab stages. The ADR is Proposed; nothing records human acceptance.
 Settled at approval, 2026-11-13: the ADR is accepted with the plan (see decisions.md, Settled at
 approval).
 
+Review revision, 2026-11-20: the model boundary and independent partial-write/pin checks
+below are proposed changes after approval; they are unapproved. Historical approvals stand
+for the earlier text only.
+
 ## Terms
 
 - **Base:** immutable, authenticated backup identity, volume incarnation and geometry.
@@ -43,6 +47,8 @@ reads need no repository operation. Fast reads must prove the whole extent local
 **S4. Writes.** A write covering a whole logical block can replace it without fetching. A
 partial-block update merges the base where necessary before committing. Larger physical
 allocation units do not zero neighboring remote blocks. An explicit zero is local content.
+The model history retains the original partial operand/range, and its independent checker
+applies that operand to its own preceding register value, never the implementation's merge.
 
 **S5. Races.** Hydration cannot overwrite a client write, including after session replacement,
 failover, restart and an ISR change. Old completions have no authority in a new epoch. Ordinary
@@ -67,12 +73,18 @@ marked hydrating; it must never leave remote data marked complete.
 **S9. Authority.** Fetch authority is scoped to the pinned base, read-only, revocable and
 unavailable to applications or arbitrary replicas. Hydration cannot issue arbitrary bucket
 requests. A base remains retained until completion or deletion releases the dependency.
+An independent model monitor checks the exact requested destination-incarnation/base pin
+before Hydrating exposure and after every transition until a durable Complete/deletion commit,
+including restart, failed completion and same-name recreation. Grow-only storage cannot mask
+a missing or prematurely released pin.
 Snapshots, backups and shipping are refused while hydrating in this step's protocol.
 
 **S10. Executable model.** The simulator models a nonzero base, presence state, delayed fetches,
 repository loss/corruption, concurrent writes, crash/restart, failover, resync and moves. Each
 new safety rule has a deliberate mutation which its check catches. Ordinary-volume behavior
 and existing lease/fencing checks remain covered.
+The hydration facade uses separate model protocol types; existing production enums and
+adapters remain unchanged and ordinary/default workspace consumers must still compile.
 
 **S11. Honest delivery.** Protocol and architecture distinguish modeled rules from runtime
 support. Store/format/wire, worker, command/CSI and measured pod-start/hydration checks remain
@@ -83,9 +95,12 @@ required later stages before #68 can close.
 - S1–S3, S6: typed-state unit tests and simulator reads with nonzero base; restart, digest,
   repair and resync of mixed local/remote extents; fast-read admission model.
 - S4–S5: single-block and partial update histories, delayed hydration after newer writes and
-  epochs, allocation-unit boundary cases; mutations must demonstrate each violation.
+  epochs, nonzero neighbors, concurrent partial/full updates; original lane-mask operands
+  drive the independent register oracle and catch `partial_update_zero_fill`.
 - S7–S9: missing, corrupt and unavailable repository; detached failover; stale completion and
   membership change; no repository event after completion, and lifecycle work during outage.
+  Exact destination/base pin admission/lifetime checks catch `omit_initial_pin` and
+  `early_release_pin` despite all repository objects remaining available.
 - S10–S11: reproducible seeded chaos, explicit rule/mutation mapping and documentation check.
   Runtime, fuzz/crash-format and lab tests are later stages, not evidence supplied here.
 
