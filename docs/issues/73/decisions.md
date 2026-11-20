@@ -7,10 +7,10 @@ as given; none is an approval.
 
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-13.
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-13.
+- **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`f2f65652a586379b51aba9156654d4b9f43e0e31b961d0a99ea8cbb3480b019c`).
+- **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
 
-Approved with the recommended answer to each open question (see Settled at approval). The plan's
-review loop continues after approval; later fixes are recorded as changes made after approval.
-Nothing is implemented. Approved before its plan review cleared (status:
+Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet. Approved before its plan review cleared (status:
 needs_incremental_review).
 
 - **After approval:** the round-3 review fixes (commit `Address the review of the design of #73,
