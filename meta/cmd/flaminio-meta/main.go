@@ -142,17 +142,21 @@ func serve(args []string) error {
 	default:
 		return fmt.Errorf("unknown store %q", *storeKind)
 	}
-	defer store.Close()
-
 	lis, err := net.Listen("tcp", *listen)
 	if err != nil {
+		store.Close()
 		return err
 	}
 	svc := service.New(store, opts)
-	srv := grpc.NewServer(append(serverOpts, grpc.UnaryInterceptor(svc.Authorize))...)
-	metav1.RegisterMetadataServiceServer(srv, svc)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	svc.StartCreateRecovery(ctx)
+	defer func() {
+		svc.StopCreateRecovery()
+		store.Close()
+	}()
+	srv := grpc.NewServer(append(serverOpts, grpc.UnaryInterceptor(svc.Authorize))...)
+	metav1.RegisterMetadataServiceServer(srv, svc)
 	go func() {
 		<-ctx.Done()
 		srv.GracefulStop()

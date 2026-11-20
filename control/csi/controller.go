@@ -237,14 +237,22 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	switch status.Code(err) {
 	case codes.OK:
 	case codes.AlreadyExists:
-		// A retry of the same request succeeds; a different volume of the same name does not.
+		// Metadata returns success for an identical new-format resumed create. AlreadyExists is
+		// a full-identity conflict: preserve it when GetVolume cannot see a hidden Creating
+		// header, and refuse scalar-only matches that would mask a policy conflict (docs/issues/76 S9).
 		v, gerr := c.Meta.GetVolume(ctx, req.GetName())
 		if gerr != nil {
+			if status.Code(gerr) == codes.NotFound {
+				return nil, err
+			}
 			return nil, gerr
 		}
 		if v.GetSizeBytes() != size || v.GetChunkBytes() != p.chunk || v.GetReplicas() != p.replicas || v.GetMinIsr() != p.minISR {
 			return nil, status.Errorf(codes.AlreadyExists, "volume %s exists with other properties", req.GetName())
 		}
+		// Legacy visible headers lack full policy identity: scalar match remains the documented
+		// compatibility exception. Prefer-node / failure-domain mismatches on new-format volumes
+		// are refused by metadata before AlreadyExists reaches CSI with a visible GetVolume.
 	case codes.FailedPrecondition:
 		return nil, status.Error(codes.ResourceExhausted, status.Convert(err).Message())
 	default:

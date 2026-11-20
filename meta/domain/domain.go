@@ -5,6 +5,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -33,6 +34,12 @@ type Move struct {
 	To   string `json:"to"`
 }
 
+// MaxCreateIdentityBytes bounds the canonical create-identity encoding (docs/issues/76).
+const MaxCreateIdentityBytes = 1024
+
+// MaxCreateRecordBytes bounds one root, header or plan/chunk JSON value at admission and reread.
+const MaxCreateRecordBytes = 8192
+
 // Header is everything about a volume except its chunks.
 type Header struct {
 	ID         string `json:"id"`
@@ -51,6 +58,12 @@ type Header struct {
 	// True once a deletion has begun: the volume no longer exists for any other operation, and
 	// its chunks' replicas can no longer change (docs/issues/8).
 	Deleting bool `json:"deleting,omitempty"`
+	// CreateOperation is the durable operation id that admitted this incarnation (docs/issues/76).
+	// Retained after visibility.
+	CreateOperation string `json:"create_operation,omitempty"`
+	// CreateSpec is the normalized full create identity. Retained after visibility. Absent on
+	// legacy headers (scalar matching only).
+	CreateSpec *CreateSpec `json:"create_spec,omitempty"`
 }
 
 // ChunkCount is the number of chunks the volume is split into.
@@ -172,6 +185,69 @@ type Spec struct {
 	Policy     PlacementPolicy
 }
 
+// CreateSpec is the canonical create identity persisted with an operation (docs/issues/76).
+// PreferNode is empty or a ValidID; Domain/Policy use their normalized defaults.
+type CreateSpec struct {
+	SizeBytes  uint64          `json:"size_bytes"`
+	ChunkBytes uint64          `json:"chunk_bytes"`
+	Replicas   uint32          `json:"replicas"`
+	MinISR     uint32          `json:"min_isr"`
+	PreferNode string          `json:"prefer_node,omitempty"`
+	Domain     FailureDomain   `json:"failure_domain"`
+	Policy     PlacementPolicy `json:"failure_domain_policy"`
+}
+
+// CreateSpecFrom builds the normalized create identity from a validated Spec.
+func CreateSpecFrom(s Spec) CreateSpec {
+	return CreateSpec{
+		SizeBytes: s.SizeBytes, ChunkBytes: s.ChunkBytes, Replicas: s.Replicas, MinISR: s.MinISR,
+		PreferNode: s.PreferNode, Domain: s.Domain, Policy: s.Policy,
+	}
+}
+
+// Equal reports whether two create identities match.
+func (a CreateSpec) Equal(b CreateSpec) bool {
+	return a.SizeBytes == b.SizeBytes && a.ChunkBytes == b.ChunkBytes &&
+		a.Replicas == b.Replicas && a.MinISR == b.MinISR &&
+		a.PreferNode == b.PreferNode && a.Domain == b.Domain && a.Policy == b.Policy
+}
+
+// ScalarEqual is the legacy visible-header comparison (size/chunk/replicas/minISR only).
+func (a CreateSpec) ScalarEqual(b CreateSpec) bool {
+	return a.SizeBytes == b.SizeBytes && a.ChunkBytes == b.ChunkBytes &&
+		a.Replicas == b.Replicas && a.MinISR == b.MinISR
+}
+
+// Validate checks PreferNode and the encoded identity size. Other scalar checks belong on Spec.
+func (c CreateSpec) Validate() error {
+	if c.PreferNode != "" && !ValidID(c.PreferNode) {
+		return fmt.Errorf("%w: prefer node", ErrInvalid)
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("%w: create identity", ErrInvalid)
+	}
+	if len(b) > MaxCreateIdentityBytes {
+		return fmt.Errorf("%w: create identity exceeds %d bytes", ErrInvalid, MaxCreateIdentityBytes)
+	}
+	return nil
+}
+
+// DecodeCreateSpec strictly decodes a persisted create identity.
+func DecodeCreateSpec(b []byte) (CreateSpec, error) {
+	if len(b) > MaxCreateIdentityBytes {
+		return CreateSpec{}, fmt.Errorf("create identity: data loss: exceeds %d bytes", MaxCreateIdentityBytes)
+	}
+	var c CreateSpec
+	if err := json.Unmarshal(b, &c); err != nil {
+		return CreateSpec{}, fmt.Errorf("create identity: data loss: %w", err)
+	}
+	if err := c.Validate(); err != nil {
+		return CreateSpec{}, fmt.Errorf("create identity: data loss: %w", err)
+	}
+	return c, nil
+}
+
 // Validate checks a volume specification.
 func (s *Spec) Validate() error {
 	switch {
@@ -191,6 +267,11 @@ func (s *Spec) Validate() error {
 		return fmt.Errorf("%w: failure domain", ErrInvalid)
 	case s.Policy != PolicyStrict && s.Policy != PolicyBestEffort:
 		return fmt.Errorf("%w: failure domain policy", ErrInvalid)
+	case s.PreferNode != "" && !ValidID(s.PreferNode):
+		return fmt.Errorf("%w: prefer node", ErrInvalid)
+	}
+	if err := CreateSpecFrom(*s).Validate(); err != nil {
+		return err
 	}
 	return nil
 }

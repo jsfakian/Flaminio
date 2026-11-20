@@ -29,6 +29,9 @@ func retry[T any](ctx context.Context, f func(context.Context) (T, error)) (T, e
 		err error
 	)
 	for range attempts {
+		if err := charge(ctx); err != nil {
+			return v, err
+		}
 		actx, cancel := context.WithTimeout(ctx, AttemptTimeout)
 		v, err = f(actx)
 		cancel()
@@ -79,6 +82,83 @@ func (e *Etcd) List(ctx context.Context, prefix string) ([]Entry, error) {
 		out[i] = Entry{Key: string(kv.Key), Value: kv.Value, Rev: kv.ModRevision}
 	}
 	return out, nil
+}
+
+// prefixEnd is the etcd exclusive end key for a prefix range.
+func prefixEnd(prefix string) string {
+	return string(clientv3.GetPrefixRangeEnd(prefix))
+}
+
+func (e *Etcd) ScanKeys(ctx context.Context, prefix, after string, limit int) (ScanPage, error) {
+	if err := checkScanLimit(limit); err != nil {
+		return ScanPage{}, err
+	}
+	start := prefix
+	if after != "" {
+		// Exclusive after: start at after+NUL so the next key is strictly greater.
+		start = after + "\x00"
+		if start < prefix {
+			start = prefix
+		}
+	}
+	end := prefixEnd(prefix)
+	// Keys-only + limit keeps the reply under ScanKeysMaxReplyBytes for valid service keys;
+	// oversize keys fail closed below. Linearizable Get (default), not serializable.
+	r, err := retry(ctx, func(ctx context.Context) (*clientv3.GetResponse, error) {
+		return e.c.Get(ctx, start,
+			clientv3.WithRange(end),
+			clientv3.WithLimit(int64(limit)),
+			clientv3.WithKeysOnly(),
+		)
+	})
+	if err != nil {
+		return ScanPage{}, err
+	}
+	page := ScanPage{Entries: make([]KeyRev, 0, len(r.Kvs)), Done: !r.More}
+	reply := 0
+	for _, kv := range r.Kvs {
+		k := string(kv.Key)
+		if len(k) > ScanKeysMaxKeyBytes {
+			return ScanPage{}, fmt.Errorf("key exceeds %d bytes", ScanKeysMaxKeyBytes)
+		}
+		cost := len(k) + 8
+		if reply+cost > ScanKeysMaxReplyBytes {
+			page.Done = false
+			break
+		}
+		page.Entries = append(page.Entries, KeyRev{Key: k, Rev: kv.ModRevision})
+		reply += cost
+	}
+	if len(page.Entries) > 0 {
+		page.Next = page.Entries[len(page.Entries)-1].Key
+	}
+	if len(page.Entries) == 0 {
+		page.Done = true
+	}
+	return page, nil
+}
+
+func (e *Etcd) GetBounded(ctx context.Context, key string, maxBytes int) (Entry, bool, error) {
+	if maxBytes < 0 {
+		return Entry{}, false, fmt.Errorf("maxBytes %d", maxBytes)
+	}
+	// Exact-key Range; reject before JSON decode. Per-RPC receive caps are enforced by the
+	// client dial options in production; the value bound is checked here (docs/issues/76).
+	_ = GetBoundedRecvCap
+	r, err := retry(ctx, func(ctx context.Context) (*clientv3.GetResponse, error) {
+		return e.c.Get(ctx, key)
+	})
+	if err != nil {
+		return Entry{}, false, err
+	}
+	if len(r.Kvs) == 0 {
+		return Entry{}, false, nil
+	}
+	kv := r.Kvs[0]
+	if len(kv.Value) > maxBytes {
+		return Entry{}, false, fmt.Errorf("%w: key %q has %d bytes, max %d", ErrOversized, key, len(kv.Value), maxBytes)
+	}
+	return Entry{Key: string(kv.Key), Value: kv.Value, Rev: kv.ModRevision}, true, nil
 }
 
 func (e *Etcd) Txn(ctx context.Context, cmps []Cmp, ops []Op) (bool, error) {
