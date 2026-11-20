@@ -52,3 +52,29 @@ Approved with the recommended answer to each open question (see Settled at appro
 
 These are technical plan refinements addressing review, pending incremental review. Q1–Q3 and
 all architectural/availability approvals remain open; no accepted risk or user approval is added.
+
+## Review-loop fixes (implementation)
+
+Settled while fixing Low+ code/security review findings on `issue/76-interrupted-volume-creation`:
+
+- **Orphan public-chunk scan cursor:** `cleanupOrphanPublicChunks` advances `after` only after a
+  successful delete-only page txn. A failed compare that leaves keys in place does not skip them.
+  If a volume header reappears mid-cleanup, return Aborted with leftovers intact (no false Done).
+- **Unpublished DeleteVolume is delete-only:** recognized never-published Creating claims go
+  straight to `stepUnpublishedRollback` with no Deleting mark Put, so the path still works when
+  etcd refuses Puts (NOSPACE). Published deletion keeps the mark + tombstone path.
+- **Seal uses the staged root:** `stagePlans` returns the updated root (including `Staged`) so seal
+  does not persist a stale `Staged:0` over an already-written plan prefix.
+- **NOSPACE proof:** mem fixture rejecting Puts covers unpublished rollback and orphan plan GC;
+  published DeleteVolume fails closed under the same fixture.
+- **Page-tail fairness:** recovery budget tests require a retained unexamined tail after the first
+  pass and eventual examination/cleanup of every stable chunk-orphan key.
+- **helpCreate nil CreateSpec:** fail closed with DataLoss (no panic).
+- **Attach/token vs unpublished proof:** Attach on Creating yields NotFound/no token; after
+  publication + Attach, `isUnpublishedCreating` and proof-based rollback refuse.
+- **Recovery vs by-name DeleteVolume:** `create_recovery.go` must not reference `DeleteVolume`;
+  published Deleting headers are left for the conservative public path.
+- **GetBoundedRecvCap on etcd (deferred):** `clientv3.Config.MaxCallRecvMsgSize` is dial-wide, so
+  setting it to `GetBoundedRecvCap` (16KiB) would break List and other large RPCs. Per-call recv
+  caps need dial/call-option surgery outside this fix loop; the service still enforces the
+  decode-time maxBytes bound in `GetBounded`. Recorded as deferred, not dropped.

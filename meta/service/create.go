@@ -175,7 +175,7 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		}
 	}
 
-	rootRev, err = s.stagePlans(ctx, op, root, rootRev, v.Chunks)
+	root, rootRev, err = s.stagePlans(ctx, op, root, rootRev, v.Chunks)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +393,7 @@ func (s *Service) createInitialRoot(ctx context.Context, op string, root createR
 	return rev, nil
 }
 
-func (s *Service) stagePlans(ctx context.Context, op string, root createRoot, rootRev int64, chunks []domain.Chunk) (int64, error) {
+func (s *Service) stagePlans(ctx context.Context, op string, root createRoot, rootRev int64, chunks []domain.Chunk) (createRoot, int64, error) {
 	for root.Staged < uint32(len(chunks)) {
 		if root.State != rootPreparing {
 			break
@@ -404,7 +404,7 @@ func (s *Service) stagePlans(ctx context.Context, op string, root createRoot, ro
 		for i := start; i < end; i++ {
 			b, err := encodeRecord(chunks[i])
 			if err != nil {
-				return 0, err
+				return root, 0, err
 			}
 			ops = append(ops, kv.Op{Key: createPlanKey(op, i), Value: b})
 		}
@@ -412,24 +412,24 @@ func (s *Service) stagePlans(ctx context.Context, op string, root createRoot, ro
 		next.Staged = end
 		rb, err := encodeRecord(next)
 		if err != nil {
-			return 0, err
+			return root, 0, err
 		}
 		ops = append(ops, kv.Op{Key: createRootKey(op), Value: rb})
 		ok, err := s.kv.Txn(ctx, []kv.Cmp{{Key: createRootKey(op), Rev: rootRev}}, ops)
 		if err != nil {
-			return 0, err
+			return root, 0, err
 		}
 		if !ok {
 			e, found, err := s.kv.GetBounded(ctx, createRootKey(op), domain.MaxCreateRecordBytes)
 			if err != nil {
-				return 0, err
+				return root, 0, err
 			}
 			if !found {
-				return 0, status.Errorf(codes.Aborted, "create operation %s revoked during staging", truncID(op))
+				return root, 0, status.Errorf(codes.Aborted, "create operation %s revoked during staging", truncID(op))
 			}
 			root, err = decodeRoot(e.Value)
 			if err != nil {
-				return 0, err
+				return root, 0, err
 			}
 			rootRev = e.Rev
 			continue
@@ -438,17 +438,17 @@ func (s *Service) stagePlans(ctx context.Context, op string, root createRoot, ro
 		e, found, err := s.kv.GetBounded(ctx, createRootKey(op), domain.MaxCreateRecordBytes)
 		if err != nil || !found {
 			if err != nil {
-				return 0, err
+				return root, 0, err
 			}
-			return 0, status.Errorf(codes.Aborted, "create operation %s missing after staging", truncID(op))
+			return root, 0, status.Errorf(codes.Aborted, "create operation %s missing after staging", truncID(op))
 		}
 		root, err = decodeRoot(e.Value)
 		if err != nil {
-			return 0, err
+			return root, 0, err
 		}
 		rootRev = e.Rev
 	}
-	return rootRev, nil
+	return root, rootRev, nil
 }
 
 func (s *Service) admitCreate(ctx context.Context, op string, root createRoot, rootRev int64, v *domain.Volume) (claim int64, newRootRev int64, err error) {
@@ -545,6 +545,9 @@ type errResumeDone struct{ v *domain.Volume }
 func (e errResumeDone) Error() string { return "create already complete" }
 
 func (s *Service) helpCreate(ctx context.Context, op string, claim int64, h domain.Header) (*domain.Volume, error) {
+	if h.CreateSpec == nil {
+		return nil, status.Errorf(codes.DataLoss, "creating volume %q missing CreateSpec", h.ID)
+	}
 	e, ok, err := s.kv.GetBounded(ctx, createRootKey(op), domain.MaxCreateRecordBytes)
 	if err != nil {
 		return nil, err
@@ -823,16 +826,22 @@ func (s *Service) cleanupOrphanPublicChunks(ctx context.Context, id string) erro
 		for _, kr := range page.Entries {
 			cmps = append(cmps, kv.Cmp{Key: kr.Key, Rev: kr.Rev})
 			ops = append(ops, kv.Op{Key: kr.Key, Delete: true})
-			after = kr.Key
 		}
 		ok, err := s.kv.Txn(ctx, cmps, ops)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			// Stale: reread; do not cross ABA.
+			// Stale compare or a recreated header: never advance past undeleted keys.
+			if _, present, gerr := s.kv.Get(ctx, volumeKey(id)); gerr != nil {
+				return gerr
+			} else if present {
+				return status.Errorf(codes.Aborted, "volume %q reappeared with orphan chunk leftovers", id)
+			}
 			continue
 		}
+		// Advance the scan cursor only after a successful delete of this page.
+		after = page.Entries[len(page.Entries)-1].Key
 		if page.Done && len(page.Entries) < createBatchSize {
 			return nil
 		}

@@ -2,12 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/domain"
@@ -416,6 +418,300 @@ func TestLegacyCreatingCompatibleRetry(t *testing.T) {
 		h2 := header(t, store, "leg")
 		if h2.Creating || h2.CreateOperation == "" || h2.CreateSpec == nil {
 			t.Fatalf("expected new-format header: %+v", h2)
+		}
+	})
+}
+
+// failOnceDeleteKV makes the first delete-only Txn report !ok without applying (docs/issues/76).
+type failOnceDeleteKV struct {
+	kv.KV
+	failed bool
+}
+
+func (f *failOnceDeleteKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := f.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (f *failOnceDeleteKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	onlyDeletes := len(ops) > 0
+	for _, o := range ops {
+		if !o.Delete {
+			onlyDeletes = false
+			break
+		}
+	}
+	if onlyDeletes && !f.failed {
+		f.failed = true
+		return 0, false, nil
+	}
+	return f.KV.TxnRev(ctx, cmps, ops)
+}
+
+// docs/issues/76: orphan chunk cleanup must not advance the scan cursor past a failed delete.
+func TestCleanupOrphanChunksDoesNotSkipOnFailedDelete(t *testing.T) {
+	ctx := context.Background()
+	inner := kv.NewMem(nil)
+	store := &failOnceDeleteKV{KV: inner}
+	s := New(store, Options{})
+	for i := 0; i < 3; i++ {
+		if _, err := inner.Txn(ctx, nil, []kv.Op{{Key: chunkKey("orph", uint32(i)), Value: []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.cleanupOrphanPublicChunks(ctx, "orph"); err != nil {
+		t.Fatal(err)
+	}
+	left, err := inner.List(ctx, chunkPrefix("orph"))
+	if err != nil || len(left) != 0 {
+		t.Fatalf("leftover chunks after failed-then-retried delete: %d %v", len(left), err)
+	}
+}
+
+// reappearHeaderKV inserts a volume header before the first header-absent chunk-delete txn.
+type reappearHeaderKV struct {
+	kv.KV
+	id   string
+	once bool
+}
+
+func (r *reappearHeaderKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := r.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (r *reappearHeaderKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	if !r.once {
+		for _, c := range cmps {
+			if c.Key == volumeKey(r.id) && c.Rev == 0 {
+				r.once = true
+				h := domain.Header{ID: r.id, SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1}
+				b, _ := encodeRecord(h)
+				if _, _, err := r.KV.TxnRev(ctx, nil, []kv.Op{{Key: volumeKey(r.id), Value: b}}); err != nil {
+					return 0, false, err
+				}
+				break
+			}
+		}
+	}
+	return r.KV.TxnRev(ctx, cmps, ops)
+}
+
+// docs/issues/76: a recreated header during orphan cleanup returns Aborted with leftovers intact.
+func TestCleanupOrphanChunksAbortedIfHeaderReappears(t *testing.T) {
+	ctx := context.Background()
+	inner := kv.NewMem(nil)
+	store := &reappearHeaderKV{KV: inner, id: "race"}
+	s := New(store, Options{})
+	for i := 0; i < 2; i++ {
+		if _, err := inner.Txn(ctx, nil, []kv.Op{{Key: chunkKey("race", uint32(i)), Value: []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := s.cleanupOrphanPublicChunks(ctx, "race")
+	if code(err) != codes.Aborted {
+		t.Fatalf("cleanup: %v, want Aborted", err)
+	}
+	left, err := inner.List(ctx, chunkPrefix("race"))
+	if err != nil || len(left) == 0 {
+		t.Fatalf("expected leftovers under recreated header: %d %v", len(left), err)
+	}
+}
+
+// deleteOnlyKV rejects any Put, simulating etcd NOSPACE (docs/issues/76 S7).
+type deleteOnlyKV struct {
+	kv.KV
+}
+
+func (d *deleteOnlyKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := d.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (d *deleteOnlyKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	for _, o := range ops {
+		if !o.Delete {
+			return 0, false, errNoSpace
+		}
+	}
+	return d.KV.TxnRev(ctx, cmps, ops)
+}
+
+var errNoSpace = status.Error(codes.ResourceExhausted, "mvcc: database space exceeded")
+
+// docs/issues/76 S7/S8: unpublished DeleteVolume and orphan plan GC stay delete-only under NOSPACE.
+func TestUnpublishedRollbackAndOrphanGCUnderNoSpace(t *testing.T) {
+	ctx := context.Background()
+	inner := kv.NewMem(nil)
+	store := &deleteOnlyKV{KV: inner}
+	s := New(store, Options{})
+
+	h := domain.Header{
+		ID: "ns", SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinISR: 1,
+		Creating: true, Epoch: 0,
+	}
+	hb, _ := encodeRecord(h)
+	if _, ok, err := inner.TxnRev(ctx, []kv.Cmp{{Key: volumeKey("ns"), Rev: 0}}, []kv.Op{
+		{Key: volumeKey("ns"), Value: hb},
+		{Key: chunkKey("ns", 0), Value: []byte(`{"replicas":["a","b"],"isr":["a","b"],"isr_ver":1}`)},
+	}); err != nil || !ok {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "ns"}); err != nil {
+		t.Fatalf("unpublished rollback under NOSPACE: %v", err)
+	}
+	if _, ok, _ := inner.Get(ctx, volumeKey("ns")); ok {
+		t.Fatal("header remained")
+	}
+	if chunks, _ := inner.List(ctx, chunkPrefix("ns")); len(chunks) != 0 {
+		t.Fatalf("chunks remained: %d", len(chunks))
+	}
+	if tombstoned(t, s, "a", "ns") {
+		t.Fatal("unpublished rollback wrote a tombstone under NOSPACE")
+	}
+
+	op := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for i := 0; i < 3; i++ {
+		if _, err := inner.Txn(ctx, nil, []kv.Op{{Key: createPlanKey(op, uint32(i)), Value: []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.RunCreateRecovery(ctx); err != nil {
+		t.Fatalf("orphan plan GC under NOSPACE: %v", err)
+	}
+	page, err := inner.ScanKeys(ctx, createPlanOpPrefix(op), "", 32)
+	if err != nil || len(page.Entries) != 0 {
+		t.Fatalf("orphan plans remain under NOSPACE: %+v %v", page.Entries, err)
+	}
+
+	// Contrast: published deletion still needs a Deleting mark Put and must fail closed.
+	pub := domain.Header{ID: "pub", SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1, Epoch: 1}
+	pb, _ := encodeRecord(pub)
+	if _, ok, err := inner.TxnRev(ctx, []kv.Cmp{{Key: volumeKey("pub"), Rev: 0}}, []kv.Op{{Key: volumeKey("pub"), Value: pb}}); err != nil || !ok {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "pub"}); err == nil {
+		t.Fatal("published DeleteVolume must not succeed when Puts are refused")
+	}
+}
+
+// sealCaptureKV records sealed create-root payloads (docs/issues/76).
+type sealCaptureKV struct {
+	kv.KV
+	sealed []createRoot
+}
+
+func (c *sealCaptureKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := c.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (c *sealCaptureKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	rev, ok, err := c.KV.TxnRev(ctx, cmps, ops)
+	if ok {
+		for _, o := range ops {
+			if o.Delete || !strings.HasPrefix(o.Key, createRootPrefix) {
+				continue
+			}
+			r, derr := decodeRoot(o.Value)
+			if derr == nil && r.State == rootSealed {
+				c.sealed = append(c.sealed, r)
+			}
+		}
+	}
+	return rev, ok, err
+}
+
+// docs/issues/76: seal must persist the staged plan count, not a stale Staged:0.
+func TestSealPersistsStagedPlanCount(t *testing.T) {
+	store := &sealCaptureKV{KV: kv.NewMem(nil)}
+	s := New(store, Options{})
+	addNodes(t, s, "a", "b")
+	if _, err := create(s, "staged", 3, 2, 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.sealed) == 0 {
+		t.Fatal("no sealed root observed")
+	}
+	for _, r := range store.sealed {
+		if r.Staged != uint32(r.ChunkCount) || r.ChunkCount != 3 {
+			t.Fatalf("sealed root Staged=%d ChunkCount=%d, want both 3", r.Staged, r.ChunkCount)
+		}
+	}
+}
+
+// docs/issues/76: helpCreate fail-closed when CreateSpec is missing (no nil deref).
+func TestHelpCreateNilCreateSpecDataLoss(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		s := New(store, Options{})
+		op := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		root := createRoot{
+			Schema: createRootSchema, Volume: "nilspec", Spec: domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1},
+			State: rootCopying, ChunkCount: 1, Staged: 1,
+		}
+		rb, _ := encodeRecord(root)
+		if _, ok, err := store.TxnRev(context.Background(), nil, []kv.Op{{Key: createRootKey(op), Value: rb}}); err != nil || !ok {
+			t.Fatal(err)
+		}
+		h := domain.Header{ID: "nilspec", SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1, Creating: true, CreateOperation: op}
+		_, err := s.helpCreate(context.Background(), op, 1, h)
+		if code(err) != codes.DataLoss {
+			t.Fatalf("helpCreate nil CreateSpec: %v, want DataLoss", err)
+		}
+	})
+}
+
+// docs/issues/76 S8 (security): Attach/token requires publication; unpublished classifier refuses that shape.
+func TestAttachTokenThenUnpublishedClassifierRefuses(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		_, key, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(store, Options{TokenKey: key})
+		addNodes(t, s, "a", "b")
+
+		creating := domain.Header{
+			ID: "tok", SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinISR: 1,
+			Creating: true, Epoch: 0,
+		}
+		if isUnpublishedCreating(creating) != true {
+			t.Fatal("precondition: creating claim must be unpublished-eligible")
+		}
+		cb, _ := encodeRecord(creating)
+		if _, ok, err := store.TxnRev(ctx, []kv.Cmp{{Key: volumeKey("tok"), Rev: 0}}, []kv.Op{{Key: volumeKey("tok"), Value: cb}}); err != nil || !ok {
+			t.Fatal(err)
+		}
+		att, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "tok", Node: "a"})
+		if code(err) != codes.NotFound || (att != nil && att.GetToken() != nil) {
+			t.Fatalf("attach unpublished: %v token=%v", err, att.GetToken())
+		}
+
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey("tok"), Delete: true}}); err != nil {
+			t.Fatal(err)
+		}
+		v, err := create(s, "tok", 1, 2, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		att, err = s.Attach(ctx, &metav1.AttachRequest{Volume: "tok", Node: "a"})
+		if err != nil || att.GetToken() == nil {
+			t.Fatalf("attach published: %v token=%v", err, att.GetToken())
+		}
+		h := header(t, store, "tok")
+		if isUnpublishedCreating(h) {
+			t.Fatalf("published+attached header must not pass unpublished classifier: %+v", h)
+		}
+		if h.Creating || h.Epoch == 0 || h.Target == "" {
+			t.Fatalf("attached header must be published with a target: %+v", h)
+		}
+		if h.FirstEpoch != v.GetEpoch() {
+			t.Fatalf("FirstEpoch %d want create epoch %d", h.FirstEpoch, v.GetEpoch())
+		}
+		// Proof-based rollback must refuse this shape (conservative deletion owns it).
+		if err := s.stepUnpublishedRollback(ctx, h, 1); code(err) != codes.FailedPrecondition {
+			t.Fatalf("rollback published header: %v, want FailedPrecondition", err)
 		}
 	})
 }

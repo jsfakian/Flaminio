@@ -1,9 +1,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -144,16 +146,18 @@ func TestCreateMissingRootFailsClosed(t *testing.T) {
 	})
 }
 
-// docs/issues/76 S7: four populated sources keep page tails bounded; wrap only after the tail is examined.
+// docs/issues/76 S7: four populated sources keep page tails bounded; wrap only after the tail
+// is examined; every stable eligible key is eventually examined under a tight mutation budget.
 func TestCreateRecoveryRespectsPageTailBudget(t *testing.T) {
 	store := kv.NewMem(nil)
 	ctx := context.Background()
 	s := New(store, Options{})
-	for i := 0; i < recoveryPageSize; i++ {
+	const n = recoveryPageSize
+	for i := 0; i < n; i++ {
 		op := fmt.Sprintf("%032x", i)
 		root := createRoot{
 			Schema: createRootSchema, Volume: fmt.Sprintf("v%03d", i),
-			Spec: domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1},
+			Spec:  domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1},
 			State: rootComplete, ChunkCount: 1, Staged: 1, Next: 1,
 		}
 		rb, _ := encodeRecord(root)
@@ -168,32 +172,94 @@ func TestCreateRecoveryRespectsPageTailBudget(t *testing.T) {
 		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey(h.ID), Value: hb}}); err != nil {
 			t.Fatal(err)
 		}
+		// Orphan public chunks (no matching header): eligible for delete-only cleanup.
 		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: chunkKey(fmt.Sprintf("c%03d", i), 0), Value: []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.RunCreateRecovery(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if s.recoveryCursors == nil {
-		t.Fatal("cursors discarded")
-	}
-	for i, cur := range s.recoveryCursors {
-		if len(cur.tail) > recoveryPageSize {
-			t.Fatalf("source %d tail unbounded: %d", i, len(cur.tail))
-		}
-		if len(cur.tail) > 0 && cur.after == "" && !cur.fetched {
-			t.Fatalf("source %d: unconsumed tail with cleared cursor", i)
-		}
-	}
-	for pass := 0; pass < 16; pass++ {
+	sawPendingTail := false
+	// recoveryMaxMutations=8: when the chunk-orphan source leads a pass it stops mid-page and
+	// must retain the unexamined tail (never advance after to fetched next alone).
+	// Rotate firstSrc like the worker — RunCreateRecovery alone does not.
+	for pass := 0; pass < n+int(srcCount); pass++ {
+		s.recoveryFirstSrc = pass % int(srcCount)
 		if err := s.RunCreateRecovery(ctx); err != nil {
 			t.Fatal(err)
 		}
-	}
-	for i, cur := range s.recoveryCursors {
-		if len(cur.tail) > recoveryPageSize {
-			t.Fatalf("source %d tail grew: %d", i, len(cur.tail))
+		if s.recoveryCursors == nil {
+			t.Fatal("cursors discarded")
+		}
+		for i, cur := range s.recoveryCursors {
+			if len(cur.tail) > recoveryPageSize {
+				t.Fatalf("pass %d source %d tail unbounded: %d", pass, i, len(cur.tail))
+			}
+			if len(cur.tail) == 0 {
+				continue
+			}
+			sawPendingTail = true
+			if cur.after == "" && !cur.fetched {
+				t.Fatalf("pass %d source %d: unconsumed tail with cleared cursor", pass, i)
+			}
+			if cur.next != "" && cur.after == cur.next {
+				t.Fatalf("pass %d source %d advanced after to fetched next while tail remains", pass, i)
+			}
 		}
 	}
+	if !sawPendingTail {
+		t.Fatal("expected a retained unexamined page tail under the mutation budget")
+	}
+	left, err := store.ScanKeys(ctx, "/flaminio/v1/chunks/", "", recoveryPageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left.Entries) != 0 {
+		t.Fatalf("chunk orphans not eventually examined/cleaned: %d left (sample %+v)", len(left.Entries), left.Entries[0])
+	}
+}
+
+// docs/issues/76 S6/S8 (security): recovery must not invoke public by-name DeleteVolume.
+func TestCreateRecoveryDoesNotCallDeleteVolumeByName(t *testing.T) {
+	src, err := os.ReadFile("create_recovery.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(src, []byte("DeleteVolume")) {
+		t.Fatal("create_recovery.go must not call by-name DeleteVolume")
+	}
+
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		// Published Deleting shape: recovery must leave the conservative public path in charge.
+		h := domain.Header{
+			ID: "pubdel", SizeBytes: mib, ChunkBytes: mib, Replicas: 2, MinISR: 1,
+			Deleting: true, Epoch: 7, Target: "a",
+		}
+		hb, _ := encodeRecord(h)
+		if _, ok, err := store.TxnRev(ctx, []kv.Cmp{{Key: volumeKey("pubdel"), Rev: 0}}, []kv.Op{
+			{Key: volumeKey("pubdel"), Value: hb},
+			{Key: chunkKey("pubdel", 0), Value: []byte(`{"replicas":["a","b"],"isr":["a"],"isr_ver":1}`)},
+		}); err != nil || !ok {
+			t.Fatal(err)
+		}
+		for i := 0; i < 4; i++ {
+			if err := s.RunCreateRecovery(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		he, ok, _ := store.Get(ctx, volumeKey("pubdel"))
+		if !ok {
+			t.Fatal("recovery removed a published Deleting header (by-name deletion substitution)")
+		}
+		var got domain.Header
+		if err := json.Unmarshal(he.Value, &got); err != nil || !got.Deleting || got.Epoch != 7 {
+			t.Fatalf("published deleting header changed: %+v %v", got, err)
+		}
+		if chunks, err := store.List(ctx, chunkPrefix("pubdel")); err != nil || len(chunks) != 1 {
+			t.Fatalf("recovery must not deleteChunks a published deletion: %d %v", len(chunks), err)
+		}
+		if tombstoned(t, s, "a", "pubdel") {
+			t.Fatal("recovery wrote a tombstone for published Deleting")
+		}
+	})
 }

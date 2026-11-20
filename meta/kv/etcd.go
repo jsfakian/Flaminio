@@ -142,8 +142,9 @@ func (e *Etcd) GetBounded(ctx context.Context, key string, maxBytes int) (Entry,
 	if maxBytes < 0 {
 		return Entry{}, false, fmt.Errorf("maxBytes %d", maxBytes)
 	}
-	// Exact-key Range; reject before JSON decode. Per-RPC receive caps are enforced by the
-	// client dial options in production; the value bound is checked here (docs/issues/76).
+	// Exact-key Range; reject before JSON decode. The value bound is checked here.
+	// Per-RPC MaxCallRecvMsgSize=GetBoundedRecvCap is deferred: clientv3 applies that cap
+	// dial-wide, and wiring it only for GetBounded needs dial/call-option surgery (docs/issues/76).
 	_ = GetBoundedRecvCap
 	r, err := retry(ctx, func(ctx context.Context) (*clientv3.GetResponse, error) {
 		return e.c.Get(ctx, key)

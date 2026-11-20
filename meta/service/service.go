@@ -448,23 +448,10 @@ func (s *Service) DeleteVolume(ctx context.Context, r *metav1.DeleteVolumeReques
 		rev := e.Rev
 		h, herr := decodeHeaderBounded(e.Value)
 		if herr == nil && isUnpublishedCreating(h) {
-			// Never-published creating claim: proof-based header-only rollback (docs/issues/76 S8).
+			// Never-published creating claim: delete-only proof-based rollback (docs/issues/76 S8).
+			// No Deleting mark Put — that would fail under etcd NOSPACE and is unnecessary for
+			// an incarnation that never authorized materialization.
 			h.ID = r.GetId()
-			if !h.Deleting {
-				h.Deleting = true
-				b, err := encodeRecord(h)
-				if err != nil {
-					return nil, errStatus(err)
-				}
-				marked, ok, err := s.kv.TxnRev(ctx, []kv.Cmp{{Key: e.Key, Rev: e.Rev}}, []kv.Op{{Key: e.Key, Value: b}})
-				if err != nil {
-					return nil, errStatus(err)
-				}
-				if !ok {
-					continue
-				}
-				rev = marked
-			}
 			if err := s.stepUnpublishedRollback(ctx, h, rev); err != nil {
 				if status.Code(err) == codes.Aborted {
 					continue
