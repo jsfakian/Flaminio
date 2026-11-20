@@ -841,21 +841,20 @@ impl BlockDevice for UringDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     /// Test-only: fail preparation at `index` (before SQ publication). Clear with `None`.
-    #[allow(dead_code)]
     fn inject_prepare_fail_at(index: Option<usize>) {
         TEST_PREPARE_FAIL_AT.with(|c| c.set(index));
     }
 
     /// Test-only: next submit returns this errno once.
-    #[allow(dead_code)]
     fn inject_submit_errno(errno: Option<i32>) {
         TEST_SUBMIT_ERRNO.with(|c| c.set(errno));
     }
 
     /// Test-only: prepend injected CQEs consumed before the real completion queue.
-    #[allow(dead_code)]
     fn inject_cqe_seq(seq: impl IntoIterator<Item = (u64, i32)>) {
         TEST_CQE_SEQ.with(|q| {
             let mut q = q.borrow_mut();
@@ -865,20 +864,84 @@ mod tests {
     }
 
     /// Test-only: panic once after the ownership guard is armed.
-    #[allow(dead_code)]
     fn inject_panic_when_armed(panic: bool) {
         TEST_PANIC_WHEN_ARMED.with(|c| c.set(panic));
     }
 
+    /// Clears every injection seam when dropped (including on assertion failure).
+    struct ClearInjects;
+    impl Drop for ClearInjects {
+        fn drop(&mut self) {
+            inject_prepare_fail_at(None);
+            inject_submit_errno(None);
+            inject_cqe_seq(std::iter::empty());
+            inject_panic_when_armed(false);
+        }
+    }
+
     fn temp_device(size: u64, direct: bool) -> (UringDevice, std::path::PathBuf) {
+        static N: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "flaminio-uring-{}-{size}-{direct}",
-            std::process::id()
+            "flaminio-uring-{}-{}-{size}-{direct}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
         ));
         let f = File::create(&path).unwrap();
         f.set_len(size).unwrap();
         drop(f);
         (UringDevice::open(&path, direct).unwrap(), path)
+    }
+
+    /// Reserve address space without committing resident pages (`MAP_NORESERVE`).
+    fn map_anon(len: usize, writable: bool) -> *mut libc::c_void {
+        let prot = if writable {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            libc::PROT_READ
+        };
+        // SAFETY: anonymous mapping; length is non-zero in every caller.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(ptr, libc::MAP_FAILED, "mmap {len} bytes");
+        ptr
+    }
+
+    fn unmap(ptr: *mut libc::c_void, len: usize) {
+        // SAFETY: ptr/len from map_anon in this test.
+        unsafe {
+            libc::munmap(ptr, len);
+        }
+    }
+
+    /// Spawn this test binary's `abort_harness` with `FLAMINIO_URING85_ABORT=case` and expect SIGABRT.
+    fn spawn_abort_case(case: &str) {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .env("FLAMINIO_URING85_ABORT", case)
+            .env(
+                "FLAMINIO_URING85_PARENT_PID",
+                std::process::id().to_string(),
+            )
+            .env("RUST_TEST_THREADS", "1")
+            .args(["--exact", "uring::tests::abort_harness", "--nocapture"])
+            .output()
+            .expect("spawn abort_harness");
+        assert_eq!(
+            output.status.signal(),
+            Some(libc::SIGABRT),
+            "case {case}: status={:?} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]
@@ -1021,8 +1084,615 @@ mod tests {
             dev.read_at(2 << 20, &mut buf).is_err(),
             "read past the end is a short read"
         );
+        // Short read among later valid operations: every CQE is reaped before the error returns.
+        let mut good = vec![0u8; 4096];
+        let mut bad = vec![0u8; 4096];
+        let mut reads = [(0u64, &mut good[..]), ((2 << 20) as u64, &mut bad[..])];
+        assert!(dev.read_many(&mut reads).is_err());
         dev.write_many(&[(0, &data[..]), (4096, &data[..])])
             .unwrap();
+        // Empty and full-window sizes remain usable after an error.
+        dev.write_many(&[]).unwrap();
+        dev.read_many(&mut []).unwrap();
+        let aligned: Vec<AlignedBuf> = (0..256u32)
+            .map(|i| AlignedBuf::copy_of(&[i as u8; 4096]))
+            .collect();
+        let writes: Vec<(u64, &[u8])> = aligned
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i as u64 * 4096, &b[..]))
+            .collect();
+        // Device is 1 MiB = 256 × 4 KiB: exactly one full window.
+        dev.write_many(&writes).unwrap();
+        let mut bufs: Vec<Vec<u8>> = (0..256).map(|_| vec![0u8; 4096]).collect();
+        let mut rereads: Vec<(u64, &mut [u8])> = bufs
+            .iter_mut()
+            .enumerate()
+            .map(|(i, b)| (i as u64 * 4096, &mut b[..]))
+            .collect();
+        dev.read_many(&mut rereads).unwrap();
+        for (i, b) in bufs.iter().enumerate() {
+            assert!(b.iter().all(|&x| x == i as u8), "block {i}");
+        }
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn len32_boundary() {
+        assert_eq!(len32(u32::MAX as usize).unwrap(), u32::MAX);
+        let err = len32((u32::MAX as usize) + 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("4 GiB"));
+    }
+
+    #[test]
+    fn window_preflight_rejects_before_allocation() {
+        let _clear = ClearInjects;
+        let (dev, path) = temp_device(64 << 10, false);
+        let data = vec![0x11u8; 4096];
+        for fail_at in [0usize, 1, 2] {
+            inject_prepare_fail_at(Some(fail_at));
+            let err = dev
+                .write_many(&[(0, &data[..]), (4096, &data[..]), (8192, &data[..])])
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("injected preparation failure"),
+                "fail_at={fail_at}: {err}"
+            );
+            inject_prepare_fail_at(None);
+            // Rejected window published nothing.
+            let mut got = vec![0u8; 4096];
+            for off in [0u64, 4096, 8192] {
+                dev.read_at(off, &mut got).unwrap();
+                assert!(
+                    got.iter().all(|&x| x == 0),
+                    "fail_at={fail_at} offset {off} changed"
+                );
+            }
+        }
+        // Oversized length is rejected by len32 before bounce allocation (no giant resident alloc).
+        let huge_len = (u32::MAX as usize) + 1;
+        let ptr = map_anon(huge_len, false);
+        // SAFETY: anonymous readable mapping of huge_len bytes.
+        let huge = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), huge_len) };
+        let err = dev.write_many(&[(0, &data[..]), (4096, huge)]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        unmap(ptr, huge_len);
+        let mut got = vec![0u8; 4096];
+        dev.read_at(0, &mut got).unwrap();
+        assert!(got.iter().all(|&x| x == 0));
+        // Device still accepts ordinary I/O.
+        dev.write_at(0, &data).unwrap();
+        dev.flush().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    #[test]
+    fn rejected_batch_does_not_retain_borrowed_buffers() {
+        use std::os::unix::fs::FileExt;
+        let path = std::env::temp_dir().join(format!(
+            "flaminio-uring-reject-batch-{}",
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(8192).unwrap();
+        let dev = UringDevice::open(&path, false).unwrap();
+        let length = (u32::MAX as usize) + 4097;
+        // Reserve address space, not 4 GiB of resident memory. The huge slice is never submitted.
+        let ptr = map_anon(length, false);
+        // SAFETY: the anonymous mapping is initialized, readable, and lives through this test.
+        let huge = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), length) };
+        let small = vec![0x5a; 4096];
+        let result = dev.write_many(&[(0, &small), (4096, huge)]);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        let mut before = [0u8; 4096];
+        file.read_at(&mut before, 0).unwrap();
+        let mut unrelated = [0u8; 4096];
+        // Keep `small` alive to demonstrate the queued-SQE defect without inducing use-after-free.
+        dev.read_at(4096, &mut unrelated).unwrap();
+        let _ = dev.flush();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let mut after = [0u8; 4096];
+        file.read_at(&mut after, 0).unwrap();
+        // Writable mapping for a rejected read batch (never construct a read buffer from PROT_READ-only).
+        let rptr = map_anon(length, true);
+        // SAFETY: writable anonymous mapping of length bytes.
+        let rhuge = unsafe { std::slice::from_raw_parts_mut(rptr.cast::<u8>(), length) };
+        let mut small_r = vec![0u8; 4096];
+        let rerr = dev.read_many(&mut [(0, &mut small_r[..]), (4096, rhuge)]);
+        assert_eq!(rerr.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        drop(dev);
+        unmap(ptr, length);
+        unmap(rptr, length);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            before, after,
+            "a later call submitted a write borrowing the already-returned batch's buffer"
+        );
+        assert!(before.iter().all(|&x| x == 0));
+    }
+
+    #[cfg(all(target_os = "linux", not(target_pointer_width = "64")))]
+    #[test]
+    fn rejected_batch_oversized_mapping_unsupported_on_32bit() {
+        // Cannot reserve a >4 GiB anonymous mapping on 32-bit; integer-boundary and injected
+        // preparation tests still cover S1/S2. This records the platform limitation (S8).
+    }
+
+    #[test]
+    fn rejection_at_window_boundaries() {
+        let _clear = ClearInjects;
+        let huge_len = (u32::MAX as usize) + 1;
+        let huge_ptr = map_anon(huge_len, false);
+        // SAFETY: readable anonymous mapping used only as a length-invalid write source.
+        let huge = unsafe { std::slice::from_raw_parts(huge_ptr.cast::<u8>(), huge_len) };
+        let rhuge_ptr = map_anon(huge_len, true);
+        for direct in [false, true] {
+            for bounced in [false, true] {
+                for &reject_idx in &[0usize, 255, 256, 257] {
+                    let n = reject_idx + 1;
+                    let size = (n as u64) * 8192;
+                    let (dev, path) = temp_device(size.max(1 << 20), direct);
+                    let smalls: Vec<Vec<u8>> =
+                        (0..n).map(|_| vec![0xABu8; 4096]).collect();
+                    // Aligned path: keep AlignedBuf allocations so slices stay 4 KiB aligned.
+                    let aligned_smalls: Vec<AlignedBuf> = (0..n)
+                        .map(|_| AlignedBuf::copy_of(&[0xABu8; 4096]))
+                        .collect();
+                    let writes: Vec<(u64, &[u8])> = (0..n)
+                        .map(|i| {
+                            let data = if i == reject_idx {
+                                huge
+                            } else if bounced {
+                                &smalls[i][..]
+                            } else {
+                                &aligned_smalls[i][..]
+                            };
+                            (i as u64 * 8192, data)
+                        })
+                        .collect();
+                    let err = dev.write_many(&writes).unwrap_err();
+                    assert_eq!(
+                        err.kind(),
+                        io::ErrorKind::InvalidInput,
+                        "direct={direct} bounced={bounced} reject_idx={reject_idx}"
+                    );
+                    let mut got = vec![0u8; 4096];
+                    let first_window = QUEUE_DEPTH as usize;
+                    for i in 0..n {
+                        dev.read_at(i as u64 * 8192, &mut got).unwrap();
+                        let expect_written = reject_idx >= first_window && i < first_window;
+                        if expect_written {
+                            assert!(
+                                got.iter().all(|&x| x == 0xAB),
+                                "earlier window should land: i={i} reject={reject_idx}"
+                            );
+                        } else {
+                            assert!(
+                                got.iter().all(|&x| x == 0),
+                                "rejected/unpublished must not land: i={i} reject={reject_idx}"
+                            );
+                        }
+                    }
+                    // Subsequent unrelated I/O succeeds and does not consume stale completions.
+                    if direct && !bounced {
+                        let a = AlignedBuf::copy_of(&[0xCDu8; 4096]);
+                        dev.write_at(0, &a[..]).unwrap();
+                    } else {
+                        let ok = vec![0xCDu8; 4096];
+                        dev.write_at(0, &ok).unwrap();
+                    }
+                    let mut rv = vec![0u8; 4096];
+                    dev.read_at(0, &mut rv).unwrap();
+                    assert!(rv.iter().all(|&x| x == 0xCD));
+                    dev.flush().unwrap();
+
+                    // Read-batch rejection at the same index (writable huge destination).
+                    // Huge is last (reject_idx == n-1), so prefix buffers come from one allocation.
+                    // SAFETY: writable anonymous mapping.
+                    let rhuge =
+                        unsafe { std::slice::from_raw_parts_mut(rhuge_ptr.cast::<u8>(), huge_len) };
+                    let mut storage = vec![0u8; reject_idx * 4096];
+                    let mut chunks: Vec<&mut [u8]> = if reject_idx == 0 {
+                        Vec::new()
+                    } else {
+                        storage.chunks_exact_mut(4096).collect()
+                    };
+                    let mut reads: Vec<(u64, &mut [u8])> = chunks
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(i, c)| (i as u64 * 8192, &mut **c))
+                        .collect();
+                    reads.push((reject_idx as u64 * 8192, rhuge));
+                    let rerr = dev.read_many(&mut reads).unwrap_err();
+                    assert_eq!(rerr.kind(), io::ErrorKind::InvalidInput);
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+        }
+        unmap(huge_ptr, huge_len);
+        unmap(rhuge_ptr, huge_len);
+    }
+
+    #[test]
+    fn retryable_submit_errno_drains() {
+        let _clear = ClearInjects;
+        let (dev, path) = temp_device(1 << 20, false);
+        let data = vec![0x3Cu8; 4096];
+        inject_submit_errno(Some(libc::EAGAIN));
+        dev.write_at(0, &data).unwrap();
+        let mut got = vec![0u8; 4096];
+        inject_submit_errno(Some(libc::EINTR));
+        dev.read_at(0, &mut got).unwrap();
+        assert!(got.iter().all(|&x| x == 0x3C));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn submission_lifetime_failures() {
+        for case in [
+            "fatal_submit",
+            "panic_armed",
+            "bad_cqe_id",
+            "dup_cqe",
+            "dirty_sq",
+        ] {
+            spawn_abort_case(case);
+        }
+    }
+
+    #[test]
+    fn rejected_commit_keeps_early_writes() {
+        let _clear = ClearInjects;
+        for direct in [false, true] {
+            let (dev, path) = temp_device(4 << 20, direct);
+            let early = if direct {
+                AlignedBuf::shared_copy_of(&[0xE1u8; 8192])
+            } else {
+                Bytes::from(vec![0xE1u8; 8192])
+            };
+            let commit = if direct {
+                AlignedBuf::shared_copy_of(&[0xC1u8; 8192])
+            } else {
+                Bytes::from(vec![0xC1u8; 8192])
+            };
+            let next = if direct {
+                AlignedBuf::shared_copy_of(&[0xC2u8; 4096])
+            } else {
+                Bytes::from(vec![0xC2u8; 4096])
+            };
+            dev.start_writes(&[(0, early.clone())]).unwrap();
+            let gen_before = dev.commits.borrow().next_gen;
+            inject_prepare_fail_at(Some(0));
+            let err = dev.start_commit(&[(65536, commit.clone())]).unwrap_err();
+            assert!(err.to_string().contains("injected preparation failure"));
+            inject_prepare_fail_at(None);
+            assert_eq!(
+                dev.commits.borrow().next_gen,
+                gen_before,
+                "rejected commit must not advance next_gen"
+            );
+            assert!(
+                dev.commits.borrow().writes.is_empty()
+                    || dev
+                        .commits
+                        .borrow()
+                        .writes
+                        .values()
+                        .any(|(_, g)| *g == gen_before),
+                "early writes stay associated with the unadvanced generation"
+            );
+            // Successful commit covers the early writes; outcomes reported once, in order.
+            assert!(!dev.start_commit(&[(65536, next.clone())]).unwrap());
+            assert!(dev.poll_commit(true).unwrap().is_ok(), "direct={direct}");
+            let mut buf = vec![0u8; 8192];
+            dev.read_at(0, &mut buf).unwrap();
+            assert!(buf.iter().all(|&x| x == 0xE1), "direct={direct}");
+            // Early write errors are retained across a rejected commit start.
+            let bad = if direct {
+                AlignedBuf::shared_copy_of(&[1u8; 4096])
+            } else {
+                Bytes::from(vec![1u8; 4096])
+            };
+            dev.start_writes(&[(u64::MAX - 8191, bad.clone())]).unwrap();
+            inject_prepare_fail_at(Some(0));
+            assert!(dev.start_commit(&[(131072, next.clone())]).is_err());
+            inject_prepare_fail_at(None);
+            assert!(!dev.start_commit(&[(131072, next.clone())]).unwrap());
+            assert!(
+                dev.poll_commit(true).unwrap().is_err(),
+                "early error survives rejection, direct={direct}"
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn commit_prepare_failure_keeps_accounting() {
+        let _clear = ClearInjects;
+        let (dev, path) = temp_device(8 << 20, false);
+        let a = Bytes::from(vec![1u8; 4096]);
+        let b = Bytes::from(vec![2u8; 4096]);
+        // An accepted commit remains pollable while a later prepare fails.
+        assert!(!dev.start_commit(&[(0, a.clone())]).unwrap());
+        let generation = dev.commits.borrow().next_gen;
+        inject_prepare_fail_at(Some(0));
+        assert!(dev.start_commit(&[(4096, b.clone())]).is_err());
+        inject_prepare_fail_at(None);
+        assert_eq!(dev.commits.borrow().next_gen, generation);
+        assert!(dev.poll_commit(true).unwrap().is_ok());
+
+        // Tag space exhausted before publication: no SQE, no generation advance.
+        {
+            let mut st = dev.commits.borrow_mut();
+            st.next_tag = FLUSH_TAG - 1;
+            st.next_gen = 0;
+        }
+        let err = dev
+            .start_commit(&[(0, a.clone()), (4096, b.clone())])
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(dev.commits.borrow().next_gen, 0);
+        assert!(dev.commits.borrow().writes.is_empty());
+        {
+            let mut st = dev.commits.borrow_mut();
+            st.next_tag = FLUSH_TAG;
+        }
+        let err = dev.start_writes(&[(0, a.clone())]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(dev.commits.borrow().writes.is_empty());
+        // Restore a usable tag space and prove the device still works.
+        {
+            let mut st = dev.commits.borrow_mut();
+            st.next_tag = 0;
+        }
+        assert!(!dev.start_commit(&[(0, a)]).unwrap());
+        assert!(dev.poll_commit(true).unwrap().is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn drop_drains_owned_writes() {
+        for direct in [false, true] {
+            let path = {
+                let (dev, path) = temp_device(4 << 20, direct);
+                let w = if direct {
+                    AlignedBuf::shared_copy_of(&[0xDDu8; 8192])
+                } else {
+                    Bytes::from(vec![0xDDu8; 8192])
+                };
+                let c = if direct {
+                    AlignedBuf::shared_copy_of(&[0xEEu8; 8192])
+                } else {
+                    Bytes::from(vec![0xEEu8; 8192])
+                };
+                // Caller drops its handles while I/O is still owned by the device.
+                dev.start_writes(&[(0, w)]).unwrap();
+                assert!(!dev.start_commit(&[(65536, c)]).unwrap());
+                // Overlapping synchronous activity while commits are in flight.
+                let sync = vec![0xAAu8; 4096];
+                dev.write_at(131072, &sync).unwrap();
+                drop(dev); // must drain owned writes/flushes before releasing Held allocations
+                path
+            };
+            let dev = UringDevice::open(&path, false).unwrap();
+            let mut buf = vec![0u8; 8192];
+            dev.read_at(0, &mut buf).unwrap();
+            assert!(buf.iter().all(|&x| x == 0xDD), "direct={direct}");
+            dev.read_at(65536, &mut buf).unwrap();
+            assert!(buf.iter().all(|&x| x == 0xEE), "direct={direct}");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn commit_flush_cqe_requires_submitted_owner() {
+        for case in [
+            "flush_waiting",
+            "flush_covered",
+            "flush_done_dup",
+            "flush_unknown",
+            "flush_positive",
+            "flush_dup_err_ok",
+        ] {
+            spawn_abort_case(case);
+        }
+        // Valid Submitted success and coalesced Covered outcomes remain once-only.
+        let (dev, path) = temp_device(4 << 20, false);
+        dev.set_flush_coalesce(2);
+        let a = Bytes::from(vec![1u8; 4096]);
+        let b = Bytes::from(vec![2u8; 4096]);
+        assert!(!dev.start_commit(&[(0, a)]).unwrap());
+        assert!(!dev.start_commit(&[(4096, b)]).unwrap());
+        assert!(dev.poll_commit(true).unwrap().is_ok());
+        assert!(dev.poll_commit(true).unwrap().is_ok());
+        // A third poll with nothing in flight is Ok(()).
+        assert!(dev.poll_commit(true).unwrap().is_ok());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn panicking_owner_during_drop_aborts_before_release() {
+        let marker = std::env::temp_dir().join(format!(
+            "flaminio-uring85-release-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        spawn_abort_case("panic_owner_drop");
+        assert!(
+            !marker.exists(),
+            "outstanding owner's Drop must not run before abort"
+        );
+    }
+
+    /// Child cases for fail-stop paths. No-op when the abort env var is unset (normal suite).
+    #[test]
+    fn abort_harness() {
+        let Ok(case) = std::env::var("FLAMINIO_URING85_ABORT") else {
+            return;
+        };
+        let _clear = ClearInjects;
+        match case.as_str() {
+            "fatal_submit" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                inject_submit_errno(Some(libc::EIO));
+                let _ = dev.write_at(0, &vec![1u8; 4096]);
+            }
+            "panic_armed" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                inject_panic_when_armed(true);
+                let _ = dev.write_at(0, &vec![1u8; 4096]);
+            }
+            "bad_cqe_id" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                inject_cqe_seq([(999, 4096)]);
+                let _ = dev.write_at(0, &vec![1u8; 4096]);
+            }
+            "dup_cqe" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                inject_cqe_seq([(0, 4096), (0, 4096)]);
+                let _ = dev.write_at(0, &vec![1u8; 4096]);
+            }
+            "dirty_sq" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let fd = types::Fd(dev.file.as_raw_fd());
+                    let entry = opcode::Fsync::new(fd)
+                        .flags(types::FsyncFlags::DATASYNC)
+                        .build()
+                        .user_data(0);
+                    // SAFETY: test-only leftover SQE to force the dirty-ring fail-stop.
+                    unsafe {
+                        dev.ring.borrow_mut().submission().push(&entry).unwrap();
+                    }
+                }
+                let _ = dev.write_at(0, &vec![1u8; 4096]);
+            }
+            "flush_waiting" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let mut st = dev.commits.borrow_mut();
+                    let mut ring = dev.commit_ring.borrow_mut();
+                    st.current.push_back((0, Flush::Waiting));
+                    inject_cqe_seq([(FLUSH_TAG, 0)]);
+                    UringDevice::reap_commits(&mut st, &mut ring);
+                }
+            }
+            "flush_covered" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let mut st = dev.commits.borrow_mut();
+                    let mut ring = dev.commit_ring.borrow_mut();
+                    st.current.push_back((0, Flush::Covered));
+                    inject_cqe_seq([(FLUSH_TAG, 0)]);
+                    UringDevice::reap_commits(&mut st, &mut ring);
+                }
+            }
+            "flush_done_dup" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let mut st = dev.commits.borrow_mut();
+                    let mut ring = dev.commit_ring.borrow_mut();
+                    st.current
+                        .push_back((0, Flush::Done(None)));
+                    inject_cqe_seq([(FLUSH_TAG, 0)]);
+                    UringDevice::reap_commits(&mut st, &mut ring);
+                }
+            }
+            "flush_unknown" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let mut st = dev.commits.borrow_mut();
+                    let mut ring = dev.commit_ring.borrow_mut();
+                    inject_cqe_seq([(FLUSH_TAG | 7, 0)]);
+                    UringDevice::reap_commits(&mut st, &mut ring);
+                }
+            }
+            "flush_positive" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let mut st = dev.commits.borrow_mut();
+                    let mut ring = dev.commit_ring.borrow_mut();
+                    st.current.push_back((0, Flush::Submitted));
+                    inject_cqe_seq([(FLUSH_TAG, 1)]);
+                    UringDevice::reap_commits(&mut st, &mut ring);
+                }
+            }
+            "flush_dup_err_ok" => {
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let mut st = dev.commits.borrow_mut();
+                    let mut ring = dev.commit_ring.borrow_mut();
+                    st.current.push_back((0, Flush::Submitted));
+                    inject_cqe_seq([(FLUSH_TAG, -5), (FLUSH_TAG, 0)]);
+                    UringDevice::reap_commits(&mut st, &mut ring);
+                }
+            }
+            "panic_owner_drop" => {
+                #[derive(Clone)]
+                struct TrackedOwner {
+                    data: Arc<Vec<u8>>,
+                    marker: std::path::PathBuf,
+                    panic_on_drop: bool,
+                }
+                impl AsRef<[u8]> for TrackedOwner {
+                    fn as_ref(&self) -> &[u8] {
+                        self.data.as_ref()
+                    }
+                }
+                impl Drop for TrackedOwner {
+                    fn drop(&mut self) {
+                        if self.panic_on_drop {
+                            panic!("injected panicking Bytes owner");
+                        }
+                        let _ = std::fs::write(&self.marker, b"released");
+                    }
+                }
+                let marker = std::env::temp_dir().join(format!(
+                    "flaminio-uring85-release-{}",
+                    // Parent uses the parent's pid; child must use the same path.
+                    std::env::var("FLAMINIO_URING85_PARENT_PID").unwrap_or_else(|_| {
+                        std::process::id().to_string()
+                    })
+                ));
+                let panic_data = Arc::new(vec![1u8; 4096]);
+                let other_data = Arc::new(vec![2u8; 4096]);
+                // Independent backing reference so a missed abort cannot free kernel-visible memory.
+                let _keep_alive = other_data.clone();
+                let panic_owner = TrackedOwner {
+                    data: panic_data,
+                    marker: marker.clone(),
+                    panic_on_drop: true,
+                };
+                let other_owner = TrackedOwner {
+                    data: other_data,
+                    marker,
+                    panic_on_drop: false,
+                };
+                let (dev, _path) = temp_device(1 << 20, false);
+                {
+                    let mut st = dev.commits.borrow_mut();
+                    st.writes.insert(
+                        0,
+                        (Held::Shared(Bytes::from_owner(panic_owner)), 0),
+                    );
+                    st.writes.insert(
+                        1,
+                        (Held::Shared(Bytes::from_owner(other_owner)), 0),
+                    );
+                    st.current.push_back((0, Flush::Waiting));
+                }
+                inject_cqe_seq([(0, 4096)]);
+                drop(dev);
+            }
+            other => panic!("unknown FLAMINIO_URING85_ABORT case: {other}"),
+        }
+        panic!("abort case {case} returned normally");
     }
 }
