@@ -1,0 +1,58 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review90_r3_security",
+  "reviewed_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+  "dependency_commits": {
+    "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC90-R2-01",
+      "status": "fixed",
+      "evidence": "90/local-target-contract.md:13-37 preserves FLCH134 and signs its exact FLCTv3/LID digest only following a fresh authorized Attach CAS; engine checks signatures, current process nonce, incarnation/target/epoch and ran_epochs. budgets.md:83-105 adds paged target_nonce12/target_handoff5 while retaining revision tags3/4, same auth/use/CAS gates and coherent-page-before-start semantics. local-target-contract.md:43-101 gives bounded versioned device/status/detach commands, the complete LID lifetime tuple, schema2 durable normal intent and precise lost metadata/daemon/detach reply and changed-daemon recovery. :103-129 retains legacy initialization refusal and concrete normal/paged CSI acceptance, stale-LID/handoff, restart, byte-bound and model/mutant fixtures."
+    },
+    {
+      "id": "R1-C5",
+      "status": "fixed",
+      "evidence": "The remaining R2 partial closure was the same local composition gap. 90/local-target-contract.md:13-108 now expressly amends the canonical #15/#79/#83 positive-only contracts for exact signed FE0/LID ordinary/snapshot lifetimes, including paged Attach, without changing replica preservation or granting fresh filesystem initialization."
+    },
+    {
+      "id": "SEC90-R1-01",
+      "status": "fixed",
+      "evidence": "Actual R2 security artifact confirmed consumable INITIAL authority fixed in core-design.md/contracts.md. The R3 delta leaves those rules intact and the new legacy local profile expressly cannot initialize."
+    },
+    {
+      "id": "SEC90-R1-02",
+      "status": "fixed",
+      "evidence": "Actual R2 security artifact confirmed bounded cleanup storage/pagination/migration fixed. Those mechanisms are unchanged by this local-target amendment."
+    },
+    {
+      "id": "SEC90-R1-03",
+      "status": "fixed",
+      "evidence": "Actual R2 security artifact confirmed correction CAS and verification-generation restart fixed. Those mechanisms are unchanged by this local-target amendment."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "Shared INITIAL root was confirmed fixed by actual R2 reviews; R3 does not revise its authority transition."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "Shared cleanup boundedness root was confirmed fixed by actual R2 reviews; R3 does not revise its storage/list mechanism."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "Actual R2 reviews confirmed the proof-scoped delete-only NOSPACE exception; R3 does not revise its classification or gates."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "Actual R2 reviews confirmed own-IO/admin heartbeat and atomic TTL/node-state composition; R3 does not revise its authorization or transaction ordering."
+    }
+  ],
+  "findings": [],
+  "report": "Fresh bounded incremental #90 R3 design-security and changed-spec-security review of c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8..331f337d3b847ff2d4faabc572f4ceae74837cd7, excluding report.md: zero comments including Nits. Read actual R2 code/security artifacts and all eight changed normative files. Traced affected existing Attach service/auth/proto, CSI device/socket wrappers, engine target-start and capability-codec paths; dependency plans remain unimplemented. Examined canonical ledger-mapped #15 device lifetime, #79 normal intent/use admission and #83 current-process FLCH contracts, including their exact current HEADs listed above; their ledger technical-clear commits are respectively3592050cc4da3cacf4c9a759692907534fbcccb3,52f7a966fa29cbea967d9252880636a328bd0b26,f9a0a519adf21d4ee2c9048f44139489446c94e7. Checked post-clear dependency diffs to distinguish historical approval/provenance annotations from these technical interfaces, without reopening clear dependencies. Confirmed full/paged normal target admission, positive/legacy profile separation, exact LID device/CSI persistence and comparison, bounded strict parsing, no credential persistence, stale/wrong-LID/handoff refusal, lost-reply/restart behavior, handoff response allowance and continued FE0 fresh-filesystem refusal. No unspecified adapter is hidden behind activation: local-target-contract.md specifies the mechanism and #90 owns whoever-lands-second integration. No new security or changed-spec finding. Earlier R1 closures outside the bounded delta are recorded from actual R2 artifacts, not re-audited. git diff --check passed. Final issue HEAD and clean status reverified; dependency snapshots remained unchanged. No repository/dependency edits, child agents, tracker writes, runtime tests or lab/disk/benchmark actions; all named implementation tests remain future requirements."
+}

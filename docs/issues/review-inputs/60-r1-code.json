@@ -1,0 +1,90 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review60_r1_code (design-code/spec correctness, R1)",
+  "reviewed_commit": "44a709907930a3a154f33f9e7fd99aa71b8c403c",
+  "dependency_commits": {
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+    "57": "6b60c20335ff2c64466d717b3de1e66a1a073436",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e"
+  },
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "Medium",
+      "summary": "The promised eight-call instance cap has no supplying implementation or production insertion point.",
+      "evidence": "#60 spec.md:47-50 and design.md:7-9,70-74 say to reuse #50's eight permits. Current #50 contracts.md:55-57 and design.md:217-222 explicitly provide a one-second context and no in-flight bound; #50 decisions.md:138 records removal of the cap. #60 places the proposed wrapper in its fake/provider discussion and lists only service tests, so limiting the fake can make the cap test green while actual configured sources remain unlimited.",
+      "fix": "Remove the attribution to #50. For a conformance-only increment, bound fixture/driver concurrency and defer a production admission policy explicitly to the provider stage already responsible for #50 Q12; do not claim production eight-call protection. If the current slice must introduce the intent's instance-wide admission bound, specify it as a new #60 mechanism at the real service Wrap/Unwrap boundary, with shared ownership, acquisition/refusal/cancellation rules and tests that invoke that production boundary."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "Medium",
+      "summary": "Retry behavior and the subordinate-error wire extension do not match the current shared contract.",
+      "evidence": "#60 design.md:10-11,56-62,76-81,105-111 requires structured details to stop cycling, adds an ambiguously named reason and mentions bounded RetryAfter without a type, unit, numeric bound or wire field. #50 contracts.md:44-57 fixes INSTANCE_UNAVAILABLE=Unavailable, SOURCE_UNAVAILABLE=ResourceExhausted, DENIED=PermissionDenied and INVALID_ENVELOPE=FailedPrecondition; ErrorInfo.reason is Kind, and retry is decided by gRPC code alone. Actual control/csi/meta.go:75-83 and flaminio-metaclient/src/lib.rs:145-160 already stop on ResourceExhausted. The design's final claim that metadata gains only an enum also leaves RetryAfter unaccounted for.",
+      "fix": "Keep #50's exact four code mappings and code-based retry table; make two-endpoint tests assert them without introducing detail-dependent fallback. Fix the extension concretely as ErrorInfo.reason=Kind plus one explicitly named metadata key for the safe enum, its Go error field, allowed kind/reason combinations and unknown-value handling. Remove unused RetryAfter from this no-automatic-retry slice, or fully specify its representation, units and bound in the shared contract."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "Medium",
+      "summary": "The registry coverage check is not connected to the production configuration path it must cover.",
+      "evidence": "#60 S1 and intent outcome 2 require every configurable source to appear in conformance coverage. design.md:17-21,42-45 compares RegisteredKinds() to a FixtureFactory map but defines neither the production registry nor how startup construction is constrained by it. No RegisteredKinds/KeySource registry exists in the current source; meta/cmd/flaminio-meta/main.go:84-151 constructs options directly. #50 design.md:193-204 proposes the --kek-file construction path, while #57 design.md:27-32 adds a material-loader mode that still constructs cryptographic kind static. A separately maintained kinds list can agree with fixtures while a CLI branch bypasses it.",
+      "fix": "Define one production source-kind descriptor/factory list and make actual startup construction resolve through it; keep the mandatory fixture map solely in tests. State how file-static and tpm-sealed-static loaders both resolve static, and add startup/configuration tests rejecting unregistered/fault kinds. Registry coverage must enumerate the same descriptors the production constructor accepts, not another test list."
+    },
+    {
+      "id": "R1-C4",
+      "severity": "Medium",
+      "summary": "Unpublished creation tests require a stable DEK that #50 and #76 deliberately do not persist.",
+      "evidence": "#60 design.md:92-94 requires the hidden create to retain its original operation/key identity and says retry cannot generate a different published key. Current #50 design.md:81-87,99-111 generates a DEK immediately before publication; with #76 a failed wrap leaves the operation and a helper wraps its own key at conditional finalization. #76 spec.md:43-57/design.md Conditional helpers retain the operation, admitted plan and claim revision, not an unpublished DEK. There is no prior durable key/envelope for a retry after failed initial Wrap to reuse.",
+      "fix": "Distinguish durable create identity from DEK identity. Before successful finalization, retries/helpers may generate independent candidate DEKs and must clear losers; only one atomic finalization may publish its bound envelope. After publication, recovery/retry must retain that exact winning envelope/key. Test failed wrap, competing helpers and lost publication reply with these assertions, without adding durable plaintext or another key-staging protocol."
+    },
+    {
+      "id": "R1-C5",
+      "severity": "Medium",
+      "summary": "The no-key-call I/O proof lacks a concrete route between the Go fault source and the Rust memory-node harness.",
+      "evidence": "#60 design.md:95-97,101-108,118-127 promises zero provider calls while memory-node read/write/resync/ISR executes, but names no Rust engine test file or bridge to its Go conformance/fault_source.go counters. Existing flaminio-node/tests/engine.rs:34-50,196-235 uses its own Rust FakeMeta through MetaPort, not a Go metadata service; its TLS network connects replicas. Existing Rust/Go tests are separate: flaminio-metaclient/tests/interop.rs:22-25 is ignored by ordinary cargo test and scripts/dev/meta-interop.sh:24-40 starts an ordinary production server without a test fault source. Thus the current fixture descriptions do not explain how the claimed counters observe the I/O path.",
+      "fix": "Name a runnable layered proof: ordinary Rust engine tests extend FakeMeta to count/script ReleaseVolumeKey and assert no further release during verified I/O/resync/ISR, while Go backend/mTLS tests prove a release invokes the counted source only as specified. Alternatively define an isolated test-binary server exposing the Go fixture to the Rust client/engine. Specify file/target wiring and keep test fault configuration out of shipping binaries; do not claim an unconnected Go counter proves Rust behavior."
+    },
+    {
+      "id": "R1-C6",
+      "severity": "Low",
+      "summary": "The design presents an invented 1024-byte envelope ceiling as #50's exact bound.",
+      "evidence": "#60 design.md:23-26 says to consume #50's exact limits and then specifies envelope<=1024 bytes. #50 contracts.md:8-14,29-36 defines 1..64 ASCII identifier bytes per source component, profile 1..32 ASCII bytes and exactly 92 Sealed bytes for static. Its protobuf Size section bounds KeyEnvelope at 328 bytes with maximal fields; it defines no generic 1024-byte envelope representation. Tests based only on the stated 1024 ceiling would miss a static 93-byte sealed body or invalid identity bounds.",
+      "fix": "Use the shared field/encoding bounds directly: fixed/derived static identity, 64-byte DEK, 32-byte KEK, 92-byte Sealed and the shared protobuf size fixtures. Remove the unexplained generic 1024 limit, or explicitly propose and measure a separately versioned shared limit for future providers instead of attributing it to #50."
+    },
+    {
+      "id": "R1-C7",
+      "severity": "Low",
+      "summary": "The required no-network claim contradicts the specified local integration fixtures.",
+      "evidence": "#60 intent outcome 5 and spec.md:62-64 say required tests run without network, while design.md:85 requires real loopback mTLS and :127 allows only that network exception. Actual backend helper meta/service/service_test.go:46-53 starts embedded etcd whose client and peer URLs are loopback HTTP (meta/kv/kvtest/kvtest.go:24-43); Rust memory-node tests also bind replica TCP/TLS listeners (flaminio-node/tests/engine.rs:196-209). These tests are feasible locally but not under the literal stated network restriction.",
+      "fix": "Say without external network, cloud/emulator services or credentials; explicitly permit owned loopback metadata mTLS, embedded-etcd client/peer traffic and replica TLS fixtures. Align intent, S9 and the design exception without weakening the prohibition on default cloud actions."
+    }
+  ],
+  "report": {
+    "result": "changes_required",
+    "summary": "Five Medium and two Low findings; no Nits. Full #60 intent/spec/design/decisions reviewed against current source and the mapped dependency plans. Shared cap/retry/unpublished-key findings coordinated with the separate security reviewer.",
+    "scope_notes": [
+      "No implementation, test execution, cloud calls, shared lab actions or repository edits were performed; all described runtime tests remain future work.",
+      "Historical approvals were preserved as evidence; missing approval of later dependency revisions is not a finding.",
+      "S3's direct retained V1/V2 fixture sources are feasible test-only evidence. #50/#57 still have an immutable source pin and no production rotation/version-routing support; this review does not claim such support.",
+      "Both-backend service/mTLS tests are feasible by combining existing backends() and the existing authorization TLS harness. The unresolved integration boundary is specifically the claimed Go-source counter versus Rust memory-node I/O proof.",
+      "No SDK, cloud deployment or workload identity is selected or requested by this conformance/fault slice. Cloud completion remains later."
+    ],
+    "read_source_paths": [
+      "meta/service/{service.go,auth.go,service_test.go,auth_test.go,main_test.go}",
+      "meta/cmd/flaminio-meta/main.go",
+      "meta/kv/kvtest/kvtest.go",
+      "control/csi/{controller.go,meta.go}",
+      "dataplane/crates/flaminio-metaclient/{src/lib.rs,tests/interop.rs}",
+      "dataplane/crates/flaminio-node/tests/engine.rs",
+      "scripts/dev/meta-interop.sh",
+      "Makefile",
+      "go.mod"
+    ],
+    "primary_docs_checked": [
+      "https://learn.microsoft.com/en-us/rest/api/keyvault/keys/wrap-key/wrap-key?view=rest-keyvault-keys-2025-07-01",
+      "https://docs.aws.amazon.com/kms/latest/developerguide/deleting-keys.html",
+      "https://docs.cloud.google.com/kms/docs/resource-hierarchy"
+    ],
+    "snapshot": "Issue #60 and all five dependency worktrees remained clean at their recorded hashes at completion. Main instruction/ledger/ADR checkout was 338acb58fdc3830c1d3bf2b146a7c0fb806c5536; its unrelated existing changes were untouched."
+  }
+}

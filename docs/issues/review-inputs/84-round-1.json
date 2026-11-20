@@ -1,0 +1,30 @@
+{
+  "round": 1,
+  "reviewed_commit": "733065c45b3805b3353ba2a2c2a05225e83d96fa",
+  "reviewers": [
+    "r84c1 (design-code)",
+    "r84s1 (design-security)"
+  ],
+  "findings": [
+    {
+      "id": "Review84-R1-C1",
+      "severity": "Medium",
+      "summary": "Exact op/flag/range/registration contract and discard advertisement unspecified",
+      "evidence": "design.md18\u201325,79\u201389; ublk.rs950\u2013966 BASIC-only params"
+    },
+    {
+      "id": "Review84-R1-C2",
+      "severity": "Medium",
+      "summary": "No usable cacheless kernel-consumed FLUSH/FUA observation oracle",
+      "evidence": "design.md36\u201346,92\u201393; Linux writeback_cache_control and v6.6 blk-flush.c"
+    },
+    {
+      "id": "Review84-R1-C3",
+      "severity": "Medium",
+      "summary": "Matrix/helper path CLI/result schema deferred; need bounded exact run-owned disposable guards and #83 admission",
+      "evidence": "design.md51\u201363,83\u201384,116\u2013120"
+    }
+  ],
+  "resolution": "pending designer fix; both reviewers independently confirmed same three findings and no Nits",
+  "status": "addressing_round_1"
+}

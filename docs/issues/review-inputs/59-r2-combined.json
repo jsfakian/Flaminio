@@ -1,0 +1,43 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review59_r2_combined",
+  "reviewed_commit": "29ddcf31b9ab38974456a21c545ff2d902394e2a",
+  "prior_findings": {
+    "R1-C1": "Fixed: concrete object-only namespace/FD broker, bounded helper lifecycle, nft lease gate and checked TBF accounting now replace the unspecified mechanism. New lower-path-MTU fallout is R2-C1.",
+    "R1-C2": "Fixed: only named local waits suspend clocks; remote backpressure counts, ACK progress is observable through typed Go TCP_INFO, and wire rates below 1024 refuse. Payload-profile clock/cost coverage remains new fallout R2-C2.",
+    "R1-C3": "Fixed: pinned SDK/Smithy APIs, direct custom Hyper HTTP1 transport, explicit outer retry/signing, static credentials, no idle pooling and guarded socket/driver cancellation are specified; inspected the pinned official crate sources in /tmp/flaminio-59-sdk-research.",
+    "R1-C4": "Fixed for wire-v1: paired qualified store-time refresh, exact cover proofs, one re-cover, finishing-slot budget and terminal late-root handling preserve #53. The same admission path lacks payload-v1 cost semantics, R2-C2.",
+    "R1-C5": "Fixed: authoritative boundary is explicitly scheduler dequeue at owned local egress; remote batching is diagnostic and has a failing counterexample.",
+    "R1-C6": "Fixed: exact encoded K*4194384 cut bound, graph/request/inbound/control accounting and resume-episode boundaries replace small-overhead prose.",
+    "R1-C7": "Fixed: concrete bounded 8334 fixture, namespace/capture ownership, physical/legacy-VM distinction, #83 pre-mutation refusal and retention-aware cleanup are specified.",
+    "R1-C8": "Fixed: explicit policy activation and no-flags exit-1/manual-rerun compatibility, including restart-profile checks and fixtures.",
+    "R1-C9": "Fixed: shared bundled IANA-2025b table, hash/revision/restart refusal and actual Athens UTC DST/midnight vectors are specified.",
+    "R1-N1": "Fixed: current choices are distinguished from historical settlements, and new profile/policy revisions remain Proposed/unapproved."
+  },
+  "dependency_commits": {
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "53": "105dac041ccfca18ba1bcd4984e84115efceb200",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "findings": [
+    {
+      "id": "R2-C1",
+      "severity": "Medium",
+      "summary": "The TCP-only gate black-holes PMTU feedback on ordinary lower-MTU WAN paths.",
+      "evidence": "docs/issues/59/transport-profile.md:38-46 fixes namespace/veth MTU1500 and only endpoint /32 routes; :131-140 permits only reverse TCP input, dropping ICMP including fragmentation-needed. A host/tunnel/downstream path with MTU below1500 can pass SYN and small records but drop full-sized DF TCP segments; no per-endpoint route MTU/MSS clamp, PMTU ICMP exception or PLPMTUD profile is specified. The 8334 co-located lab endpoint does not exercise this. Linux6.6 TCP explicitly handles ICMP_FRAG_NEEDED to update PMTU/MSS and retransmit: https://raw.githubusercontent.com/torvalds/linux/v6.6/net/ipv4/tcp_ipv4.c (tcp_v4_mtu_reduced/tcp_v4_err); https://www.kernel.org/doc/html/v6.6/networking/ip-sysctl.html documents PMTU/PLPMTUD controls.",
+      "fix": "Specify a narrow, lease/window-bound ICMP fragmentation-needed input rule validated against the owned TCP tuples/quoted packet, or a concrete conservative route-MTU/MSS/PLPMTUD scheme with qualification/refusal rules. Preserve object-only isolation and outbound accounting. Add a separate routed endpoint behind a smaller-MTU hop and assert large TLS/object traffic progresses; include forged ICMP and gate-closed counterexamples."
+    },
+    {
+      "id": "R2-C2",
+      "severity": "Medium",
+      "summary": "Supported payload-v1 modes have no defined phase-clock or #53 publication-cost calculation.",
+      "evidence": "docs/issues/59/design.md:45-48 permits payload-v1 at1B/s and without any rate for window-only admission. transport-profile.md:95 defines r=floor(99*R/100) only for wire-v1; :267-284 uses division by r for all phase allowances, and :304-310 defines the only local_cost via r/Q/wire_budget. policy-contracts.md:59-74 applies its emission-cost/window reservation and root_local_emit_seconds=ceil(local_cost(...)/1e9) without a profile branch to immutable repositories. At payload rate1 the borrowed wire r is zero; with no cap it is undefined. These valid configurations cannot follow the stated admission contract, and the wire-only queue/qualification failure rules do not specify a payload alternative.",
+      "fix": "Define profile-specific transport/phase clocks and local emission estimates: payload-v1 should use its actual optional payload rate/body budget and no kernel-shaper allowance, while window-only mode must explicitly define the zero known pacing cost plus bounded dispatch/window checks without asserting a minimum network throughput. Bind #53 finishing reservations to that profile-specific function. Add payload1B/s and payload-window-only immutable-root admission fixtures, including low-rate incompatibility, window closure, remote backpressure and no division by absent/zero rate."
+    }
+  ],
+  "report": "Fresh combined design-code/design-security incremental review of4f9eff3..29ddcf3 excluding report.md, plus affected current source/dependency contracts. R1-C1..C9/N1 addressed as recorded;2 Medium fallout findings, no Nits, not clear. Verified actual worktree/dependency HEADs, current Rust1.88/rustix1.1.5/x-sys0.49.0 facts, inspected pinned official SDK/Smithy/Hyper/rustls sources, and checked Linux6.6/nftables primary sources. Read #52/#53 publication, transport, restore and lab contracts, #83 admission and mapped dependency identities. Historical approval is preserved; new revisions unapproved. git diff --check passed. No runtime/lab execution, repo edits, subagents, push or merge."
+}

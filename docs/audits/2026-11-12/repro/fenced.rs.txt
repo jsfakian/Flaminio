@@ -1,0 +1,27 @@
+use flaminio_net::frame::Frame;
+use flaminio_repl::{extent::Extent, msg::{Request,Response,ToReplica}, replica::{Action,ReplicaCore}, types::Version};
+fn report(chunks:u32, count:u32)->Frame {
+    let mut core=ReplicaCore::default();
+    for chunk in 0..chunks {core.add_chunk(1,chunk,262144);}
+    let mut msg=ToReplica {vol:1,epoch:1,session:1,req:1,body:Request::<()>::Hello};
+    assert!(matches!(core.handle(&msg),Action::Fence{..}));
+    for chunk in 0..chunks {for i in 0..count {
+        msg.req+=1;
+        msg.body=Request::Write {chunk,ext:Extent::new(i*2,1),data:(),version:Version{epoch:1,seq:msg.req},prune:None};
+        assert!(matches!(core.handle(&msg),Action::Write{..}));
+    }}
+    msg.session=2;msg.req+=1;msg.body=Request::Hello;
+    let Action::Fence{reply:Response::Fenced{uncertain},..}=core.handle(&msg) else {panic!("no Fenced");};
+    println!("chunks={chunks} uncertain_extents={}",uncertain.iter().map(|(_,e)|e.len()).sum::<usize>());
+    Frame::Fenced {req:msg.req,uncertain}
+}
+fn main(){
+    let encoded=report(1,65537).encode();
+    let decoded=Frame::decode(&encoded[4..]);
+    println!("one_chunk_encoded_body={} decode={decoded:?}",encoded.len()-4);
+    assert!(decoded.is_err());
+    let frame=report(2,65543);
+    let result=std::panic::catch_unwind(||frame.encode());
+    println!("two_chunk_encode_panicked={}",result.is_err());
+    assert!(result.is_err());
+}

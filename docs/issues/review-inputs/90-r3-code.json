@@ -1,0 +1,23 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review90_r3_code",
+  "reviewed_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+  "dependency_commits": {
+    "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC90-R2-01",
+      "status": "fixed",
+      "evidence": "local-target-contract.md:11-36 composes the exact signed FLCTv3/LID with unchanged purpose1 FLCH134, current process nonce, new-epoch issuance and ran_epochs. budgets.md:83-105 allocates paged nonce12/handoff5 while retaining revision3/4, pins coherent pages and requires fresh Attach after conflict. local-target-contract.md:38-102 defines exact v2 device/status/detach grammar, every-field lifetime comparison, schema2 durable normal intents and restart/lost-reply handling; legacy filesystem initialization remains refused. Lines109-129 specify normal/paged Go-service/Rust-daemon/CSI acceptance, mismatch/refusal, bounds, restart/lost-reply and independent model/mutant coverage."
+    },
+    {
+      "id": "R1-C5",
+      "status": "fixed",
+      "evidence": "The remaining shared FE0 strict-local composition gap is closed by local-target-contract.md; signed LID is verified against metadata/intent/cache and preserved in target/registry/device identity, normal intent and conditional cleanup. This completes the affected portion previously marked partially fixed in the actual R2 security report. R2 correctness itself had zero findings."
+    }
+  ],
+  "findings": [],
+  "report": "Fresh bounded incremental design-code and changed-spec review of c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8..331f337d3b847ff2d4faabc572f4ceae74837cd7 excluding report.md: zero comments including Nits. Read the actual R2 correctness/security reports, every changed normative document and new local-target contract, then only affected owner dependency slices and baseline CSI Node.device, metadata Attach/auth, capability codec, daemon dispatch and Engine::start_target. Checked ordinary/snapshot FE0 full and paged target/CSI admission, wrong/stale LID and handoff, device tuple exactness, operation recovery, daemon/plugin restart, lost metadata/daemon/detach replies, page conflicts, response accounting and continued legacy fresh-filesystem refusal. dependency_commits are actual mapped worktree HEADs read; technical-clear hashes are respectively 3592050cc4da3cacf4c9a759692907534fbcccb3, 52f7a966fa29cbea967d9252880636a328bd0b26 and f9a0a519adf21d4ee2c9048f44139489446c94e7. Dependencies remain read-only proposed/accepted-plan contracts, not implemented features or reopened reviews. No repository/dependency mutation, children, runtime tests, lab/disk/benchmark/tracker actions; all named acceptance/model tests are future implementation obligations. git diff --check passed; final issue HEAD remains the reviewed full hash and git status is clean."
+}

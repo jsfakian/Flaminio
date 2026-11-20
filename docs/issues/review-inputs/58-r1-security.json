@@ -1,0 +1,46 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review58_r1_security",
+  "reviewed_commit": "3822c48cf8efeb7bdcf81b7df4e6215f31c95a11",
+  "dependency_commits": {
+    "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "81": "15b0c35d137a324a257cb845e2f9b2531cd27745"
+  },
+  "findings": [
+    {
+      "id": "R1-S1",
+      "severity": "High",
+      "summary": "Pair revocation has no bounded linearization predicate that every receiver admission/publication must compare.",
+      "evidence": "design.md:38\u201341 promises pair revocation by relationship-generation and destination-epoch changes, but a pair may own many relationships; contracts.md:29\u201333 and design.md:68\u201373 make CommitShip compare only relationship/ship/incarnation/epoch/ISR evidence, not the pair record/config generation. No atomic fanout or bounded revocation barrier is specified. A commit racing or preceding its relationship fanout can still publish for a revoked pair. ConfigureDrPair also changes the generation to which live sessions are pinned.",
+      "fix": "Make one pair-record CAS (generation+1/revoked) the O(1) revocation/configuration linearization point. Bind pair UUID and admitted config generation into every ship/receiver grant; compare that exact unrevoked pair revision in AttachStandby and every CommitShip/prepare-publication decision. Define bounded linearizable per-request/batch admission and connection invalidation; already admitted writes may finish only in isolated roots and can never publish after the pair CAS. Epoch cleanup across relationships is resumable fallout, not the authority barrier. Specify TLS1.3 fresh peer verification/no resumptions or generation-isolated session caches. Add CAS races for multiple relationships, stale sessions/queued frames, lost revocation response and metadata outage; catch a mutation omitting the pair compare."
+    },
+    {
+      "id": "R1-S2",
+      "severity": "High",
+      "summary": "A generic local target capability and a metadata-only ordinary Attach refusal do not isolate the specialized standby writer from ordinary device/maintenance paths.",
+      "evidence": "design.md:31\u201336 and contracts.md:26\u201328 return a local target token from AttachStandby, with no purpose claim or distinct ticket. Only ordinary metadata Attach is named as refused. Baseline Engine::start_target accepts a matching volume/node/epoch token (engine.rs:1595\u20131622); replica session accept binds those same claims (session.rs:135\u2013156). Current #17 AttachMaintenance/StartMaintenance independently issue the ordinary capability, and #15/CSI/control shortcuts may reuse an existing attachment. #54 contracts explicitly needed a distinct FLRT and typed restore attachment to prevent the analogous bypass.",
+      "fix": "Define a purpose-bound standby receiver ticket (or an equivalently complete capability/mode contract) binding destination first epoch, relationship/generation, ship, pair generation, receiver node and writer epoch. Ordinary engine/control/ublk/agent/CSI and maintenance paths reject it and refuse Standby/Promoting independently; only typed receiver input admits inactive-root operations. Specify its exact token/mode handoff, slot accounting, status/device-info/detach answers and restart behavior using current #15/#17/#48/#54 seams, with whoever-lands-second integration. Add ordinary attach/token reuse, maintenance takeover, existing-device CSI shortcut and stale writer tests plus a caught ordinary-exposure mutation."
+    },
+    {
+      "id": "R1-S3",
+      "severity": "Medium",
+      "summary": "Local DR RPC authority and standby creation bypass the current tenancy role/owner contract as written.",
+      "evidence": "design.md:31\u201336 and contracts.md:19\u201339 say local administrator/read role only without #73 before/after activation rows or insecure refusal. CreateStandby has no owner semantics, although #73 requires system-provisioner and a system owner for ownerless creation, forbids tenant-form system names, and conditionally compares authorization/owner allocation state. A generic administrator-name rule would restore powers to audit/deletion-only identities after activation; a separately published unassigned standby also breaks creation ownership/accounting.",
+      "fix": "Write an explicit before/after-activation auth.go matrix for every DR RPC, receiver self/current-operation rules and insecure-instance refusal. Choose concrete existing roles, keeping security/deletion/audit-only identities from unintended DR mutation. Define this increment as system-owned standby creation through #76 with #73 system-provisioner, system owner and tenant-name refusal (or specify a complete tenant creation path). Carry authorization/owner/creation compares into the same transactions, state the audit hook/follow-up choice, and test revocation/activation races, wrong roles, wrong receiver and protected deletion behavior. Keep clear dependency plans read-only; whichever implementation lands second adds the integration."
+    },
+    {
+      "id": "R1-S4",
+      "severity": "Medium",
+      "summary": "The new foreign listener bounds payload counts but leaves attacker-controlled waits and aggregate admission/resource accounting unspecified.",
+      "evidence": "design.md:105\u2013114 caps eight connections, outstanding ranges and64MiB buffers, but defines no pre-auth/TLS/Hello/body/idle deadline, cap treatment before authentication, bounded metadata validations/queues or fair per-pair admission. contracts.md:69\u201377 also leaves Begin/Status/manifests incomplete. A peer can hold all slots with stalled handshakes or partial frames; large manifests/receipts/root indexes can consume resources beyond the listed data buffers.",
+      "fix": "Define finite handshake/Hello/body/call/idle liveness limits distinct from fencing, node-wide pre-auth and authenticated/per-pair caps, nonqueued refusal or bounded queues, and a bound/rate on metadata admission work. Reserve one global byte budget before all frame/manifest/proof allocations; page/spool canonical manifests and receipts with explicit disk/metadata accounting included in staging reservation. Define exhaustion/disconnect behavior preserving the last point and source pins. Add stalled TLS/Hello/truncated-body/flood/large-manifest and reservation-exhaustion fixtures showing bounded memory/work and continuing local application/heartbeat progress. Coordinate exact manifest/proof paging with the correctness finding rather than duplicating formats."
+    }
+  ],
+  "report": "Full R1 security review of issue58 intent/spec/design/contracts/decisions/local ADR against the listed current dependency snapshots and relevant auth/token/engine/store boundaries. Four findings:2 High,2 Medium; no Nits. Correctness reviewer separately owns unresolved shared ABI/API/reader/proof batching, old-metadata standby-marker compatibility and status wording. No repository edits, runtime tests, TPM/lab actions or dependency changes."
+}

@@ -25,6 +25,24 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 | 13 | Replicas left behind by moves | A move leaves the source's replica on its disk: fl-a kept all 64 moved replicas (4 GiB) after the item 3 check | With the node agent (step 6) | [#13](https://github.com/jsfakian/Flaminio/issues/13) |
 | 14 | Tombstones on nodes outside Kubernetes | Only the CSI node plugin sweeps tombstones; for a data node without one (fl-c), an operator confirms by hand (`lab.sh vol-confirm`) | With the node agent (step 6) | [#14](https://github.com/jsfakian/Flaminio/issues/14) |
 
+## Correctness audit (2026-11-12)
+
+The [audit report](audits/2026-11-12/README.md) adds confirmed defects outside the original
+follow-ups: [#76](https://github.com/jsfakian/Flaminio/issues/76) interrupted creation,
+[#77](https://github.com/jsfakian/Flaminio/issues/77) inconsistent volume reads,
+[#78](https://github.com/jsfakian/Flaminio/issues/78) drain admission,
+[#79](https://github.com/jsfakian/Flaminio/issues/79) CSI mount ownership,
+[#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation,
+[#81](https://github.com/jsfakian/Flaminio/issues/81) ISR RPC batching,
+[#82](https://github.com/jsfakian/Flaminio/issues/82) node-wide shutdown assertions and
+[#85](https://github.com/jsfakian/Flaminio/issues/85) io_uring buffer lifetime on error.
+The subsequent issue-plan review reproduced Fenced uncertainty framing overflow, tracked by
+[#86](https://github.com/jsfakian/Flaminio/issues/86); bounded geometry alone does not fix it.
+The clock contract is tracked by [#83](https://github.com/jsfakian/Flaminio/issues/83), and
+block-interface conformance by [#84](https://github.com/jsfakian/Flaminio/issues/84).
+A green existing suite does not close these issues; their separate adversarial reproductions
+fail on the audited revision. Proposed ADRs 0007–0011 record the design corrections.
+
 ## 1. Read performance
 
 Superseded by the [performance plan](performance-plan.md), which adds a profile, measurement

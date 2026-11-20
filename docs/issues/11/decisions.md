@@ -5,6 +5,12 @@
 - **Spec:** approved by Ioannis Sfakianakis, 2026-10-30.
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-04.
 
+Approval confirmed by Ioannis Sfakianakis, 2026-11-13, with every plan of the batch of
+2026-11-12; the plan has no open question to settle. The plan's review loop continues after
+approval; later fixes are recorded as changes made after approval. Work on this issue merged
+before this approval was recorded (pull request #38); the issue is closed. Confirmed before its
+plan review in the batch cleared (status: pending).
+
 Settled during the spec and design reviews. Each line: the choice, and why.
 
 ## Scope

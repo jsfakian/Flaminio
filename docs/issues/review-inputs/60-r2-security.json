@@ -1,0 +1,66 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review60_r2_security (design-security, R2)",
+  "reviewed_commit": "d72a998ea5e10602a2b0a747fc272bd1b32450f2",
+  "prior_findings": [
+    {
+      "id": "R1-S1",
+      "status": "fixed",
+      "evidence": "contracts.md:129-142 and design.md:36-42 require immediate deferred cleanup of every nonnil allocated/returned key buffer before errors, cancellation or assertions, including violating error/late outputs. Alias checks plus controlled panic/Goexit exercise cleanup on the actual case runner without dumping secrets."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "contracts.md:95-125 and design.md:79-87 add an explicit new #60 service-owned shared eight-permit gate for all Wrap/Unwrap paths, with authorization/eligibility first, nonblocking refusal, context checks, synchronous ownership through actual return/output disposal and real mixed-service tests. The cooperative-context limitation is stated honestly."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "contracts.md:60-93 keeps the four exact #50 codes and code-only endpoint decisions; bounded key_reason has a concrete Go type, six-value enum, allowed kind/value pairs, 16-byte limit and ParseReason normalization. RetryAfter is removed. Malformed/contradictory details cannot alter fallback, and raw provider failures normalize safely."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "contracts.md:6-35 connects real file-static/TPM material loaders to one production descriptor table/config.Open path, copies and clears material with #57 preflight preserved, keeps fixture registration in tests and refuses unknown/fault/mixed/insecure configurations. Loader tests exercise the shared resolver without using the host TPM."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "design.md:105-112 and spec.md:65-68 distinguish durable operation/identity/plan/binding from unpublished DEK candidates, require losing/error candidates to clear and retain the exact atomic winning envelope after publication/lost reply. This matches #50/#76 without a plaintext staging protocol."
+    },
+    {
+      "id": "R1-C5",
+      "status": "fixed",
+      "evidence": "design.md:114-126,150-160 names ordinary Rust engine Model/FakeMeta release counters over actual I/O/resync/ISR and separate both-backend/mTLS Go tests connecting release to counted Unwrap. The composition no longer claims a Go counter directly observes Rust I/O."
+    },
+    {
+      "id": "R1-C6",
+      "status": "fixed",
+      "evidence": "contracts.md:37-56 and design.md:27-33 use exact #50 DEK/KEK/static-Sealed/identity/profile/protobuf bounds and distinguish maximal encoding fixtures from semantic acceptance. The invented 1024-byte envelope ceiling is removed."
+    },
+    {
+      "id": "R1-C7",
+      "status": "fixed",
+      "evidence": "intent outcome 5, spec.md:74-79 and design.md:157-163 prohibit external network/cloud/emulator dependencies while explicitly permitting owned metadata mTLS, embedded-etcd client/peer HTTP and replica TLS fixtures."
+    }
+  ],
+  "dependency_commits": {
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+    "57": "6b60c20335ff2c64466d717b3de1e66a1a073436",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4"
+  },
+  "findings": [],
+  "report": {
+    "result": "clear",
+    "summary": "R2 design-security incremental review is clear: zero comments, including Nits. The prior independent Low and the shared security roots behind the code findings are fixed; no security fallout was found in the revision.",
+    "scope": "Reviewed only 44a7099..d72a998 for #60 contracts/design/spec/intent/decisions, excluding report.md, plus affected source and exact prerequisite boundaries. Earlier reports were read for closure; unchanged material was not re-audited.",
+    "checks": [
+      "Verified the single Service construction/startup resolver insertion points against meta/cmd/flaminio-meta/main.go and Service/New/auth boundaries against meta/service/service.go and auth.go.",
+      "Verified code-only endpoint fallback against control/csi/meta.go and flaminio-metaclient/src/lib.rs, and the concrete ordinary engine/mTLS/backend/Make target wiring against current source.",
+      "Checked #50 source/envelope/error/protected-release/creation contracts, #57 process-wide protected-memory/loader ownership and #76 admitted-helper/finalization semantics; #72/#73 ordering is preserved rather than replaced.",
+      "Confirmed the issue and five dependency worktrees were clean at the recorded commits. Historical approvals remain historical; substantive #60 revisions remain explicitly unapproved.",
+      "No SDK/provider/cloud identity/action is selected or required by this slice; no new replication rule or simulator mutation is introduced. No repository edits, runtime tests, lab work or cloud actions were performed."
+    ]
+  }
+}

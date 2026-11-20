@@ -1,0 +1,16 @@
+package failover
+
+import (
+ "context"
+ "testing"
+ "time"
+)
+
+func TestAuditPartitionDoesNotAssertNodeShutdown(t *testing.T) {
+ now:=time.Date(2026,11,12,0,0,0,0,time.UTC)
+ // A partition can produce these exact observations while the machine and its pods run.
+ k:=&fakeKube{nodes:[]Node{{Name:"a",Ready:false,Since:now.Add(-time.Minute)},{Name:"b",Ready:true}}}
+ c:=&Controller{Kube:k,Liveness:fakeLiveness{"b":true},Grace:40*time.Second,Now:func()time.Time{return now}}
+ if err:=c.Step(context.Background());err!=nil{t.Fatal(err)}
+ if len(k.calls)!=0{t.Fatalf("asserted node shutdown from absence signals only: %v",k.calls)}
+}

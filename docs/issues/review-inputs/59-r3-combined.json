@@ -1,0 +1,20 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review59_r3_combined",
+  "reviewed_commit": "32c70bf60b2957debe1c5b6a17ec3fbaeeb46f9d",
+  "prior_findings": {
+    "R2-C1": "Fixed: the namespace gate now admits only lease-bound related IPv4 fragmentation-needed messages for original owned TCP tuples, with namespace-scoped hardened PMTU validation. Routed MTU1280 and owned-SNAT progression, forged/truncated/checksum/sequence feedback and closed-gate counterexamples are specified.",
+    "R2-C2": "Fixed: payload-v1 explicitly uses A=0, actual optional payload rate and exclusively reserved available credit, with zero known pacing cost/no division for window-only mode. Host-mode typed TCP_INFO sampling and fresh Date, generation, open-window and #53 2u checks remain required. Concrete low-rate, credit, closure and remote-backpressure fixtures cover both payload modes."
+  },
+  "dependency_commits": {
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "53": "105dac041ccfca18ba1bcd4984e84115efceb200",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "findings": [],
+  "report": "Fresh combined design-code/design-security incremental review of 29ddcf3..32c70bf, excluding report.md, plus affected transport/policy/spec and #53 publication contracts. Both R2 findings are fixed. Zero findings including Nits; clear within this incremental scope. No re-audit of unchanged R1 SDK/profile/roadmap decisions. Checked Linux v6.6 TCP socket/sequence PMTU validation and namespace sysctl semantics against official kernel source/documentation, and directional conntrack tuple expressions against the official nftables manual (https://raw.githubusercontent.com/torvalds/linux/v6.6/net/ipv4/tcp_ipv4.c; https://www.kernel.org/doc/html/v6.6/networking/ip-sysctl.html; https://www.netfilter.org/projects/nftables/manpage.html). Dependency identities retained from R2; affected #53 HEAD independently confirmed. git diff --check passed. No runtime/lab execution, repository edits, subagents, push or merge."
+}

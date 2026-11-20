@@ -1,0 +1,16 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review57_r4_code",
+  "reviewed_commit": "55dff2b45c7cb6751d98ad65df58864f88a85913",
+  "range": "9c6549c..55dff2b",
+  "prior_findings": {
+    "R3-C1": "Fixed: the test-only transport.TPM Send adapter serializes complete pairs, completes writes, reads the exact 10-byte TPM2 header and declared bounded body, closes failed streams, and obeys the overall owner deadline. Fragmented header/body, short write, EOF, oversized/bad-tag/deadline and concurrency fixtures are explicit.",
+    "R3-N1": "Fixed: emulator invocation is explicitly swtpm socket --tpm2 with the private state/data/control arguments."
+  },
+  "findings": [],
+  "primary_sources": [
+    "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpm2/transport/tpm.go",
+    "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpmutil/run.go",
+    "https://raw.githubusercontent.com/stefanberger/swtpm/v0.9.0/man/man8/swtpm.pod"
+  ],
+  "report": "Reviewed only issue57 technical diff 9c6549c..55dff2b, excluding report.md, and affected pinned transport/emulator contracts. R3-C1 and R3-N1 are fixed. The new framing, serialization, bounds, failure closure and fixtures are coherent. Zero additional correctness comments, including Nits. No repository edits, runtime tests or lab actions."
+}

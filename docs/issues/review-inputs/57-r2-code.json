@@ -1,0 +1,43 @@
+{
+  "reviewed_commit": "18f04de30bdc8295fdbde6effde3fad771ccb242",
+  "range": "eb38cba..18f04de",
+  "reviewer": "/root/remaining_plan_reviews/review57_r2_code",
+  "prior_findings": {
+    "R1-C1": "fixed; new affected integration issues listed separately",
+    "R1-C2": "fixed; new affected integration issues listed separately",
+    "R1-C3": "fixed; new affected integration issues listed separately",
+    "R1-C4": "fixed; new affected integration issues listed separately",
+    "R1-C5": "fixed; new affected integration issues listed separately",
+    "R1-N1": "fixed; new affected integration issues listed separately"
+  },
+  "dependency_commits": {
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa"
+  },
+  "findings": [
+    {
+      "id": "R2-C1",
+      "severity": "Medium",
+      "summary": "The new recipe accepts nonempty owner hierarchy authorization but unattended startup has no protected source for it.",
+      "evidence": "tpm-contracts.md:31\u201336,63\u201366,197\u2013205; design.md:28\u201338. The local seal/recover pipe carries owner_auth, while serve exposes only bundle/profile and intentionally persists no hierarchy secret. Recreating the owner primary requires that hierarchy authorization.",
+      "fix": "Simplest first profile: support only empty owner hierarchy auth, reject nonempty enrollment/recovery input and qualified profiles before publication, and add refusal/boot fixtures. Alternatively define an actual unattended protected boot input that meets the no-external-call/no-clear-disk rules. Do not seal a candidate that cannot boot.",
+      "sources": [
+        "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpm2/tpm2.go"
+      ]
+    },
+    {
+      "id": "R2-C2",
+      "severity": "Medium",
+      "summary": "Required isolated local swtpm coverage has no route through the new fixed production device, owner-state and protected-host contracts.",
+      "evidence": "design.md:28\u201329,121\u2013124; tpm-contracts.md:76\u2013103,125\u2013172. Production owner always opens /dev/tpmrm0 and fixed root-owned /run state, but make tpm-test promises private swtpm sockets and no physical TPM access. No isolated transport/record/profile injection or sandbox setup is specified.",
+      "fix": "Define an explicit test-only integration route (for example a test-binary transport/host-facts/state-path constructor plus isolated private swtpm socket and real protected-memory fixtures) without a shipping runtime bypass. Specify how CI sets required permissions/limits and exercises the production owner protocol while proving it never opens the host TPM/state. Required cases must run, not silently skip."
+    },
+    {
+      "id": "R2-N1",
+      "severity": "Nit",
+      "summary": "Common preflight scope says any secret read, but failed preflight still starts ordinary TLS/token-authenticated metadata RPCs.",
+      "evidence": "design.md:34\u201339; tpm-contracts.md:148\u2013152. Existing identity/token secrets are explicitly outside #57 intent scope.",
+      "fix": "Name the covered TPM source material (KEK, canary, escrow/unlock and hierarchy-auth inputs) and state that baseline TLS/token loading remains governed by existing setup. Apply the wording consistently."
+    }
+  ],
+  "report": "R1-C1..C5 and R1-N1 have concrete corrections. Two Medium affected integration gaps and one Nit remain; no other findings. No repo edits or lab actions."
+}

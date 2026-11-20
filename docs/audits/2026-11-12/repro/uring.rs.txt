@@ -1,0 +1,33 @@
+#[test]
+fn rejected_batch_does_not_retain_borrowed_buffers() {
+    use flaminio_store::BlockDevice;
+    use flaminio_uring::UringDevice;
+    use std::{fs::OpenOptions, os::unix::fs::FileExt};
+    let path = std::env::temp_dir().join(format!("flaminio-audit-uring-{}", std::process::id()));
+    let file = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+    file.set_len(8192).unwrap();
+    let dev = UringDevice::open(&path, false).unwrap();
+    let length = u32::MAX as usize + 4097;
+    // Reserve address space, not 4 GiB of resident memory. The huge slice is never submitted.
+    let ptr = unsafe { libc::mmap(std::ptr::null_mut(), length, libc::PROT_READ,
+        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE, -1, 0) };
+    assert_ne!(ptr, libc::MAP_FAILED);
+    // SAFETY: the anonymous mapping is initialized, readable, and lives through this test.
+    let huge = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), length) };
+    let small = vec![0x5a; 4096];
+    let result = dev.write_many(&[(0, &small), (4096, huge)]);
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+    let mut before = [0; 4096];
+    file.read_at(&mut before, 0).unwrap();
+    let mut unrelated = [0; 4096];
+    // Keep `small` alive to demonstrate the queued-SQE defect without inducing use-after-free.
+    dev.read_at(4096, &mut unrelated).unwrap();
+    let _ = dev.flush();
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mut after = [0; 4096];
+    file.read_at(&mut after, 0).unwrap();
+    drop(dev);
+    unsafe { libc::munmap(ptr, length); }
+    std::fs::remove_file(path).unwrap();
+    assert!(before == after, "a later call submitted a write borrowing the already-returned batch's buffer");
+}

@@ -1,0 +1,94 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review61_r1_security",
+  "reviewed_commit": "5696573a126c0abe26347d3c9700e557489613cf",
+  "dependency_commits": {
+    "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+    "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "78": "16953ee5d70dbb352463b6b76eed072dc0df1fcf",
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+    "82": "18fb58576f2d5a8cbf31463619c652fbf475a5bc",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "findings": [
+    {
+      "id": "SEC61-R1-01",
+      "severity": "High",
+      "summary": "The bootstrap grant does not define how an already-open session acquires or enforces authority for a later move/replacement.",
+      "evidence": "docs/issues/61/design.md:44\u201356, 79\u201385, 130\u2013137 authorize the Hello's requested chunk set once and cache only in that session. Actual replica/mod.rs:346\u2013353 creates a missing chunk on BeginResync; the target can add a new move destination on an existing node/volume session. A session established before that assignment has no matching SessionAssignment, and the design never specifies per-request grant enforcement or a transition to acquire its new role.",
+      "fix": "Persist the authorized chunk/ref/role/operation set in the accepted session and check it before every creation or reconstruction operation. Define a bounded control-path reauthorization or explicit new-Hello transition when moves add chunks/roles, including operation changes, session supersession, and delayed answers. Do not add metadata calls to ordinary I/O. Test a session predating the move, an ungranted BeginResync, and a stale replacement operation before any store mutation."
+    },
+    {
+      "id": "SEC61-R1-02",
+      "severity": "High",
+      "summary": "The new replica-gate exceeds the concrete release transaction limit.",
+      "evidence": "docs/issues/61/design.md:59\u201364 requires an extra atomically bumped gate on release mutations. The current #13 design.md:105\u2013122 permits 118 chunk comparisons plus header and #72 ledger comparisons, exactly 120. Adding the gate makes 121, refused by meta/kv/etcd.go:91\u201392. #13's sweep concretely emits batches of 118. Repeated release failure prevents reclamation and eventually blocks moves at the release bound.",
+      "fix": "Recalculate every affected transaction and publish the new exact batch caps, including ConfirmRelease request validation, producer, tests, #72 ledger interaction, ForgetNode/enrollment batches and model adapters. For the existing ConfirmRelease shape, reduce the maximum to 117 if one extra compare suffices; document the complete compare/write table and test boundary and boundary+1 against both backends."
+    },
+    {
+      "id": "SEC61-R1-03",
+      "severity": "High",
+      "summary": "Replacement completion accounts only for current data, leaving snapshot and DR historical completeness unspecified.",
+      "evidence": "docs/issues/61/design.md:79\u201385 follows the current Mapped/copy/holes resync and admits the new ref after 'full synchronization'. Actual target.rs:2351\u20132377 reconstructs only the current chunk. Current #51 design.md:170\u2013199 instead requires every committed historical stage, suppresses live forwarding until lower stages complete, and rechecks the frontier before joining. #58 design.md, Lifecycle and commit, additionally requires committed and pinned roots/receipts on every joiner. #52 contracts.md:43\u201355 relies on #61 identity plus that completeness to grant a snapshot source.",
+      "fix": "Define replacement admission's composition with snapshot/root profiles: reconstruct and prove every committed/pinned historical view using the exact #51/#58 transition when those profiles exist, or explicitly refuse the unsupported profile before replacement begins. State which barrier/version proves completion across cuts and takeover, and add caught mutants for joining after current-only reconstruction and accepting a stale historical frontier."
+    },
+    {
+      "id": "SEC61-R1-04",
+      "severity": "High",
+      "summary": "Every-Hello metadata authorization can exhaust memory and starve membership/fencing work.",
+      "evidence": "docs/issues/61/design.md:44\u201350 adds paged metadata work for every new Hello but supplies only a page-size bound (:135), with no aggregate pending-session, queued-page, retry, deadline or fairness bounds. Actual net.rs:176\u2013199 spawns accepted connections without a cap, :212 uses an unbounded reply channel; flaminio-metaclient/lib.rs:110\u2013120 serially services one unbounded call queue. A valid target with a retained token can repeatedly open sessions during an outage and queue authorization work ahead of ChangeIsr/refresh/heartbeats.",
+      "fix": "Specify bounded preauthorization state, active/pending grants and bytes per node/peer/volume, handshake/grant deadlines and cancellation on disconnect/supersession, bounded retry/backoff, and fair scheduling that prevents bootstrap pages monopolizing the metadata worker. Refuse excess sessions without enqueuing work. Test a valid-token Hello flood, stalled metadata, many-page volume and cancellation while existing targets still make bounded control-path progress."
+    },
+    {
+      "id": "SEC61-R1-05",
+      "severity": "Medium",
+      "summary": "The paged authorization interface states binding requirements without a concrete verifiable cursor/grant protocol.",
+      "evidence": "docs/issues/61/design.md:59\u201364 and 130\u2013137 let requests supply after/generation/snapshot_revision and require a fixed full-request digest, but do not define the first-page snapshot acquisition, authenticated/server-owned continuation, generation source, fixed final comparison set, or lifetime/bounds of Mem snapshots. The digest is response-only. 'Do not trust a caller-supplied newer generation' is an invariant, not an implementable mechanism, and KV currently has neither historical reads nor snapshots (meta/kv/kv.go:38\u201352).",
+      "fix": "Fix the exact GetAt/ListPage snapshot API and revision semantics and a stateless authenticated continuation or bounded server-owned grant record that binds caller/store/token digest/first epoch/epoch/full sorted chunk set/gate and node revisions. Specify the final O(1) comparison transaction, all gate writers/initialization/no-delete rules, expiry/cancellation/resource reclamation, compacted-revision behavior and restart. Test forged/mixed cursors, changed request sets, generation ABA, compaction and incomplete-page refusal."
+    },
+    {
+      "id": "SEC61-R1-06",
+      "severity": "Medium",
+      "summary": "The claimed shared replication-v2 bytes conflict with the current snapshot-v2 proposal.",
+      "evidence": "docs/issues/61/design.md:143\u2013145 says ALPN flaminio-repl/2 and inserts a canonical UUID string before Hello's token, and UUID16 into Fenced. Current #51 contracts.md:160\u2013197 independently fixes HelloV2 tag 0x10, a u16 version=2 and the existing Hello layout 'unchanged thereafter', plus new snapshot request tags and legacy-frame refusal. #72 contains no ReplicaRef/wire-v2 contract at all; its intent.md:53 postpones multiple disks until after #61. Thus 'matching #72' does not settle the actual #51/#61 codec composition.",
+      "fix": "Provide one exact composed profile/tag/layout table for identity-aware ordinary and snapshot/root sessions, including Hello/Fenced, endianness, UUID representation, ALPN negotiation and old/new cross-decode behavior. Make #61 the actual owner of ReplicaRef rather than claiming an existing #72 definition. Add shared golden vectors for both feature combinations and controlled refusal of mismatched profiles; leave dependencies read-only while recording the exact second-to-land hooks."
+    },
+    {
+      "id": "SEC61-R1-07",
+      "severity": "Medium",
+      "summary": "Exact-store cleanup is promised but the cleanup authority/storage/RPC schemas remain node-only.",
+      "evidence": "docs/issues/61/design.md:23, 85\u201390, 126\u2013148 adds released_refs to ChunkMeta and says #13 releases/fences/tombstones must use refs, without defining header fence-holder refs, tombstone pending/confirmed refs, stored schemas or revised list/confirm request fields. Baseline meta.proto:169\u2013190 identifies tombstones and ConfirmDeletion only by node; #13 design.md:105\u2013153 defines node-only ConfirmRelease/ListReleases and self-IO authorization. The new store must not confirm an unplugged old store, but these builders have no agreed bytes to express that distinction.",
+      "fix": "Define the complete versioned exact-ReplicaRef cleanup contracts, including header/tombstone records, list responses, confirmation requests, incarnation/revision preconditions, node/ref self-authorization, legacy-field handling, retry and ledger release behavior. Explicitly distinguish possession/deletion of the old UUID from mere current node identity. Add real RPC/adapter tests where a replacement tries to confirm the old ref and an old disk returns after new membership has joined."
+    },
+    {
+      "id": "SEC61-R1-08",
+      "severity": "Medium",
+      "summary": "The shared response/frame size envelope is deferred although identity fields invalidate its existing formula.",
+      "evidence": "docs/issues/61/design.md:126\u2013147 adds authoritative ref arrays while retaining node projections, then leaves #80 to 'tighten shared caps if needed'. #80 design.md:29\u201347 fixes B(N,R) and per-RF caps for node-string memberships; #13 design.md:65\u201385 adds release/fence-holder terms, and #51 adds catalog bytes. Each ReplicaRef adds nested node+UUID/tag bytes, and exact cleanup refs add more. No new composed formula/caps or rule for including/omitting projections is given.",
+      "fix": "Compute and publish the concrete combined bound/caps now for the proposed supported profiles, maximum canonical UUID/ID lengths, R+1 membership/move/release/fence-holder shapes, catalog and token. Define precisely when legacy projections are emitted. Update checked Hello/Fenced formulas for the UUID/version fields, and name worst-view proto.Size and real Go/Rust transport fixtures at every new boundary."
+    },
+    {
+      "id": "SEC61-R1-09",
+      "severity": "Medium",
+      "summary": "Node.store_generation has no defined semantics despite being consumed as a security lifetime.",
+      "evidence": "docs/issues/61/design.md:126\u2013133 appends store_generation and request/response generation fields without defining initialization, change conditions, monotonicity/overflow, preservation on label-only registration, or whether the two generations are identical. Current #52 contracts.md:43\u201356, 139\u2013158 uses precisely #61 Node.store_generation in signed SourceProofV1 and source validation. An implementation cannot decide whether an old source token survives UUID A\u2192B\u2192A or enrollment/restart.",
+      "fix": "Define one source-lifetime generation authority, its exact stored/proto types and relationship to the replica gate and pagination generation. Specify atomic updates with UUID registration/enrollment, no-op preservation, ABA/overflow handling and field-level registration ownership (agents and other roles cannot supply/overwrite service-owned generations). Add registration/source-proof tests covering label CAS, restart, repeated UUID replacement and delayed proof replay."
+    },
+    {
+      "id": "SEC61-R1-10",
+      "severity": "Low",
+      "summary": "The later VM reformat lab proof is incompatible with the current production clock-admission plan.",
+      "evidence": "docs/issues/61/intent.md, What we want 8, and design.md:169\u2013172 prescribe the shared fl-a/fl-b VM lab as the later RF2 proof. Current #83 design.md:21\u201342 requires physical-boottime-v1 before storage opens and deliberately refuses these VMs; no force bypass exists.",
+      "fix": "Distinguish separately authorized pre-#83 exploratory VM evidence from supported production qualification, and provide an authorized physical-fixture alternative or explicitly mark that production proof unavailable under the VM lab. Do not invent physical attestations or broaden cloud/classification scope."
+    }
+  ],
+  "report": "R1 security/spec-security review of the whole #61 intent/spec/design/decisions/issue-local ADR at 5696573a126c0abe26347d3c9700e557489613cf. Ten findings: 4 High, 5 Medium, 1 Low; not clear. The central store-bound invariant, token/current-epoch/first-epoch authorization before old-incarnation cleanup, no automatic force promotion, minimum-ISR preservation and conservative old-store release intent are sound. Existing token v2 does carry first_epoch; actual Hello cleanup is destructive before fencing, so ordering must remain explicit. Simulator/store-loss/identity-alias and bootstrap-old-token proof is required by the draft; every additional admission/completeness safety transition identified above also needs an explicit core check and caught mutant. No metadata/lock work was added to steady-state I/O by this review. All issue/dependency worktrees were clean and retained the recorded HEADs at final verification. No repository edits, tracker writes, runtime tests, benchmarks, shared VM or disk actions. Historical approvals remain evidence only; fixes and the proposed dedicated-root-cause split require fresh review/approval rather than fabricated acceptance."
+}

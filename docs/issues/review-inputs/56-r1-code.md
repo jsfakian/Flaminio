@@ -1,0 +1,11 @@
+Reviewed #56 at 513b97374f66c70e3627c50051be50abf84bccd6. Reviewer /root/remaining_plan_reviews/review56_r1_code.
+
+- R1-C1 High: spec94–99/design95–105 and decisions treat confirmed VM power-off as automatic recovery evidence. #82 design36–51,153–158 requires held fence and rejects VM/sample providers. Remove alternative, block VM node-wide recovery; stop unsafe baseline controller before exploratory partition.
+- R1-C2 Medium: design67–70 exploratory VM execution conflicts with #83 design21–42 physical-only startup refusal. Distinguish legacy pre-#83 baseline exploratory run from integrated Blocked-before-mutation execution.
+- R1-C3 Medium: design72–86,116–123 new history mode lacks executable contract. #49 FLRUN001 is sequential same-boot End segments, cannot represent overlapping endpoints/powered-off VM. Separate versioned coordinator CLI/format/checker adapter with exact envelopes, global IDs, lost responses, optional deadlines, checkpoint conditions, bounds; clean/lying fixtures for overlap/poweroff/late resurfacing.
+- R1-C4 Medium: design51–56,129 simulator actions silently skip Read/Write; Attach changes metadata despite meta_up false; run heals before assertions. Model-only labeled issued probe outcomes/phase assertions ISR/readiness/required-forbidden completion; gate metadata decisions on authority. Explicit crash/restart/outage controls and witness/double-loss abstraction.
+- R1-C5 Medium: spec75/design108–109 nonexistent metadata revision interface. #77 keeps etcd/header revisions private/no proto shape change. Use coherent (epoch,per-chunk isr_ver,ISR) samples and management envelopes; test missed transitions.
+- R1-C6 Low: intent119 unconditional cleanup contradicts specS9/design97–100. Qualify observed exits; persisted independent healing after management loss.
+No Nits.
+Dependencies inspected: #44 670c275595bc0ada1c0511313bf8ed5533a22797; #49 de46aeff4d5e2874bd9501a899a088ef3e42812a; #55 5b140f05a4c9d40ecf8332114283b2d1a3860770; #77 bb8df5b057e1e26f6e73e1319c9afc49a3c72994; #81 15b0c35d137a324a257cb845e2f9b2531cd27745; #82 18fb58576f2d5a8cbf31463619c652fbf475a5bc; #83 67862ad667ac3121b453c9227cef1e8ec5248138.
+#44 current HEAD includes earlier reviewed technical revision then approval records; no mapping defect.

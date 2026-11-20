@@ -1,0 +1,8 @@
+chunks=1 uncertain_extents=65537
+one_chunk_encoded_body=524317 decode=Err(Invalid("too many uncertain extents"))
+chunks=2 uncertain_extents=131086
+
+thread 'main' (6) panicked at /home/jsfakian/Documents/src/flaminio/dataplane/crates/flaminio-net/src/frame.rs:342:9:
+frame body of 1048717 bytes
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+two_chunk_encode_panicked=true

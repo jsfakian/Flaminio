@@ -1,0 +1,59 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review90_r1_code",
+  "reviewed_commit": "98390ae141d287ec9e8e7443bac6389bd3ade9f7",
+  "dependency_commits": {
+    "13": "612979176e245b00b74d58aa94c41b2d2989c8d8",
+    "45": "e7dc21462ccc4f121569641a24f3bd64dd01e240",
+    "51": "a450dc65fac35af1037084b076968185d052ba15",
+    "52": "48d4d823a56572c2ca95ef7b4bd01e3766325453",
+    "58": "d557e13636bc647090c81dfa78eecfb699958cb2",
+    "72": "186074fb9e04314cec4a6f735cc08ace734b3158",
+    "73": "b7b0b821ee8a2e6a13702126a294576b09e47da5",
+    "76": "9642649278ca6bced116d11f417ca27e45e6f025",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "78": "16953ee5d70dbb352463b6b76eed072dc0df1fcf",
+    "79": "52f7a966fa29cbea967d9252880636a328bd0b26",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "81": "0a8bfca37184f3dd4a45355c6020a58827017dae",
+    "82": "6c858756ec7aa9ceabb4530aba3400f8acb62016",
+    "83": "f9a0a519adf21d4ee2c9048f44139489446c94e7"
+  },
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "High",
+      "summary": "INITIAL creation authority has no defined issuance/consumption transition distinguishing first bootstrap from earned membership.",
+      "evidence": "90/core-design.md:24-25,35-47 allows INITIAL to create and requires MEMBER to exist, but defines INITIAL only by the #76 initial-placement operation. 90/contracts.md:45-79 has no pending-initial/earned field or completion transaction. Actual meta/domain/domain.go:199-207 places every new replica in the ISR before any Hello; reviewed #76 design.md:24,48-59 retains create_operation and its immutable plan after publication, attach and later mutation. Consequently those same metadata fields describe both a never-materialized initial copy and an earned copy on a later attach. The grant algorithm cannot select the stated roles or establish when INITIAL can no longer be reissued. No INITIAL replay/consumption check or caught mutant appears in the proof table.",
+      "fix": "Define authoritative bounded initial-materialization state and the exact transition from creation permission to earned source/ack/lease authority, including completion CAS/durable evidence and partial-bootstrap crash/takeover behavior. A retained create_operation alone must not authorize later empty recreation. Specify role selection at Open/Page/Finish and session transition after completion; add an independent simulator assertion/caught INITIAL-replay mutant plus actual first attach, partial creation restart, lost completion reply and post-earned missing-chunk refusal tests."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "High",
+      "summary": "Cleanup has neither a stored-tombstone byte bound nor a bounded ListTombstones response path.",
+      "evidence": "90/contracts.md:90-106 stores the entire volume union of placed/moving/released/fenced/claimed refs and per-ref charges in one tombstone and adds refs/pending_refs/confirmed_refs to each reply. Per-chunk release and 16-fence limits do not bound the union to a small record; distinct old UUIDs are deliberately not deduplicated by node. 90/budgets.md:9-42 proves only Volume responses; :46-56 also promises exact deletion for paged legacy volumes up to65536 chunks. No tombstone record bytes, list count/bytes, paging cursor or bounded scan is specified. Actual service.go:584-614 lists the entire tombstone prefix and returns every matching tombstone; meta.proto:182-184 has one unpaged repeated result. Many ordinary pending deletions exceed the unchanged4MiB receive limit, and a large exact-ref union can exceed the backend request/value envelope even when its Volume view has a paged path. 90/migration.md:98-106 also assumes a tombstone fits one16KiB item/binding.",
+      "fix": "Define bounded persistent tombstone roots/ref-charge pages and atomic deletion/confirmation progress, or another exact representation whose worst stored transaction fits the real backend byte limit. Add bounded count-and-byte ListTombstones paging (including one large tombstone), stable incarnation/revision semantics, bounded backend scans and sweep continuation; compose enrollment with the same pages. Publish exact storage/transport envelopes and both-backend plus real Go/Rust boundary/+1 fixtures, many pending volumes and maximal legacy union cases without raising receive limits."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "High",
+      "summary": "Mandatory replica-gate puts disable #76 delete-only recovery under etcd NOSPACE.",
+      "evidence": "90/contracts.md:138-149 requires a compared/incremented gate on creation abort and public cleanup, deletion chunk cleanup and final deletion, with no helper exception. 90/budgets.md:175-181 requires the gate write in other deletion transactions and explicitly adds it to post-header cleanup. Reviewed #76 design.md:80-112 deliberately makes unpublished header rollback, root revocation and orphan plan/public-chunk cleanup delete-only: etcd3.7 rejects any transaction containing a Put while NOSPACE is raised (its source fact is design.md:11-12). Adding the proposed gate Put makes those recovery operations fail precisely when they are needed to reclaim space.",
+      "fix": "Compose an explicit delete-only exception for proof-scoped unpublished rollback/revocation/orphan reclamation, retaining identity-mode and exact root/header/key revision comparisons. Explain why absent/unpublished header plus those irreversible fences makes a gate increment unnecessary for grant freshness, or supply a different concrete NOSPACE-safe fencing mechanism. Keep all genuinely live authority changes gated. Update transaction tables and add real-etcd NOSPACE rollback/root-GC/public-and-private-orphan tests, with late publication/authorization/recreation schedules and a caught safety mutant for the exception."
+    },
+    {
+      "id": "R1-C4",
+      "severity": "Medium",
+      "summary": "The new heartbeat contract drops #45 state ordering and re-admits agent heartbeats.",
+      "evidence": "90/budgets.md:126-133 permits an agent/admin heartbeat and replaces TTL work with KV.TxnTTL(cmps,key,value,ttl), a single compared put whose stated comparisons are node+identity-mode. Reviewed #45 design.md State record/heartbeat ordering explicitly refuses agent heartbeats and atomically compares node and node-state, writes alive and transitions Missing to Active. Its lease registration/renewal rules also correlate overlapping commits by revision. The single-put #90 API cannot execute that atomic state update; using it as specified can leave a recovered node Missing or race a Failed transition, and agent liveness can indefinitely hide the stopped data plane. #45 is not included in the final composition-hook list.",
+      "fix": "Preserve #45 own-IO/admin authorization and its node-state comparison/optional state write, adding observed UUID/G and identity-mode checks to that same multi-operation TTL transaction. Reuse the #45 KV.Op TTL/commit-order lease contract rather than introducing an incompatible single-put replacement. Name the second-to-land #45 hook and test Missing recovery, Fail/Admit/Forget races, delayed old-store reports and agent refusal on both backends."
+    },
+    {
+      "id": "R1-C5",
+      "severity": "Medium",
+      "summary": "Enrollment does not handle valid legacy first_epoch=0 volumes before requiring v2 tokens and nonzero incarnation.",
+      "evidence": "90/wire-contracts.md:27-30 requires first_epoch>0 and refuses FLCT v1. Actual pkg/captoken/captoken.go:49-75 emits FLCT v1 whenever Header.FirstEpoch is0; the existing metadata read path and reviewed #77 spec.md:44-46 explicitly support these legacy headers. 90/migration.md inventories/converts header first_epoch but defines no positive-incarnation establishment, durable store-fence conversion, token change or explicit treatment of proven unchanged first_epoch=0 data. Its generic schema2 verification can therefore activate a known-original volume that can never establish the required Hello, despite S8 and budgets.md:46-55 promising a coherent operable path for valid proven legacy geometry.",
+      "fix": "Specify the complete first_epoch=0 migration case. Either define a safe maintenance transition establishing positive incarnation/fences and rewriting every dependent reference before activation without letting DeleteEarlierIncarnation erase preserved data, or define an explicit safe versioned legacy-incarnation representation and token/profile rules. Do not infer a new first_epoch from attach or silently activate an unusable record. Add both-backend and real Store bootstrap tests preserving acknowledged bytes, retained fences/cleanup references and any active historical views across this migration."
+    }
+  ],
+  "report": "First actual #90 round, full design-code/spec review: 3 High, 2 Medium, zero Nits; not clear. Read all #90 intent/spec/design/decisions/ADR and normative appendices, current Go/Rust functions/adapters/transactions, and relevant dependency plans. Dependency hashes are the canonical main-ledger snapshots, not lagging worktree heads; compared their technical diffs (remaining differences are approval/provenance and #52 wording). Source runtime diff against8aaa7a3 is empty. Predecessor findings are inputs only: composed v4 wire, service-owned lifetime, exact cleanup identities/115 compare cap, replacement capacity charges, full history/root frontier, paged grants/Mem caps/fair queues, admin migration APIs and physical-only qualification now have concrete mechanisms. The old response-budget finding remains partly open specifically for tombstone storage/listing; INITIAL earning and the listed composition/migration defects are fresh whole-scope findings. No approval-only defect or cloud/classification work is alleged. No repo edits, tracker writes, subagents, runtime tests, disk or lab actions. Issue worktree remained clean at98390ae."
+}

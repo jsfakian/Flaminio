@@ -1,0 +1,40 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review57_r3_code",
+  "reviewed_commit": "9c6549ce06757620a324777ec09c416e7d7f98f6",
+  "range": "18f04de..9c6549c",
+  "prior_findings": {
+    "R2-C1": "Fixed: the first profile requires empty existing owner auth; hierarchy-auth input is removed from CLI/IPC and nonempty auth is refused without mutation.",
+    "R2-C2": "Fixed at the mechanism level: a test-only constructor, private transport/state, real memory checks and isolated unit setup now define an executable route; the stream-framing revision issue below remains.",
+    "R2-N1": "Fixed: preflight is scoped to TPM source material while baseline TLS/token startup remains governed by existing setup."
+  },
+  "findings": [
+    {
+      "id": "R3-C1",
+      "severity": "Medium",
+      "summary": "The new direct Unix-stream TPM adapter does not provide complete TPM response framing.",
+      "evidence": "tpm-contracts.md:240\u2013242 selects net.DialUnix followed directly by transport.FromReadWriteCloser. In go-tpm v0.9.8, that adapter calls tpmutil.RunCommandRaw, which performs one Read into a4096-byte buffer; a Unix byte-stream Read may return a partial response. A fragmented valid response can fail parsing or leave bytes for the following command.",
+      "fix": "Use an existing suitable packet-aware swtpm adapter or a test-only transport.TPM Send implementation that serializes commands, fully writes each command, reads the10-byte TPM header with io.ReadFull, validates the declared response size against a fixed bound, and reads the complete remainder. Add fragmented-header/body, EOF and oversize-response fixtures; the identical unfragmented recipe must pass.",
+      "sources": [
+        "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpm2/transport/tpm.go",
+        "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpmutil/run.go"
+      ]
+    },
+    {
+      "id": "R3-N1",
+      "severity": "Nit",
+      "summary": "The new emulator invocation says swtpm2 instance without selecting the required socket interface.",
+      "evidence": "tpm-contracts.md:255\u2013257 lists socket flags after \u201cstart an owned swtpm2 instance\u201d; the pinned executable is swtpm and the interface is selected by its socket subcommand.",
+      "fix": "Name the invocation explicitly as swtpm socket --tpm2 followed by the listed private-state/data/control flags.",
+      "sources": [
+        "https://raw.githubusercontent.com/stefanberger/swtpm/v0.9.0/man/man8/swtpm.pod"
+      ]
+    }
+  ],
+  "primary_sources": [
+    "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpm2/transport/tpm.go",
+    "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpmutil/run.go",
+    "https://raw.githubusercontent.com/stefanberger/swtpm/v0.9.0/man/man8/swtpm.pod",
+    "https://www.freedesktop.org/software/systemd/man/254/systemd.exec.html"
+  ],
+  "report": "Reviewed only issue57 technical diff18f04de..9c6549c and affected transport/unit paths, excluding report.md. R2-C1/R2-C2/R2-N1 have concrete fixes. Root-owned0755 staging directories permit DynamicUser traversal; explicit RuntimeDirectoryMode and private state isolate tests. One Medium response-framing refinement and one invocation wording Nit remain. No repository edits, runtime tests or lab actions."
+}

@@ -47,11 +47,26 @@ attach no longer waits for it at all (design, "Measurements").
   issue #11.
 - The CSI sidecars' timeouts (provisioner, attacher: 60 s). Those calls go to the metadata
   service, not to the node.
+- **Whole-device probing** (plan review round 1, R1-S4). With the scan off, udev still probes the
+  whole device. A tenant's LVM PV header or md superblock at the start of a raw block volume can
+  then be activated or assembled by the host (LVM event activation, `mdadm --incremental`), which
+  holds the ublk device open and blocks the node's detach. The repository has no udev rule or LVM
+  filter for `ublkb*`. Closing that is a follow-up, not filed yet: a udev rule for `ublkb*` (for
+  example `ENV{SYSTEMD_READY}="0"`, skipping the LVM and md rules) and an LVM `global_filter` that
+  rejects `/dev/ublkb.*`. #74's settled Q4 leaves the same residual to a later plan of #74.
 
 ## Dependency
 
 The data plane creates its ublk device through libublk. libublk 0.4.8, the latest release,
-refuses `UBLK_F_NO_AUTO_PART_SCAN`, as does its main branch, so (1) needs a change upstream.
+refuses `UBLK_F_NO_AUTO_PART_SCAN`, as does its main branch, so (1) needs a change to libublk.
 That change is
 [ublk-org/libublk-rs#72](https://github.com/ublk-org/libublk-rs/pull/72), opened for this issue.
-Until a libublk release includes it, this issue lands (2) and (3), and stays open for (1).
+
+#74 and #15 (both approved) vendor libublk 0.4.8 in `dataplane/vendor/libublk/`, which this
+project maintains until upstream takes their changes (#74's settled Q2). Whichever of them lands
+first brings the copy in. (1) is one more hunk in that copy, the change of #72, and lands with or
+after that plan. It no longer waits for a libublk release, and #72 stays offered upstream
+(changed after approval, plan review round 1, R1-C1 and R1-S5).
+
+(2) and (3) shipped in pull request #25. The issue stays open for (1), and for the fix of a
+defect of #25's startup retry, found in plan review round 1 (spec, S6).

@@ -1,0 +1,69 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review90_r2_security",
+  "reviewed_commit": "c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8",
+  "dependency_commits": {
+    "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+    "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+    "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "prior_findings": [
+    {
+      "id": "SEC90-R1-01",
+      "status": "fixed",
+      "evidence": "90/core-design.md:59-118 and contracts.md:49-64 define consumed-only initial_pending_refs/initial_operation, own-IO durable completion attestation and bounded header/Node/gate/mode/chunk CAS, then a new MEMBER Hello. Pending barriers apply independently at target and replica. core-design.md:249-250 and279-282 name independent durable-before-earned and consumed-replay assertions/caught mutants and remote/local/crash/retry tests. Retained create_operation no longer grants recreation."
+    },
+    {
+      "id": "SEC90-R1-02",
+      "status": "fixed",
+      "evidence": "90/contracts.md Exact cleanup authority defines schema3 <=4096-byte roots, <=512-byte per-ref charge rows, <=128-byte indexes, bounded BUILDING publication/confirmation/reclamation and signed exact-ref pagination with <=32 examined keys and <=32KiB response. budgets.md:166-198 supplies aggregate/backend envelopes and streaming monolithic legacy projections; migration.md:53-66 inventories bounded native rows or projections. budgets.md:299-306 specifies boundary/+1, maximal458878-ref, repeated UUID, many-volume, both-backend and real-transport fixtures. No volume-wide array/list/migration item is required."
+    },
+    {
+      "id": "SEC90-R1-03",
+      "status": "fixed",
+      "evidence": "90/migration.md:98-99,195-235 defines admin GetEnrollmentItem/CorrectStoreEnrollment for already converted items, original/current revision/hash and evidence/observation/job CAS, coupled charge-preserving updates, immutable receipts and EXACT/QUARANTINED counter conservation. Corrections/changed observations invalidate verification_generation; full scan restarts from the beginning and READY/ACTIVE remain immutable. migration.md:282-291 specifies failed-final-verification, changed observation, lost-reply/restart and charge/counter tests on both backends."
+    },
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "Shared root with SEC90-R1-01; exact durable pending-to-earned transition and INITIAL replay proof now exist in core-design.md:59-118,249-250."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "Shared root with SEC90-R1-02; bounded cleanup root/ref/index storage, list/sweep work and legacy conversion are now concrete in contracts.md and budgets.md:166-198."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "90/budgets.md:250-297 preserves #76 delete-only rollback/root/orphan reclamation under exact mode/header/root/key-revision proof, retains all live authority gates and names real-etcd NOSPACE fixtures plus independent NoLiveAuthorityGC/caught identity_gc_weak_classifier. contracts.md/core-design.md explicitly compose the exception with pending INITIAL authority."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "90/budgets.md:126-161 restores #45 own-IO/admin authorization, agent refusal, node/node-state/mode comparison, optional Missing-to-Active write and transactional Op.TTL with commit-revision lease registration. It adds UUID/G without replacing the ordered state transition; :307-309 covers races and delayed lifetime/lease replies."
+    },
+    {
+      "id": "R1-C5",
+      "status": "partially_fixed",
+      "evidence": "90/migration.md:237-277 and wire-contracts.md now define signed FLCTv3/LID profiles preserving FE0 bytes/fences/history and avoiding DeleteEarlierIncarnation. The new representation is propagated through replica grants/sessions/cleanup, but not through #15/#79/#83 local target/device admission, which still requires positive FirstEpoch. This remaining affected-path gap is SEC90-R2-01."
+    }
+  ],
+  "findings": [
+    {
+      "id": "SEC90-R2-01",
+      "severity": "Medium",
+      "summary": "The new FE0/LID profile has no composed strict local target handoff and device-lifetime admission contract.",
+      "evidence": "90/migration.md:247-273 promises ordinary/snapshot FE0 Attach and usable I/O after normal #79 checks, and binds LID to replica grants/sessions/read handles/cleanup. No #90 appendix defines LID in the local target/device admission path. At the mapped dependency HEADs, #83 fresh-process-contract.md:23-38 requires a current-process FLCH for target startup and explicitly refuses FirstEpoch0 target lifetimes; #15 device-lifetime-contract.md:19-43 requires FIRST_EPOCH to be nonzero in device-info/detach-device and the validated lifetime tuple; #79 initialization-contract.md:133-147 requires that exact tuple and a purpose1 FLCH even for normal noninitializing attach. Thus a proven FE0 volume can pass the newly added replica profile and enrollment verification yet cannot start a strict target or pass CSI device admission when these supported features are composed. The new AttachIdentityVolume contract in90/budgets.md:83-94 also carries neither a process nonce nor returned handoff.",
+      "fix": "Have #90 specify its whoever-lands-second integration for proven FE0/LID at the strict local target boundary: how fresh-epoch FLCH issuance/verification accepts and binds the signed FLCTv3 identity (including paged Attach), and how #15 device-info/detach lifetime plus #79 normal attach intents persist and compare the exact LID while preserving process nonce/epoch/device checks. Keep dependency plans read-only. Add concrete normal target/CSI and paged-legacy acceptance tests, stale/wrong-LID and handoff refusal, and restart/lost-reply cases; retain the prohibition on fresh-filesystem initialization for legacy data."
+    }
+  ],
+  "report": "Fresh bounded #90 R2 incremental design-security and changed-spec-security review of98390ae141d287ec9e8e7443bac6389bd3ade9f7..c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8, excluding report.md:1 Medium, zero Nits; not clear. All three actual prior security findings are fixed, as are shared INITIAL/cleanup roots and the NOSPACE/heartbeat overlaps. The FE0 correction closes destructive replica bootstrap but leaves the strict local target/device composition above incomplete. Read all changed issue-local contracts and only affected baseline Hello/token/auth/cleanup and mapped dependency paths. dependency_commits records actual worktree HEADs read, distinct from the ledger technical clear hashes (e.g.15 technical3592050,83 technicalf9a0a519); those later provenance/report commits were not treated as implementation or approval of90. No unchanged unrelated scope was reopened. No repository/dependency edits, subagents, tracker writes, runtime tests or lab/disk/benchmark actions; proposed tests remain future work. Reverified clean issue worktree and unchanged technical snapshot at the reviewed full HEAD."
+}

@@ -1,0 +1,121 @@
+{
+  "verified_on": "2026-11-20",
+  "user_instruction": "We have merged 4,5,7,8,10,11, and 30 so let us clear them",
+  "scope": "Completed implementation excluded from the remaining plan-review queue; no new review rounds claimed.",
+  "issues": [
+    {
+      "number": 4,
+      "issue_url": "https://github.com/jsfakian/Flaminio/issues/4",
+      "closed_at": "2026-10-28T18:03:54Z",
+      "pull_request": {
+        "baseRefName": "main",
+        "mergeCommit": "75abfa1e0ed5198f2bed09e6a137e01a86910b06",
+        "merged": true,
+        "mergedAt": "2026-10-28T17:11:02Z",
+        "number": 22,
+        "url": "https://github.com/jsfakian/Flaminio/pull/22"
+      },
+      "merge_is_ancestor_of": "57b4b18b3447513d3b7447d7916dffd16b448b8e",
+      "new_review_performed": false,
+      "acceptance_run": {
+        "conclusion": "success",
+        "createdAt": "2026-10-28T17:11:11Z",
+        "headSha": "75abfa1e0ed5198f2bed09e6a137e01a86910b06",
+        "id": 40733268362,
+        "name": "Fuzz",
+        "status": "completed",
+        "url": "https://github.com/jsfakian/Flaminio/actions/runs/40733268362"
+      }
+    },
+    {
+      "number": 5,
+      "issue_url": "https://github.com/jsfakian/Flaminio/issues/5",
+      "closed_at": "2026-10-28T19:11:59Z",
+      "pull_request": {
+        "number": 24,
+        "url": "https://github.com/jsfakian/Flaminio/pull/24",
+        "merged": true,
+        "mergedAt": "2026-10-28T19:11:57Z",
+        "baseRefName": "main",
+        "mergeCommit": "b75cf37788f7e1a006c4c7a68b08502c6edf26c3"
+      },
+      "merge_is_ancestor_of": "57b4b18b3447513d3b7447d7916dffd16b448b8e",
+      "new_review_performed": false
+    },
+    {
+      "number": 7,
+      "issue_url": "https://github.com/jsfakian/Flaminio/issues/7",
+      "closed_at": "2026-10-29T06:07:21Z",
+      "pull_request": {
+        "number": 26,
+        "url": "https://github.com/jsfakian/Flaminio/pull/26",
+        "merged": true,
+        "mergedAt": "2026-10-29T06:07:19Z",
+        "baseRefName": "main",
+        "mergeCommit": "571385a1a032ffa9b266576d3f4b5ec9d14850ff"
+      },
+      "merge_is_ancestor_of": "57b4b18b3447513d3b7447d7916dffd16b448b8e",
+      "new_review_performed": false
+    },
+    {
+      "number": 8,
+      "issue_url": "https://github.com/jsfakian/Flaminio/issues/8",
+      "closed_at": "2026-10-29T10:46:19Z",
+      "pull_request": {
+        "number": 27,
+        "url": "https://github.com/jsfakian/Flaminio/pull/27",
+        "merged": true,
+        "mergedAt": "2026-10-29T10:46:17Z",
+        "baseRefName": "main",
+        "mergeCommit": "3a410746ccf1f3c2b1c3e4dea332831845d6b36d"
+      },
+      "merge_is_ancestor_of": "57b4b18b3447513d3b7447d7916dffd16b448b8e",
+      "new_review_performed": false
+    },
+    {
+      "number": 10,
+      "issue_url": "https://github.com/jsfakian/Flaminio/issues/10",
+      "closed_at": "2026-11-04T05:50:33Z",
+      "pull_request": {
+        "number": 32,
+        "url": "https://github.com/jsfakian/Flaminio/pull/32",
+        "merged": true,
+        "mergedAt": "2026-11-04T05:50:32Z",
+        "baseRefName": "main",
+        "mergeCommit": "3904a0c3721715a672aa80f619915bf27cbe1985"
+      },
+      "merge_is_ancestor_of": "57b4b18b3447513d3b7447d7916dffd16b448b8e",
+      "new_review_performed": false
+    },
+    {
+      "number": 11,
+      "issue_url": "https://github.com/jsfakian/Flaminio/issues/11",
+      "closed_at": "2026-11-04T15:11:14Z",
+      "pull_request": {
+        "number": 38,
+        "url": "https://github.com/jsfakian/Flaminio/pull/38",
+        "merged": true,
+        "mergedAt": "2026-11-04T15:11:12Z",
+        "baseRefName": "main",
+        "mergeCommit": "4a9db451b69eb96cacb122c0be329e20441cd563"
+      },
+      "merge_is_ancestor_of": "57b4b18b3447513d3b7447d7916dffd16b448b8e",
+      "new_review_performed": false
+    },
+    {
+      "number": 30,
+      "issue_url": "https://github.com/jsfakian/Flaminio/issues/30",
+      "closed_at": "2026-11-04T11:14:15Z",
+      "pull_request": {
+        "number": 34,
+        "url": "https://github.com/jsfakian/Flaminio/pull/34",
+        "merged": true,
+        "mergedAt": "2026-11-04T11:14:12Z",
+        "baseRefName": "main",
+        "mergeCommit": "19d797e62063ab77bf65ee1d00a74dc2955d71a5"
+      },
+      "merge_is_ancestor_of": "57b4b18b3447513d3b7447d7916dffd16b448b8e",
+      "new_review_performed": false
+    }
+  ]
+}

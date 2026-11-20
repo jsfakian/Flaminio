@@ -6,6 +6,12 @@
   implementation fb99440, 2026-10-30); recorded 2026-11-03, when the review moved to the new
   pipeline.
 
+Approval confirmed by Ioannis Sfakianakis, 2026-11-13, with every plan of the batch of
+2026-11-12; the plan has no open question to settle. The plan's review loop continues after
+approval; later fixes are recorded as changes made after approval. Work on this issue merged
+before this approval was recorded (pull request #34); the issue is closed. Confirmed before its
+plan review in the batch cleared (status: pending).
+
 ## Choices
 
 **D1. The first epoch is the revision of the claim** (S1).

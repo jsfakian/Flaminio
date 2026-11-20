@@ -1,0 +1,585 @@
+{
+  "date": "2026-11-20",
+  "main_base": "a1cc2421ad5aad62695c124537900b0ad0963e5e",
+  "audit_source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+  "scope": "Consolidated issue plans, actual review records, proposed ADRs and audit evidence. No runtime implementation or additional review/approval inferred.",
+  "terminal_statuses": [
+    "clear",
+    "cleared_completed"
+  ],
+  "remaining_issues": [
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69
+  ],
+  "inputs": [
+    {
+      "number": 4,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/4",
+      "files": 5,
+      "content_sha256": "e57173b7b96ad820cca3a9a94c881c9131b81a7bc06346a64eeb9fefd615a5c6",
+      "status": "cleared_completed"
+    },
+    {
+      "number": 5,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/5",
+      "files": 5,
+      "content_sha256": "7b4e43c8b73d897fb21ba195d565ede378fbd12d3bf9766e8930ebaf925085fa",
+      "status": "cleared_completed"
+    },
+    {
+      "number": 6,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/6",
+      "files": 5,
+      "content_sha256": "d16ba637de50b5c862396ecac2972195c4d0fc55ca9764085e8162b36e4b4d59",
+      "status": "clear"
+    },
+    {
+      "number": 7,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/7",
+      "files": 5,
+      "content_sha256": "69093ab91ec06056b02a92691f56e12d6b810f460532f262308c270a6357f6a6",
+      "status": "cleared_completed"
+    },
+    {
+      "number": 8,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/8",
+      "files": 5,
+      "content_sha256": "59472657fad795be2f4a560c36e74f69c75579c70a4ebd06962a0c51ab35e35f",
+      "status": "cleared_completed"
+    },
+    {
+      "number": 9,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/9",
+      "files": 5,
+      "content_sha256": "b242fee792e79e2f352dc1d533500bcc875c440ffda1afe216e47e2bcfd039d0",
+      "status": "clear"
+    },
+    {
+      "number": 10,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/10",
+      "files": 5,
+      "content_sha256": "d4f8d05fd941e9fd2c3b038a95dcf5909255f0c0d6d62278a57c03cc2801c758",
+      "status": "cleared_completed"
+    },
+    {
+      "number": 11,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/11",
+      "files": 5,
+      "content_sha256": "f536e9a2280b13732de41dbdac985dcea9b878b724038336358cadb83a6a6400",
+      "status": "cleared_completed"
+    },
+    {
+      "number": 12,
+      "branch": "issue/12-data-plane-in-kubernetes",
+      "source_commit": "314e82fac6853b652e2c9f73d86d6367e22a9e78",
+      "published_path": "docs/issues/12",
+      "files": 5,
+      "content_sha256": "2cf3d06d287412e53d65b1d39e666e59ab8b1422e1de94e8ff5b3974964b37e4",
+      "status": "clear"
+    },
+    {
+      "number": 13,
+      "branch": "issue/13-replicas-left-by-moves",
+      "source_commit": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+      "published_path": "docs/issues/13",
+      "files": 5,
+      "content_sha256": "7fee25d680fd40138784966afbfc7d37e0cfbe742f9742e71ad88746e7c02a16",
+      "status": "clear"
+    },
+    {
+      "number": 14,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/14",
+      "files": 5,
+      "content_sha256": "2b6ab13e57743d663356cf18cf70c2791a4e7ef38e52329cea4ea3cc9af70e71",
+      "status": "clear"
+    },
+    {
+      "number": 15,
+      "branch": "issue/15-volumes-per-node",
+      "source_commit": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+      "published_path": "docs/issues/15",
+      "files": 6,
+      "content_sha256": "ae19703359ae36d713f057e072cf074c091add1f0a4ae0ee6902d57385d10901",
+      "status": "clear"
+    },
+    {
+      "number": 16,
+      "branch": "issue/16-short-lived-certificates",
+      "source_commit": "71a473aca77946cf18de12364f64b78f9043b2c4",
+      "published_path": "docs/issues/16",
+      "files": 5,
+      "content_sha256": "dac96e47b3eb776acd1c6687e7fb64f6db609f9314632baf4d9fa01f3f38bf15",
+      "status": "clear"
+    },
+    {
+      "number": 17,
+      "branch": "issue/17-drain-unattached-volumes",
+      "source_commit": "4154dfdd649a0e495e78104010105b0c1eefc847",
+      "published_path": "docs/issues/17",
+      "files": 5,
+      "content_sha256": "28b397266eb42ecd107a067c52737eabde9ce20697b177893d12e8bf3834caad",
+      "status": "clear"
+    },
+    {
+      "number": 18,
+      "branch": "issue/18-failure-domain-in-moves",
+      "source_commit": "b00ac22d8de3783ce01a183d1f095abcfe7e295d",
+      "published_path": "docs/issues/18",
+      "files": 5,
+      "content_sha256": "5e7001b6ccd5e0ca8cbcc1c282200ce88d292d17c7087eb8cec9d41aa5d82354",
+      "status": "clear"
+    },
+    {
+      "number": 30,
+      "branch": "audit/2026-11-12-correctness",
+      "source_commit": "e96ee6d595a74ef7bcce1f6017e90a18e533685d",
+      "published_path": "docs/issues/30",
+      "files": 5,
+      "content_sha256": "71bf653cb9e8ce8bdfff8d7868b2a184339d6175c74eeec8c8d43c5456681127",
+      "status": "cleared_completed"
+    },
+    {
+      "number": 43,
+      "branch": "issue/43-operator",
+      "source_commit": "134bb33573d1be1d546c8070b475b01100642b92",
+      "published_path": "docs/issues/43",
+      "files": 6,
+      "content_sha256": "7617a720730c71d0c033635112490578799e0c61ed2237d8eabe1198c8df693f",
+      "status": "clear"
+    },
+    {
+      "number": 44,
+      "branch": "issue/44-dirty-region-resync",
+      "source_commit": "670c275595bc0ada1c0511313bf8ed5533a22797",
+      "published_path": "docs/issues/44",
+      "files": 5,
+      "content_sha256": "ea4132e862d0ee98483b7414f2ef4ff86be4f6ce0245a9428e31de65dcff6f9c",
+      "status": "clear"
+    },
+    {
+      "number": 45,
+      "branch": "issue/45-many-to-many-rebuild",
+      "source_commit": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+      "published_path": "docs/issues/45",
+      "files": 6,
+      "content_sha256": "a7eabea19ebb0103b899b3daf20a1a570cb21854d888f6a818f4bf85a2676da0",
+      "status": "clear"
+    },
+    {
+      "number": 46,
+      "branch": "issue/46-scrubbing-and-repair",
+      "source_commit": "d04aa6f649e26f76305c678f270fa33576c38c0c",
+      "published_path": "docs/issues/46",
+      "files": 5,
+      "content_sha256": "d9b9a71648d65d9d42e649bb74c3c8026c7bcae3a5ac15af6305f5c6ace38016",
+      "status": "clear"
+    },
+    {
+      "number": 47,
+      "branch": "issue/47-gray-failure-detection",
+      "source_commit": "189305c8c757ca3e3d956a254a0857be6c4b1599",
+      "published_path": "docs/issues/47",
+      "files": 5,
+      "content_sha256": "86607bffb6f227d53a0c8e61101deb51bc379c85a74b93d6fa4604d7bf122277",
+      "status": "clear"
+    },
+    {
+      "number": 48,
+      "branch": "issue/48-live-data-plane-upgrade",
+      "source_commit": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+      "published_path": "docs/issues/48",
+      "files": 6,
+      "content_sha256": "7018dbb3e7bd5026fa16328d5c474636ec706fc80d6ca30c7fe24ac0bb907c56",
+      "status": "clear"
+    },
+    {
+      "number": 49,
+      "branch": "issue/49-chaos-test-suite",
+      "source_commit": "de46aeff4d5e2874bd9501a899a088ef3e42812a",
+      "published_path": "docs/issues/49",
+      "files": 6,
+      "content_sha256": "06d89fae678a16b04d55ced46c222ffaef41527adb448f11e66d75d964d1a64c",
+      "status": "clear"
+    },
+    {
+      "number": 50,
+      "branch": "issue/50-encryption-at-rest",
+      "source_commit": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+      "published_path": "docs/issues/50",
+      "files": 7,
+      "content_sha256": "323977909e4fce1dcf3c22b97858dc0ac6658b304b780d90f30474654a18be1d",
+      "status": "clear"
+    },
+    {
+      "number": 51,
+      "branch": "issue/51-snapshots-and-clones",
+      "source_commit": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+      "published_path": "docs/issues/51",
+      "files": 7,
+      "content_sha256": "f6877520beccac71dbcca353c98aa3cd0312f01f5d8a6f08fd07b4807a6593a6",
+      "status": "clear"
+    },
+    {
+      "number": 52,
+      "branch": "issue/52-incremental-s3-backups",
+      "source_commit": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+      "published_path": "docs/issues/52",
+      "files": 7,
+      "content_sha256": "c78bb582d0b193f66cf9d3def25819dcc38a6ed3bb965074c9da73afdc8f9b33",
+      "status": "clear"
+    },
+    {
+      "number": 53,
+      "branch": "issue/53-immutable-backups",
+      "source_commit": "105dac041ccfca18ba1bcd4984e84115efceb200",
+      "published_path": "docs/issues/53",
+      "files": 7,
+      "content_sha256": "022834e7a7d62eeddd827269cba7865efa27b95c3b1d8ce347633151055691b0",
+      "status": "clear"
+    },
+    {
+      "number": 54,
+      "branch": "issue/54-restore-to-another-cluster",
+      "source_commit": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+      "published_path": "docs/issues/54",
+      "files": 7,
+      "content_sha256": "028f231f1b66456a731d8d124d095fe27b5b7bf7a04fcdf4fd33a0243e2d98d7",
+      "status": "clear"
+    },
+    {
+      "number": 55,
+      "branch": "issue/55-compact-mode",
+      "source_commit": "5b140f05a4c9d40ecf8332114283b2d1a3860770",
+      "published_path": "docs/issues/55",
+      "files": 5,
+      "content_sha256": "0ef85980ff8d38508f633f3899f938d2db130ece4af08921a3a9507a1cd15c8d",
+      "status": "clear"
+    },
+    {
+      "number": 56,
+      "branch": "issue/56-edge-topologies",
+      "source_commit": "ec6e352948c2df8d2240c67dcbec26addfe694f4",
+      "published_path": "docs/issues/56",
+      "files": 6,
+      "content_sha256": "0f36f079e0dd3bd47cb9720b40a3266d91d3ccd9c6cbc1db3322d73ae7606157",
+      "status": "clear"
+    },
+    {
+      "number": 57,
+      "branch": "issue/57-tpm-sealed-keys",
+      "source_commit": "6b60c20335ff2c64466d717b3de1e66a1a073436",
+      "published_path": "docs/issues/57",
+      "files": 7,
+      "content_sha256": "e9681d4e92b1fdec405128685750913f53e4f03a1749eee98472a5db631f1f92",
+      "status": "clear"
+    },
+    {
+      "number": 58,
+      "branch": "issue/58-async-cross-cluster-replication",
+      "source_commit": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+      "published_path": "docs/issues/58",
+      "files": 10,
+      "content_sha256": "b1057ca955bc1aefe1bcc4d4e1b195fa65b20a72c286241aef2a8d825f6db738",
+      "status": "clear"
+    },
+    {
+      "number": 59,
+      "branch": "issue/59-wan-tolerant-backups",
+      "source_commit": "dc1e0fd8d8fae099399b88d29fad3ab1bca2b440",
+      "published_path": "docs/issues/59",
+      "files": 8,
+      "content_sha256": "630d908eb838910069d2ed7be7389b5e9f443317d5e22b648e6ba70bc6df491c",
+      "status": "clear"
+    },
+    {
+      "number": 60,
+      "branch": "issue/60-cloud-kms-providers",
+      "source_commit": "13646e04783a839dc9af8730bbd7abe2dd2b0207",
+      "published_path": "docs/issues/60",
+      "files": 6,
+      "content_sha256": "f1ad5fced275c051b7c7c5d0000516151dd70108de4a0ef9f719394b83494313",
+      "status": "clear"
+    },
+    {
+      "number": 61,
+      "branch": "issue/61-instance-store-nvme",
+      "source_commit": "4fe0f143a4e8780ae5c0a861996f6b1d5a638646",
+      "published_path": "docs/issues/61",
+      "files": 6,
+      "content_sha256": "d2010bd3309a8e08d65598a3a6cc6c8071ba1752a26d8b290e4f3d93d3bf30d3",
+      "status": "clear"
+    },
+    {
+      "number": 62,
+      "branch": "issue/62-zone-cost-aware-placement",
+      "source_commit": "f920db069130df65d57874d88ea729ce9f4d56d8",
+      "published_path": "docs/issues/62",
+      "files": 5,
+      "content_sha256": "ae726039e3d7ff4d30a8358cf432c06668296463b5b18698bada39816ca15f68",
+      "status": "needs_fix"
+    },
+    {
+      "number": 63,
+      "branch": "issue/63-autoscaler-integration",
+      "source_commit": "1a4a14df1a8b1ae6c2762bbaabf4ba5489305d31",
+      "published_path": "docs/issues/63",
+      "files": 5,
+      "content_sha256": "1d2e3e23f0158e1b0f15d9892b30b4af0b345e6a69ec6be2d2653733e69fa248",
+      "status": "pending"
+    },
+    {
+      "number": 64,
+      "branch": "issue/64-erasure-coding",
+      "source_commit": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+      "published_path": "docs/issues/64",
+      "files": 5,
+      "content_sha256": "33715f255b55097d22001e079abe527a40bb38c5b6fc1ca27c16ea4e67c35605",
+      "status": "pending"
+    },
+    {
+      "number": 65,
+      "branch": "issue/65-rdma-transport",
+      "source_commit": "9d806703f4642ecdbcbd9bde6cbe4fdd2430b22c",
+      "published_path": "docs/issues/65",
+      "files": 4,
+      "content_sha256": "d4e40468f0fed57364dfcae0091497d53d4050f35ca94d86d5997ff3fd3b788f",
+      "status": "pending"
+    },
+    {
+      "number": 66,
+      "branch": "issue/66-nvme-of-and-vhost-user-blk",
+      "source_commit": "9ae0a6adad7915b4ae4ad0dd6345a77a4525e2da",
+      "published_path": "docs/issues/66",
+      "files": 4,
+      "content_sha256": "fbe59f0de328a506893bf84ddbad7db12a163491b93779b6c0b3af184ad7827e",
+      "status": "pending"
+    },
+    {
+      "number": 67,
+      "branch": "issue/67-rwx-nfs-gateway",
+      "source_commit": "fd544c8cf66d0ba7e279c3aadd51f88ad2b34f3b",
+      "published_path": "docs/issues/67",
+      "files": 5,
+      "content_sha256": "438f6537320cb25bdfd5537811ef7c1449e21628de81b2485e15ff7761f9c7f2",
+      "status": "pending"
+    },
+    {
+      "number": 68,
+      "branch": "issue/68-instant-restore",
+      "source_commit": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+      "published_path": "docs/issues/68",
+      "files": 5,
+      "content_sha256": "7f40e67e3040804010a04c2677a4d49fedac7072d19b97834e2bd2aa6e21345c",
+      "status": "pending"
+    },
+    {
+      "number": 69,
+      "branch": "issue/69-ui",
+      "source_commit": "3d53c0b61924923d51b9568ec6f1fa56a95e8518",
+      "published_path": "docs/issues/69",
+      "files": 5,
+      "content_sha256": "d6aee773c8ab1bf493b4d2804a932542588b99495a369937fd09c1cf0f7c2002",
+      "status": "pending"
+    },
+    {
+      "number": 70,
+      "branch": "issue/70-csi-volume-expansion-and-xfs-support",
+      "source_commit": "54c44e867d4b8fe8d90cb4b99b9e7b3ea417005d",
+      "published_path": "docs/issues/70",
+      "files": 6,
+      "content_sha256": "a4f6ededfea5d781e643004dd87c4cbe32765d9daf575bf382d05dea8452af2c",
+      "status": "clear"
+    },
+    {
+      "number": 71,
+      "branch": "issue/71-observability-and-the-kubectl-flaminio-operations-cli",
+      "source_commit": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+      "published_path": "docs/issues/71",
+      "files": 7,
+      "content_sha256": "bfe817d0c89360bbdfcd9cd10e78b870a3c38b64b382cb58de8f302f81962d80",
+      "status": "clear"
+    },
+    {
+      "number": 72,
+      "branch": "issue/72-capacity-safety-automatic-rebalancing-and-data-locality",
+      "source_commit": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+      "published_path": "docs/issues/72",
+      "files": 7,
+      "content_sha256": "3abda7e4653442892f41b2364c15c5732e2c4bb2c2e96e654db3448175ac26c1",
+      "status": "clear"
+    },
+    {
+      "number": 73,
+      "branch": "issue/73-tenant-admission-policies-quotas-and-destructive-operat",
+      "source_commit": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+      "published_path": "docs/issues/73",
+      "files": 7,
+      "content_sha256": "f2f65652a586379b51aba9156654d4b9f43e0e31b961d0a99ea8cbb3480b019c",
+      "status": "clear"
+    },
+    {
+      "number": 74,
+      "branch": "issue/74-runtime-privilege-separation-and-verifiable-release-art",
+      "source_commit": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+      "published_path": "docs/issues/74",
+      "files": 6,
+      "content_sha256": "a5a036387a5c44c9c8f7f775fea41b9a4cc2e55fa9719e3ed7522021e02fdea0",
+      "status": "clear"
+    },
+    {
+      "number": 75,
+      "branch": "issue/75-per-volume-qos-background-i-o-scheduling-and-performanc",
+      "source_commit": "8ce744aadf0e1f5633609cc0cbc712c45bdba978",
+      "published_path": "docs/issues/75",
+      "files": 6,
+      "content_sha256": "2414282598ee8ec67636fca907a6711d8270b41770cc0c684edf77be8368a88e",
+      "status": "clear"
+    },
+    {
+      "number": 76,
+      "branch": "issue/76-interrupted-volume-creation-cannot-be-resumed-by-an-ide",
+      "source_commit": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+      "published_path": "docs/issues/76",
+      "files": 6,
+      "content_sha256": "5cf3455e4cfdb80aa19bfccd06de6a9f7daa164fddafbd2e23c01fe1d93c900a",
+      "status": "clear"
+    },
+    {
+      "number": 77,
+      "branch": "issue/77-getvolume-can-mix-a-deleted-volume-header-with-replacem",
+      "source_commit": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+      "published_path": "docs/issues/77",
+      "files": 5,
+      "content_sha256": "e560e6e7ad72ca0c06d99647fad4ae074a06f36e0f238fd095f8ba42cdabf410",
+      "status": "clear"
+    },
+    {
+      "number": 78,
+      "branch": "issue/78-provisioning-can-place-replicas-on-a-node-after-it-is-m",
+      "source_commit": "16953ee5d70dbb352463b6b76eed072dc0df1fcf",
+      "published_path": "docs/issues/78",
+      "files": 6,
+      "content_sha256": "7c401d26392fc01f7afd442229d1a091c4a7a20991dd1917f437324a1af270a4",
+      "status": "clear"
+    },
+    {
+      "number": 79,
+      "branch": "issue/79-csi-mount-retries-accept-the-wrong-source-or-incompatib",
+      "source_commit": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+      "published_path": "docs/issues/79",
+      "files": 8,
+      "content_sha256": "d6dfc00934502cfe198187a7b8d2d3df75e6420701988ef6988b5c6af03361f3",
+      "status": "clear"
+    },
+    {
+      "number": 80,
+      "branch": "issue/80-metadata-accepts-volume-geometries-that-replica-attach",
+      "source_commit": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+      "published_path": "docs/issues/80",
+      "files": 7,
+      "content_sha256": "dbf5cf7cc8bc87afc614d3c5ffce11bea843c303e7573a393d7409721732f792",
+      "status": "clear"
+    },
+    {
+      "number": 81,
+      "branch": "issue/81-isr-recovery-sends-more-changes-than-the-metadata-rpc-a",
+      "source_commit": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+      "published_path": "docs/issues/81",
+      "files": 5,
+      "content_sha256": "c333817de44a2d9115d9da47a5bd2c4209440a212a2728d48c09c9f19a59668f",
+      "status": "clear"
+    },
+    {
+      "number": 82,
+      "branch": "issue/82-failover-treats-a-partitioned-node-as-shut-down-and-for",
+      "source_commit": "18fb58576f2d5a8cbf31463619c652fbf475a5bc",
+      "published_path": "docs/issues/82",
+      "files": 7,
+      "content_sha256": "08b66fb0be95bd9b0b19078ba2b2f6490686cbb440d89df9d58184a0d771504c",
+      "status": "clear"
+    },
+    {
+      "number": 83,
+      "branch": "issue/83-enforce-and-test-the-lease-clock-contract-across-suspen",
+      "source_commit": "67862ad667ac3121b453c9227cef1e8ec5248138",
+      "published_path": "docs/issues/83",
+      "files": 7,
+      "content_sha256": "4f18a1e256d6aec5ac17f1eb497bd7fb12bed18ededeb1b3f038a64a1d4f9997",
+      "status": "clear"
+    },
+    {
+      "number": 84,
+      "branch": "issue/84-validate-the-exported-block-durability-flush-and-discar",
+      "source_commit": "cfde4b58fb929cdc642f16c5d1d9bbef78dc9a24",
+      "published_path": "docs/issues/84",
+      "files": 6,
+      "content_sha256": "47a2b8d495c4308f641adcd38e900d6038abda3314a37cb73afe738b6a79905f",
+      "status": "clear"
+    },
+    {
+      "number": 85,
+      "branch": "issue/85-io-uring-batch-validation-can-return-with-borrowed-buff",
+      "source_commit": "0d95430b0e45c12bb61f59ae62b42a03709a4804",
+      "published_path": "docs/issues/85",
+      "files": 5,
+      "content_sha256": "71becde5d3aa4b06c4755891c5309e6f9eb44bb0094608cdcf1ade0a79fa6254",
+      "status": "clear"
+    },
+    {
+      "number": 86,
+      "branch": "issue/86-bound-fenced-uncertainty-reports",
+      "source_commit": "0ad06129c43d4b5a3d1254919cdcc53da678a96e",
+      "published_path": "docs/issues/86",
+      "files": 6,
+      "content_sha256": "c9083313e6389cfc9076e1bd1c1c6903d7725bd166ae449bec313cf62a05af1a",
+      "status": "clear"
+    },
+    {
+      "number": 90,
+      "branch": "issue/90-store-incarnation-authority",
+      "source_commit": "c9231b243dceb196a0eccb615055887c9879bb73",
+      "published_path": "docs/issues/90",
+      "files": 12,
+      "content_sha256": "c8126d6e64c1c2d9f9be994e55656aa6689949e8a63165129adb2f03ec1bad54",
+      "status": "clear"
+    }
+  ],
+  "publication_normalizations": {
+    "change": "Whitespace only in saved reviewer Markdown; original patch artifact preserved byte-for-byte.",
+    "files": [
+      "docs/issues/review-inputs/56-r3-code.md",
+      "docs/issues/review-inputs/57-r1-code.md",
+      "docs/issues/review-inputs/57-r1-security.md",
+      "docs/issues/review-inputs/14-r2-both.md",
+      "docs/issues/review-inputs/56-r2-code.md",
+      "docs/issues/review-inputs/56-r2-security.md",
+      "docs/issues/review-inputs/56-r1-code.md",
+      "docs/issues/review-inputs/56-r3-security.md",
+      "docs/issues/review-inputs/56-r1-security.md"
+    ]
+  }
+}

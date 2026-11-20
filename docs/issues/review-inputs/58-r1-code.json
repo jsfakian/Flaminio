@@ -1,0 +1,69 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review58_r1_code",
+  "reviewed_commit": "3822c48cf8efeb7bdcf81b7df4e6215f31c95a11",
+  "dependency_commits": {
+    "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "64": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+    "68": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "High",
+      "summary": "The shared root, local-replica, reader and manifest ABI remains unspecified, so the isolated staging invariant has no implementable contract.",
+      "evidence": "contracts.md:4,48\u201365,79\u201385; design.md Isolated staging/Contracts. Actual record.rs has only top-layer records1\u20138; state.rs:352+ applies LayerCreate/MapUpdate to that sole chain. #51 contracts150\u2013204 adds views/generations but no inactive root; #52 contracts5\u201310 explicitly delegates shared bytes to this review.",
+      "fix": "Complete a versioned issue-local format/reader/manifest appendix now: feature bit, journal tags, catalog/page/checkpoint pointer layout/padding/CRC/bounds, immutable base/reference and zero semantics, replay/drop accounting, root-qualified local replica requests/replies and exact shared SnapshotRef/SourceProof/diff/foreign Begin/Status encodings. Publish golden vectors and old/new cross-decode plus crash/fuzz tests. Inventory existing bit0, journal1\u20138/page1\u20137, #51 tags and current #64/#68 (no runtime assignments); state exact proposed allocations and whoever-lands-second updates without reopening clear dependencies. Use bounded canonical manifest pages/streaming rather than an unbounded in-memory list. Do not replace the present gate with another future gate."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "High",
+      "summary": "The local API cannot construct or execute its required source/destination relationship.",
+      "evidence": "contracts.md:13\u201328: Relationship stores source cluster/volume/first_epoch but CreateStandby takes no source or pair binding; StartShip takes only a relationship UUID although that record is destination-owned. No source-side destination reference, worker dispatch, elected receiver persistence or promotion driver is specified.",
+      "fix": "Define complete source and destination operation records and exact RPC/CLI/worker call sequence. CreateStandby must accept/bind the paired source UUID, source volume incarnation and geometry; source StartShip must identify destination pair/relationship/incarnation and retained snapshot/base, then launch/resume a named local reader+shipper. Specify durable receiver selection and local io execution (including promotion recovery), idempotency/lost replies, creation via #76 and deletion/recreation cleanup. Add end-to-end no-guessing lifecycle fixtures from pair to resumed ship and promoted attach."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "High",
+      "summary": "Staged per-chunk ISR evidence has no stable bounded commit rule.",
+      "evidence": "contracts.md:29\u201333 and design.md prepare/commit promise every expected ISR version remains valid through a bounded final decision. kv.MaxTxnOps=120; ChangeIsr service.go:811\u2013819 writes only chunk records, not the header, and #81 preserves chunk-wise transitions. Checking chunks in earlier batches plus one header CAS does not detect a changed earlier chunk.",
+      "fix": "Prefer #51\u2019s trusted current-target barrier: receiver sans-I/O core drains root writes/repairs, includes joining members as required, makes prepared roots immutable, and admits ISR members only after all committed+pinned roots/receipts are complete. It emits CommitShip only after this barrier; metadata compares current epoch/target/header plus ship/relationship revisions in O(1), with exact transaction counts. Handle uncertain replies and takeover without reopening a prepared root. Alternatively specify a real freeze/invalidation generation observed by every membership writer. Add checks and caught mutants for join without roots, late writes, stale proof/epoch and commit/promotion races; never pretend staged reads are an atomic ISR vector."
+    },
+    {
+      "id": "R1-C5",
+      "severity": "High",
+      "summary": "Store feature refusal does not protect standby state from older metadata/target binaries.",
+      "evidence": "contracts.md:57\u201363 and design.md compatibility mention only old store readers. Current Header.ID is string and json.Unmarshal ignores extra flags; Attach service.go:708\u2013725 reads and re-marshals the header. An older service can erase a standby flag and issue an ordinary target token. Current #50 and #54 explicitly address analogous activation/rollout risks.",
+      "fix": "Define an explicit service activation/rollout guard and fail-closed header/root profile marker composed with #50/#51, plus target/receiver capability admission before issuing tokens or starting an engine. Keep a required root profile after promotion. Older services/clients must refuse before a header rewrite or attachment, not silently downgrade to ordinary Current data; specify rollback eligibility and test old-service read/write plus old-target attach attempts through all paths."
+    },
+    {
+      "id": "R1-C4",
+      "severity": "Medium",
+      "summary": "Reusing #52\u2019s scoped reader is not yet defined for a direct DR ship.",
+      "evidence": "design.md Local authority and isolated staging; #52 contracts58\u201376,99\u2013111,125\u2013203 restrict worker to backup URI, a grant to one SnapshotRef and completion root to repository/backup ArchiveRef. #58 has distinct shipper/receiver roles and completion evidence with no ArchiveRef.",
+      "fix": "Specify the source worker\u2019s local backup-reader identity separately from its foreign shipper identity, exact base/target grant/pin ownership and revalidation, and a DR completion/cancellation outcome carrying authenticated destination pair/relationship/ship/manifest/point evidence. Extend the shared grant outcome/reader schema explicitly in the whoever-lands-second seam; preserve close barriers and pins across process death. Add fixtures for base/target recreation, lost commit response, source-worker restart, cancellation and deletion while a ship is pinned. Pin only after an actual authorized grant, never by an informal local flag."
+    },
+    {
+      "id": "R1-C6",
+      "severity": "Medium",
+      "summary": "The planned two-cluster VM check omits current destination and clock-profile compatibility.",
+      "evidence": "design.md Lab proposes another cluster on fl-c without reusing/naming #54\u2019s already specified destination resources; #54 design369\u2013388 fixes direct-mode units/ports/paths on fl-c. Current #83 physical-only admission refuses lab VM data planes; the plan presents the campaign without this condition.",
+      "fix": "Define the concrete Make/lab entrypoint, reuse or explicitly disjointly allocate #54\u2019s destination disk/units/ports/identities/control socket, pin direct/privsep behavior and owned cleanup. When #83 enforcement is active, VM data-plane execution is Blocked before mutation; any separately authorized legacy exploratory run is not production qualification and has no fake physical profile/bypass. State RF1 destination evidence limitations, with multi-ISR proofs covered by models or a later physical campaign. Add fake preflight/collision/cleanup/admission tests."
+    },
+    {
+      "id": "R1-N1",
+      "severity": "Nit",
+      "summary": "Historical Accepted status is contradicted by current unaccepted/proposal wording.",
+      "evidence": "adr-proposal.md Status/Options/final paragraph; design.md Docs risks and ADRs; contracts.md heading versus remaining gates.",
+      "fix": "Preserve the real 2026-11-13 acceptance/settled records and consistently mark review revisions proposed/unapproved; remove contradictory present-tense claims that no choice was accepted."
+    }
+  ],
+  "report": "Full issue58 R1 correctness/spec review against source and current mapped dependency plans. Four High, two Medium and one Nit. Shared format/reader/local and foreign contracts remain genuine mechanisms to settle now; current-target barrier offers bounded metadata proof publication without unbounded per-chunk CAS. Historical approvals/settlements preserved; no repo edits, agents, runtime checks or lab actions. Artifact output only."
+}

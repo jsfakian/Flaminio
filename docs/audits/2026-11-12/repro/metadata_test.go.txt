@@ -1,0 +1,50 @@
+package service
+
+import (
+ "context"
+ "encoding/json"
+ "testing"
+ metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+ "github.com/flaminio/flaminio/meta/domain"
+ "github.com/flaminio/flaminio/meta/kv"
+)
+
+// These are desired-contract tests. The audited revision is expected to fail them.
+func TestAuditInterruptedCreateRetry(t *testing.T) {
+ ctx := context.Background()
+ store := kv.NewMem(nil)
+ s := New(store, Options{})
+ addNodes(t,s,"a","b")
+ b,_ := json.Marshal(domain.Header{ID:"v",SizeBytes:2*mib,ChunkBytes:mib,Replicas:2,MinISR:1,Creating:true})
+ if _,err:=store.Txn(ctx,nil,[]kv.Op{{Key:volumeKey("v"),Value:b}});err!=nil {t.Fatal(err)}
+ _,err:=create(s,"v",2,2,1)
+ if err!=nil {t.Fatalf("retry cannot resume interrupted creation: %v",err)}
+}
+
+func TestAuditReadVolumeDoesNotMixIncarnations(t *testing.T) {
+ ctx:=context.Background()
+ k:=&interleaveKV{KV:kv.NewMem(nil)}
+ s:=New(k,Options{})
+ addNodes(t,s,"a","b")
+ old,err:=create(s,"v",2,2,1);if err!=nil {t.Fatal(err)}
+ k.key=volumeKey("v")
+ hook:=func(){deleteAndConfirm(t,s,"v","a","b");if _,err:=create(s,"v",2,1,1);err!=nil {t.Fatal(err)}}
+ k.hook.Store(&hook)
+ got,err:=s.GetVolume(ctx,&metav1.GetVolumeRequest{Id:"v"})
+ if err!=nil {return} // A concurrent replacement may be refused or retried.
+ v:=got.GetVolume()
+ if v.GetEpoch()==old.GetEpoch() && len(v.GetChunks()[0].GetReplicas())!=int(old.GetReplicas()) {
+  t.Fatalf("mixed old header epoch=%d replicas=%d with replacement chunk replicas=%v",v.GetEpoch(),v.GetReplicas(),v.GetChunks()[0].GetReplicas())
+ }
+}
+
+func TestAuditCreateDoesNotPlaceOnConcurrentDrain(t *testing.T) {
+ ctx:=context.Background()
+ k:=&interleaveKV{KV:kv.NewMem(nil),prefix:prefix+"chunks/"}
+ s:=New(k,Options{})
+ addNodes(t,s,"a")
+ hook:=func(){if _,err:=s.DrainNode(ctx,&metav1.DrainNodeRequest{Node:"a",Draining:true});err!=nil {t.Fatal(err)}}
+ k.hook.Store(&hook)
+ v,err:=create(s,"v",1,1,1)
+ if err==nil {t.Fatalf("created new placement %v after its only node was marked draining",v.GetChunks()[0].GetReplicas())}
+}

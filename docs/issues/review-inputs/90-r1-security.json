@@ -1,0 +1,45 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review90_r1_security",
+  "reviewed_commit": "98390ae141d287ec9e8e7443bac6389bd3ade9f7",
+  "dependency_commits": {
+    "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+    "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "78": "16953ee5d70dbb352463b6b76eed072dc0df1fcf",
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+    "82": "18fb58576f2d5a8cbf31463619c652fbf475a5bc",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "findings": [
+    {
+      "id": "SEC90-R1-01",
+      "severity": "High",
+      "summary": "INITIAL creation has no durable pending-to-earned transition, so first bootstrap and forbidden recreation are not distinguishable.",
+      "evidence": "90/core-design.md:24-25,35-44,93-95 authorizes INITIAL by the #76 create operation, permits allocation, and requires earned membership for ordinary acknowledgements/source/lease credit. 90/design.md:48-49 says the created copy stays unearned until reconstruction/join, but no INITIAL completion event, stored state, RPC/CAS, or initial join is defined. Actual #76 design.md:22,53-56 retains create_operation permanently and publishes chunks with initial ISR before any physical materialization; the retained operation is not consumable bootstrap authority. #79 initialization-contract.md controls filesystem use, not per-replica first allocation. Therefore treating that existing ISR as MEMBER refuses every newly created absent chunk; treating the persisted create operation as INITIAL indefinitely permits later empty recreation and still lacks the event making a new volume usable.",
+      "fix": "Define the durable per-chunk/ref initial-bootstrap authority and its exact conditional pending-to-earned/consumed transition, including partial creation, lost replies, new epochs and restart. Specify how first-volume zero contents become source/ack/lease eligible and why a consumed operation can never authorize a missing earned chunk. Include contracts/gate/transaction/size hooks and separate independent simulator assertions/caught mutants for initial readiness without durable creation and replayed INITIAL recreation, with real remote/local first-attach and crash/retry tests."
+    },
+    {
+      "id": "SEC90-R1-02",
+      "severity": "High",
+      "summary": "Exact-ref tombstones and their lists have no aggregate storage/response envelope or bounded migration representation.",
+      "evidence": "90/contracts.md:90-106 unions every chunk replica/move/released ref and fence holder into one tombstone with refs, pending_refs and confirmed_refs plus per-UUID charges. UUID changes prevent the former node deduplication from bounding that union. 90/budgets.md:26-42 bounds Volume responses only; :46-97 pages oversized legacy Volumes only. Actual meta/service/service.go:584-614 ListTombstones scans and returns every matching full tombstone, with no page/byte cap. Even legal new RF1/N2955 volumes can retain two distinct old UUID releases per chunk, yielding about 5911 refs and roughly 2 MiB in the two full protobuf ref projections per tombstone with maximal node names; three tombstones pending for the same current ref exceed 4 MiB. The explicitly supported N65536 legacy path can exceed that in one tombstone. 90/migration.md:53-59,98-106,131-144 nevertheless requires each whole tombstone inventory/binding item <=16 KiB and to fit one <=120-key coupled transaction; a legal large tombstone cannot satisfy that representation. Raising receive limits would violate the preserved #80 contract.",
+      "fix": "Give exact cleanup its own bounded persisted representation and list/page/confirmation contract, covering total per-volume ref/charge multiplicity, backend request/value limits, aggregate RPC bytes and stable incarnation/revision pagination. Adapt deletion publication, sweep/admin clients, both-backend migration inventory/conversion and capacity accounting so every admitted new/paged-legacy volume remains deletable without truncating refs or dropping charges. Specify numerical caps and boundary/+1 real transport/backend fixtures, including many tombstones for one node and repeated same-node UUID replacements. Keep dependencies read-only; assign the composition hooks to #90."
+    },
+    {
+      "id": "SEC90-R1-03",
+      "severity": "Medium",
+      "summary": "Enrollment cannot correct an already processed item after changed observations or failed verification.",
+      "evidence": "90/migration.md:131-144 accepts only the next inventory positions, or an identical retry of the latest batch ID; it has no amendment/rebind API. :145-157 begins verification only after enroll_cursor==inventory_count, then sends a failed scan back to ENROLLING with a cursor invalidated and requires explicit correction. :164-169 also allows changed UUID observations after binding and requires quarantine/review before VERIFYING. The contracts specify neither a rewind/revision-safe rewrite of an already converted item nor an operation that records that quarantine and updates coupled refs/charges/evidence. Advancing the enrollment cursor to the end therefore removes the only defined way to repair the affected item, while a replacement enrollment job is explicitly forbidden.",
+      "fix": "Define a bounded conditional correction/rebind-or-quarantine operation for already inventoried/converted items, or an exact durable rewind protocol, including expected original/current hashes, evidence/observation revisions, coupled-key updates, capacity conservation, counter changes, idempotence and invalidation/restart of verification digests. Keep READY immutable. Test changed observation after binding and verification failure after the final batch through correction, restart, lost reply and successful re-verification/activation on both backends."
+    }
+  ],
+  "report": "Fresh whole-scope #90 R1 design-security/spec-security review: 2 High, 1 Medium, zero Nits; not clear. Read all issue-local drafts/appendices, actual predecessor #61 R1 code/security reports at source5696573 (not relabeled), current source and relevant dependency contracts at the recorded clean HEADs. Most predecessor mechanisms are now concrete: service-owned lifetime/ABA/role ownership, immutable paged grants before mutation, durable-fence callbacks, exact cleanup auth, replacement/history/root frontier, bounded queues/reserved metadata slots, v4 bytes and physical qualification policy. Remaining findings concern implementable initial authority, aggregate cleanup representation and recoverable migration correction. Historical approvals are provenance only; their absence is not a finding. No repository edits, subagents, runtime tests, lab/disk/benchmark actions, tracker writes or dependency edits. #90 checkout remains clean at the reviewed commit."
+}

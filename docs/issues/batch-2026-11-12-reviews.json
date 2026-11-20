@@ -1,0 +1,2614 @@
+{
+  "date": "2026-11-12",
+  "scope": "61 issue plans:59 original issues plus audit follow-up86 and approved store-identity split90; draft review only",
+  "clearance": "Zero unresolved comments including Nits; approvals remain separate",
+  "issues": [
+    {
+      "number": 4,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "cleared_completed",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "1619143",
+      "completion": {
+        "date": "2026-11-20",
+        "basis": "User-confirmed completed implementation; closed issue and main merge verified.",
+        "evidence": "docs/issues/review-inputs/completed-issues-2026-11-20.json",
+        "pull_request": 22,
+        "merge_commit": "75abfa1e0ed5198f2bed09e6a137e01a86910b06",
+        "new_review_performed": false
+      }
+    },
+    {
+      "number": 5,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "cleared_completed",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "6ecbf28",
+      "completion": {
+        "date": "2026-11-20",
+        "basis": "User-confirmed completed implementation; closed issue and main merge verified.",
+        "evidence": "docs/issues/review-inputs/completed-issues-2026-11-20.json",
+        "pull_request": 24,
+        "merge_commit": "b75cf37788f7e1a006c4c7a68b08502c6edf26c3",
+        "new_review_performed": false
+      }
+    },
+    {
+      "number": 6,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "6c9f32e",
+      "round": "1",
+      "authoritative_report": "docs/issues/6/report.md",
+      "latest_fix_commit": "4642aaa788ffb5c9ea653b8f4aef48732233e0fb",
+      "clear_round": 6,
+      "clear_report_commit": "0ccece8"
+    },
+    {
+      "number": 7,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "cleared_completed",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "840e0d9",
+      "completion": {
+        "date": "2026-11-20",
+        "basis": "User-confirmed completed implementation; closed issue and main merge verified.",
+        "evidence": "docs/issues/review-inputs/completed-issues-2026-11-20.json",
+        "pull_request": 26,
+        "merge_commit": "571385a1a032ffa9b266576d3f4b5ec9d14850ff",
+        "new_review_performed": false
+      }
+    },
+    {
+      "number": 8,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "cleared_completed",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "c2c78f7",
+      "completion": {
+        "date": "2026-11-20",
+        "basis": "User-confirmed completed implementation; closed issue and main merge verified.",
+        "evidence": "docs/issues/review-inputs/completed-issues-2026-11-20.json",
+        "pull_request": 27,
+        "merge_commit": "3a410746ccf1f3c2b1c3e4dea332831845d6b36d",
+        "new_review_performed": false
+      }
+    },
+    {
+      "number": 9,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "13b57e8",
+      "round": "1",
+      "authoritative_report": "docs/issues/9/report.md",
+      "latest_fix_commit": "0b109f302eba87281ee7d61d454ae5db4d25cc4a",
+      "clear_round": 8,
+      "clear_report_commit": "0d06536"
+    },
+    {
+      "number": 10,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "cleared_completed",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "cc29e7b",
+      "completion": {
+        "date": "2026-11-20",
+        "basis": "User-confirmed completed implementation; closed issue and main merge verified.",
+        "evidence": "docs/issues/review-inputs/completed-issues-2026-11-20.json",
+        "pull_request": 32,
+        "merge_commit": "3904a0c3721715a672aa80f619915bf27cbe1985",
+        "new_review_performed": false
+      }
+    },
+    {
+      "number": 11,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "cleared_completed",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "c943fc0",
+      "completion": {
+        "date": "2026-11-20",
+        "basis": "User-confirmed completed implementation; closed issue and main merge verified.",
+        "evidence": "docs/issues/review-inputs/completed-issues-2026-11-20.json",
+        "pull_request": 38,
+        "merge_commit": "4a9db451b69eb96cacb122c0be329e20441cd563",
+        "new_review_performed": false
+      }
+    },
+    {
+      "number": 12,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-12",
+      "branch": "issue/12-data-plane-in-kubernetes",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "6f70e98",
+      "round": "1",
+      "authoritative_report": "docs/issues/12/report.md",
+      "latest_fix_commit": "1d200c96b367192ade6e3d819ee7ba1b070c444f",
+      "clear_round": 5,
+      "clear_report_commit": "314e82f"
+    },
+    {
+      "number": 13,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-13",
+      "branch": "issue/13-replicas-left-by-moves",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "7defc59",
+      "round": "1",
+      "authoritative_report": "docs/issues/13/report.md",
+      "latest_fix_commit": "612979176e245b00b74d58aa94c41b2d2989c8d8",
+      "clear_round": 9,
+      "clear_report_commit": "db7b194"
+    },
+    {
+      "number": 14,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "9365a4a",
+      "round": "1",
+      "authoritative_report": "docs/issues/14/report.md",
+      "latest_fix_commit": "5dfe0230471a67cfee487a9ae3bb8ecfb9af56fd",
+      "clear_round": 3,
+      "clear_report_commit": "cdc9bcb"
+    },
+    {
+      "number": 15,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-15",
+      "branch": "issue/15-volumes-per-node",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "15dad9c 976e7d5",
+      "round": "1",
+      "authoritative_report": "docs/issues/15/report.md",
+      "latest_fix_commit": "3592050cc4da3cacf4c9a759692907534fbcccb3",
+      "clear_round": 9,
+      "clear_report_commit": "e36882b"
+    },
+    {
+      "number": 16,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-16",
+      "branch": "issue/16-short-lived-certificates",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "f7a13cd 89a6cc6",
+      "round": "1",
+      "authoritative_report": "docs/issues/16/report.md",
+      "latest_fix_commit": "46fec33449fe49042ab4f457e89efc1a49ebd5dc",
+      "clear_round": 9,
+      "clear_report_commit": "71a473a"
+    },
+    {
+      "number": 17,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-17",
+      "branch": "issue/17-drain-unattached-volumes",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "5172cc2 b904a18",
+      "round": "1",
+      "authoritative_report": "docs/issues/17/report.md",
+      "latest_fix_commit": "43d1ec2807f31d46aded1c494e5d5d730979476f",
+      "clear_round": 21,
+      "clear_report_commit": "4154dfd"
+    },
+    {
+      "number": 18,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-18",
+      "branch": "issue/18-failure-domain-in-moves",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "2e1d3a0 1287453",
+      "round": "1",
+      "authoritative_report": "docs/issues/18/report.md",
+      "latest_fix_commit": "d333ca864431b68125007881476fdfdc8149217a",
+      "clear_round": 7,
+      "clear_report_commit": "b00ac22"
+    },
+    {
+      "number": 30,
+      "worktree": "/home/jsfakian/Documents/src/flaminio",
+      "branch": "audit/2026-11-12-correctness",
+      "status": "cleared_completed",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "9d94e8d",
+      "completion": {
+        "date": "2026-11-20",
+        "basis": "User-confirmed completed implementation; closed issue and main merge verified.",
+        "evidence": "docs/issues/review-inputs/completed-issues-2026-11-20.json",
+        "pull_request": 34,
+        "merge_commit": "19d797e62063ab77bf65ee1d00a74dc2955d71a5",
+        "new_review_performed": false
+      }
+    },
+    {
+      "number": 43,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-43",
+      "branch": "issue/43-operator",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "13c1e90",
+      "authoritative_report": "docs/issues/43/report.md",
+      "latest_fix_commit": "f23ee17c30ba8a00c575a15a42ca0737d864fd9d",
+      "clear_round": 11,
+      "clear_report_commit": "a06aaf5",
+      "approved": "2026-11-13",
+      "approval_commit": "d2acdb6 ec6ed55"
+    },
+    {
+      "number": 44,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-44",
+      "branch": "issue/44-dirty-region-resync",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "6fec02a",
+      "authoritative_report": "docs/issues/44/report.md",
+      "latest_fix_commit": "aa0457b7601c7ce03f4e17d8ebcfa49dc22c6c6e",
+      "clear_round": 7,
+      "clear_report_commit": "e329113",
+      "approved": "2026-11-13",
+      "approval_commit": "9c22aa8 670c275"
+    },
+    {
+      "number": 45,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-45",
+      "branch": "issue/45-many-to-many-rebuild",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "0766990",
+      "round": "1",
+      "authoritative_report": "docs/issues/45/report.md",
+      "latest_fix_commit": "e7dc21462ccc4f121569641a24f3bd64dd01e240",
+      "clear_round": 14,
+      "clear_report_commit": "eae9ecc"
+    },
+    {
+      "number": 46,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-46",
+      "branch": "issue/46-scrubbing-and-repair",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "f6bb583",
+      "round": "1",
+      "authoritative_report": "docs/issues/46/report.md",
+      "latest_fix_commit": "d3cf93dcaa07819d444ce9794974a206559e62e7",
+      "clear_round": 6,
+      "clear_report_commit": "d04aa6f"
+    },
+    {
+      "number": 47,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-47",
+      "branch": "issue/47-gray-failure-detection",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "c60ba6a",
+      "round": "1",
+      "authoritative_report": "docs/issues/47/report.md",
+      "latest_fix_commit": "3bb708eec85f3a1a9476b57cfa8843e2e0a3fac7",
+      "clear_round": 6,
+      "clear_report_commit": "635ad15"
+    },
+    {
+      "number": 48,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-48",
+      "branch": "issue/48-live-data-plane-upgrade",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "ace563a f7db824",
+      "round": "1",
+      "authoritative_report": "docs/issues/48/report.md",
+      "latest_fix_commit": "75316ba625c43ed64581957dec8f8b95bd2d6d2d",
+      "clear_round": 5,
+      "clear_report_commit": "6886634"
+    },
+    {
+      "number": 49,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-49",
+      "branch": "issue/49-chaos-test-suite",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "243596e dde1d79",
+      "round": "14",
+      "authoritative_report": "docs/issues/49/report.md",
+      "latest_fix_commit": "70f1816",
+      "clear_round": 14,
+      "clear_report_commit": "de46aef"
+    },
+    {
+      "number": 50,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-50",
+      "branch": "issue/50-encryption-at-rest",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "d08f71b 9edd590",
+      "round": "5",
+      "authoritative_report": "docs/issues/50/report.md",
+      "latest_fix_commit": "6b65a96",
+      "clear_round": 5,
+      "clear_report_commit": "e8f0fe2"
+    },
+    {
+      "number": 51,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-51",
+      "branch": "issue/51-snapshots-and-clones",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "512c43a c8908eb",
+      "round": "4",
+      "latest_fix_commit": "a450dc6",
+      "authoritative_report": "docs/issues/51/report.md",
+      "clear_round": 4,
+      "clear_report_commit": "a822bb9"
+    },
+    {
+      "number": 52,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-52",
+      "branch": "issue/52-incremental-s3-backups",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "420486a c44a190 0edaee1",
+      "round": "8",
+      "latest_fix_commit": "48d4d82",
+      "authoritative_report": "docs/issues/52/report.md",
+      "clear_round": 8,
+      "clear_report_commit": "96067ab"
+    },
+    {
+      "number": 53,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-53",
+      "branch": "issue/53-immutable-backups",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "1f5d87a e362517",
+      "round": "10",
+      "latest_fix_commit": "a461a6b",
+      "authoritative_report": "docs/issues/53/report.md",
+      "clear_round": 10,
+      "clear_report_commit": "105dac0"
+    },
+    {
+      "number": 54,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-54",
+      "branch": "issue/54-restore-to-another-cluster",
+      "status": "clear",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "8986ef4 52df1de",
+      "round": "8",
+      "latest_fix_commit": "3fd4cef",
+      "authoritative_report": "docs/issues/54/report.md",
+      "clear_round": 8,
+      "clear_report_commit": "5ffa0c2"
+    },
+    {
+      "number": 55,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-55",
+      "branch": "issue/55-compact-mode",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "cd584f4ca92178b174cf1a70d522e87bed5dfcdf",
+          "reviewers": [
+            "saved plan-reviewer (design-code and design-security; identity unrecorded)"
+          ],
+          "findings_summary": {
+            "High": 1,
+            "Medium": 7,
+            "Low": 9,
+            "Nit": 5
+          },
+          "inputs": [
+            "docs/issues/review-inputs/55-r1-both.md"
+          ],
+          "fix_commit": "ec52405ff1ca92fe8338989981cd416b9cbdccb0",
+          "resolution": "Defined cgroup verdicts, per-form inventory, replay-qualified fresh-open slopes, safe pinned restarts and conservative owned lifecycle cleanup. Preserved existing approvals and measurement-only scope. All fixes subject to fresh incremental review.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "ec52405ff1ca92fe8338989981cd416b9cbdccb0",
+          "reviewers": [
+            "/root/review55_r2_code (incremental design-code)",
+            "/root/review55_r2_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R2-C1",
+              "severity": "Medium",
+              "summary": "Pod deletion does not hold the store stopped for offline inspection."
+            },
+            {
+              "id": "R2-N1",
+              "severity": "Nit",
+              "summary": "Budget reference names a removed paragraph."
+            }
+          ],
+          "inputs": [
+            "docs/issues/review-inputs/55-r2-code.md",
+            "docs/issues/review-inputs/55-r2-security.md"
+          ],
+          "fix_commit": "47b183ebbabf2d1629644cff33cb2c0eaa033b4f",
+          "resolution": "Specified a recorded, conditional per-node selector hold and exact restoration with host process/store absence checks and bounded recovery; fixed paragraph reference. Security R2 clear. Fresh R3 reviews pending.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "47b183ebbabf2d1629644cff33cb2c0eaa033b4f",
+          "reviewers": [
+            "/root/review55_r3_code (incremental design-code)",
+            "/root/review55_r3_security (incremental design-security)"
+          ],
+          "findings": [],
+          "inputs": [
+            "docs/issues/review-inputs/55-r3-code.md",
+            "docs/issues/review-inputs/55-r3-security.md"
+          ],
+          "resolution": "Both fresh reviewers confirmed R2-C1 and R2-N1 fixed and reported zero comments including Nits. Selector hold, host stop evidence, bounded replay/re-hold and exact lifecycle restoration agree with clear #12. No runtime implementation, test suite, lab measurement, push or GitHub write. Existing approval remains separate from this review.",
+          "status": "clear"
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "ec47eba",
+      "round": "3",
+      "reviewed_commit": "47b183ebbabf2d1629644cff33cb2c0eaa033b4f",
+      "latest_fix_commit": "47b183ebbabf2d1629644cff33cb2c0eaa033b4f",
+      "authoritative_report": "docs/issues/55/report.md",
+      "clear_round": 3,
+      "clear_report_commit": "5b140f05a4c9d40ecf8332114283b2d1a3860770"
+    },
+    {
+      "number": 56,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-56",
+      "branch": "issue/56-edge-topologies",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "513b97374f66c70e3627c50051be50abf84bccd6",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review56_r1_code (design-code and spec correctness)",
+            "/root/remaining_plan_reviews/review56_r1_security (design-security and spec security)"
+          ],
+          "dependency_commits": {
+            "44": "670c275595bc0ada1c0511313bf8ed5533a22797",
+            "49": "de46aeff4d5e2874bd9501a899a088ef3e42812a",
+            "55": "5b140f05a4c9d40ecf8332114283b2d1a3860770",
+            "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+            "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+            "82": "18fb58576f2d5a8cbf31463619c652fbf475a5bc",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+          },
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "High",
+              "summary": "VM power-off was accepted as node recovery authority contrary to current held physical-fence profile.",
+              "evidence": "spec.md S11/Open questions; design.md Lab history and faults; #82 design36\u201351"
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "Exploratory VM path did not distinguish enforced physical-only #83 startup refusal.",
+              "evidence": "design.md Lab history and faults; #83 design21\u201342"
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Medium",
+              "summary": "Manager causal histories had no versioned executable contract compatible with overlap or powered-off endpoints.",
+              "evidence": "design.md Lab history and faults/Contracts; #49 FLRUN001"
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Medium",
+              "summary": "Simulator skipped probes and post-heal assertions could not demonstrate fault-phase contract; metadata Attach bypassed modeled authority.",
+              "evidence": "design.md Simulator and mutation coverage; sim/mod.rs483\u2013530,1070\u20131104,1332\u20131367"
+            },
+            {
+              "id": "R1-C5",
+              "severity": "Medium",
+              "summary": "Metadata revision observations assumed an interface #77 does not expose.",
+              "evidence": "spec.md S10; design.md observation section; #77 no protobuf shape change"
+            },
+            {
+              "id": "R1-C6",
+              "severity": "Low",
+              "summary": "Intent promised unconditional removal of faults despite management loss.",
+              "evidence": "intent.md What we want4; spec.md S9"
+            },
+            {
+              "id": "R1-S1",
+              "severity": "High",
+              "summary": "Sampled power-off and subsequent VM restart did not preserve #82 held restart interlock.",
+              "evidence": "design.md95\u2013105,141\u2013143; #82 design36\u201351"
+            },
+            {
+              "id": "R1-S2",
+              "severity": "Medium",
+              "summary": "Unqualified VM exploration supplied no admitted #83 execution path.",
+              "evidence": "design.md67\u201370; #83 design19\u201342"
+            },
+            {
+              "id": "R1-S3",
+              "severity": "Medium",
+              "summary": "Contextual envelopes could not establish #49 checker boundaries or safe optional-write deadlines.",
+              "evidence": "design.md72\u201386,119\u2013122; #49 FLRUN001"
+            },
+            {
+              "id": "R1-S4",
+              "severity": "Medium",
+              "summary": "Privileged independent healer lacked strict bounded recovery-record validation.",
+              "evidence": "design.md93\u2013100; #49 ledger validation"
+            }
+          ],
+          "inputs": [
+            "docs/issues/review-inputs/56-r1-code.md",
+            "docs/issues/review-inputs/56-r1-security.md"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "All findings addressed in issue-only plans: physical-only enforcement, isolated legacy controller hold, FLEDGE01 coordinator/helper and strict owned-healer contracts, fault-phase model assertions, public epoch/isr_ver samples and realistic cleanup. Revisions explicitly unapproved; fresh incremental reviews required.",
+          "fix_commit": "b2b76b7e28215afc331cd6c5a07ee0350027a010"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "b2b76b7e28215afc331cd6c5a07ee0350027a010",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review56_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review56_r2_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R2-C1",
+              "severity": "Medium",
+              "summary": "Checkpoint could carry an earlier read value after a newer acknowledged write.",
+              "evidence": "lab-contracts.md:131"
+            },
+            {
+              "id": "R2-C2",
+              "severity": "Low",
+              "summary": "JSON Patch has no annotation-absence test operation.",
+              "evidence": "lab-contracts.md:175; RFC6902 section4.6"
+            },
+            {
+              "id": "R2-S1",
+              "severity": "Medium",
+              "summary": "Independent healer lacked persisted remote helper invocation ownership.",
+              "evidence": "lab-contracts.md:43\u201351,153\u2013185"
+            }
+          ],
+          "inputs": [
+            "docs/issues/review-inputs/56-r2-code.md",
+            "docs/issues/review-inputs/56-r2-security.md"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "Dedicated drained checkpoint Read/immediate cut; GET/resourceVersion conditional owner patch with absent-map support; typed helper action/private invocation startup claim and pinned verified termination. All three fixes need fresh incremental review; revisions unapproved.",
+          "fix_commit": "e22ebd7e1181dfafab41a48760bd0518657657be"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "e22ebd7e1181dfafab41a48760bd0518657657be",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review56_r3_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review56_r3_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R3-C1",
+              "severity": "Medium",
+              "summary": "Retry after conditional hold conflict could reuse stale saved restoration state.",
+              "evidence": "lab-contracts.md:184"
+            }
+          ],
+          "inputs": [
+            "docs/issues/review-inputs/56-r3-code.md",
+            "docs/issues/review-inputs/56-r3-security.md"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "Abort every hold conflict without retry or fault injection; preserve foreign ownerless scale/spec updates and never reuse stale restoration snapshots at a newer resourceVersion. Added exact conflict fixture. Security clear; fresh round4 required.",
+          "fix_commit": "b43ee508e00949524907309e931b5d954f442918"
+        },
+        {
+          "round": 4,
+          "reviewed_commit": "b43ee508e00949524907309e931b5d954f442918",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review56_r4_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review56_r4_security (incremental design-security)"
+          ],
+          "findings": [],
+          "inputs": [
+            "docs/issues/review-inputs/56-r4-code.md",
+            "docs/issues/review-inputs/56-r4-security.md"
+          ],
+          "resolution": "Both fresh reviewers confirmed R3-C1 fixed and returned zero comments including Nits. Earlier findings resolved in prior rounds; no runtime/lab/dependency edits, approval inference or scope closure.",
+          "status": "clear"
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "513b973",
+      "round": "4",
+      "reviewed_commit": "b43ee508e00949524907309e931b5d954f442918",
+      "authoritative_report": "docs/issues/56/report.md",
+      "latest_fix_commit": "b43ee508e00949524907309e931b5d954f442918",
+      "clear_round": 4,
+      "clear_report_commit": "ec6e352948c2df8d2240c67dcbec26addfe694f4"
+    },
+    {
+      "number": 57,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-57",
+      "branch": "issue/57-tpm-sealed-keys",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "eb38cba71d7e2b9f4dd2b47129c79b80e2d9a80e",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review57_r1_code (design-code/spec correctness)",
+            "/root/remaining_plan_reviews/review57_r1_security (design-security/spec security)"
+          ],
+          "dependency_commits": {
+            "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+            "53": "105dac041ccfca18ba1bcd4984e84115efceb200",
+            "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3"
+          },
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "Medium",
+              "summary": "design31\u201334,83\u2013100 permits configurable source ID/version and128-byte UTF8 identities",
+              "evidence": "Full section/line references and primary sources in 57-r1-code.md"
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Low",
+              "summary": "design41\u201342 incorrectly attributes8-call bound and detail-based retry to #50",
+              "evidence": "Full section/line references and primary sources in 57-r1-code.md"
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Medium",
+              "summary": "design83\u201389 canary envelope lacks Binding.VolumeID/FirstEpoch required by #50 AAD",
+              "evidence": "Full section/line references and primary sources in 57-r1-code.md"
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Medium",
+              "summary": "design56\u201365 unspecified hierarchy/parent template/child attributes/policy/session recipe determine reproducible loading",
+              "evidence": "Full section/line references and primary sources in 57-r1-code.md"
+            },
+            {
+              "id": "R1-C5",
+              "severity": "Medium",
+              "summary": "design44\u201351,120\u2013123 lacks executable unit/protected-memory route",
+              "evidence": "Full section/line references and primary sources in 57-r1-code.md"
+            },
+            {
+              "id": "R1-N1",
+              "severity": "Nit",
+              "summary": "adr-proposal says Accepted and No choice Accepted; design stale Proposed wording",
+              "evidence": "Full section/line references and primary sources in 57-r1-code.md"
+            },
+            {
+              "id": "R1-S1",
+              "severity": "High",
+              "summary": "design36\u201338,160\u2013161 promises5s unseal and no leftover worker by closing transport",
+              "evidence": "Full section/line references and primary sources in 57-r1-security.md"
+            },
+            {
+              "id": "R1-S2",
+              "severity": "Medium",
+              "summary": "spec34\u201337 preserve prior bundle on failure contradicted by design106\u2013109 exclusive create then rename/dirfsync; replacement already occurs on fsync error, concurrent activation ownership absent",
+              "evidence": "Full section/line references and primary sources in 57-r1-security.md"
+            }
+          ],
+          "inputs": [
+            "docs/issues/review-inputs/57-r1-code.md",
+            "docs/issues/review-inputs/57-r1-security.md"
+          ],
+          "resolution": "All8 findings addressed: exact #50 source/canary/retry contracts, pinned TPM recipe, explicit protected unit/memory path, binary single-owner IPC/lifetime quarantine and immutable validated bundle candidates. Historical approvals/local ADR acceptance preserved; revisions unapproved, fresh incremental reviews required.",
+          "status": "needs_incremental_review",
+          "fix_commit": "18f04de30bdc8295fdbde6effde3fad771ccb242"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "18f04de30bdc8295fdbde6effde3fad771ccb242",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review57_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review57_r2_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R2-C1",
+              "severity": "Medium",
+              "summary": "The new recipe accepts nonempty owner hierarchy authorization but unattended startup has no protected source for it.",
+              "evidence": "tpm-contracts.md:31\u201336,63\u201366,197\u2013205; design.md:28\u201338. The local seal/recover pipe carries owner_auth, while serve exposes only bundle/profile and intentionally persists no hierarchy secret. Recreating the owner primary requires that hierarchy authorization.",
+              "fix": "Simplest first profile: support only empty owner hierarchy auth, reject nonempty enrollment/recovery input and qualified profiles before publication, and add refusal/boot fixtures. Alternatively define an actual unattended protected boot input that meets the no-external-call/no-clear-disk rules. Do not seal a candidate that cannot boot.",
+              "sources": [
+                "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpm2/tpm2.go"
+              ]
+            },
+            {
+              "id": "R2-C2",
+              "severity": "Medium",
+              "summary": "Required isolated local swtpm coverage has no route through the new fixed production device, owner-state and protected-host contracts.",
+              "evidence": "design.md:28\u201329,121\u2013124; tpm-contracts.md:76\u2013103,125\u2013172. Production owner always opens /dev/tpmrm0 and fixed root-owned /run state, but make tpm-test promises private swtpm sockets and no physical TPM access. No isolated transport/record/profile injection or sandbox setup is specified.",
+              "fix": "Define an explicit test-only integration route (for example a test-binary transport/host-facts/state-path constructor plus isolated private swtpm socket and real protected-memory fixtures) without a shipping runtime bypass. Specify how CI sets required permissions/limits and exercises the production owner protocol while proving it never opens the host TPM/state. Required cases must run, not silently skip."
+            },
+            {
+              "id": "R2-N1",
+              "severity": "Nit",
+              "summary": "Common preflight scope says any secret read, but failed preflight still starts ordinary TLS/token-authenticated metadata RPCs.",
+              "evidence": "design.md:34\u201339; tpm-contracts.md:148\u2013152. Existing identity/token secrets are explicitly outside #57 intent scope.",
+              "fix": "Name the covered TPM source material (KEK, canary, escrow/unlock and hierarchy-auth inputs) and state that baseline TLS/token loading remains governed by existing setup. Apply the wording consistently."
+            }
+          ],
+          "dependency_commits": {
+            "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/57-r2-code.json",
+            "docs/issues/review-inputs/57-r2-security.json"
+          ],
+          "resolution": "Empty-existing owner auth only; test-binary-only isolated swtpm transport/state with explicit real memory/unit setup; preflight scoped to TPM-source material. All three findings addressed, revisions unapproved; fresh R3 required.",
+          "status": "needs_incremental_review",
+          "fix_commit": "9c6549ce06757620a324777ec09c416e7d7f98f6"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "9c6549ce06757620a324777ec09c416e7d7f98f6",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review57_r3_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review57_r3_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R3-C1",
+              "severity": "Medium",
+              "summary": "The new direct Unix-stream TPM adapter does not provide complete TPM response framing.",
+              "evidence": "tpm-contracts.md:240\u2013242 selects net.DialUnix followed directly by transport.FromReadWriteCloser. In go-tpm v0.9.8, that adapter calls tpmutil.RunCommandRaw, which performs one Read into a4096-byte buffer; a Unix byte-stream Read may return a partial response. A fragmented valid response can fail parsing or leave bytes for the following command.",
+              "fix": "Use an existing suitable packet-aware swtpm adapter or a test-only transport.TPM Send implementation that serializes commands, fully writes each command, reads the10-byte TPM header with io.ReadFull, validates the declared response size against a fixed bound, and reads the complete remainder. Add fragmented-header/body, EOF and oversize-response fixtures; the identical unfragmented recipe must pass.",
+              "sources": [
+                "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpm2/transport/tpm.go",
+                "https://raw.githubusercontent.com/google/go-tpm/v0.9.8/tpmutil/run.go"
+              ]
+            },
+            {
+              "id": "R3-N1",
+              "severity": "Nit",
+              "summary": "The new emulator invocation says swtpm2 instance without selecting the required socket interface.",
+              "evidence": "tpm-contracts.md:255\u2013257 lists socket flags after \u201cstart an owned swtpm2 instance\u201d; the pinned executable is swtpm and the interface is selected by its socket subcommand.",
+              "fix": "Name the invocation explicitly as swtpm socket --tpm2 followed by the listed private-state/data/control flags.",
+              "sources": [
+                "https://raw.githubusercontent.com/stefanberger/swtpm/v0.9.0/man/man8/swtpm.pod"
+              ]
+            }
+          ],
+          "inputs": [
+            "docs/issues/review-inputs/57-r3-code.json",
+            "docs/issues/review-inputs/57-r3-security.json"
+          ],
+          "resolution": "Explicit bounded complete TPM stream Send framing with serialization/full writes/header+body ReadFull/deadline failure and matching fixtures; exact swtpm socket command. Both findings addressed, fresh R4 required.",
+          "status": "needs_incremental_review",
+          "fix_commit": "55dff2b45c7cb6751d98ad65df58864f88a85913"
+        },
+        {
+          "round": 4,
+          "reviewed_commit": "55dff2b45c7cb6751d98ad65df58864f88a85913",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review57_r4_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review57_r4_security (incremental design-security)"
+          ],
+          "findings": [],
+          "inputs": [
+            "docs/issues/review-inputs/57-r4-code.json",
+            "docs/issues/review-inputs/57-r4-security.json"
+          ],
+          "resolution": "Both fresh reviewers confirmed R3-C1/N1 fixed and returned zero comments including Nits. All earlier findings resolved in prior rounds; revisions remain unapproved. No runtime/lab/dependency change or new issue.",
+          "status": "clear"
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "eb38cba",
+      "round": "4",
+      "reviewed_commit": "55dff2b45c7cb6751d98ad65df58864f88a85913",
+      "authoritative_report": "docs/issues/57/report.md",
+      "latest_fix_commit": "55dff2b45c7cb6751d98ad65df58864f88a85913",
+      "clear_round": 4,
+      "clear_report_commit": "6b60c20335ff2c64466d717b3de1e66a1a073436"
+    },
+    {
+      "number": 58,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-58",
+      "branch": "issue/58-async-cross-cluster-replication",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "3822c48cf8efeb7bdcf81b7df4e6215f31c95a11",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review58_r1_code (design-code/spec correctness)",
+            "/root/remaining_plan_reviews/review58_r1_security (design-security/spec security)"
+          ],
+          "dependency_commits": {
+            "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+            "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+            "64": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+            "68": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+            "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+            "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+            "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+            "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e"
+          },
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "High",
+              "summary": "The shared root, local-replica, reader and manifest ABI remains unspecified, so the isolated staging invariant has no implementable contract.",
+              "evidence": "contracts.md:4,48\u201365,79\u201385; design.md Isolated staging/Contracts. Actual record.rs has only top-layer records1\u20138; state.rs:352+ applies LayerCreate/MapUpdate to that sole chain. #51 contracts150\u2013204 adds views/generations but no inactive root; #52 contracts5\u201310 explicitly delegates shared bytes to this review.",
+              "fix": "Complete a versioned issue-local format/reader/manifest appendix now: feature bit, journal tags, catalog/page/checkpoint pointer layout/padding/CRC/bounds, immutable base/reference and zero semantics, replay/drop accounting, root-qualified local replica requests/replies and exact shared SnapshotRef/SourceProof/diff/foreign Begin/Status encodings. Publish golden vectors and old/new cross-decode plus crash/fuzz tests. Inventory existing bit0, journal1\u20138/page1\u20137, #51 tags and current #64/#68 (no runtime assignments); state exact proposed allocations and whoever-lands-second updates without reopening clear dependencies. Use bounded canonical manifest pages/streaming rather than an unbounded in-memory list. Do not replace the present gate with another future gate."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "High",
+              "summary": "The local API cannot construct or execute its required source/destination relationship.",
+              "evidence": "contracts.md:13\u201328: Relationship stores source cluster/volume/first_epoch but CreateStandby takes no source or pair binding; StartShip takes only a relationship UUID although that record is destination-owned. No source-side destination reference, worker dispatch, elected receiver persistence or promotion driver is specified.",
+              "fix": "Define complete source and destination operation records and exact RPC/CLI/worker call sequence. CreateStandby must accept/bind the paired source UUID, source volume incarnation and geometry; source StartShip must identify destination pair/relationship/incarnation and retained snapshot/base, then launch/resume a named local reader+shipper. Specify durable receiver selection and local io execution (including promotion recovery), idempotency/lost replies, creation via #76 and deletion/recreation cleanup. Add end-to-end no-guessing lifecycle fixtures from pair to resumed ship and promoted attach."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "High",
+              "summary": "Staged per-chunk ISR evidence has no stable bounded commit rule.",
+              "evidence": "contracts.md:29\u201333 and design.md prepare/commit promise every expected ISR version remains valid through a bounded final decision. kv.MaxTxnOps=120; ChangeIsr service.go:811\u2013819 writes only chunk records, not the header, and #81 preserves chunk-wise transitions. Checking chunks in earlier batches plus one header CAS does not detect a changed earlier chunk.",
+              "fix": "Prefer #51\u2019s trusted current-target barrier: receiver sans-I/O core drains root writes/repairs, includes joining members as required, makes prepared roots immutable, and admits ISR members only after all committed+pinned roots/receipts are complete. It emits CommitShip only after this barrier; metadata compares current epoch/target/header plus ship/relationship revisions in O(1), with exact transaction counts. Handle uncertain replies and takeover without reopening a prepared root. Alternatively specify a real freeze/invalidation generation observed by every membership writer. Add checks and caught mutants for join without roots, late writes, stale proof/epoch and commit/promotion races; never pretend staged reads are an atomic ISR vector."
+            },
+            {
+              "id": "R1-C5",
+              "severity": "High",
+              "summary": "Store feature refusal does not protect standby state from older metadata/target binaries.",
+              "evidence": "contracts.md:57\u201363 and design.md compatibility mention only old store readers. Current Header.ID is string and json.Unmarshal ignores extra flags; Attach service.go:708\u2013725 reads and re-marshals the header. An older service can erase a standby flag and issue an ordinary target token. Current #50 and #54 explicitly address analogous activation/rollout risks.",
+              "fix": "Define an explicit service activation/rollout guard and fail-closed header/root profile marker composed with #50/#51, plus target/receiver capability admission before issuing tokens or starting an engine. Keep a required root profile after promotion. Older services/clients must refuse before a header rewrite or attachment, not silently downgrade to ordinary Current data; specify rollback eligibility and test old-service read/write plus old-target attach attempts through all paths."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Medium",
+              "summary": "Reusing #52\u2019s scoped reader is not yet defined for a direct DR ship.",
+              "evidence": "design.md Local authority and isolated staging; #52 contracts58\u201376,99\u2013111,125\u2013203 restrict worker to backup URI, a grant to one SnapshotRef and completion root to repository/backup ArchiveRef. #58 has distinct shipper/receiver roles and completion evidence with no ArchiveRef.",
+              "fix": "Specify the source worker\u2019s local backup-reader identity separately from its foreign shipper identity, exact base/target grant/pin ownership and revalidation, and a DR completion/cancellation outcome carrying authenticated destination pair/relationship/ship/manifest/point evidence. Extend the shared grant outcome/reader schema explicitly in the whoever-lands-second seam; preserve close barriers and pins across process death. Add fixtures for base/target recreation, lost commit response, source-worker restart, cancellation and deletion while a ship is pinned. Pin only after an actual authorized grant, never by an informal local flag."
+            },
+            {
+              "id": "R1-C6",
+              "severity": "Medium",
+              "summary": "The planned two-cluster VM check omits current destination and clock-profile compatibility.",
+              "evidence": "design.md Lab proposes another cluster on fl-c without reusing/naming #54\u2019s already specified destination resources; #54 design369\u2013388 fixes direct-mode units/ports/paths on fl-c. Current #83 physical-only admission refuses lab VM data planes; the plan presents the campaign without this condition.",
+              "fix": "Define the concrete Make/lab entrypoint, reuse or explicitly disjointly allocate #54\u2019s destination disk/units/ports/identities/control socket, pin direct/privsep behavior and owned cleanup. When #83 enforcement is active, VM data-plane execution is Blocked before mutation; any separately authorized legacy exploratory run is not production qualification and has no fake physical profile/bypass. State RF1 destination evidence limitations, with multi-ISR proofs covered by models or a later physical campaign. Add fake preflight/collision/cleanup/admission tests."
+            },
+            {
+              "id": "R1-N1",
+              "severity": "Nit",
+              "summary": "Historical Accepted status is contradicted by current unaccepted/proposal wording.",
+              "evidence": "adr-proposal.md Status/Options/final paragraph; design.md Docs risks and ADRs; contracts.md heading versus remaining gates.",
+              "fix": "Preserve the real 2026-11-13 acceptance/settled records and consistently mark review revisions proposed/unapproved; remove contradictory present-tense claims that no choice was accepted."
+            },
+            {
+              "id": "R1-S1",
+              "severity": "High",
+              "summary": "Pair revocation has no bounded linearization predicate that every receiver admission/publication must compare.",
+              "evidence": "design.md:38\u201341 promises pair revocation by relationship-generation and destination-epoch changes, but a pair may own many relationships; contracts.md:29\u201333 and design.md:68\u201373 make CommitShip compare only relationship/ship/incarnation/epoch/ISR evidence, not the pair record/config generation. No atomic fanout or bounded revocation barrier is specified. A commit racing or preceding its relationship fanout can still publish for a revoked pair. ConfigureDrPair also changes the generation to which live sessions are pinned.",
+              "fix": "Make one pair-record CAS (generation+1/revoked) the O(1) revocation/configuration linearization point. Bind pair UUID and admitted config generation into every ship/receiver grant; compare that exact unrevoked pair revision in AttachStandby and every CommitShip/prepare-publication decision. Define bounded linearizable per-request/batch admission and connection invalidation; already admitted writes may finish only in isolated roots and can never publish after the pair CAS. Epoch cleanup across relationships is resumable fallout, not the authority barrier. Specify TLS1.3 fresh peer verification/no resumptions or generation-isolated session caches. Add CAS races for multiple relationships, stale sessions/queued frames, lost revocation response and metadata outage; catch a mutation omitting the pair compare."
+            },
+            {
+              "id": "R1-S2",
+              "severity": "High",
+              "summary": "A generic local target capability and a metadata-only ordinary Attach refusal do not isolate the specialized standby writer from ordinary device/maintenance paths.",
+              "evidence": "design.md:31\u201336 and contracts.md:26\u201328 return a local target token from AttachStandby, with no purpose claim or distinct ticket. Only ordinary metadata Attach is named as refused. Baseline Engine::start_target accepts a matching volume/node/epoch token (engine.rs:1595\u20131622); replica session accept binds those same claims (session.rs:135\u2013156). Current #17 AttachMaintenance/StartMaintenance independently issue the ordinary capability, and #15/CSI/control shortcuts may reuse an existing attachment. #54 contracts explicitly needed a distinct FLRT and typed restore attachment to prevent the analogous bypass.",
+              "fix": "Define a purpose-bound standby receiver ticket (or an equivalently complete capability/mode contract) binding destination first epoch, relationship/generation, ship, pair generation, receiver node and writer epoch. Ordinary engine/control/ublk/agent/CSI and maintenance paths reject it and refuse Standby/Promoting independently; only typed receiver input admits inactive-root operations. Specify its exact token/mode handoff, slot accounting, status/device-info/detach answers and restart behavior using current #15/#17/#48/#54 seams, with whoever-lands-second integration. Add ordinary attach/token reuse, maintenance takeover, existing-device CSI shortcut and stale writer tests plus a caught ordinary-exposure mutation."
+            },
+            {
+              "id": "R1-S3",
+              "severity": "Medium",
+              "summary": "Local DR RPC authority and standby creation bypass the current tenancy role/owner contract as written.",
+              "evidence": "design.md:31\u201336 and contracts.md:19\u201339 say local administrator/read role only without #73 before/after activation rows or insecure refusal. CreateStandby has no owner semantics, although #73 requires system-provisioner and a system owner for ownerless creation, forbids tenant-form system names, and conditionally compares authorization/owner allocation state. A generic administrator-name rule would restore powers to audit/deletion-only identities after activation; a separately published unassigned standby also breaks creation ownership/accounting.",
+              "fix": "Write an explicit before/after-activation auth.go matrix for every DR RPC, receiver self/current-operation rules and insecure-instance refusal. Choose concrete existing roles, keeping security/deletion/audit-only identities from unintended DR mutation. Define this increment as system-owned standby creation through #76 with #73 system-provisioner, system owner and tenant-name refusal (or specify a complete tenant creation path). Carry authorization/owner/creation compares into the same transactions, state the audit hook/follow-up choice, and test revocation/activation races, wrong roles, wrong receiver and protected deletion behavior. Keep clear dependency plans read-only; whichever implementation lands second adds the integration."
+            },
+            {
+              "id": "R1-S4",
+              "severity": "Medium",
+              "summary": "The new foreign listener bounds payload counts but leaves attacker-controlled waits and aggregate admission/resource accounting unspecified.",
+              "evidence": "design.md:105\u2013114 caps eight connections, outstanding ranges and64MiB buffers, but defines no pre-auth/TLS/Hello/body/idle deadline, cap treatment before authentication, bounded metadata validations/queues or fair per-pair admission. contracts.md:69\u201377 also leaves Begin/Status/manifests incomplete. A peer can hold all slots with stalled handshakes or partial frames; large manifests/receipts/root indexes can consume resources beyond the listed data buffers.",
+              "fix": "Define finite handshake/Hello/body/call/idle liveness limits distinct from fencing, node-wide pre-auth and authenticated/per-pair caps, nonqueued refusal or bounded queues, and a bound/rate on metadata admission work. Reserve one global byte budget before all frame/manifest/proof allocations; page/spool canonical manifests and receipts with explicit disk/metadata accounting included in staging reservation. Define exhaustion/disconnect behavior preserving the last point and source pins. Add stalled TLS/Hello/truncated-body/flood/large-manifest and reservation-exhaustion fixtures showing bounded memory/work and continuing local application/heartbeat progress. Coordinate exact manifest/proof paging with the correctness finding rather than duplicating formats."
+            }
+          ],
+          "inputs": [
+            "docs/issues/review-inputs/58-r1-code.json",
+            "docs/issues/review-inputs/58-r1-security.json"
+          ],
+          "resolution": "All11 findings addressed by disjoint ABI/lifecycle designers. Concrete root/wire/reader/manifest/lifecycle/purpose/authority/resource/compatibility contracts replace future gates; no individual root GC, bounded retention explicit. Historical approvals preserved, revisions unapproved; fresh R2 required.",
+          "status": "needs_incremental_review",
+          "fix_commit": "c12f7cc1ccf739730b73b9e94a2e6f08adb16efd"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "c12f7cc1ccf739730b73b9e94a2e6f08adb16efd",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review58_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review58_r2_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R2-C1",
+              "severity": "High",
+              "summary": "The source worker has no operation that binds its newly constructed manifest into Outgoing before completion verification.",
+              "evidence": "contracts.md:66-69,83-88; lifecycle.md:54-57,72-73,182-188; wire-contracts.md:268-271. StartShip accepts a target snapshot and optional prior base hash, not the target manifest. The worker constructs that manifest later. ReportDrProgress accepts only bytes/error, and no other source RPC writes the manifest or enters Sending. RecordDrCompletion nevertheless must compare the receipt manifest against the outgoing tuple.",
+              "fix": "Add an exact worker-owned idempotent manifest-binding RPC (or extend ReportDrProgress explicitly) before foreign Begin. Validate canonical ManifestRootV1 against the authorized target/base refs and outgoing immutable destination, CAS the current noncancelled outgoing to a manifest-bound Sending state, persist the root/hash, and define identical/conflicting retry behavior. Specify how close barriers advance the outgoing to Closed. Add construct/bind/send/restart/lost-reply/conflicting-manifest/completion fixtures."
+            },
+            {
+              "id": "R2-C2",
+              "severity": "High",
+              "summary": "The replica ABI cannot install and later recover the manifest commitment needed to authenticate pages and receipts.",
+              "evidence": "wire-contracts.md:145-164,172-181; root-format.md:80,103-107,118-124,131-138,154-155; contracts.md:73,91-93. CreateRoot carries no ManifestRootV1; PutRootManifestPage carries only a page and sibling path. ManifestRootV1 first arrives at PrepareRoot, after pages/ranges must already have verified proofs and durable receipts. RootDescriptor/RootSeal retain only manifest_id, RootBlob retains pages/proofs, and metadata Admit retains only refs/hash/page count. No local read operation returns the full manifest root or persisted manifest pages/proofs for takeover/catch-up, despite the required complete copy/reconciliation. A SHA256 manifest_id cannot recover its Merkle root/preimage.",
+              "fix": "Define an immutable manifest-init/bind operation before any page/range ACK, its exact durable root/blob/journal representation (including the complete bounded ManifestRootV1), and replay/order/idempotency rules. Add bounded local get-manifest-root/page-proof operations for takeover and base-first catch-up, with typed session/root correlation and proof validation before receipt admission. Cover empty incremental manifests, crash before seal, restart on another node and joining-member transfer without contacting the foreign sender in vectors/crash/model fixtures."
+            },
+            {
+              "id": "R2-C3",
+              "severity": "High",
+              "summary": "Grant creation is not serialized with source cancellation, allowing a cancelled ship to acquire a new reader grant.",
+              "evidence": "lifecycle.md:167-171,199-205,332-335; #52 contracts.md Reader grant/RPC/lifecycle and Transactions: AuthorizeSnapshotRead compares header/catalog/reader, with no DR outgoing predicate. StartShip queues the outgoing and then creates target/base grants one at a time before recording their references. CancelShip can mark it Cancelled and close the grants currently present while an earlier handler subsequently creates another deterministic grant or has not yet published its reference. The defined #52 close barrier cannot prevent creation of a different/absent grant.",
+              "fix": "Extend the internal DR grant-claim transaction to compare the exact current noncancelled outgoing and source guard, and atomically publish its GrantRef or a durable per-kind claim. Cancellation must block further claims first and discover/close both deterministic grant identities even across a crash before reference publication; Closed/EndDrSource must require this phase complete. State transaction counts and test cancel before/between/after each target/base grant claim and reference update, including restart and lost response; add a caught late-grant-after-cancel mutation."
+            },
+            {
+              "id": "R2-C4",
+              "severity": "Low",
+              "summary": "Deletion assigns relationship states that its enum does not define.",
+              "evidence": "lifecycle.md:82 says deletion marks the relationship Closed/Cancelled; contracts.md:38-40 defines only STANDBY, PROMOTING, PROMOTED, REVOKED (SOURCE_PAIRED is explicitly not a relationship state). CANCELLED exists only on Incoming and Outgoing.",
+              "fix": "Specify deletion as a concrete existing relationship state (for example REVOKED with generation/fence change), or allocate a terminal relationship state and define its RPC/status/retry behavior. Keep incoming/outgoing cancellation separate and add the terminal enum to deletion/recreation fixtures."
+            }
+          ],
+          "dependency_commits": {
+            "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+            "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+            "64": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+            "68": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+            "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+            "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+            "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+            "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+            "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+            "48": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+            "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/58-r2-code.json",
+            "docs/issues/review-inputs/58-r2-security.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "All4 findings addressed: durable source/full replica manifest binding and recovery reads; atomic grant claim/cancel/close/collection predicates with bounded transactions; concrete REVOKED deletion state. Revisions unapproved, fresh R3 required.",
+          "fix_commit": "c055592433c77c81bd483e535d5e0afbdbdffdab"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "c055592433c77c81bd483e535d5e0afbdbdffdab",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review58_r3_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review58_r3_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R3-C1",
+              "severity": "Medium",
+              "summary": "Closure retries do not define the already-CLOSED path after eligible grant collection.",
+              "evidence": "docs/issues/58/contracts.md:179-180 requires every CancelShip retry to invoke the reconciler for either terminal outcome; :188-194 defines that reconciler only for Committed/Cancelled/Closing, says lost replies repeat its read-back, and treats a missing COMPLETED grant as Internal. Yet :199-203 explicitly permits collecting grants once outgoing is CLOSED and only names EndDrSource as accepting that absence. A lost final closure reply followed by retry can therefore encounter CLOSED with collected grants and has no successful idempotent transition under these predicates.",
+              "fix": "Define an already-CLOSED fast path for ReportDrProgress(check_closure=true) and the reconciler used by CancelShip: return the unchanged durable outcome/all-closed mask without re-closing collected grants. Restrict missing-completed-grant=Internal to operations that have not durably established closure. Add lost final closure reply -> collection -> progress/cancel retry fixtures for both terminal outcomes."
+            },
+            {
+              "id": "R3-N1",
+              "severity": "Nit",
+              "summary": "The identical bind retry condition ambiguously requires COMPLETED on SENDING.",
+              "evidence": "docs/issues/58/contracts.md:162-164 says identical bind retry on Sending/Committed/Closing/Closed with COMPLETED outcome returns the stored record. Sending precedes foreign Begin/completion, so its normal outcome is still UNSPECIFIED; lifecycle.md:412-413 explicitly expects a lost bind response to return the same Sending record.",
+              "fix": "Separate the predicate: identical bound SENDING retries return the record with UNSPECIFIED outcome; completed Committed/Closing/Closed retries return their recorded completed outcome; cancelled outcomes refuse. Keep the lost-bind-response fixture aligned."
+            }
+          ],
+          "dependency_commits": {
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/58-r3-code.json",
+            "docs/issues/review-inputs/58-r3-security.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "Already-CLOSED idempotent fast path after grant collection; explicit SENDING+UNSPECIFIED bind retry versus completed/cancelled outcomes; exact lost-reply/collection fixtures. Both comments addressed, revisions unapproved, fresh R4 required.",
+          "fix_commit": "d557e13636bc647090c81dfa78eecfb699958cb2"
+        },
+        {
+          "round": 4,
+          "reviewed_commit": "d557e13636bc647090c81dfa78eecfb699958cb2",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review58_r4_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review58_r4_security (incremental design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/58-r4-code.json",
+            "docs/issues/review-inputs/58-r4-security.json"
+          ],
+          "status": "clear",
+          "resolution": "Both fresh reviewers returned zero comments including Nits. No approval is inferred."
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "ce035c3",
+      "round": "4",
+      "reviewed_commit": "d557e13636bc647090c81dfa78eecfb699958cb2",
+      "authoritative_report": "docs/issues/58/report.md",
+      "latest_fix_commit": "d557e13636bc647090c81dfa78eecfb699958cb2",
+      "clear_round": 4,
+      "clear_report_commit": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a"
+    },
+    {
+      "number": 59,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-59",
+      "branch": "issue/59-wan-tolerant-backups",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "4f9eff31e79b4ffa7410cee868ab3b90a8c0fe07",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review59_r1_combined (design-code and design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "High",
+              "summary": "The wire shaper, window gate and privileged setup still have no implementable mechanism.",
+              "evidence": "#59 design.md:56\u201376,128\u2013129,159\u2013165 defer exact qdisc/offload/buffer settings and tail to qualification, without choosing a shaper/gate or a helper interface/lifetime. #74 design/spec cover ublk/disk privilege separation, retain SYS_ADMIN only, and provide no network-namespace/shaper setup operation. #52's same Rust worker also opens metadata and snapshot-reader connections, which cannot all be placed behind the store window gate.",
+              "fix": "Specify a concrete proposed Linux profile now: topology and object-only connector isolation, IP packet accounting/offload settings, qdisc/buffer limits and how B is derived, packet gate update/control ownership, root setup entry point with validated bounded inputs, worker credentials, failure/kill/restart cleanup and refusal behavior. Keep measured qualification results pending, but do not defer the mechanism. Add ownership, forged-input, partial-setup and killed-worker/gate tests. Do not infer that #74 supplies an unplanned networking helper."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "High",
+              "summary": "Socket-readiness exclusion can suppress genuine stalls forever; shaper waiting can also trigger false connection/header timeouts.",
+              "evidence": "#59 design.md:80\u201385 advances upload idle elapsed only when 'window/budget/socket readiness permit sending'. A peer that stops reading makes the socket nonwritable, so remote-progress idle never reaches120s. Conversely, cap min1byte/sec (line40) can delay even a TCP SYN beyond connect30s, independently of the userspace payload limiter. No concrete way to distinguish qdisc wait, TCP progress and server response progress is specified.",
+              "fix": "Define phase-specific eligible elapsed and observable progress events. Exclude only explicit local pacing/gate suspension, count remote-caused backpressure as stall time, and account for shaper delay in connect/header/response timing. Identify the actual connector/transport signals used. Add tests for a peer that accepts but never reads, a full send buffer, a server that consumes but never responds, and a1byte/sec handshake/response with qualified local shaping."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "High",
+              "summary": "SDK admission/progress/cancellation remains an unspecified implementation gate.",
+              "evidence": "#59 design.md:49\u201354,80\u201387,171\u2013178 and decisions.md's historical SDK gate still ask whether the chosen SDK exposes needed controls. Current #52 contracts.md:417\u2013425 chooses aws-sdk-s3 and specifies an adapter seam, not an existing implementation of those hooks; current Cargo workspace has no backup/SDK code. Merely naming before_attempt does not define per-byte pacing, remote progress, retry ownership, or cancellation of pooled sockets.",
+              "fix": "Research and choose a concrete proposed aws-sdk-s3/Smithy HTTP integration: pinned compatible API/profile, attempt admission location, explicit SDK retry/redirect/credential behavior, connector/body wrapper and transport progress/idle/cancel controls, including pooled connections. Where SDK hooks cannot supply the contract, name the custom connector/HTTP implementation that does. Record research evidence and conformance fixtures; measured backend qualification may remain future."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "High",
+              "summary": "The 'pacing only delays work' integration does not preserve #53's deadline and automatic-completion behavior.",
+              "evidence": "#59 design.md:97\u2013109 only says to check retention and use #52's original commit protocol. Current #53 design.md:80\u2013107 and contracts.md 'One root per operation' require store-time D/E, at most one re-cover, a pre-PUT allowance, and permanent incomplete status for a root accepted late, requiring an administrator's abort and a new operation. A gate may defer the root PUT over a closed window after its deadline check; a tiny cap can make root transmission itself exceed D. These are realistic configured cases where this living run cannot finish automatically even after the link returns.",
+              "fix": "Specify the exact #53-aware admission sequence after every limiter/window wait: refresh qualified store time, revalidate/renew exact-version retention, budget cover/root transfer under the policy, and never dispatch a known-stale root. Preserve #53's one-root/late-root semantics; explicitly diagnose incompatible budget/policy or the unavoidable late-root terminal outcome instead of promising unconditional eventual completion. Add close-during-cover, close-before-root, low-rate large-root, lost-root-ACK and late-root tests."
+            },
+            {
+              "id": "R1-C5",
+              "severity": "Medium",
+              "summary": "A sender's shaper does not prove the same arbitrary-interval envelope at the remote arrival point.",
+              "evidence": "#59 spec.md:35\u201338 requires bytes<=R*dt+B at the remote observation point; design.md:58\u201365 shapes the local namespace and captures remotely. A downstream queue can accumulate shaped traffic and release it in a burst larger than B, even when local departures satisfy the envelope. No path delay/buffering assumption or enlarged remote B is defined.",
+              "fix": "Choose an exact authoritative enforcement/observation boundary. Either guarantee the envelope at the owned local egress and treat remote arrival captures as diagnostics, marking the spec adjustment unapproved, or define and qualify downstream buffering/jitter bounds and include them in the remote envelope. Add a delayed/batched-path counterexample to the qualification tests."
+            },
+            {
+              "id": "R1-C6",
+              "severity": "Medium",
+              "summary": "S6's bounded resume/control traffic has no concrete accounting bound or resume protocol.",
+              "evidence": "#59 spec.md:57\u201361 requires separately bounded control/manifest traffic; design.md:97\u2013101 gives only K and 'small bounded protocol overhead', and115\u2013116 provides a counter. Current #52 contracts.md:383\u2013399 permits encoded blocks up to4194384 bytes and pages/roots up to1048656 bytes;429\u2013433 requires revalidating previously referenced versions, while a lost PUT can require a full exact-version GET. This is graph-sized inbound traffic and request work, not merely a small fixed overhead after a cut.",
+              "fix": "State the exact encoded in-flight payload bound K*(4194304+80), separately define page/root/control and verification-GET budgets/counts as functions of the bounded archive graph, and define what the 'resume episode' ends at. Count both directions and requests before the first new upload, distinguish retransmitted PUT payload from required GET readback, and add large-manifest/receipt-revalidation/lost-ACK fixtures. Keep the outbound cap boundary explicit."
+            },
+            {
+              "id": "R1-C7",
+              "severity": "Medium",
+              "summary": "The lab section is not runnable on the actual dependency topology and ignores #83's VM exclusion.",
+              "evidence": "#59 design.md:131\u2013165 names scripts/target but no setup grammar, run ownership, endpoint routing, capture location, fixture sizes/window duration or cleanup sequence. Current #52 design.md:334 onward runs both worker and candidate store on fl-w, with a2GiB file-backed store and <=1GiB test data; current #53 has a different8334 store. #83 design.md 'Profile admission' refuses the current lab VMs and supplies no unsafe bypass.",
+              "fix": "Provide concrete proposed target/subcommands and a bounded fixture workflow using a specified store instance/port, worker location, namespace path and independent capture boundary, exact snapshot/restore/verification and retention-aware cleanup. State the permitted execution order before #83 admission lands, or move the future full write-load qualification to an authorized disposable qualified physical environment. Keep VM fake/pure checks distinct and add parser/setup/cleanup fixtures."
+            },
+            {
+              "id": "R1-C8",
+              "severity": "Low",
+              "summary": "Default no-policy behavior conflicts with #52's exit-on-store-failure contract.",
+              "evidence": "#59 spec.md:33 says 'No cap/window preserves #52 behavior', while S4/design.md:103\u2013109 require living-run automatic outage retry. Current #52 design.md:85\u201386,183\u2013187 and contracts.md CLI explicitly exit1 on store failure, retaining grant/checkpoint for a rerun. The #59 text does not say whether automatic retry is enabled only when a transfer policy is supplied.",
+              "fix": "Explicitly choose the activation/default semantics and update S1/S4/CLI consistently. Add a no-flags compatibility fixture and a policy-enabled outage fixture, preserving the historical approval record and marking the changed default interpretation unapproved."
+            },
+            {
+              "id": "R1-C9",
+              "severity": "Low",
+              "summary": "Recording a tzdb version does not define deterministic cross-language or restart behavior when zone rules change.",
+              "evidence": "#59 design.md:22,33\u201343,124\u2013126 records tzdb version and policy hash but neither chooses a time-zone data source/version for Rust/Go nor says whether restart under another tzdb is accepted. Identical IANA zone/window config can produce different admissions after a rule update, despite S1's settings consistency and S8's shared deterministic rules.",
+              "fix": "Specify a proposed tzdb source/version contract, persisted policy identity and restart/update behavior; reject an unacknowledged rules mismatch or explicitly revision it. Include actual UTC transition vectors for repeated/nonexistent times, crossing midnight and rule-version mismatch, rather than leaving host tzdb behavior implicit."
+            },
+            {
+              "id": "R1-N1",
+              "severity": "Nit",
+              "summary": "Active prose still presents already settled choices as unresolved.",
+              "evidence": "#59 design.md:75\u201378 calls the window wording a clarification gate immediately before stating it was settled;171\u2013178 repeats the gate and #52 object-choice prerequisite. adr-proposal.md Consequences says 'No choice is Accepted' immediately before acceptance. spec.md Open questions similarly retains 'remain unaccepted' before the settlement.",
+              "fix": "Preserve dated approvals and historical settlements, but label superseded questions explicitly as historical or rewrite the current-state prose. Keep genuinely new revisions/proposals unapproved; do not erase or fabricate acceptance."
+            }
+          ],
+          "dependency_commits": {
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "53": "105dac041ccfca18ba1bcd4984e84115efceb200",
+            "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+            "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/59-r1-combined.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "All10 comments addressed in concrete transport-profile/policy contracts and reconciled plans: exact helper/SDK/progress/boundary,53 deadlines, resume graph budgets, lab83/default/tzdb/acceptance. Revisions unapproved; fresh combined R2 required.",
+          "fix_commit": "29ddcf31b9ab38974456a21c545ff2d902394e2a"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "29ddcf31b9ab38974456a21c545ff2d902394e2a",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review59_r2_combined (design-code and design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R2-C1",
+              "severity": "Medium",
+              "summary": "The TCP-only gate black-holes PMTU feedback on ordinary lower-MTU WAN paths.",
+              "evidence": "docs/issues/59/transport-profile.md:38-46 fixes namespace/veth MTU1500 and only endpoint /32 routes; :131-140 permits only reverse TCP input, dropping ICMP including fragmentation-needed. A host/tunnel/downstream path with MTU below1500 can pass SYN and small records but drop full-sized DF TCP segments; no per-endpoint route MTU/MSS clamp, PMTU ICMP exception or PLPMTUD profile is specified. The 8334 co-located lab endpoint does not exercise this. Linux6.6 TCP explicitly handles ICMP_FRAG_NEEDED to update PMTU/MSS and retransmit: https://raw.githubusercontent.com/torvalds/linux/v6.6/net/ipv4/tcp_ipv4.c (tcp_v4_mtu_reduced/tcp_v4_err); https://www.kernel.org/doc/html/v6.6/networking/ip-sysctl.html documents PMTU/PLPMTUD controls.",
+              "fix": "Specify a narrow, lease/window-bound ICMP fragmentation-needed input rule validated against the owned TCP tuples/quoted packet, or a concrete conservative route-MTU/MSS/PLPMTUD scheme with qualification/refusal rules. Preserve object-only isolation and outbound accounting. Add a separate routed endpoint behind a smaller-MTU hop and assert large TLS/object traffic progresses; include forged ICMP and gate-closed counterexamples."
+            },
+            {
+              "id": "R2-C2",
+              "severity": "Medium",
+              "summary": "Supported payload-v1 modes have no defined phase-clock or #53 publication-cost calculation.",
+              "evidence": "docs/issues/59/design.md:45-48 permits payload-v1 at1B/s and without any rate for window-only admission. transport-profile.md:95 defines r=floor(99*R/100) only for wire-v1; :267-284 uses division by r for all phase allowances, and :304-310 defines the only local_cost via r/Q/wire_budget. policy-contracts.md:59-74 applies its emission-cost/window reservation and root_local_emit_seconds=ceil(local_cost(...)/1e9) without a profile branch to immutable repositories. At payload rate1 the borrowed wire r is zero; with no cap it is undefined. These valid configurations cannot follow the stated admission contract, and the wire-only queue/qualification failure rules do not specify a payload alternative.",
+              "fix": "Define profile-specific transport/phase clocks and local emission estimates: payload-v1 should use its actual optional payload rate/body budget and no kernel-shaper allowance, while window-only mode must explicitly define the zero known pacing cost plus bounded dispatch/window checks without asserting a minimum network throughput. Bind #53 finishing reservations to that profile-specific function. Add payload1B/s and payload-window-only immutable-root admission fixtures, including low-rate incompatibility, window closure, remote backpressure and no division by absent/zero rate."
+            }
+          ],
+          "dependency_commits": {
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "53": "105dac041ccfca18ba1bcd4984e84115efceb200",
+            "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+            "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/59-r2-combined.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "Both findings addressed: narrowly leased owned-flow PMTU feedback plus routed/forged/closed-gate fixtures; profile-specific payload phase/cost/reserved-credit/no-rate branches preserving53 admission. Revisions unapproved; fresh combined R3 required.",
+          "fix_commit": "32c70bf60b2957debe1c5b6a17ec3fbaeeb46f9d"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "32c70bf60b2957debe1c5b6a17ec3fbaeeb46f9d",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review59_r3_combined (design-code and design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "53": "105dac041ccfca18ba1bcd4984e84115efceb200",
+            "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+            "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/59-r3-combined.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "6653c8d 5c63d2c",
+      "round": "3",
+      "reviewed_commit": "32c70bf60b2957debe1c5b6a17ec3fbaeeb46f9d",
+      "authoritative_report": "docs/issues/59/report.md",
+      "latest_fix_commit": "32c70bf60b2957debe1c5b6a17ec3fbaeeb46f9d",
+      "clear_round": 3,
+      "clear_report_commit": "dc1e0fd8d8fae099399b88d29fad3ab1bca2b440"
+    },
+    {
+      "number": 60,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-60",
+      "branch": "issue/60-cloud-kms-providers",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "44a709907930a3a154f33f9e7fd99aa71b8c403c",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review60_r1_code (design-code/spec correctness, R1) (incremental design-code)",
+            "/root/remaining_plan_reviews/review60_r1_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "Medium",
+              "summary": "The promised eight-call instance cap has no supplying implementation or production insertion point.",
+              "evidence": "#60 spec.md:47-50 and design.md:7-9,70-74 say to reuse #50's eight permits. Current #50 contracts.md:55-57 and design.md:217-222 explicitly provide a one-second context and no in-flight bound; #50 decisions.md:138 records removal of the cap. #60 places the proposed wrapper in its fake/provider discussion and lists only service tests, so limiting the fake can make the cap test green while actual configured sources remain unlimited.",
+              "fix": "Remove the attribution to #50. For a conformance-only increment, bound fixture/driver concurrency and defer a production admission policy explicitly to the provider stage already responsible for #50 Q12; do not claim production eight-call protection. If the current slice must introduce the intent's instance-wide admission bound, specify it as a new #60 mechanism at the real service Wrap/Unwrap boundary, with shared ownership, acquisition/refusal/cancellation rules and tests that invoke that production boundary."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "Retry behavior and the subordinate-error wire extension do not match the current shared contract.",
+              "evidence": "#60 design.md:10-11,56-62,76-81,105-111 requires structured details to stop cycling, adds an ambiguously named reason and mentions bounded RetryAfter without a type, unit, numeric bound or wire field. #50 contracts.md:44-57 fixes INSTANCE_UNAVAILABLE=Unavailable, SOURCE_UNAVAILABLE=ResourceExhausted, DENIED=PermissionDenied and INVALID_ENVELOPE=FailedPrecondition; ErrorInfo.reason is Kind, and retry is decided by gRPC code alone. Actual control/csi/meta.go:75-83 and flaminio-metaclient/src/lib.rs:145-160 already stop on ResourceExhausted. The design's final claim that metadata gains only an enum also leaves RetryAfter unaccounted for.",
+              "fix": "Keep #50's exact four code mappings and code-based retry table; make two-endpoint tests assert them without introducing detail-dependent fallback. Fix the extension concretely as ErrorInfo.reason=Kind plus one explicitly named metadata key for the safe enum, its Go error field, allowed kind/reason combinations and unknown-value handling. Remove unused RetryAfter from this no-automatic-retry slice, or fully specify its representation, units and bound in the shared contract."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Medium",
+              "summary": "The registry coverage check is not connected to the production configuration path it must cover.",
+              "evidence": "#60 S1 and intent outcome 2 require every configurable source to appear in conformance coverage. design.md:17-21,42-45 compares RegisteredKinds() to a FixtureFactory map but defines neither the production registry nor how startup construction is constrained by it. No RegisteredKinds/KeySource registry exists in the current source; meta/cmd/flaminio-meta/main.go:84-151 constructs options directly. #50 design.md:193-204 proposes the --kek-file construction path, while #57 design.md:27-32 adds a material-loader mode that still constructs cryptographic kind static. A separately maintained kinds list can agree with fixtures while a CLI branch bypasses it.",
+              "fix": "Define one production source-kind descriptor/factory list and make actual startup construction resolve through it; keep the mandatory fixture map solely in tests. State how file-static and tpm-sealed-static loaders both resolve static, and add startup/configuration tests rejecting unregistered/fault kinds. Registry coverage must enumerate the same descriptors the production constructor accepts, not another test list."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Medium",
+              "summary": "Unpublished creation tests require a stable DEK that #50 and #76 deliberately do not persist.",
+              "evidence": "#60 design.md:92-94 requires the hidden create to retain its original operation/key identity and says retry cannot generate a different published key. Current #50 design.md:81-87,99-111 generates a DEK immediately before publication; with #76 a failed wrap leaves the operation and a helper wraps its own key at conditional finalization. #76 spec.md:43-57/design.md Conditional helpers retain the operation, admitted plan and claim revision, not an unpublished DEK. There is no prior durable key/envelope for a retry after failed initial Wrap to reuse.",
+              "fix": "Distinguish durable create identity from DEK identity. Before successful finalization, retries/helpers may generate independent candidate DEKs and must clear losers; only one atomic finalization may publish its bound envelope. After publication, recovery/retry must retain that exact winning envelope/key. Test failed wrap, competing helpers and lost publication reply with these assertions, without adding durable plaintext or another key-staging protocol."
+            },
+            {
+              "id": "R1-C5",
+              "severity": "Medium",
+              "summary": "The no-key-call I/O proof lacks a concrete route between the Go fault source and the Rust memory-node harness.",
+              "evidence": "#60 design.md:95-97,101-108,118-127 promises zero provider calls while memory-node read/write/resync/ISR executes, but names no Rust engine test file or bridge to its Go conformance/fault_source.go counters. Existing flaminio-node/tests/engine.rs:34-50,196-235 uses its own Rust FakeMeta through MetaPort, not a Go metadata service; its TLS network connects replicas. Existing Rust/Go tests are separate: flaminio-metaclient/tests/interop.rs:22-25 is ignored by ordinary cargo test and scripts/dev/meta-interop.sh:24-40 starts an ordinary production server without a test fault source. Thus the current fixture descriptions do not explain how the claimed counters observe the I/O path.",
+              "fix": "Name a runnable layered proof: ordinary Rust engine tests extend FakeMeta to count/script ReleaseVolumeKey and assert no further release during verified I/O/resync/ISR, while Go backend/mTLS tests prove a release invokes the counted source only as specified. Alternatively define an isolated test-binary server exposing the Go fixture to the Rust client/engine. Specify file/target wiring and keep test fault configuration out of shipping binaries; do not claim an unconnected Go counter proves Rust behavior."
+            },
+            {
+              "id": "R1-C6",
+              "severity": "Low",
+              "summary": "The design presents an invented 1024-byte envelope ceiling as #50's exact bound.",
+              "evidence": "#60 design.md:23-26 says to consume #50's exact limits and then specifies envelope<=1024 bytes. #50 contracts.md:8-14,29-36 defines 1..64 ASCII identifier bytes per source component, profile 1..32 ASCII bytes and exactly 92 Sealed bytes for static. Its protobuf Size section bounds KeyEnvelope at 328 bytes with maximal fields; it defines no generic 1024-byte envelope representation. Tests based only on the stated 1024 ceiling would miss a static 93-byte sealed body or invalid identity bounds.",
+              "fix": "Use the shared field/encoding bounds directly: fixed/derived static identity, 64-byte DEK, 32-byte KEK, 92-byte Sealed and the shared protobuf size fixtures. Remove the unexplained generic 1024 limit, or explicitly propose and measure a separately versioned shared limit for future providers instead of attributing it to #50."
+            },
+            {
+              "id": "R1-C7",
+              "severity": "Low",
+              "summary": "The required no-network claim contradicts the specified local integration fixtures.",
+              "evidence": "#60 intent outcome 5 and spec.md:62-64 say required tests run without network, while design.md:85 requires real loopback mTLS and :127 allows only that network exception. Actual backend helper meta/service/service_test.go:46-53 starts embedded etcd whose client and peer URLs are loopback HTTP (meta/kv/kvtest/kvtest.go:24-43); Rust memory-node tests also bind replica TCP/TLS listeners (flaminio-node/tests/engine.rs:196-209). These tests are feasible locally but not under the literal stated network restriction.",
+              "fix": "Say without external network, cloud/emulator services or credentials; explicitly permit owned loopback metadata mTLS, embedded-etcd client/peer traffic and replica TLS fixtures. Align intent, S9 and the design exception without weakening the prohibition on default cloud actions."
+            },
+            {
+              "id": "R1-S1",
+              "severity": "Low",
+              "summary": "Conformance failure paths do not require unconditional cleanup of returned secret buffers.",
+              "evidence": "docs/issues/60/design.md:31-35 clears only successfully returned buffers after assertion. A broken source being tested can return a non-nil plaintext buffer together with an error, and an assertion can terminate the subtest before a subsequent clear. Neither case is named by the output-ownership tests, despite docs/issues/50/contracts.md:21-24 requiring caller-owned plaintext to be cleared on every exit and #60 S2 inheriting that rule.",
+              "fix": "Require Run and its fixtures to arrange deferred cleanup immediately for every non-nil plaintext/key buffer, before checking errors or making assertions, including buffers received with errors or late cancellation results. Add a deliberately violating source and a controlled failing assertion/cancellation path that prove the harness clears those buffers without printing their contents."
+            }
+          ],
+          "dependency_commits": {
+            "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+            "57": "6b60c20335ff2c64466d717b3de1e66a1a073436",
+            "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/60-r1-code.json",
+            "docs/issues/review-inputs/60-r1-security.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "All8 findings addressed: new explicit60 service gate, CLI-used descriptor registry, exact diagnostic/code retry/error/bounds, unpublished candidate semantics, layered engine/source tests, loopback scope and unconditional secret cleanup. Revisions unapproved; fresh R2 required.",
+          "fix_commit": "d72a998ea5e10602a2b0a747fc272bd1b32450f2"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "d72a998ea5e10602a2b0a747fc272bd1b32450f2",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review60_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review60_r2_security (incremental design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+            "57": "6b60c20335ff2c64466d717b3de1e66a1a073436",
+            "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/60-r2-code.json",
+            "docs/issues/review-inputs/60-r2-security.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "824acc4 a1dcb85",
+      "round": "2",
+      "reviewed_commit": "d72a998ea5e10602a2b0a747fc272bd1b32450f2",
+      "authoritative_report": "docs/issues/60/report.md",
+      "latest_fix_commit": "d72a998ea5e10602a2b0a747fc272bd1b32450f2",
+      "clear_round": 2,
+      "clear_report_commit": "13646e04783a839dc9af8730bbd7abe2dd2b0207"
+    },
+    {
+      "number": 61,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-61",
+      "branch": "issue/61-instance-store-nvme",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "5696573a126c0abe26347d3c9700e557489613cf",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review61_r1_code (design-code)",
+            "/root/remaining_plan_reviews/review61_r1_security (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "High",
+              "summary": "The proposed v2 contract does not compose with the existing snapshot-v2 contract, and the claimed shared #72 schema does not exist.",
+              "evidence": "61/design.md:126-145 assigns ReplicaRef and inserts a UUID before Hello's token under flaminio-repl/2, saying these bytes/fields match #72. Reviewed 72/spec.md Terms and 72/design.md Contracts/capacity-contracts.md instead define one node store, Node.capacity=72, and explicitly no replication-wire changes or ReplicaRef. Reviewed 51/contracts.md:160-200 defines HelloV2 tag0x10 with a u16 version followed by the unchanged existing Hello fields, snapshot-specific request tags and existing replies. The two v2 descriptions do not specify a common Hello/Fenced layout or which profile accepts the other's tags. 52/design.md:60-62 and 58/wire-contracts.md:28-32 also consume a nonzero store_generation that #61 declares but never defines operationally.",
+              "fix": "Make the dedicated identity plan the explicit owner of one concrete ref/generation schema and a composed replication profile: exact HelloV2/Fenced tags and bytes, snapshot operations when enabled, rejection/cross-decode rules, and generation initialization/change/CAS semantics. State which implementation landing second adds each hook and golden/interoperability vector. Keep the reviewed dependency plans read-only and remove the false claim that #72 already supplies these contracts. Preserve historical Q2 approval while marking the revised contract unapproved."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "High",
+              "summary": "Full-response admission is left as future coordination even though the new repeated refs materially invalidate the current bound.",
+              "evidence": "61/design.md:126-129 adds full node+UUID nested messages for replicas, ISR, two move endpoints and releases while retaining old node projections; :146-147 only says to include them and tighten caps if needed. 80/design.md Admission and metadata bounds fixes a specific 4MiB B(N,R); 13/design.md Releases already revises it to 4160+N*(288+264*(R+1)+132), and 51/design.md Budget further accounts for snapshots/encryption. A maximal ReplicaRef alone contains a 128-byte node plus a 36-byte UUID, repeated across all these sets. Neither a numerical combined bound/caps nor treatment of formerly admitted maximum volumes is specified.",
+              "fix": "Derive the exact conservative combined Create/Get/Attach and relevant new-RPC budgets now, including whether legacy projections are emitted, ref/fence/release cardinalities, current #13/#51 additions, nested overhead and token/frame sizes. Publish per-RF caps and exact boundary/over-bound real Go/Rust interop fixtures under unchanged receive limits. Specify maintenance handling for existing volumes that exceed the new representation bound; do not silently make formerly supported clusters unmigratable. Assign the last-landing implementation the concrete admission/fixture hooks."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "High",
+              "summary": "The #13 cleanup conversion lacks the identity-bearing contracts and transaction-bound adjustment needed to prevent confirming another disk's cleanup.",
+              "evidence": "61/design.md:85-90 correctly retains oldRef releases, but :124/:148 merely asks the #13 sweep/release/tombstone adapters to use exact refs. Only ChunkMeta.released_refs is assigned; no Header.Fenced/tombstone/ref confirmation fields or changed ListReleases/ConfirmRelease/ListTombstones/ConfirmDeletion contracts are given. Reviewed 13/design.md Releases uses node strings, ConfirmRelease(node,volume,chunks), Header.Fenced []string, and 118 chunks+header+ledger=120 worst-case operations. 61/design.md:59 adds a replica-gate write to every release transition, making that existing maximum 121 operations. #13's own-node io authorization cannot distinguish an old disk from the replacement on that node by itself.",
+              "fix": "Specify exact stored/proto/CLI/sweep contracts for ref-bound releases, fence holders and tombstones, including opened-store verification before destructive work/confirmation, old-store-return behavior and retained-reference limits. Recompute each compare/op bound (the worst ConfirmRelease write batch becomes at most117 with this added gate) and list every writer that bumps replica-gate, including cleanup/forget/deletion composition. Add both-backend max-bound and same-node wrong-UUID confirmation tests, and explicit last-landing #13/#72 hooks."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "High",
+              "summary": "Same-node replacement bypasses #72's capacity admission and leaves capacity observations unbound to the store that reported them.",
+              "evidence": "61/design.md:73-77 describes ReplaceReplicaStore as a chunk/header/ref CAS with no capacity report, Room check or ledger change. Reviewed 72/design.md Charging and release and capacity-contracts.md charge every new move destination under a ledger compare, retain lost/released copies until exact cleanup, and expose node-keyed reports without store UUID. A replacement can therefore allocate an additional full copy without its charge; changing observed_store_uuid at 61/design.md:25-28 also leaves an old store's alive/capacity report eligible for the new store. A differently sized replacement can inherit the old disk's admission budget.",
+              "fix": "Define the replacement transaction's Room/ledger/charge semantics, preserving conservative charges for inaccessible old refs and snapshot multiplicity when #51 is active. Bind reports and report acceptance to the observed UUID/generation, invalidate old-store reports atomically on identity change, and reject delayed old-store heartbeats. State last-landing hooks for #72 rather than introducing a second capacity authority. Test replacement versus create/move/InitCapacity/release races and the larger-old/smaller-new disk case on both backends."
+            },
+            {
+              "id": "R1-C5",
+              "severity": "High",
+              "summary": "The simulator proof does not yet define executable checks and caught mutants for all newly introduced recovery rules.",
+              "evidence": "61/design.md:152-165 groups broad scenarios and explicitly names only identity_alias and bootstrap-old-token, then says every identity rule will get a check/bypass. Actual ReplicaCore::handle (replica.rs:173-199) takes Hello straight to fencing, the simulator precreates chunks (sim/mod.rs:395-401), and crash retains durable state (:1107-1121). There is no specified pure bootstrap authorization/fence-completion state or independently checked oracle for the new same-node replacement/full-resync/join transition. An identity-alias counterexample does not demonstrate rejection of dirty-only replacement, early UUID binding/join or replayed authorization after an epoch/ref change.",
+              "fix": "Give the sans-I/O bootstrap and replacement transitions concrete events/state/actions, including authorization completion, durable-fence completion, cancellation and chunk roles. Map each new safety rule to its independent simulator assertion, a named violating mutation, and the bounded scenario that must catch it. At minimum separate identity/ack/lease isolation, current-authority bootstrap, full-range-before-join, current-epoch/version replacement and no-authoritative-source refusal. Name real production adapter tests for both accepted remote and synthetic local Hello paths, delayed callbacks, fast-read admission/completion and restart boundaries."
+            },
+            {
+              "id": "R1-C6",
+              "severity": "Medium",
+              "summary": "The approved enrollment policy has no implementable migration/activation API or durable concurrency contract.",
+              "evidence": "61/design.md:100-112 specifies administrator enroll-store, CAS batch cursors, inventory generation and activation, but Files and contracts names no enrollment RPC, persistent schema/keys, request/response, authorization/error rules, batch bound or activation linearization condition. Current meta/service/auth.go only recognizes enumerated RPCs, while current KV supplies ordinary Get/List/Txn APIs. The conceptual maintenance stop does not define how a resumed migration distinguishes inventories or proves every assignment/fence/release/tombstone was converted before identity-required mode resumes. The historical Q1 decision settles provenance policy, not these missing mechanisms.",
+              "fix": "Define the administrator-only enrollment and activation contracts with bounded batches, exact inventory/operation identity, conditional revisions, durable cursor/idempotency, conflict and lost-reply behavior, quarantine representation, and the complete activation predicate. Explain how interrupted migration and concurrent/new io registration are handled under the maintenance barrier. Add real memory/etcd restart/concurrency and auth-matrix tests; preserve the historical administrator-evidence decision without claiming these new details were already approved."
+            },
+            {
+              "id": "SEC61-R1-01",
+              "severity": "High",
+              "summary": "The bootstrap grant does not define how an already-open session acquires or enforces authority for a later move/replacement.",
+              "evidence": "docs/issues/61/design.md:44\u201356, 79\u201385, 130\u2013137 authorize the Hello's requested chunk set once and cache only in that session. Actual replica/mod.rs:346\u2013353 creates a missing chunk on BeginResync; the target can add a new move destination on an existing node/volume session. A session established before that assignment has no matching SessionAssignment, and the design never specifies per-request grant enforcement or a transition to acquire its new role.",
+              "fix": "Persist the authorized chunk/ref/role/operation set in the accepted session and check it before every creation or reconstruction operation. Define a bounded control-path reauthorization or explicit new-Hello transition when moves add chunks/roles, including operation changes, session supersession, and delayed answers. Do not add metadata calls to ordinary I/O. Test a session predating the move, an ungranted BeginResync, and a stale replacement operation before any store mutation."
+            },
+            {
+              "id": "SEC61-R1-02",
+              "severity": "High",
+              "summary": "The new replica-gate exceeds the concrete release transaction limit.",
+              "evidence": "docs/issues/61/design.md:59\u201364 requires an extra atomically bumped gate on release mutations. The current #13 design.md:105\u2013122 permits 118 chunk comparisons plus header and #72 ledger comparisons, exactly 120. Adding the gate makes 121, refused by meta/kv/etcd.go:91\u201392. #13's sweep concretely emits batches of 118. Repeated release failure prevents reclamation and eventually blocks moves at the release bound.",
+              "fix": "Recalculate every affected transaction and publish the new exact batch caps, including ConfirmRelease request validation, producer, tests, #72 ledger interaction, ForgetNode/enrollment batches and model adapters. For the existing ConfirmRelease shape, reduce the maximum to 117 if one extra compare suffices; document the complete compare/write table and test boundary and boundary+1 against both backends."
+            },
+            {
+              "id": "SEC61-R1-03",
+              "severity": "High",
+              "summary": "Replacement completion accounts only for current data, leaving snapshot and DR historical completeness unspecified.",
+              "evidence": "docs/issues/61/design.md:79\u201385 follows the current Mapped/copy/holes resync and admits the new ref after 'full synchronization'. Actual target.rs:2351\u20132377 reconstructs only the current chunk. Current #51 design.md:170\u2013199 instead requires every committed historical stage, suppresses live forwarding until lower stages complete, and rechecks the frontier before joining. #58 design.md, Lifecycle and commit, additionally requires committed and pinned roots/receipts on every joiner. #52 contracts.md:43\u201355 relies on #61 identity plus that completeness to grant a snapshot source.",
+              "fix": "Define replacement admission's composition with snapshot/root profiles: reconstruct and prove every committed/pinned historical view using the exact #51/#58 transition when those profiles exist, or explicitly refuse the unsupported profile before replacement begins. State which barrier/version proves completion across cuts and takeover, and add caught mutants for joining after current-only reconstruction and accepting a stale historical frontier."
+            },
+            {
+              "id": "SEC61-R1-04",
+              "severity": "High",
+              "summary": "Every-Hello metadata authorization can exhaust memory and starve membership/fencing work.",
+              "evidence": "docs/issues/61/design.md:44\u201350 adds paged metadata work for every new Hello but supplies only a page-size bound (:135), with no aggregate pending-session, queued-page, retry, deadline or fairness bounds. Actual net.rs:176\u2013199 spawns accepted connections without a cap, :212 uses an unbounded reply channel; flaminio-metaclient/lib.rs:110\u2013120 serially services one unbounded call queue. A valid target with a retained token can repeatedly open sessions during an outage and queue authorization work ahead of ChangeIsr/refresh/heartbeats.",
+              "fix": "Specify bounded preauthorization state, active/pending grants and bytes per node/peer/volume, handshake/grant deadlines and cancellation on disconnect/supersession, bounded retry/backoff, and fair scheduling that prevents bootstrap pages monopolizing the metadata worker. Refuse excess sessions without enqueuing work. Test a valid-token Hello flood, stalled metadata, many-page volume and cancellation while existing targets still make bounded control-path progress."
+            },
+            {
+              "id": "SEC61-R1-05",
+              "severity": "Medium",
+              "summary": "The paged authorization interface states binding requirements without a concrete verifiable cursor/grant protocol.",
+              "evidence": "docs/issues/61/design.md:59\u201364 and 130\u2013137 let requests supply after/generation/snapshot_revision and require a fixed full-request digest, but do not define the first-page snapshot acquisition, authenticated/server-owned continuation, generation source, fixed final comparison set, or lifetime/bounds of Mem snapshots. The digest is response-only. 'Do not trust a caller-supplied newer generation' is an invariant, not an implementable mechanism, and KV currently has neither historical reads nor snapshots (meta/kv/kv.go:38\u201352).",
+              "fix": "Fix the exact GetAt/ListPage snapshot API and revision semantics and a stateless authenticated continuation or bounded server-owned grant record that binds caller/store/token digest/first epoch/epoch/full sorted chunk set/gate and node revisions. Specify the final O(1) comparison transaction, all gate writers/initialization/no-delete rules, expiry/cancellation/resource reclamation, compacted-revision behavior and restart. Test forged/mixed cursors, changed request sets, generation ABA, compaction and incomplete-page refusal."
+            },
+            {
+              "id": "SEC61-R1-06",
+              "severity": "Medium",
+              "summary": "The claimed shared replication-v2 bytes conflict with the current snapshot-v2 proposal.",
+              "evidence": "docs/issues/61/design.md:143\u2013145 says ALPN flaminio-repl/2 and inserts a canonical UUID string before Hello's token, and UUID16 into Fenced. Current #51 contracts.md:160\u2013197 independently fixes HelloV2 tag 0x10, a u16 version=2 and the existing Hello layout 'unchanged thereafter', plus new snapshot request tags and legacy-frame refusal. #72 contains no ReplicaRef/wire-v2 contract at all; its intent.md:53 postpones multiple disks until after #61. Thus 'matching #72' does not settle the actual #51/#61 codec composition.",
+              "fix": "Provide one exact composed profile/tag/layout table for identity-aware ordinary and snapshot/root sessions, including Hello/Fenced, endianness, UUID representation, ALPN negotiation and old/new cross-decode behavior. Make #61 the actual owner of ReplicaRef rather than claiming an existing #72 definition. Add shared golden vectors for both feature combinations and controlled refusal of mismatched profiles; leave dependencies read-only while recording the exact second-to-land hooks."
+            },
+            {
+              "id": "SEC61-R1-07",
+              "severity": "Medium",
+              "summary": "Exact-store cleanup is promised but the cleanup authority/storage/RPC schemas remain node-only.",
+              "evidence": "docs/issues/61/design.md:23, 85\u201390, 126\u2013148 adds released_refs to ChunkMeta and says #13 releases/fences/tombstones must use refs, without defining header fence-holder refs, tombstone pending/confirmed refs, stored schemas or revised list/confirm request fields. Baseline meta.proto:169\u2013190 identifies tombstones and ConfirmDeletion only by node; #13 design.md:105\u2013153 defines node-only ConfirmRelease/ListReleases and self-IO authorization. The new store must not confirm an unplugged old store, but these builders have no agreed bytes to express that distinction.",
+              "fix": "Define the complete versioned exact-ReplicaRef cleanup contracts, including header/tombstone records, list responses, confirmation requests, incarnation/revision preconditions, node/ref self-authorization, legacy-field handling, retry and ledger release behavior. Explicitly distinguish possession/deletion of the old UUID from mere current node identity. Add real RPC/adapter tests where a replacement tries to confirm the old ref and an old disk returns after new membership has joined."
+            },
+            {
+              "id": "SEC61-R1-08",
+              "severity": "Medium",
+              "summary": "The shared response/frame size envelope is deferred although identity fields invalidate its existing formula.",
+              "evidence": "docs/issues/61/design.md:126\u2013147 adds authoritative ref arrays while retaining node projections, then leaves #80 to 'tighten shared caps if needed'. #80 design.md:29\u201347 fixes B(N,R) and per-RF caps for node-string memberships; #13 design.md:65\u201385 adds release/fence-holder terms, and #51 adds catalog bytes. Each ReplicaRef adds nested node+UUID/tag bytes, and exact cleanup refs add more. No new composed formula/caps or rule for including/omitting projections is given.",
+              "fix": "Compute and publish the concrete combined bound/caps now for the proposed supported profiles, maximum canonical UUID/ID lengths, R+1 membership/move/release/fence-holder shapes, catalog and token. Define precisely when legacy projections are emitted. Update checked Hello/Fenced formulas for the UUID/version fields, and name worst-view proto.Size and real Go/Rust transport fixtures at every new boundary."
+            },
+            {
+              "id": "SEC61-R1-09",
+              "severity": "Medium",
+              "summary": "Node.store_generation has no defined semantics despite being consumed as a security lifetime.",
+              "evidence": "docs/issues/61/design.md:126\u2013133 appends store_generation and request/response generation fields without defining initialization, change conditions, monotonicity/overflow, preservation on label-only registration, or whether the two generations are identical. Current #52 contracts.md:43\u201356, 139\u2013158 uses precisely #61 Node.store_generation in signed SourceProofV1 and source validation. An implementation cannot decide whether an old source token survives UUID A\u2192B\u2192A or enrollment/restart.",
+              "fix": "Define one source-lifetime generation authority, its exact stored/proto types and relationship to the replica gate and pagination generation. Specify atomic updates with UUID registration/enrollment, no-op preservation, ABA/overflow handling and field-level registration ownership (agents and other roles cannot supply/overwrite service-owned generations). Add registration/source-proof tests covering label CAS, restart, repeated UUID replacement and delayed proof replay."
+            },
+            {
+              "id": "SEC61-R1-10",
+              "severity": "Low",
+              "summary": "The later VM reformat lab proof is incompatible with the current production clock-admission plan.",
+              "evidence": "docs/issues/61/intent.md, What we want 8, and design.md:169\u2013172 prescribe the shared fl-a/fl-b VM lab as the later RF2 proof. Current #83 design.md:21\u201342 requires physical-boottime-v1 before storage opens and deliberately refuses these VMs; no force bypass exists.",
+              "fix": "Distinguish separately authorized pre-#83 exploratory VM evidence from supported production qualification, and provide an authorized physical-fixture alternative or explicitly mark that production proof unavailable under the VM lab. Do not invent physical attestations or broaden cloud/classification scope."
+            }
+          ],
+          "dependency_commits": {
+            "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+            "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+            "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+            "78": "16953ee5d70dbb352463b6b76eed072dc0df1fcf",
+            "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+            "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+            "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+            "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+            "82": "18fb58576f2d5a8cbf31463619c652fbf475a5bc"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/61-r1-code.json",
+            "docs/issues/review-inputs/61-r1-security.json"
+          ],
+          "status": "transferred_pending_issue_90_review",
+          "resolution": "Original16 reported findings (with shared roots) follow identity authority to newly filed90. They are not resolved by the move.61 remains pending until90 full fresh review/address clears and61 composition diff is freshly reviewed."
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "8caf6b13963917426b0e8cdf40b8afe6f51f7121",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review61_r2_combined (design-code and design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "90": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+            "90_report_only_HEAD": "c9231b243dceb196a0eccb615055887c9879bb73",
+            "61_predecessor": "5696573a126c0abe26347d3c9700e557489613cf"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/61-r2-combined.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "0bee964 5696573",
+      "round": "2",
+      "reviewed_commit": "8caf6b13963917426b0e8cdf40b8afe6f51f7121",
+      "authoritative_report": "docs/issues/61/report.md",
+      "depends_on_plan_review": 90,
+      "composition_commit": "8caf6b13963917426b0e8cdf40b8afe6f51f7121",
+      "clear_round": 2,
+      "clear_report_commit": "4fe0f143a4e8780ae5c0a861996f6b1d5a638646",
+      "latest_fix_commit": "8caf6b13963917426b0e8cdf40b8afe6f51f7121",
+      "dependency_clear_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+    },
+    {
+      "number": 62,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-62",
+      "branch": "issue/62-zone-cost-aware-placement",
+      "status": "needs_fix",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "f920db069130df65d57874d88ea729ce9f4d56d8",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review62_r1_code (design-code)",
+            "/root/remaining_plan_reviews/review62_r1_security (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "Medium",
+              "summary": "The shared stats v1 contract no longer exists in #47 and contradicts the owning telemetry contract.",
+              "evidence": "62/spec.md S7 and design.md:18,91-109,146,151 build a new root-control-socket stats [VOLUME] response with version=1, 1024 peers and a 4 MiB limit. At actual #47 HEAD 189305c8c757ca3e3d956a254a0857be6c4b1599, design.md:167-218 explicitly supplies latency through #71 observe, schema 2, and says #62 must move its traffic onto that path. #71/contracts.md Telemetry socket and #71/spec.md S3 allow observations only on the separate observe socket, with 64 KiB replies, at most four targets, one pending snapshot and one capture per second; its Go decoder rejects unknown keys/schema. #62 cannot preserve nonexistent latency fields by adding this incompatible root report.",
+              "fix": "Make #62 own the concrete whoever-lands-second composition with #71/#47: the observation command/path, versioned traffic schema and optional-latency combinations, exact Rust/Go decoder/fixture changes, upgrade behavior, collection concurrency and proved byte/row limits. Preserve exact totals or explicit bounded refusal, keep administration commands unchanged, and leave clear dependency plans read-only."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "Medium",
+              "summary": "The added topology refresh has no bounded single-flight schedule or isolation from authority metadata work.",
+              "evidence": "62/design.md:79-83 schedules one ListNodes every 5 s, coalescing results, but specifies neither an outstanding-call bound nor admission/priority isolation. Actual flaminio-metaclient/src/lib.rs:107-126 uses an unbounded mpsc queue and executes call_any synchronously one call at a time; :129-165 tries every endpoint for cfg.timeout. flaminio-io/src/node.rs:314 configures 3 s per endpoint, so a three-endpoint request can take 9 s. Engine::meta_call (engine.rs:608-613) also retains every wait. Observer calls can accumulate and sit ahead of heartbeats/GetVolume/ChangeIsr, or a single slow observer call can delay them, violating S6 and the no-outcome-change invariant rather than merely making zones stale.",
+              "fix": "Define a bounded observer schedule with one outstanding refresh, deadline/completion-based retry behavior, coalescing without queued ticks, and explicit stale-result handling. Give its RPC work an isolated bounded lane or another concrete mechanism that cannot queue authority/heartbeat work behind observation. Keep failed refresh diagnostic-only. Add slow/unavailable-metadata tests proving bounded pending state and unchanged foreground/control scheduling and outcomes."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "Medium",
+              "summary": "The receive design does not account decoded Refused frames before transport discards them.",
+              "evidence": "S1 requires every decoded remote target frame to count. 62/design.md:47-52 exposes length beside decoded Frame/NetEvent, but actual flaminio-node/src/net.rs:278-294 handles Frame::Refused by immediately returning SessionError::Refused and emits only NetEvent::Lost; Lost carries a reason, not that frame or its byte length. Refusals at Hello or on an established session therefore bypass the normal Reply observer path. The test table at :141 covers Hello/Fenced and request/reply purposes, with no refusal receipt test.",
+              "fix": "Specify the outgoing receive hook before the Refused-to-Lost conversion, or a bounded receipt event carrying immutable target generation/peer and actual length. Count a decoded Refused exactly once as Other while retaining existing session failure behavior, and add real codec/transport tests for initial and established-session refusal, including replacement-generation isolation."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Medium",
+              "summary": "The only planned baseline environment is refused by the current physical-clock dependency.",
+              "evidence": "62/design.md:119-135 and intent.md Why9/What we want6 require the existing fl-a/fl-b/fl-c VM lab for loads and drain, without an environment gate or a supported alternative. Current #83/spec.md S1 and design.md admission/profile rules explicitly refuse observed virtualization and state that the existing lab VMs are unqualified, with no force bypass. #90/design.md Lab and documentation already distinguishes pre-#83 exploratory VM evidence from qualified physical fixtures. Thus #62 S10 has no runnable supported baseline when these plans are composed.",
+              "fix": "State that VM execution is an explicitly authorized pre-#83 exploratory campaign only, unavailable once #83 admission is active. Define the equivalent separately authorized qualified physical fixture/workload and truthful blocked/unavailable result when it does not exist. Add environment-refusal fixtures and preserve cleanup, unknown-zone coverage and the prohibition on invented attestations or bypasses."
+            },
+            {
+              "id": "R1-C5",
+              "severity": "Low",
+              "summary": "Replica identity and topology paging are attributed to dependency plans that do not provide them.",
+              "evidence": "62/design.md:18-19,54-57 names #61/#72 as owners of ReplicaRef(node,UUID) and multidisk routes; :83 proposes using future #72 paging for node-label snapshots, and spec.md S4 similarly defers identity/routing gates to #61/#72. Current #61/design.md is only a composition wrapper; #90/contracts.md explicitly owns ReplicaRef and says #72 supplies capacity, not ReplicaRef. #90/core-design.md and wire-contracts.md own exact session/ref/generation and version4 frames. The read #72 spec/design offers capacity through existing ListNodes, with no node-label paging facility. This leaves the traffic adapter tied to nonexistent integration seams.",
+              "fix": "Point to actual #90 identity/session/wire contracts and #72 capacity only. State #62 own concrete whoever-lands-second mapping from validated exact-ref/session attribution to a physical-node counter, retaining generation/ref admission before grouping and supporting the real codec profiles. Remove the nonexistent #72 paging assumption; specify bounded topology behavior using an actual available contract. Leave dependency plans read-only."
+            },
+            {
+              "id": "R1-C6",
+              "severity": "Low",
+              "summary": "The zone write floor is stated as applying to a requested zone level even under bestEffort fallback.",
+              "evidence": "62/intent.md Why2 says that under zone every write crosses R-1 zones at least and calls this the failure-domain rule; design.md:113-115 repeats zone RF=R without the zone-separated qualifier used correctly in spec.md S9. #18/spec.md S1 deliberately stores the requested level/policy, not a bestEffort placement effective level; S10 permits per-chunk fallback. Actual domain.go resolveDomain falls zone to rack/node under bestEffort. A reported zone/bestEffort RF2 volume can therefore have both replicas in one zone and zero payload crossings, legitimately below the stated floor.",
+              "fix": "Qualify the R-1 floor consistently as requiring R distinct known replica zones, or strict zone placement under its assumptions. Explain that requested zone/bestEffort alone does not establish it; use the actual per-chunk placement for a floor comparison and add a fallback fixture. No cost-policy value is needed."
+            },
+            {
+              "id": "SEC62-R1-01",
+              "severity": "High",
+              "summary": "The new periodic topology observer has no concrete bound or isolation from the authoritative metadata queue.",
+              "evidence": "62/design.md:79-84 schedules engine-wide ListNodes every 5 s and retains labels after failed/oversized replies, but states no outstanding-request cap, aggregate cache/label byte bound, cancellation/deadline rule or scheduling isolation. Current flaminio-metaclient/src/lib.rs:98-120 uses an unbounded FIFO serviced by one serial worker; call_any at :124-145 tries each endpoint with the full timeout. flaminio-io/src/node.rs:308-314 sets that timeout to 3 s per endpoint. A three-endpoint stalled refresh can therefore occupy that worker for 9 s while more 5 s observations and existing heartbeat/membership work queue. Node-controlled labels are merged without a length bound at meta/service/service.go:197-205; the 1024-row/4MiB limits in 62/design.md:106-107 apply only to a report, not the new cache or pending refreshes.",
+              "fix": "Specify a bounded observer control path: at most one outstanding refresh, skipped/coalesced ticks while pending, exact node/zone/total-cache byte caps with atomic last-good-snapshot installation, a bounded timeout/backoff and generation/cancellation handling. Isolate or schedule observation work so it cannot build a backlog ahead of registration, membership and existing authoritative refresh work. Test stalled endpoints, repeated ticks, hostile/oversized labels, stale completions and continued bounded authoritative control progress; keep all metadata work off foreground I/O."
+            },
+            {
+              "id": "SEC62-R1-02",
+              "severity": "Medium",
+              "summary": "The report is built against a removed #47 control-socket contract and omits the current telemetry trust/resource boundary.",
+              "evidence": "62/spec.md:S7 and design.md:18,91-109 require root stats [VOLUME] with a shared #47 stats-v1 object, latency fields and up to 4MiB/1024 rows. Actual reviewed 47/design.md:167-218 explicitly has no stats line: observations use #71 observe, schema 2, one pending snapshot, at most one snapshot/s, a 2 s engine wait and a 64KiB line; it explicitly identifies #62 as needing composition. 71/spec.md:S3 and contracts.md:40-87 reserve observations for that separate socket, define telemetry-off/privsep refusal and strict schema/unknown-key decoding. Current control.rs:55-60 spawns one thread per control connection; an individual reply-size bound does not bound repeated expensive snapshot requests. There is consequently no shared current producer/consumer contract or preserved scheduling boundary for the proposed traffic report.",
+              "fix": "Make #62 own a concrete whoever-lands-second extension of the current #71/#47 observation contract: exact request/schema/traffic fields, latency mapping, size/row refusal or another explicitly bounded exact mechanism, cache/rate/pending/time limits, telemetry-off and privsep behavior, upgrade order and Rust/Go golden/invalid fixtures. Preserve no truncation and the settled measurement semantics. Do not claim an existing #47 stats-v1 ABI or silently reopen/edit the clear dependency plans."
+            },
+            {
+              "id": "SEC62-R1-03",
+              "severity": "Medium",
+              "summary": "The declared network attribution tuple does not distinguish two target instances at the same epoch.",
+              "evidence": "62/design.md:47-51 specifies immutable target-volume/epoch/peer attribution and requires dropping ended target generations, but gives no per-target-instance identity. That is insufficient in the standalone current source: Engine::handle(Input::Attach) at engine.rs:640-682 fetches GetVolume without allocating an epoch, detach at :1856 removes the runtime, and start_target at :1596-1621 accepts a token matching that same metadata epoch. Reattaching after detach can therefore construct another TargetRt with the same volume/epoch while an old decoded NetEvent is queued. The new direct late-session attribution intentionally bypasses the removed-key lookup, so volume/epoch alone can charge that old receipt to the replacement. ClientByteCounters at design.md:61-67 correctly use a distinct owned object, but the network path lacks an equivalent specified check.",
+              "fix": "Capture an immutable opaque target-instance generation (or an equivalent unique lifetime discriminator) when the runtime is constructed and carry it through outgoing sessions/events. Compare it with the current runtime before either flow lookup or any counter addition; old sessions of the same live generation may count Other, ended generations must add nothing. Add a detach/reattach test holding the same volume and metadata epoch constant with queued old replies. This is observation isolation, not a reason to change attach/fencing authority."
+            },
+            {
+              "id": "SEC62-R1-04",
+              "severity": "Medium",
+              "summary": "The later baseline assumes VM storage admission that the current clock contract explicitly refuses.",
+              "evidence": "62/design.md:119-135 requires an exclusive fl-a/fl-b/fl-c VM run and presents it as the future authorized baseline without a #83 compatibility/refusal branch. Current reviewed 83/spec.md:S1 requires qualified physical Linux hosts and refuses virtualization/unknown provenance; 83/design.md:21-42 requires the attested clock contract before opening storage/registering/listening, provides no force bypass, and explicitly says the existing lab VMs are unqualified. This is an implementation-order/runtime compatibility constraint, not authorization that a later generic lab approval can override.",
+              "fix": "Specify the check preflight and result when #83 admission is active: refuse before mutating lab state on the current VMs, record the baseline as blocked/uncollected, and move the eventual workload to an explicitly qualified disposable physical topology or clearly identify a valid pre-#83 binary baseline and its limits. Add unsupported-profile fixture coverage. Never fabricate a physical-host attestation or weaken the clock profile for measurement."
+            },
+            {
+              "id": "SEC62-R1-05",
+              "severity": "Low",
+              "summary": "Identity integration still points at #61/#72 and future v2 frames instead of the current #90 owner and composed profile.",
+              "evidence": "62/spec.md:S4 and design.md:18-19,54-57,141 attribute ReplicaRef/routing contracts to #61/#72 and name future v2 frame tests. Current 61/design.md:8-22 is only a composition wrapper; 90/contracts.md:3-17 explicitly owns ReplicaRef and says #72 does not define it. 90/wire-contracts.md:3-22,65-89 defines exact ALPN flaminio-repl/4, HelloIdentity/FencedIdentity, captured ref/generation/session identity and active-profile sizes. Treating the old dependency description as the current hook leaves implementers testing the wrong composed codec and routing seam.",
+              "fix": "Point the measurement-only aggregation to #90 as the sole identity/wire owner, retain node-only aggregation without altering exact-ref authority, and specify whichever implementation lands second carries the immutable observer attribution through those routes and tests encoded lengths on the actual active ordinary/identity/snapshot/root profiles. Leave #61/#72/#90 unchanged and keep the historical #62 approval provenance separate from this correction."
+            }
+          ],
+          "dependency_commits": {
+            "18": "b00ac22d8de3783ce01a183d1f095abcfe7e295d",
+            "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+            "47": "189305c8c757ca3e3d956a254a0857be6c4b1599",
+            "61": "4fe0f143a4e8780ae5c0a861996f6b1d5a638646",
+            "71": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+            "86": "0ad06129c43d4b5a3d1254919cdcc53da678a96e",
+            "90": "c9231b243dceb196a0eccb615055887c9879bb73"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/62-r1-code.json",
+            "docs/issues/review-inputs/62-r1-security.json"
+          ],
+          "status": "needs_fix",
+          "resolution": "Focused revision pending for all reported findings."
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "bb1aae5 f53fad2",
+      "round": "1",
+      "reviewed_commit": "f920db069130df65d57874d88ea729ce9f4d56d8",
+      "authoritative_report": "docs/issues/62/report.md"
+    },
+    {
+      "number": 63,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-63",
+      "branch": "issue/63-autoscaler-integration",
+      "status": "pending",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "90bb6e1 95a79eb"
+    },
+    {
+      "number": 64,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-64",
+      "branch": "issue/64-erasure-coding",
+      "status": "pending",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "9c353f5 86307ff"
+    },
+    {
+      "number": 65,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-65",
+      "branch": "issue/65-rdma-transport",
+      "status": "pending",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "de191df 7b0094f"
+    },
+    {
+      "number": 66,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-66",
+      "branch": "issue/66-nvme-of-and-vhost-user-blk",
+      "status": "pending",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "1d60b36"
+    },
+    {
+      "number": 67,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-67",
+      "branch": "issue/67-rwx-nfs-gateway",
+      "status": "pending",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "fd544c8"
+    },
+    {
+      "number": 68,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-68",
+      "branch": "issue/68-instant-restore",
+      "status": "pending",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "b2413a2"
+    },
+    {
+      "number": 69,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-69",
+      "branch": "issue/69-ui",
+      "status": "pending",
+      "rounds": [],
+      "approved": "2026-11-13",
+      "approval_commit": "11d86de"
+    },
+    {
+      "number": 70,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/70",
+      "branch": "issue/70-csi-volume-expansion-and-xfs-support",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "c3df855",
+      "authoritative_report": "docs/issues/70/report.md",
+      "latest_fix_commit": "75fe538d1812c25173c91e4b2c3c2acdfc7858ff",
+      "approved": "2026-11-13",
+      "approval_commit": "a3dbb5c",
+      "clear_round": 10,
+      "clear_report_commit": "54c44e8"
+    },
+    {
+      "number": 71,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/71",
+      "branch": "issue/71-observability-and-the-kubectl-flaminio-operations-cli",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "177339f",
+      "authoritative_report": "docs/issues/71/report.md",
+      "latest_fix_commit": "f68610a4c6fc3545454538cbf7305071c4e04315",
+      "approved": "2026-11-13",
+      "approval_commit": "215748e",
+      "clear_round": 8,
+      "clear_report_commit": "20af551"
+    },
+    {
+      "number": 72,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/72",
+      "branch": "issue/72-capacity-safety-automatic-rebalancing-and-data-locality",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "8c718f4",
+      "authoritative_report": "docs/issues/72/report.md",
+      "latest_fix_commit": "186074fb9e04314cec4a6f735cc08ace734b3158",
+      "approved": "2026-11-13",
+      "approval_commit": "bbdb51d",
+      "clear_round": 12,
+      "clear_report_commit": "5c76e87",
+      "note": "reopened by the orchestrator's alignment with #70's ordering prerequisite (R7-C2 of #70's review)"
+    },
+    {
+      "number": 73,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/73",
+      "branch": "issue/73-tenant-admission-policies-quotas-and-destructive-operat",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "e2e87a7",
+      "authoritative_report": "docs/issues/73/report.md",
+      "latest_fix_commit": "b7b0b821ee8a2e6a13702126a294576b09e47da5",
+      "approved": "2026-11-13",
+      "approval_commit": "7a91186",
+      "clear_round": 13,
+      "clear_report_commit": "e2ffe00"
+    },
+    {
+      "number": 74,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/74",
+      "branch": "issue/74-runtime-privilege-separation-and-verifiable-release-art",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "0564254",
+      "authoritative_report": "docs/issues/74/report.md",
+      "latest_fix_commit": "f40e9adafb5ff7cfc41b2b26d50875a5ab405705",
+      "approved": "2026-11-13",
+      "approval_commit": "7245c69",
+      "clear_round": 8,
+      "clear_report_commit": "1d0fdab"
+    },
+    {
+      "number": 75,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/75",
+      "branch": "issue/75-per-volume-qos-background-i-o-scheduling-and-performanc",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "02853e8",
+      "authoritative_report": "docs/issues/75/report.md",
+      "latest_fix_commit": "9083e69231a9f41808501d07a61a4cd0a7af745a",
+      "approved": "2026-11-13",
+      "approval_commit": "1a0a7ed",
+      "clear_round": 10,
+      "clear_report_commit": "06d161a"
+    },
+    {
+      "number": 76,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/76",
+      "branch": "issue/76-interrupted-volume-creation-cannot-be-resumed-by-an-ide",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "08a26343a321ff9d78f94446c18cd0c0fa79932f",
+          "report": "docs/issues/76/report.md",
+          "findings_summary": "Medium3 Low1 High2; authoritative report records six R1 findings and resolutions",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "b084261ae6575bdd0e3f3806e18dd2453bfa6111",
+          "report": "docs/issues/76/report.md",
+          "findings_summary": "High2 Medium1; all addressed at9642649",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "9642649278ca6bced116d11f417ca27e45e6f025",
+          "reviewers": [
+            "r76c3 (incremental design-code)",
+            "r76s3 (incremental design-security)"
+          ],
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed all R2 findings resolved: independent root-resurrection and tombstone-bypass invariants/caught mutations, actual backend replays, retained page tails and examination-based cursor fairness. Affected code/dependency paths checked; #78 technical9f0a4b0 current f672280 adds report only. Zero comments including Nits. Runtime implementation/tests and approval remain separate.",
+          "status": "clear"
+        }
+      ],
+      "latest_fix_commit": "9642649278ca6bced116d11f417ca27e45e6f025",
+      "authoritative_report": "docs/issues/76/report.md",
+      "clear_report_commit": "3f21c35",
+      "approved": "2026-11-13",
+      "approval_commit": "b9b1932 628e337"
+    },
+    {
+      "number": 77,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/77",
+      "branch": "issue/77-getvolume-can-mix-a-deleted-volume-header-with-replacem",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "bf18c22564987fa88bc3bdcf999f2e8d6bb1eb75",
+          "reviewers": [
+            "review77_code_r1 (design-code)",
+            "review77_sec_r1 (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review77-R1-C1",
+              "severity": "High",
+              "summary": "ChangeIsr rejected responses still mixed independently read header/named chunks",
+              "evidence": "design.md service scope; service.go ChangeIsr false replies"
+            },
+            {
+              "id": "Review77-R1-C2",
+              "severity": "Medium",
+              "summary": "Pinned Attach missing/unpublished header incorrectly used ordinary NotFound without known-commit context",
+              "evidence": "design.md validated helper and pinned status contract"
+            },
+            {
+              "id": "Review77-R1-C3",
+              "severity": "Medium",
+              "summary": "Existing TestConcurrentTargets equated successful API replies with committed Attach epoch increments",
+              "evidence": "service_test.go TestConcurrentTargets Aborted branch and final epoch assertion"
+            }
+          ],
+          "resolution": "Specified bounded atomic KV.ReadSet and coherent false ISR replies preserving conditional writes; defined every pinned/postcommit error code/context; revised concurrent test accounting and specific regression schedules. Security independently confirmed C1/C2, with no additional comments.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "e2a14a366d43a6c367dae9a8d34c92a63128d40c",
+          "reviewers": [
+            "review77_code_r2 (incremental design-code)",
+            "review77_sec_r2 (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review77-R2-C1",
+              "severity": "Medium",
+              "summary": "New pre-read uniqueness wording would change existing duplicate-index Applied=false/request-order behavior",
+              "evidence": "design.md ReadSet prevalidation; service.go count validation and domain.CheckIsrChange duplicate refusal"
+            }
+          ],
+          "resolution": "All round-one findings were confirmed resolved. Preserved the raw64 count limit, allowed repeated ReadSet keys and kept duplicate-policy refusal after coherent snapshot assembly; added exact duplicate response/order/no-write regressions and existing Rust vector coverage. Security independently reported the same issue as Low, with no additional comments.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "4ab5ed0e6f152bd1a740ed6f1ab6292f5b9ad466",
+          "reviewers": [
+            "review77_code_r3 (incremental design-code)",
+            "review77_sec_r3 (incremental design-security)"
+          ],
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed duplicate-input compatibility resolved, checked the changed ReadSet/policy/test contract against Go and Rust duplicate refusal, and reported no new comments including Nits. Previous round-one findings had already been confirmed resolved. This clears the draft plan, not implementation or human approval.",
+          "status": "clear"
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "bb8df5b"
+    },
+    {
+      "number": 78,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/78",
+      "branch": "issue/78-provisioning-can-place-replicas-on-a-node-after-it-is-m",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "73bfc39e8ffbed0212c057e25190f380f548638b",
+          "reviewers": [
+            "review78_code_r1 (design-code)",
+            "review78_sec_r1 (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review78-R1-C1",
+              "severity": "Medium",
+              "summary": "Absent new placement gate can classify later post-upgrade admissions as earlier than retained legacy drain markers",
+              "evidence": "design.md gate absence, idempotent mark and rollout contracts"
+            },
+            {
+              "id": "Review78-R1-C2",
+              "severity": "High",
+              "summary": "New stale drain-generation completion rule lacks explicit phased model assertion and caught missing-final-compare mutation",
+              "evidence": "design.md model checks/mutations; spec S4/S8"
+            }
+          ],
+          "resolution": "Added bounded gate initialization required before all new admissions/idempotent mutation paths, preserving legacy D while new G>D; specified rollout and lost-response regression. Added phased scan/validation model, current-D assertion, omitted-final-marker-compare mutation and Go replay for unmark/re-mark schedules. Security independently confirmed C2 (rated Medium there), with no additional findings.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "9f0a4b0812a6781de8a03af43996d97e761b3b0f",
+          "reviewers": [
+            "review78_code_r2 (incremental design-code)",
+            "review78_sec_r2 (incremental design-security)"
+          ],
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed legacy gate initialization and explicit stale-generation model/mutation findings resolved, checked affected CAS/rollout/retry paths, and reported no new comments including Nits. Implementation and approval remain separate.",
+          "status": "clear"
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "84d87d0 16953ee"
+    },
+    {
+      "number": 79,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/79",
+      "branch": "issue/79-csi-mount-retries-accept-the-wrong-source-or-incompatib",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "2868b319b8d24e934af916f9d9cc00a9464a8f1d",
+          "report": "docs/issues/79/report.md",
+          "status": "needs_incremental_review",
+          "findings_summary": "Nine actual R1 findings and fixes retained in authoritative author report"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "31bab4a2f5c3146790fec524e9368be0b540aa1e",
+          "dependency_reviewed_commit": "8af7aebf52e98de14cd70543f3aa6edc95ead142",
+          "reviewers": [
+            "review79_code_r2 (incremental design-code)",
+            "review79_sec_r2 (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review79-R2-C1",
+              "severity": "High",
+              "summary": "Node-local missing profile has no authoritative initialization-eligibility source across node movement/state loss",
+              "evidence": "design.md54\u201361,71\u201374,89\u201390; Header has no mode/history; FirstEpoch identifies incarnation only",
+              "fix": "Define trusted durable cross-node initialization grant/history and how new volumes obtain it; unknown/raw-used/missing history must never be reformatted; test fresh node and erased local profile"
+            },
+            {
+              "id": "Review79-R2-C2",
+              "severity": "Medium",
+              "summary": "Ordinary pathname unmount assumes unspecified cooperation with kubelet/other namespace writers",
+              "evidence": "design.md114\u2013123; bidirectional propagation in deploy/csi/driver.yaml130",
+              "fix": "Concrete enforceable coordination or verified Kubernetes serialization contract/deployment constraints, with successful normal cleanup and concurrent external-writer tests"
+            },
+            {
+              "id": "Review79-R2-S3",
+              "severity": "Medium",
+              "summary": "Reordered stage pin/profile before reservation loses durable intent before attachment",
+              "evidence": "design.md54\u201357,89\u201390; node.device attaches before authoritative tuple can be learned",
+              "fix": "Durably reserve initial operation before attach, then bind tuple/profile; define lost reply recovery and crash/profile-write failure cases"
+            }
+          ],
+          "prior_findings": "All nine R1 corrections are explicit; same-node formatting and mount-FD mechanical failures resolved, but new history/coordination approaches remain incomplete.",
+          "resolution": "Addressed in author-scoped4164f639; authoritative issue report records exact changes. Fresh R3 confirmed all prior findings fixed, then found revision fallout; see pending R3 below.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "reviewed_commit": "4164f6390074a643fe2232aa9a3a8caf18d975ea",
+          "reviewers": [
+            "r79c3",
+            "r79s3"
+          ],
+          "findings": [
+            {
+              "id": "Review79-R3-C1",
+              "severity": "High",
+              "summary": "Public initialization admission rule lacks explicit caught bypass mutation"
+            },
+            {
+              "id": "Review79-R3-C2",
+              "severity": "Medium",
+              "summary": "Local authority_revision field has no authoritative API source"
+            },
+            {
+              "id": "Review79-R3-S3",
+              "severity": "High",
+              "summary": "Absent Reserved attachment can restart old epoch after daemon restart; needs explicit #83 process-handoff dependency"
+            }
+          ],
+          "round": 3,
+          "dependency_reviewed_commits": {
+            "15": "8af7aeb",
+            "76": "9642649",
+            "80": "8a92832"
+          },
+          "resolution": "Author addressed all three actual R3 findings in52f7a966; authoritative issue report records independent public-init oracle/caught gate mutation, removed unused authority_revision while preserving server CAS, and explicit required #83 FLCH/nonce composition. No duplicate report entries or approval/runtime claims.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 4,
+          "reviewed_commit": "52f7a966fa29cbea967d9252880636a328bd0b26",
+          "reviewers": [
+            "r79c4 (incremental design-code)",
+            "r79s4 (incremental design-security)"
+          ],
+          "dependency_reviewed_commits": {
+            "15": "8af7aeb",
+            "76": "9642649",
+            "80": "8a92832",
+            "83": "f9a0a51"
+          },
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed all three R3 findings resolved: independent public-init issuance/exposure oracle/caught gate-bypass mutant, removed unsourced local authority_revision retaining server CAS, and mandatory #83 signed process handoff/same-daemon nonce binding with changed-daemon old-epoch refusal. Checked affected schemas/retries/credentials and dependencies; zero comments including Nits. No implementation/runtime/lab tests or approval inferred.",
+          "status": "clear"
+        }
+      ],
+      "latest_fix_commit": "52f7a966fa29cbea967d9252880636a328bd0b26",
+      "shared_dependency_fix": {
+        "issue": 15,
+        "commit": "8af7aebf52e98de14cd70543f3aa6edc95ead142",
+        "base": "48b0ae1"
+      },
+      "approved": "2026-11-13",
+      "approval_commit": "367424c d21c1ca"
+    },
+    {
+      "number": 80,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/80",
+      "branch": "issue/80-metadata-accepts-volume-geometries-that-replica-attach",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "77236aca19edcc1b0a844ada11034bd09cd05fe0",
+          "reviewers": [
+            "review80_code_r1 (design-code)",
+            "review80_sec_r1 (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review80-R1-C1",
+              "severity": "High",
+              "summary": "Scalar AlreadyExists fallback overrides full create identity conflicts",
+              "evidence": "design.md CSI retries versus #76 canonical identity"
+            },
+            {
+              "id": "Review80-R1-C2",
+              "severity": "High",
+              "summary": "Legal geometry still accumulates unrepresentable Fenced uncertainty replies",
+              "evidence": "replica.rs report/unpruned writes; frame.rs decoder bound and encoder assertion"
+            },
+            {
+              "id": "Review80-R1-C3",
+              "severity": "Medium",
+              "summary": "Administrative parseSize still wraps suffix multiplication",
+              "evidence": "meta/cmd/flaminio-meta/main.go parseSize; 17592186044417M wraps to1MiB"
+            },
+            {
+              "id": "Review80-R1-C4",
+              "severity": "Medium",
+              "summary": "Validation covers initial attach but not later malformed metadata refresh/ISR responses",
+              "evidence": "engine.rs MetaWait refresh/ISR conversion; Target::apply_view indexing"
+            }
+          ],
+          "resolution": "Added exact read-only authoritative CheckCreateVolume range/identity RPC and auth/tests to honor both #76 and CSI; included checked admin parsing; specified validation of all later views while preserving higher-epoch deposition. Reproduced C2 safely, filed #86, and made its conservative bounded uncertainty/framing contract an explicit release dependency. Security independently confirmed all four with no additional findings.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "8a92832af76bde0a8da0017d1fbc7d0eecd92421",
+          "reviewers": [
+            "r80c2 (incremental design-code)",
+            "r80s2 (incremental design-security)"
+          ],
+          "dependency_reviewed_commits": {
+            "76": "9642649278ca6bced116d11f417ca27e45e6f025",
+            "86": "412bf8ae49616116170f5b125d6c0d63d5f10488"
+          },
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed all four R1 fixes resolved: administrator-only full-identity/CSI-range compatibility RPC including larger/grown volumes, required #86 bounded uncertainty and checked Fenced framing, checked administrative suffix arithmetic, and validation of later metadata views while preserving higher-epoch deposition. Existing positional ISR row association preserved. Zero comments including Nits; no implementation/runtime/lab testing or approval inferred.",
+          "status": "clear"
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "144eb26 f6834c3"
+    },
+    {
+      "number": 81,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/81",
+      "branch": "issue/81-isr-recovery-sends-more-changes-than-the-metadata-rpc-a",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "f7be923d3255fe7cf55a41631969cedd54721fbe",
+          "reviewers": [
+            "r81c1 (design-code)",
+            "r81s1 (design-security)"
+          ],
+          "dependency_reviewed_commits": {
+            "80": "8a92832",
+            "77": "4ab5ed0"
+          },
+          "findings": [
+            {
+              "id": "Review81-R1-C1",
+              "severity": "Medium",
+              "summary": "Malformed-count handling can suppress a higher authoritative epoch, conflicting with #80",
+              "evidence": "design.md55\u201362; #80design.md79\u201386"
+            },
+            {
+              "id": "Review81-R1-N1",
+              "severity": "Nit",
+              "summary": "Spec/design link nonexistent decisions.md",
+              "evidence": "spec.md3/design.md3"
+            }
+          ],
+          "resolution": "Both reviewers independently reported the same two findings and no others. Reordered generation/request association then higher-epoch deposing using safe current geometry before payload validation on ISR and refresh paths; retain same/lower malformed-reply refusal without cache mutation and add explicit regressions. Added an explicitly unapproved choices record. No implementation/runtime/lab tests or approvals inferred.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "0a8bfca37184f3dd4a45355c6020a58827017dae",
+          "reviewers": [
+            "r81c2 (incremental design-code)",
+            "r81s2 (incremental design-security)"
+          ],
+          "dependency_reviewed_commits": {
+            "80": "8a92832",
+            "77": "4ab5ed0"
+          },
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed higher-epoch ordering and missing choices record resolved, checked affected core/engine paths and #80 contract, and reported zero comments including Nits. No implementation/runtime/lab test or approval inferred.",
+          "status": "clear"
+        }
+      ],
+      "latest_fix_commit": "0a8bfca",
+      "clear_report_commit": "eeae23d",
+      "approved": "2026-11-13",
+      "approval_commit": "15b0c35"
+    },
+    {
+      "number": 82,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/82",
+      "branch": "issue/82-failover-treats-a-partitioned-node-as-shut-down-and-for",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "883c3178b106ab9ba7a6eeb64208aa888b83f49c",
+          "reviewers": [
+            "r82c1 (design-code)",
+            "r82s1 (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review82-R1-C1",
+              "severity": "High",
+              "summary": "Production authority/config/identity/held-fence/return mechanism unspecified, leaving S4/S7 fake-only",
+              "evidence": "design.md45\u201347,85\u201396,109\u2013111,164\u2013181"
+            }
+          ],
+          "resolution": "Both fresh reviewers independently confirmed C1 with no other comments. Added concrete Proposed manual-lockout-v1: bounded immutable Ed25519 operator assertion and inventory bound to cluster/NodeUID/physical serial, explicit physical restart lock held through old-UID retirement, precise signer/config/file/API checks, default refusal and terminal fresh-NodeName/PKI/clean-OS return. Preserve every replica disk/key and #13/#14/#61 obligations; no software claim to measure isolation, no same-identity automatic Clear. Added real crypto/file/API/crash/retirement test requirements, VM refusal and physical qualification boundaries; all changes remain draft/unapproved.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "f2506fb13dacad30ec6c74c8ab7c9a8d951c69c8",
+          "reviewers": [
+            "r82c2 (incremental design-code)",
+            "r82s2 (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review82-R2-N1",
+              "severity": "Nit",
+              "summary": "Authority configuration called Node flag despite belonging to flaminio-csi failover",
+              "evidence": "manual-lockout-contract.md16; main.go69\u201376"
+            }
+          ],
+          "resolution": "Both fresh reviewers confirmed prior HighC1 resolved and independently reported only this Nit. Named exact failover-mode CLI and failover deployment wiring. No other comments or runtime/lab testing/approval.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "7c33526dbe40a4650bf3b0c8edc9886c47da35fc",
+          "reviewers": [
+            "r82c3 (incremental design-code)",
+            "r82s3 (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review82-R3-N1",
+              "severity": "Nit",
+              "summary": "New wiring wording uses nonexistent deployment flaminio-csi-failover",
+              "evidence": "manual-lockout-contract.md102; driver.yaml180"
+            }
+          ],
+          "resolution": "Both fresh reviewers confirmed prior mode Nit fixed and caught this new deployment-name typo. Corrected to existing flaminio-failover. No other findings, implementation/runtime/lab tests or approval.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 4,
+          "reviewed_commit": "6c858756ec7aa9ceabb4530aba3400f8acb62016",
+          "reviewers": [
+            "r82c4 (incremental design-code)",
+            "r82s4 (incremental design-security)"
+          ],
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed deployment-name Nit resolved against actual driver.yaml and reported zero comments including Nits. Earlier High production authority finding was confirmed resolved in R2; R2 mode Nit confirmed fixed in R3. No implementation/runtime/lab tests or approval inferred.",
+          "status": "clear"
+        }
+      ],
+      "latest_fix_commit": "6c858756ec7aa9ceabb4530aba3400f8acb62016",
+      "clear_report_commit": "1ed5ed2",
+      "approved": "2026-11-13",
+      "approval_commit": "66184ce 18fb585"
+    },
+    {
+      "number": 83,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/83",
+      "branch": "issue/83-enforce-and-test-the-lease-clock-contract-across-suspen",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "9b112896122794e21e2c041c0991c533b0a7bf04",
+          "reviewers": [
+            "r83c1 (design-code)",
+            "r83s1 (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review83-R1-C1",
+              "severity": "High",
+              "summary": "Fresh-process recovery lacks authorized enforceable new-epoch agent-to-daemon handoff",
+              "evidence": "design.md98\u2013103,142\u2013144; node.rs309\u2013313/auth.go66\u201370"
+            },
+            {
+              "id": "Review83-R1-C2",
+              "severity": "Medium",
+              "summary": "Admitted clock resolution1ms exceeds2us takeover quantization margin",
+              "evidence": "design.md52,69\u201371"
+            },
+            {
+              "id": "Review83-R1-N1",
+              "severity": "Nit",
+              "summary": "Spec/design link missing decisions.md",
+              "evidence": "spec.md3/design.md3"
+            }
+          ],
+          "resolution": "Both reviewers independently confirmed all three. Added exact signed FLCH local handoff bound to current32-byte process nonce and exact replica-token digest, issued only by authorized new-epoch Attach; preserve node/io restrictions and enforce every target-start entry. Compose #79 init credentials with same-daemon-only recovery and refuse new-daemon old epochs. Qualified error/resolution<=1us, elapsed errorE3us and conservative waitceil((L+E)*(1+rho))+E; independent bound tests/caught mutants. Added unapproved choices. No implementation/runtime/lab tests or approvals inferred.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "5a2fcd86c723b165c15ae0a1889929b81feaf204",
+          "reviewers": [
+            "r83c2 (incremental design-code)",
+            "r83s2 (incremental design-security)"
+          ],
+          "dependency_reviewed_commits": {
+            "15": "8af7aeb",
+            "79": "4164f639"
+          },
+          "findings": [
+            {
+              "id": "Review83-R2-N1",
+              "severity": "Nit",
+              "summary": "Mutation test sentence split across Markdown table rows breaks mapping",
+              "evidence": "design.md161\u2013162"
+            }
+          ],
+          "resolution": "Both fresh reviewers confirmed all three R1 findings resolved and reported only this Nit. Kept test/mutation description within one table row. FLCH134-byte binding and E3us/default5500007 bound independently checked; no implementation/runtime/lab test or approval inferred.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "f9a0a519adf21d4ee2c9048f44139489446c94e7",
+          "reviewers": [
+            "r83c3 (incremental design-code)",
+            "r83s3 (incremental design-security)"
+          ],
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed the table-row Nit resolved and found no revision fallout, including Nits. Earlier R1 technical findings were confirmed resolved in R2. No implementation/runtime/lab tests or approval inferred.",
+          "status": "clear"
+        }
+      ],
+      "latest_fix_commit": "f9a0a519adf21d4ee2c9048f44139489446c94e7",
+      "clear_report_commit": "0f97888",
+      "approved": "2026-11-13",
+      "approval_commit": "67862ad"
+    },
+    {
+      "number": 84,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/84",
+      "branch": "issue/84-validate-the-exported-block-durability-flush-and-discar",
+      "status": "clear",
+      "rounds": [],
+      "authoritative_report": "docs/issues/84/report.md",
+      "latest_fix_commit": "edb8d8d7d9c2c4209e7c38a5f9d914d480d1d2d7",
+      "reviewed_commit": "e342b46",
+      "clear_round": 6,
+      "clear_report_commit": "b75f28c",
+      "approved": "2026-11-13",
+      "approval_commit": "a2e0164"
+    },
+    {
+      "number": 85,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/85",
+      "branch": "issue/85-io-uring-batch-validation-can-return-with-borrowed-buff",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "6e877dfe213ce756d84984e11f5c35f99e64e456",
+          "reviewers": [
+            "review85_code_r1 (design-code)",
+            "review85_sec_r1 (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "Review85-R1-C1",
+              "severity": "High",
+              "summary": "Asynchronous teardown can unwind from a completed Bytes owner's destructor while other writes remain outstanding",
+              "evidence": "design.md asynchronous ownership section; uring.rs reap_commits and Drop"
+            },
+            {
+              "id": "Review85-R1-C2",
+              "severity": "Medium",
+              "summary": "A known flush generation alone does not establish a submitted flush or valid completion result",
+              "evidence": "design.md completion checks; uring.rs reap_commits Flush state handling"
+            }
+          ],
+          "resolution": "Extended fail-stop unwind protection through asynchronous reaping/teardown; require exactly Submitted group owner and fsync result0; added safe retained-backing subprocess and invalid-state/duplicate/result regression plans. Security independently confirmed both findings, with no additional comments.",
+          "status": "needs_incremental_review"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "19db1fe7168c3eff8579752df879f8f92f3dfb70",
+          "reviewers": [
+            "review85_code_r2 (incremental design-code)",
+            "review85_sec_r2 (incremental design-security)"
+          ],
+          "findings": [],
+          "resolution": "Both fresh reviewers confirmed Review85-R1-C1/C2 resolved, checked changed teardown/reaper/coalescing paths and planned regressions, and reported no new comments including Nits. Only plan changes were reviewed; runtime implementation/testing/approval remain separate.",
+          "status": "clear"
+        }
+      ],
+      "approved": "2026-11-13",
+      "approval_commit": "0d95430"
+    },
+    {
+      "number": 86,
+      "worktree": "/tmp/flaminio-plans-2026-11-12/86",
+      "branch": "issue/86-bound-fenced-uncertainty-reports",
+      "status": "clear",
+      "rounds": [],
+      "reviewed_commit": "3d89853",
+      "authoritative_report": "docs/issues/86/report.md",
+      "latest_fix_commit": "3f063b838e53b02d1ffc511a63ae1ddeb1c525b4",
+      "clear_round": 4,
+      "clear_report_commit": "eaa43e8",
+      "approved": "2026-11-13",
+      "approval_commit": "0ad0612"
+    },
+    {
+      "number": 90,
+      "worktree": "/home/jsfakian/Documents/src/flaminio-90",
+      "branch": "issue/90-store-incarnation-authority",
+      "status": "clear",
+      "rounds": [
+        {
+          "round": 1,
+          "reviewed_commit": "98390ae141d287ec9e8e7443bac6389bd3ade9f7",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review90_r1_code (design-code)",
+            "/root/remaining_plan_reviews/review90_r1_security (design-security)"
+          ],
+          "findings": [
+            {
+              "id": "R1-C1",
+              "severity": "High",
+              "summary": "INITIAL creation authority has no defined issuance/consumption transition distinguishing first bootstrap from earned membership.",
+              "evidence": "90/core-design.md:24-25,35-47 allows INITIAL to create and requires MEMBER to exist, but defines INITIAL only by the #76 initial-placement operation. 90/contracts.md:45-79 has no pending-initial/earned field or completion transaction. Actual meta/domain/domain.go:199-207 places every new replica in the ISR before any Hello; reviewed #76 design.md:24,48-59 retains create_operation and its immutable plan after publication, attach and later mutation. Consequently those same metadata fields describe both a never-materialized initial copy and an earned copy on a later attach. The grant algorithm cannot select the stated roles or establish when INITIAL can no longer be reissued. No INITIAL replay/consumption check or caught mutant appears in the proof table.",
+              "fix": "Define authoritative bounded initial-materialization state and the exact transition from creation permission to earned source/ack/lease authority, including completion CAS/durable evidence and partial-bootstrap crash/takeover behavior. A retained create_operation alone must not authorize later empty recreation. Specify role selection at Open/Page/Finish and session transition after completion; add an independent simulator assertion/caught INITIAL-replay mutant plus actual first attach, partial creation restart, lost completion reply and post-earned missing-chunk refusal tests."
+            },
+            {
+              "id": "R1-C2",
+              "severity": "High",
+              "summary": "Cleanup has neither a stored-tombstone byte bound nor a bounded ListTombstones response path.",
+              "evidence": "90/contracts.md:90-106 stores the entire volume union of placed/moving/released/fenced/claimed refs and per-ref charges in one tombstone and adds refs/pending_refs/confirmed_refs to each reply. Per-chunk release and 16-fence limits do not bound the union to a small record; distinct old UUIDs are deliberately not deduplicated by node. 90/budgets.md:9-42 proves only Volume responses; :46-56 also promises exact deletion for paged legacy volumes up to65536 chunks. No tombstone record bytes, list count/bytes, paging cursor or bounded scan is specified. Actual service.go:584-614 lists the entire tombstone prefix and returns every matching tombstone; meta.proto:182-184 has one unpaged repeated result. Many ordinary pending deletions exceed the unchanged4MiB receive limit, and a large exact-ref union can exceed the backend request/value envelope even when its Volume view has a paged path. 90/migration.md:98-106 also assumes a tombstone fits one16KiB item/binding.",
+              "fix": "Define bounded persistent tombstone roots/ref-charge pages and atomic deletion/confirmation progress, or another exact representation whose worst stored transaction fits the real backend byte limit. Add bounded count-and-byte ListTombstones paging (including one large tombstone), stable incarnation/revision semantics, bounded backend scans and sweep continuation; compose enrollment with the same pages. Publish exact storage/transport envelopes and both-backend plus real Go/Rust boundary/+1 fixtures, many pending volumes and maximal legacy union cases without raising receive limits."
+            },
+            {
+              "id": "R1-C3",
+              "severity": "High",
+              "summary": "Mandatory replica-gate puts disable #76 delete-only recovery under etcd NOSPACE.",
+              "evidence": "90/contracts.md:138-149 requires a compared/incremented gate on creation abort and public cleanup, deletion chunk cleanup and final deletion, with no helper exception. 90/budgets.md:175-181 requires the gate write in other deletion transactions and explicitly adds it to post-header cleanup. Reviewed #76 design.md:80-112 deliberately makes unpublished header rollback, root revocation and orphan plan/public-chunk cleanup delete-only: etcd3.7 rejects any transaction containing a Put while NOSPACE is raised (its source fact is design.md:11-12). Adding the proposed gate Put makes those recovery operations fail precisely when they are needed to reclaim space.",
+              "fix": "Compose an explicit delete-only exception for proof-scoped unpublished rollback/revocation/orphan reclamation, retaining identity-mode and exact root/header/key revision comparisons. Explain why absent/unpublished header plus those irreversible fences makes a gate increment unnecessary for grant freshness, or supply a different concrete NOSPACE-safe fencing mechanism. Keep all genuinely live authority changes gated. Update transaction tables and add real-etcd NOSPACE rollback/root-GC/public-and-private-orphan tests, with late publication/authorization/recreation schedules and a caught safety mutant for the exception."
+            },
+            {
+              "id": "R1-C4",
+              "severity": "Medium",
+              "summary": "The new heartbeat contract drops #45 state ordering and re-admits agent heartbeats.",
+              "evidence": "90/budgets.md:126-133 permits an agent/admin heartbeat and replaces TTL work with KV.TxnTTL(cmps,key,value,ttl), a single compared put whose stated comparisons are node+identity-mode. Reviewed #45 design.md State record/heartbeat ordering explicitly refuses agent heartbeats and atomically compares node and node-state, writes alive and transitions Missing to Active. Its lease registration/renewal rules also correlate overlapping commits by revision. The single-put #90 API cannot execute that atomic state update; using it as specified can leave a recovered node Missing or race a Failed transition, and agent liveness can indefinitely hide the stopped data plane. #45 is not included in the final composition-hook list.",
+              "fix": "Preserve #45 own-IO/admin authorization and its node-state comparison/optional state write, adding observed UUID/G and identity-mode checks to that same multi-operation TTL transaction. Reuse the #45 KV.Op TTL/commit-order lease contract rather than introducing an incompatible single-put replacement. Name the second-to-land #45 hook and test Missing recovery, Fail/Admit/Forget races, delayed old-store reports and agent refusal on both backends."
+            },
+            {
+              "id": "R1-C5",
+              "severity": "Medium",
+              "summary": "Enrollment does not handle valid legacy first_epoch=0 volumes before requiring v2 tokens and nonzero incarnation.",
+              "evidence": "90/wire-contracts.md:27-30 requires first_epoch>0 and refuses FLCT v1. Actual pkg/captoken/captoken.go:49-75 emits FLCT v1 whenever Header.FirstEpoch is0; the existing metadata read path and reviewed #77 spec.md:44-46 explicitly support these legacy headers. 90/migration.md inventories/converts header first_epoch but defines no positive-incarnation establishment, durable store-fence conversion, token change or explicit treatment of proven unchanged first_epoch=0 data. Its generic schema2 verification can therefore activate a known-original volume that can never establish the required Hello, despite S8 and budgets.md:46-55 promising a coherent operable path for valid proven legacy geometry.",
+              "fix": "Specify the complete first_epoch=0 migration case. Either define a safe maintenance transition establishing positive incarnation/fences and rewriting every dependent reference before activation without letting DeleteEarlierIncarnation erase preserved data, or define an explicit safe versioned legacy-incarnation representation and token/profile rules. Do not infer a new first_epoch from attach or silently activate an unusable record. Add both-backend and real Store bootstrap tests preserving acknowledged bytes, retained fences/cleanup references and any active historical views across this migration."
+            },
+            {
+              "id": "SEC90-R1-01",
+              "severity": "High",
+              "summary": "INITIAL creation has no durable pending-to-earned transition, so first bootstrap and forbidden recreation are not distinguishable.",
+              "evidence": "90/core-design.md:24-25,35-44,93-95 authorizes INITIAL by the #76 create operation, permits allocation, and requires earned membership for ordinary acknowledgements/source/lease credit. 90/design.md:48-49 says the created copy stays unearned until reconstruction/join, but no INITIAL completion event, stored state, RPC/CAS, or initial join is defined. Actual #76 design.md:22,53-56 retains create_operation permanently and publishes chunks with initial ISR before any physical materialization; the retained operation is not consumable bootstrap authority. #79 initialization-contract.md controls filesystem use, not per-replica first allocation. Therefore treating that existing ISR as MEMBER refuses every newly created absent chunk; treating the persisted create operation as INITIAL indefinitely permits later empty recreation and still lacks the event making a new volume usable.",
+              "fix": "Define the durable per-chunk/ref initial-bootstrap authority and its exact conditional pending-to-earned/consumed transition, including partial creation, lost replies, new epochs and restart. Specify how first-volume zero contents become source/ack/lease eligible and why a consumed operation can never authorize a missing earned chunk. Include contracts/gate/transaction/size hooks and separate independent simulator assertions/caught mutants for initial readiness without durable creation and replayed INITIAL recreation, with real remote/local first-attach and crash/retry tests."
+            },
+            {
+              "id": "SEC90-R1-02",
+              "severity": "High",
+              "summary": "Exact-ref tombstones and their lists have no aggregate storage/response envelope or bounded migration representation.",
+              "evidence": "90/contracts.md:90-106 unions every chunk replica/move/released ref and fence holder into one tombstone with refs, pending_refs and confirmed_refs plus per-UUID charges. UUID changes prevent the former node deduplication from bounding that union. 90/budgets.md:26-42 bounds Volume responses only; :46-97 pages oversized legacy Volumes only. Actual meta/service/service.go:584-614 ListTombstones scans and returns every matching full tombstone, with no page/byte cap. Even legal new RF1/N2955 volumes can retain two distinct old UUID releases per chunk, yielding about 5911 refs and roughly 2 MiB in the two full protobuf ref projections per tombstone with maximal node names; three tombstones pending for the same current ref exceed 4 MiB. The explicitly supported N65536 legacy path can exceed that in one tombstone. 90/migration.md:53-59,98-106,131-144 nevertheless requires each whole tombstone inventory/binding item <=16 KiB and to fit one <=120-key coupled transaction; a legal large tombstone cannot satisfy that representation. Raising receive limits would violate the preserved #80 contract.",
+              "fix": "Give exact cleanup its own bounded persisted representation and list/page/confirmation contract, covering total per-volume ref/charge multiplicity, backend request/value limits, aggregate RPC bytes and stable incarnation/revision pagination. Adapt deletion publication, sweep/admin clients, both-backend migration inventory/conversion and capacity accounting so every admitted new/paged-legacy volume remains deletable without truncating refs or dropping charges. Specify numerical caps and boundary/+1 real transport/backend fixtures, including many tombstones for one node and repeated same-node UUID replacements. Keep dependencies read-only; assign the composition hooks to #90."
+            },
+            {
+              "id": "SEC90-R1-03",
+              "severity": "Medium",
+              "summary": "Enrollment cannot correct an already processed item after changed observations or failed verification.",
+              "evidence": "90/migration.md:131-144 accepts only the next inventory positions, or an identical retry of the latest batch ID; it has no amendment/rebind API. :145-157 begins verification only after enroll_cursor==inventory_count, then sends a failed scan back to ENROLLING with a cursor invalidated and requires explicit correction. :164-169 also allows changed UUID observations after binding and requires quarantine/review before VERIFYING. The contracts specify neither a rewind/revision-safe rewrite of an already converted item nor an operation that records that quarantine and updates coupled refs/charges/evidence. Advancing the enrollment cursor to the end therefore removes the only defined way to repair the affected item, while a replacement enrollment job is explicitly forbidden.",
+              "fix": "Define a bounded conditional correction/rebind-or-quarantine operation for already inventoried/converted items, or an exact durable rewind protocol, including expected original/current hashes, evidence/observation revisions, coupled-key updates, capacity conservation, counter changes, idempotence and invalidation/restart of verification digests. Keep READY immutable. Test changed observation after binding and verification failure after the final batch through correction, restart, lost reply and successful re-verification/activation on both backends."
+            }
+          ],
+          "dependency_commits": {
+            "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+            "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+            "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+            "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+            "78": "16953ee5d70dbb352463b6b76eed072dc0df1fcf",
+            "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+            "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+            "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+            "82": "18fb58576f2d5a8cbf31463619c652fbf475a5bc",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/90-r1-code.json",
+            "docs/issues/review-inputs/90-r1-security.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "R1-C1/SEC90-R1-01 define durable per-chunk pending INITIAL refs, real create/fence completion, bounded metadata earning and a fresh MEMBER Hello, with independent early-earn/replay checks and caught mutants. R1-C2/SEC90-R1-02 replace aggregate tombstones with bounded root/ref/index records, streamed build/migration and bounded exact-ref list/cursor/sweep contracts. R1-C3 preserves proof-scoped delete-only unpublished/orphan reclamation under NOSPACE, exact revision comparisons and a model check/caught mutant. R1-C4 retains #45 own-IO/admin authorization, multi-operation TTL CAS and committed lease ordering while adding UUID/generation/mode checks. R1-C5 uses explicit signed legacy-incarnation profiles for proven first_epoch=0 data without destructive cleanup. SEC90-R1-03 adds conditional correction/quarantine of processed enrollment items, durable idempotent receipts and complete verification restart. These are proposed technical fixes pending fresh incremental review; transferred #61 findings remain dependent on the actual #90 clear loop. Historical approvals remain separate; subsequent revisions unapproved. No runtime/dependency/lab changes.",
+          "fix_commit": "c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8"
+        },
+        {
+          "round": 2,
+          "reviewed_commit": "c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review90_r2_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review90_r2_security (incremental design-security)"
+          ],
+          "findings": [
+            {
+              "id": "SEC90-R2-01",
+              "severity": "Medium",
+              "summary": "The new FE0/LID profile has no composed strict local target handoff and device-lifetime admission contract.",
+              "evidence": "90/migration.md:247-273 promises ordinary/snapshot FE0 Attach and usable I/O after normal #79 checks, and binds LID to replica grants/sessions/read handles/cleanup. No #90 appendix defines LID in the local target/device admission path. At the mapped dependency HEADs, #83 fresh-process-contract.md:23-38 requires a current-process FLCH for target startup and explicitly refuses FirstEpoch0 target lifetimes; #15 device-lifetime-contract.md:19-43 requires FIRST_EPOCH to be nonzero in device-info/detach-device and the validated lifetime tuple; #79 initialization-contract.md:133-147 requires that exact tuple and a purpose1 FLCH even for normal noninitializing attach. Thus a proven FE0 volume can pass the newly added replica profile and enrollment verification yet cannot start a strict target or pass CSI device admission when these supported features are composed. The new AttachIdentityVolume contract in90/budgets.md:83-94 also carries neither a process nonce nor returned handoff.",
+              "fix": "Have #90 specify its whoever-lands-second integration for proven FE0/LID at the strict local target boundary: how fresh-epoch FLCH issuance/verification accepts and binds the signed FLCTv3 identity (including paged Attach), and how #15 device-info/detach lifetime plus #79 normal attach intents persist and compare the exact LID while preserving process nonce/epoch/device checks. Keep dependency plans read-only. Add concrete normal target/CSI and paged-legacy acceptance tests, stale/wrong-LID and handoff refusal, and restart/lost-reply cases; retain the prohibition on fresh-filesystem initialization for legacy data."
+            }
+          ],
+          "dependency_commits": {
+            "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+            "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+            "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+            "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+            "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+            "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+            "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+            "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+            "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+            "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/90-r2-code.json",
+            "docs/issues/review-inputs/90-r2-security.json"
+          ],
+          "status": "needs_incremental_review",
+          "resolution": "SEC90-R2-01 is addressed by the focused local-target-contract.md composition: existing FLCH134 hashes the exact signed FLCTv3/LID, with current process nonce and a real new Attach epoch; normal and paged Attach return that same handoff. Versioned local device commands and persisted normal CSI intents compare the complete LID-aware lifetime, preserving held-device, operation, restart and lost-reply rules. Proven FE0 remains ineligible for fresh filesystem initialization. #15/#79/#83 remain read-only; #90 owns the exact last-to-land hook. This proposed correction awaits fresh incremental review, including the previously partial R1-C5 affected path. Historical approvals remain separate; subsequent revisions unapproved. No runtime/dependency/lab changes.",
+          "fix_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7"
+        },
+        {
+          "round": 3,
+          "reviewed_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+          "reviewers": [
+            "/root/remaining_plan_reviews/review90_r3_code (incremental design-code)",
+            "/root/remaining_plan_reviews/review90_r3_security (incremental design-security)"
+          ],
+          "findings": [],
+          "dependency_commits": {
+            "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+            "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+            "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+          },
+          "inputs": [
+            "docs/issues/review-inputs/90-r3-code.json",
+            "docs/issues/review-inputs/90-r3-security.json"
+          ],
+          "status": "clear",
+          "resolution": "The required fresh review scopes returned zero comments including Nits. No approval is inferred."
+        }
+      ],
+      "origin_issue": 61,
+      "origin_commit": "5696573a126c0abe26347d3c9700e557489613cf",
+      "authoritative_report": "docs/issues/90/report.md",
+      "draft_commit": "98390ae141d287ec9e8e7443bac6389bd3ade9f7",
+      "predecessor_review": {
+        "issue": 61,
+        "round": 1,
+        "reviewed_commit": "5696573a126c0abe26347d3c9700e557489613cf",
+        "inputs": [
+          "docs/issues/review-inputs/61-r1-code.json",
+          "docs/issues/review-inputs/61-r1-security.json"
+        ],
+        "status": "transferred_not_resolved"
+      },
+      "round": "3",
+      "reviewed_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+      "latest_fix_commit": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+      "clear_round": 3,
+      "clear_report_commit": "c9231b243dceb196a0eccb615055887c9879bb73"
+    }
+  ],
+  "terminal_statuses": [
+    "clear",
+    "cleared_completed"
+  ],
+  "status_meanings": {
+    "clear": "Actual plan review returned zero comments including Nits.",
+    "cleared_completed": "User removed completed, merged implementation from the review queue; no new review round claimed."
+  }
+}

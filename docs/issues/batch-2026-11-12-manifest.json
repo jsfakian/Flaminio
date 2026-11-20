@@ -1,0 +1,824 @@
+[
+  {
+    "number": 4,
+    "title": "Run every fuzz target for 10 minutes clean",
+    "state": "CLOSED",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 5,
+    "title": "Zero-copy local reads fail with EINVAL after an attach",
+    "state": "CLOSED",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 6,
+    "title": "A faster first attach after a restart",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 7,
+    "title": "RegisterNode can lose labels when two registrations race",
+    "state": "CLOSED",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 8,
+    "title": "DeleteVolume reads the chunks outside the tombstone's transaction",
+    "state": "CLOSED",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 9,
+    "title": "4K reads at queue depth 1: 84% of raw, the goal is 90%",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 10,
+    "title": "1M sequential writes: about 70% of raw",
+    "state": "CLOSED",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 11,
+    "title": "Reconcile first the chunks that clients wait on",
+    "state": "CLOSED",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 12,
+    "title": "The data plane in Kubernetes",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-12",
+    "branch": "issue/12-data-plane-in-kubernetes",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 13,
+    "title": "Replicas left behind by moves",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-13",
+    "branch": "issue/13-replicas-left-by-moves",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 14,
+    "title": "Tombstones on nodes outside Kubernetes",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 15,
+    "title": "More than one volume per node",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-15",
+    "branch": "issue/15-volumes-per-node",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 16,
+    "title": "Short-lived certificates, rotated",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-16",
+    "branch": "issue/16-short-lived-certificates",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 17,
+    "title": "Draining volumes that are not attached",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-17",
+    "branch": "issue/17-drain-unattached-volumes",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 18,
+    "title": "Moves and drains ignore a volume's failure domain",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-18",
+    "branch": "issue/18-failure-domain-in-moves",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 30,
+    "title": "A volume created again starts above every earlier epoch of its name",
+    "state": "CLOSED",
+    "worktree": "/home/jsfakian/Documents/src/flaminio",
+    "branch": "audit/2026-11-12-correctness",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": []
+  },
+  {
+    "number": 43,
+    "title": "The operator",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-43",
+    "branch": "issue/43-operator",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 44,
+    "title": "Dirty-region resync",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-44",
+    "branch": "issue/44-dirty-region-resync",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 45,
+    "title": "Many-to-many rebuild",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-45",
+    "branch": "issue/45-many-to-many-rebuild",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 46,
+    "title": "Scrubbing and repair",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-46",
+    "branch": "issue/46-scrubbing-and-repair",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 47,
+    "title": "Gray-failure detection",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-47",
+    "branch": "issue/47-gray-failure-detection",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 48,
+    "title": "Live data-plane upgrade",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-48",
+    "branch": "issue/48-live-data-plane-upgrade",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 49,
+    "title": "Chaos test suite",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-49",
+    "branch": "issue/49-chaos-test-suite",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 50,
+    "title": "Encryption at rest with a KMS (Vault, KMIP)",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-50",
+    "branch": "issue/50-encryption-at-rest",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 51,
+    "title": "Snapshots and clones",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-51",
+    "branch": "issue/51-snapshots-and-clones",
+    "existing": [
+      "intent.md",
+      "spec.md"
+    ],
+    "missing": [
+      "design.md"
+    ]
+  },
+  {
+    "number": 52,
+    "title": "Incremental backups to S3",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-52",
+    "branch": "issue/52-incremental-s3-backups",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 53,
+    "title": "Immutable backups",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-53",
+    "branch": "issue/53-immutable-backups",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 54,
+    "title": "Restore to another cluster",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-54",
+    "branch": "issue/54-restore-to-another-cluster",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 55,
+    "title": "Compact mode",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-55",
+    "branch": "issue/55-compact-mode",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 56,
+    "title": "Edge topologies: 1 node, 2 nodes and a witness, 3 nodes",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-56",
+    "branch": "issue/56-edge-topologies",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 57,
+    "title": "TPM-sealed keys",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-57",
+    "branch": "issue/57-tpm-sealed-keys",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 58,
+    "title": "Asynchronous cross-cluster replication",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-58",
+    "branch": "issue/58-async-cross-cluster-replication",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 59,
+    "title": "WAN-tolerant backups",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-59",
+    "branch": "issue/59-wan-tolerant-backups",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 60,
+    "title": "Cloud KMS providers",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-60",
+    "branch": "issue/60-cloud-kms-providers",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 61,
+    "title": "Instance-store NVMe",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-61",
+    "branch": "issue/61-instance-store-nvme",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 62,
+    "title": "Zone-cost-aware placement",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-62",
+    "branch": "issue/62-zone-cost-aware-placement",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 63,
+    "title": "Autoscaler integration",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-63",
+    "branch": "issue/63-autoscaler-integration",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 64,
+    "title": "Erasure coding",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-64",
+    "branch": "issue/64-erasure-coding",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 65,
+    "title": "RDMA transport",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-65",
+    "branch": "issue/65-rdma-transport",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 66,
+    "title": "NVMe-oF export and vhost-user-blk for VMs",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-66",
+    "branch": "issue/66-nvme-of-and-vhost-user-blk",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 67,
+    "title": "RWX through an NFS gateway",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-67",
+    "branch": "issue/67-rwx-nfs-gateway",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 68,
+    "title": "Instant restore",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-68",
+    "branch": "issue/68-instant-restore",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 69,
+    "title": "UI",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-69",
+    "branch": "issue/69-ui",
+    "existing": [
+      "intent.md"
+    ],
+    "missing": [
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 70,
+    "title": "CSI volume expansion and XFS support",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/70",
+    "branch": "issue/70-csi-volume-expansion-and-xfs-support",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 71,
+    "title": "Observability and the kubectl flaminio operations CLI",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/71",
+    "branch": "issue/71-observability-and-the-kubectl-flaminio-operations-cli",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 72,
+    "title": "Capacity safety, automatic rebalancing and data locality",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/72",
+    "branch": "issue/72-capacity-safety-automatic-rebalancing-and-data-locality",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 73,
+    "title": "Tenant admission policies, quotas and destructive-operation audit logging",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/73",
+    "branch": "issue/73-tenant-admission-policies-quotas-and-destructive-operat",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 74,
+    "title": "Runtime privilege separation and verifiable release artifacts",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/74",
+    "branch": "issue/74-runtime-privilege-separation-and-verifiable-release-art",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 75,
+    "title": "Per-volume QoS, background I/O scheduling and performance regression gates",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/75",
+    "branch": "issue/75-per-volume-qos-background-i-o-scheduling-and-performanc",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 76,
+    "title": "Interrupted volume creation cannot be resumed by an idempotent retry",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/76",
+    "branch": "issue/76-interrupted-volume-creation-cannot-be-resumed-by-an-ide",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 77,
+    "title": "GetVolume can mix a deleted volume header with replacement chunks",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/77",
+    "branch": "issue/77-getvolume-can-mix-a-deleted-volume-header-with-replacem",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 78,
+    "title": "Provisioning can place replicas on a node after it is marked draining",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/78",
+    "branch": "issue/78-provisioning-can-place-replicas-on-a-node-after-it-is-m",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 79,
+    "title": "CSI mount retries accept the wrong source or incompatible read-only state",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/79",
+    "branch": "issue/79-csi-mount-retries-accept-the-wrong-source-or-incompatib",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 80,
+    "title": "Metadata accepts volume geometries that replica attach or frame encoding cannot support",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/80",
+    "branch": "issue/80-metadata-accepts-volume-geometries-that-replica-attach",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 81,
+    "title": "ISR recovery sends more changes than the metadata RPC accepts",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/81",
+    "branch": "issue/81-isr-recovery-sends-more-changes-than-the-metadata-rpc-a",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 82,
+    "title": "Failover treats a partitioned node as shut down and force-detaches unrelated workloads",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/82",
+    "branch": "issue/82-failover-treats-a-partitioned-node-as-shut-down-and-for",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 83,
+    "title": "Enforce and test the lease clock contract across suspend and VM pause",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/83",
+    "branch": "issue/83-enforce-and-test-the-lease-clock-contract-across-suspen",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 84,
+    "title": "Validate the exported block durability, flush and discard contract",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/84",
+    "branch": "issue/84-validate-the-exported-block-durability-flush-and-discar",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 85,
+    "title": "io_uring batch validation can return with borrowed-buffer SQEs still queued",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/85",
+    "branch": "issue/85-io-uring-batch-validation-can-return-with-borrowed-buff",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 86,
+    "title": "Bound Fenced uncertainty reports before framing and preserve conservative recovery state",
+    "state": "OPEN",
+    "worktree": "/tmp/flaminio-plans-2026-11-12/86",
+    "branch": "issue/86-bound-fenced-uncertainty-reports",
+    "existing": [],
+    "missing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ]
+  },
+  {
+    "number": 90,
+    "title": "Bind replica authority to store incarnations across replacement and bootstrap",
+    "state": "OPEN",
+    "worktree": "/home/jsfakian/Documents/src/flaminio-90",
+    "branch": "issue/90-store-incarnation-authority",
+    "existing": [
+      "intent.md",
+      "spec.md",
+      "design.md"
+    ],
+    "missing": [],
+    "origin_issue": 61,
+    "origin_commit": "5696573a126c0abe26347d3c9700e557489613cf"
+  }
+]

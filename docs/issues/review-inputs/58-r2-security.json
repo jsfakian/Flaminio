@@ -1,0 +1,23 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review58_r2_security",
+  "reviewed_commit": "c12f7cc1ccf739730b73b9e94a2e6f08adb16efd",
+  "prior_findings": {
+    "R1-S1": "Fixed in the reviewed revision: pair generation/revision CAS is the bounded authority barrier; AttachStandby, per-batch admission and CommitShip require its exact unrevoked configuration. Already admitted data remains isolated, metadata outages stop new batches, and TLS resumption is disabled. Multi-relationship/config/revoke race fixtures and omit_pair_compare mutant are specified.",
+    "R1-S2": "Fixed in the reviewed revision: exact purpose-bound FLDT claims and typed Receiver/Promoter root modes replace ordinary capabilities. Independent ordinary engine/control/maintenance/agent/CSI/ublk refusal, slot accounting, direct-mode refusal, restart behavior and status/detach paths are specified against the current dependency seams, with cross-decode and expose_receiver_as_ordinary checks.",
+    "R1-S3": "Fixed in the reviewed revision: explicit before/after activation roles and insecure refusal cover every DR RPC; self/current receiver and exact worker rules deny foreign/local privilege confusion. System-only standby creation uses #76 and #73 system-provisioner ownership/activation compares; source tenancy/protection and existing protected deletion barriers remain explicit. DR audit events are an identified follow-up rather than a false audit claim.",
+    "R1-S4": "Fixed in the reviewed revision: preauth/authenticated/per-pair caps, finite phase/body/idle/metadata deadlines, bounded nonqueued metadata admission, a global allocation reservation with control reserve, canonical paged manifests/proofs and checked persistent disk/index/root reservations specify resource exhaustion behavior. Stalled/flood/large-manifest/reservation fixtures are named; no timeout is promoted to fencing."
+  },
+  "dependency_commits": {
+    "15": "e36882b7757c2afdb38c1bb4ff0428407618e9c3",
+    "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+    "48": "42d11a8a25a4322624d64a3b4662fb88421a3a2a",
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4"
+  },
+  "findings": [],
+  "report": "Incremental design-security review of 3822c48..c12f7cc excluding report.md, plus affected source and current mapped dependency seams. All four R1 security roots addressed; zero additional independent security findings, including Nits. Reviewed the newly concrete root/wire/lifecycle boundaries, immutable current-target barrier, signed completion claims and exact FLDT isolation, local cancellation and promotion after revocation, retained aborted roots and whole-incarnation deletion drain, finite foreign waits/global accounting and old-profile activation limitations. The separate R2 correctness report at /tmp/flaminio-58-r2-code.json owns the manifest binding/install/recovery gaps, source grant-claim cancellation race and relationship deletion enum drift; those remain open and are not duplicated or waived by this security result. All tests described in the plans remain future work. No repository/dependency edits, subagents, runtime/lab actions, push or merge. Worktree remained clean at the reviewed commit."
+}

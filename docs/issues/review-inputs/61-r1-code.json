@@ -1,0 +1,64 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review61_r1_code",
+  "reviewed_commit": "5696573a126c0abe26347d3c9700e557489613cf",
+  "dependency_commits": {
+    "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+    "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "78": "16953ee5d70dbb352463b6b76eed072dc0df1fcf",
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "High",
+      "summary": "The proposed v2 contract does not compose with the existing snapshot-v2 contract, and the claimed shared #72 schema does not exist.",
+      "evidence": "61/design.md:126-145 assigns ReplicaRef and inserts a UUID before Hello's token under flaminio-repl/2, saying these bytes/fields match #72. Reviewed 72/spec.md Terms and 72/design.md Contracts/capacity-contracts.md instead define one node store, Node.capacity=72, and explicitly no replication-wire changes or ReplicaRef. Reviewed 51/contracts.md:160-200 defines HelloV2 tag0x10 with a u16 version followed by the unchanged existing Hello fields, snapshot-specific request tags and existing replies. The two v2 descriptions do not specify a common Hello/Fenced layout or which profile accepts the other's tags. 52/design.md:60-62 and 58/wire-contracts.md:28-32 also consume a nonzero store_generation that #61 declares but never defines operationally.",
+      "fix": "Make the dedicated identity plan the explicit owner of one concrete ref/generation schema and a composed replication profile: exact HelloV2/Fenced tags and bytes, snapshot operations when enabled, rejection/cross-decode rules, and generation initialization/change/CAS semantics. State which implementation landing second adds each hook and golden/interoperability vector. Keep the reviewed dependency plans read-only and remove the false claim that #72 already supplies these contracts. Preserve historical Q2 approval while marking the revised contract unapproved."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "High",
+      "summary": "Full-response admission is left as future coordination even though the new repeated refs materially invalidate the current bound.",
+      "evidence": "61/design.md:126-129 adds full node+UUID nested messages for replicas, ISR, two move endpoints and releases while retaining old node projections; :146-147 only says to include them and tighten caps if needed. 80/design.md Admission and metadata bounds fixes a specific 4MiB B(N,R); 13/design.md Releases already revises it to 4160+N*(288+264*(R+1)+132), and 51/design.md Budget further accounts for snapshots/encryption. A maximal ReplicaRef alone contains a 128-byte node plus a 36-byte UUID, repeated across all these sets. Neither a numerical combined bound/caps nor treatment of formerly admitted maximum volumes is specified.",
+      "fix": "Derive the exact conservative combined Create/Get/Attach and relevant new-RPC budgets now, including whether legacy projections are emitted, ref/fence/release cardinalities, current #13/#51 additions, nested overhead and token/frame sizes. Publish per-RF caps and exact boundary/over-bound real Go/Rust interop fixtures under unchanged receive limits. Specify maintenance handling for existing volumes that exceed the new representation bound; do not silently make formerly supported clusters unmigratable. Assign the last-landing implementation the concrete admission/fixture hooks."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "High",
+      "summary": "The #13 cleanup conversion lacks the identity-bearing contracts and transaction-bound adjustment needed to prevent confirming another disk's cleanup.",
+      "evidence": "61/design.md:85-90 correctly retains oldRef releases, but :124/:148 merely asks the #13 sweep/release/tombstone adapters to use exact refs. Only ChunkMeta.released_refs is assigned; no Header.Fenced/tombstone/ref confirmation fields or changed ListReleases/ConfirmRelease/ListTombstones/ConfirmDeletion contracts are given. Reviewed 13/design.md Releases uses node strings, ConfirmRelease(node,volume,chunks), Header.Fenced []string, and 118 chunks+header+ledger=120 worst-case operations. 61/design.md:59 adds a replica-gate write to every release transition, making that existing maximum 121 operations. #13's own-node io authorization cannot distinguish an old disk from the replacement on that node by itself.",
+      "fix": "Specify exact stored/proto/CLI/sweep contracts for ref-bound releases, fence holders and tombstones, including opened-store verification before destructive work/confirmation, old-store-return behavior and retained-reference limits. Recompute each compare/op bound (the worst ConfirmRelease write batch becomes at most117 with this added gate) and list every writer that bumps replica-gate, including cleanup/forget/deletion composition. Add both-backend max-bound and same-node wrong-UUID confirmation tests, and explicit last-landing #13/#72 hooks."
+    },
+    {
+      "id": "R1-C4",
+      "severity": "High",
+      "summary": "Same-node replacement bypasses #72's capacity admission and leaves capacity observations unbound to the store that reported them.",
+      "evidence": "61/design.md:73-77 describes ReplaceReplicaStore as a chunk/header/ref CAS with no capacity report, Room check or ledger change. Reviewed 72/design.md Charging and release and capacity-contracts.md charge every new move destination under a ledger compare, retain lost/released copies until exact cleanup, and expose node-keyed reports without store UUID. A replacement can therefore allocate an additional full copy without its charge; changing observed_store_uuid at 61/design.md:25-28 also leaves an old store's alive/capacity report eligible for the new store. A differently sized replacement can inherit the old disk's admission budget.",
+      "fix": "Define the replacement transaction's Room/ledger/charge semantics, preserving conservative charges for inaccessible old refs and snapshot multiplicity when #51 is active. Bind reports and report acceptance to the observed UUID/generation, invalidate old-store reports atomically on identity change, and reject delayed old-store heartbeats. State last-landing hooks for #72 rather than introducing a second capacity authority. Test replacement versus create/move/InitCapacity/release races and the larger-old/smaller-new disk case on both backends."
+    },
+    {
+      "id": "R1-C5",
+      "severity": "High",
+      "summary": "The simulator proof does not yet define executable checks and caught mutants for all newly introduced recovery rules.",
+      "evidence": "61/design.md:152-165 groups broad scenarios and explicitly names only identity_alias and bootstrap-old-token, then says every identity rule will get a check/bypass. Actual ReplicaCore::handle (replica.rs:173-199) takes Hello straight to fencing, the simulator precreates chunks (sim/mod.rs:395-401), and crash retains durable state (:1107-1121). There is no specified pure bootstrap authorization/fence-completion state or independently checked oracle for the new same-node replacement/full-resync/join transition. An identity-alias counterexample does not demonstrate rejection of dirty-only replacement, early UUID binding/join or replayed authorization after an epoch/ref change.",
+      "fix": "Give the sans-I/O bootstrap and replacement transitions concrete events/state/actions, including authorization completion, durable-fence completion, cancellation and chunk roles. Map each new safety rule to its independent simulator assertion, a named violating mutation, and the bounded scenario that must catch it. At minimum separate identity/ack/lease isolation, current-authority bootstrap, full-range-before-join, current-epoch/version replacement and no-authoritative-source refusal. Name real production adapter tests for both accepted remote and synthetic local Hello paths, delayed callbacks, fast-read admission/completion and restart boundaries."
+    },
+    {
+      "id": "R1-C6",
+      "severity": "Medium",
+      "summary": "The approved enrollment policy has no implementable migration/activation API or durable concurrency contract.",
+      "evidence": "61/design.md:100-112 specifies administrator enroll-store, CAS batch cursors, inventory generation and activation, but Files and contracts names no enrollment RPC, persistent schema/keys, request/response, authorization/error rules, batch bound or activation linearization condition. Current meta/service/auth.go only recognizes enumerated RPCs, while current KV supplies ordinary Get/List/Txn APIs. The conceptual maintenance stop does not define how a resumed migration distinguishes inventories or proves every assignment/fence/release/tombstone was converted before identity-required mode resumes. The historical Q1 decision settles provenance policy, not these missing mechanisms.",
+      "fix": "Define the administrator-only enrollment and activation contracts with bounded batches, exact inventory/operation identity, conditional revisions, durable cursor/idempotency, conflict and lost-reply behavior, quarantine representation, and the complete activation predicate. Explain how interrupted migration and concurrent/new io registration are handled under the maintenance barrier. Add real memory/etcd restart/concurrency and auth-matrix tests; preserve the historical administrator-evidence decision without claiming these new details were already approved."
+    }
+  ],
+  "report": "R1 whole-scope design-code/spec review: 5 High, 1 Medium, zero Nits; not clear. Read all #61 intent/spec/design/decisions/ADR-proposal and relevant actual Go/Rust source; source diff against8aaa7a3 is empty in the reviewed issue checkout. Read relevant dependency contracts at the recorded commits. Historical approvals and settled tracker split are preserved; lack of human approval itself is not a finding. Parent owns the already-authorized tracker split. No repo edits, subagents, runtime tests or lab actions. Findings concern the concrete identity slice and should follow it into its dedicated issue; #61 cloud-policy scope remains open."
+}

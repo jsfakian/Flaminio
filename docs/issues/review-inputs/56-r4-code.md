@@ -1,0 +1,1 @@
+Reviewer /root/remaining_plan_reviews/review56_r4_code reviewed b43ee508e00949524907309e931b5d954f442918 incrementally from e22ebd7. R3-C1 fixed: every hold conflict aborts before retry or fault injection, preserves concurrent updates and cannot reuse stale snapshot. Matching ownerless replica/spec fixtures. Zero correctness comments including Nits. No edits or lab actions.

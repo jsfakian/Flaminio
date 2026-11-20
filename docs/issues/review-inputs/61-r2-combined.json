@@ -1,0 +1,93 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review61_r2_combined",
+  "reviewed_commit": "8caf6b13963917426b0e8cdf40b8afe6f51f7121",
+  "dependency_commits": {
+    "90": "331f337d3b847ff2d4faabc572f4ceae74837cd7",
+    "90_report_only_HEAD": "c9231b243dceb196a0eccb615055887c9879bb73",
+    "61_predecessor": "5696573a126c0abe26347d3c9700e557489613cf"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "90/contracts.md:10-43 owns exact ReplicaRef and service-owned persistent G; wire-contracts.md:1-85 defines composed ALPN/version4 Hello/Fenced and feature dispatch, no claim #72 defines it. Actual 90 R1 code/security reports confirm composed wire/lifetime mechanisms; actual R3 code/security clear331f337. 61/spec S1 delegates all such authority, decisions preserves historical Q2 without approving revisions. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "90/budgets.md:7-44 supplies B90=32768+N*(704+352*(R+1)), all five caps and omitted projections; Existing volumes section supplies bounded paged legacy operation. 90/contracts.md Exact cleanup authority and budgets Cleanup envelopes fix the aggregate tombstone continuation identified by actual90 R1; actual90 R2 code/security explicitly close R1-C2/SEC90-R1-02, R3 leaves these unchanged and clears. 61/spec S1/S2 consumes these proofs without a competing envelope. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "90/contracts.md:95-187 defines exact ref-bound release/tombstone/sweep/confirmation, opened-instance verification and old-store return; budgets.md:211-258 recomputes all compare/write caps, ConfirmRelease115 not118. Actual90 R1 reports confirm cleanup identity/115 cap; R2 code/security close additional bounded-tombstone root/list issue, R3 clears. 61/design Composition delegates cleanup and last-to-land hooks. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "90/budgets.md:112-174 binds reports to UUID/G, preserves sole node ledger, charges extra exact replacement copies and snapshot multiplicity, requires Room and seven-key CAS, invalidates stale alive on lifetime change. Actual90 full R1 code/security confirm replacement charges/lifetime mechanisms; actual R2 closes the new heartbeat composition gap, R3 clears. 61/design delegates capacity rather than keeping original unsafe replacement transaction. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "R1-C5",
+      "status": "fixed",
+      "evidence": "90/core-design.md Pure bootstrap machine, per-operation Allowed roles, replacement/frontier completion, and Independent simulator checks table give exact events/actions, independent assertions, named mutants and bounded witnesses; Production adapter tests cover remote/synthetic local, delayed completion and restart. Actual90 R1 confirms these mechanisms but finds INITIAL issue; actual R2 closes consumable INITIAL, R3 clears remaining legacy composition. 61/spec S2 keeps executable model proof as future acceptance, not runtime success. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "R1-C6",
+      "status": "fixed",
+      "evidence": "90/migration.md Barrier/records, Exact RPCs/CLI and Ordering/batches define admin-only bounded durable begin/inventory/enroll/verify/activate, exact operation/revision, quarantine and activation; Correcting already converted items defines correction receipts and full verification restart. Actual90 R2 security explicitly fixes SEC90-R1-03; R3 closes FE0 local target integration and clears. 61/decisions retains original Q1 as history, marks all revisions unapproved. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-01",
+      "status": "fixed",
+      "evidence": "90/core-design.md:36-57 persists Allowed chunk/ref/role/operation/frontier, checks every mutation, and requires a new monotonically numbered full-set Hello for dynamic moves; delayed callbacks are cancelled. Table grant_role_before_create/begin_without_grant and adapter tests cover stale session/operation. Actual90 full R1 security confirms immutable paged grants/durable callback mechanisms; R3 clears. 61/spec S1 delegates this single contract. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-02",
+      "status": "fixed",
+      "evidence": "90/contracts.md:173-180 and budgets.md Combined transaction limits set ConfirmRelease<=115 with header/chunks/node/ledger/gate/mode comparisons; production sweep/model adapter and boundary115/116 tests are specified. Actual90 full R1 code report explicitly confirms115 cap; R2 additionally fixes NOSPACE gate exception and R3 clears. 61/design adds no second batching authority. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-03",
+      "status": "fixed",
+      "evidence": "90/design.md:64-82 binds full replacement to all committed snapshot stages and committed/pinned roots/receipts, exact CompletionFrontier and winning CAS, refusing unimplemented feature profiles before allocation. core-design.md table includes replacement_current_only, join_stale_frontier, replacement_skip_pinned_root independent mutants. Actual90 full R1 code/security confirm historical/root frontier mechanisms; R3 clears unchanged authority. 61/design delegates snapshots/readers/DR integration hooks. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-04",
+      "status": "fixed",
+      "evidence": "90/core-design.md:206-232 caps TLS/pre-Hello, pending/accepted grants, bytes, snapshot storage, deadlines/retry and reply queues; separate bounded control/bootstrap queues reserve control slots with fair dispatch. Actual90 full R1 code/security confirm fair queues/reserved slots/Mem caps; R3 clear retains them. 61/spec S1 expressly delegates resource rules. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-05",
+      "status": "fixed",
+      "evidence": "90/core-design.md:120-204 defines snapshot API/etcd fixed-revision reads and Mem caps, own-IO server-owned random grants/caller-token-full-set digest, exact cursor/retry/Finish four-comparison authority point, restart/expiry/compaction and permanent gate writers. Actual90 full R1 confirms paged grant mechanisms; R2 closes proof-scoped delete-only gate exception without reopening live authority, R3 clears. 61/spec S1 delegates bootstrap/membership rules. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-06",
+      "status": "fixed",
+      "evidence": "Same moved root as61 R1-C1:90/wire-contracts.md supplies exact version4 ALPN/tag/layout/profile dispatch, old-profile rejection and golden/interoperability tests, contracts.md owns ref/G instead of false #72 ownership. Actual90 R1 code/security confirm composed v4; R3 clears. 61/adr-proposal is only historical pointer and61/decisions separates approved historical v2 from unapproved revision. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-07",
+      "status": "fixed",
+      "evidence": "Same moved cleanup root as61 R1-C3:90/contracts.md:95-187 owns bounded root/ref/index schema, exact list/confirm fields, incarnation/revision and own-node/observed-store checks, opened Store instance checks, A-return/B-refusal and charge release. Actual90 R1 confirms exact cleanup auth; R2 code/security close additional aggregate storage/list issues; R3 clears. 61/design delegates cleanup hooks. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-08",
+      "status": "fixed",
+      "evidence": "Same moved envelope root as61 R1-C2:90/budgets.md full-volume/paged/cleanup sections compute concrete numerical limits and real boundary fixtures;90/wire-contracts.md Exact bounds computes Hello/Fenced and strict refusal. Actual90 R2 explicitly closes remaining aggregate tombstone envelope issue; R3 clear includes handoff allowance. 61/spec S1 keeps one wire/resource owner. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-09",
+      "status": "fixed",
+      "evidence": "90/contracts.md:10-43 defines persistent nondeleted service-owned uint64 lifetime, starts1, UUID/enrollment change increments including ABA, checked overflow, label/same-UUID/restart preservation, role ownership and atomic alive invalidation. core-design.md separates G, replica gate, snapshot revision/page cursor. Actual90 full R1 code/security confirm lifetime/ABA/ownership, R3 clears. 61/spec S1 delegates generation and61/design names one ref/generation contract. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    },
+    {
+      "id": "SEC61-R1-10",
+      "status": "fixed",
+      "evidence": "90/design.md:131-144 explicitly distinguishes separately authorized pre-83 exploratory VM tests from physical-boottime-v1 qualified production proof, unavailable in current VM lab, without bypass/false attestations. Actual90 full R1 code/security confirm physical-only qualification; later reviews clear. 61/spec S2 outcome8 preserves live/detached proof while explicitly retaining VM clock limits and missing evidence;61/design Lab authorizes no action. Fixed means addressed in the delegated review-clear proposed plan, not implemented or human-approved."
+    }
+  ],
+  "findings": [],
+  "report": "Fresh combined design-code/design-security R2 review of5696573a126c0abe26347d3c9700e557489613cf..8caf6b13963917426b0e8cdf40b8afe6f51f7121 excluding report.md: zero comments including Nits. Read all five changed composition documents, original source intent/history and both actual61 R1 artifacts; individually mapped all16 transferred findings to the exact90 reviewed authority and real90 R1/R2/R3 code/security artifacts. Verified90 actual R3 clears both focuses at331f337d3b847ff2d4faabc572f4ceae74837cd7 andc9231b2 differs only by report.md. This is a bounded composition/reference review, not a new full90 audit or reopening of clear dependencies.61 preserves original slice outcomes and provenance, single technical authority, later45/cloud dependency boundaries, distinct historical approval versus unapproved revisions, actual future acceptance including live/detached data proof and VM clock limits. A clear draft is neither runtime/cloud protection nor implementation evidence. Local links and git diff --check pass. Both61 and90 worktrees clean and exact HEADs unchanged on final verification. No repository edits, dependency changes, subagents, tracker writes, runtime tests, benchmarks, cloud/VM/disk/lab actions; only this /tmp JSON artifact written."
+}

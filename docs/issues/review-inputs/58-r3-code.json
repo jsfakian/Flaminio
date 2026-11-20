@@ -1,0 +1,30 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review58_r3_code",
+  "reviewed_commit": "c055592433c77c81bd483e535d5e0afbdbdffdab",
+  "prior_findings": {
+    "R2-C1": "Manifest construction/publication gap fixed: BindDrManifest binds full canonical bytes and hash before Begin, with actual closure reconciliation. New terminal retry ambiguity is R3-C1; Sending retry wording is R3-N1.",
+    "R2-C2": "Fixed: immutable pre-page/range RootBindManifest record, descriptor/blob preimage persistence, full Incoming root, typed root/page recovery reads and empty-manifest/crash/takeover/join fixtures are specified.",
+    "R2-C3": "Fixed: outgoing/source-guard predicates and atomic GrantRef publication freeze claims against cancellation; deterministic discovery, bounded transactions, closure masks, collection eligibility, EndDrSource and caught late-grant mutant are specified.",
+    "R2-C4": "Fixed: deletion specifies Relationship.REVOKED plus generation/fence changes and separate incoming cancellation with replay/recreation coverage."
+  },
+  "dependency_commits": {
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72"
+  },
+  "findings": [
+    {
+      "id": "R3-C1",
+      "severity": "Medium",
+      "summary": "Closure retries do not define the already-CLOSED path after eligible grant collection.",
+      "evidence": "docs/issues/58/contracts.md:179-180 requires every CancelShip retry to invoke the reconciler for either terminal outcome; :188-194 defines that reconciler only for Committed/Cancelled/Closing, says lost replies repeat its read-back, and treats a missing COMPLETED grant as Internal. Yet :199-203 explicitly permits collecting grants once outgoing is CLOSED and only names EndDrSource as accepting that absence. A lost final closure reply followed by retry can therefore encounter CLOSED with collected grants and has no successful idempotent transition under these predicates.",
+      "fix": "Define an already-CLOSED fast path for ReportDrProgress(check_closure=true) and the reconciler used by CancelShip: return the unchanged durable outcome/all-closed mask without re-closing collected grants. Restrict missing-completed-grant=Internal to operations that have not durably established closure. Add lost final closure reply -> collection -> progress/cancel retry fixtures for both terminal outcomes."
+    },
+    {
+      "id": "R3-N1",
+      "severity": "Nit",
+      "summary": "The identical bind retry condition ambiguously requires COMPLETED on SENDING.",
+      "evidence": "docs/issues/58/contracts.md:162-164 says identical bind retry on Sending/Committed/Closing/Closed with COMPLETED outcome returns the stored record. Sending precedes foreign Begin/completion, so its normal outcome is still UNSPECIFIED; lifecycle.md:412-413 explicitly expects a lost bind response to return the same Sending record.",
+      "fix": "Separate the predicate: identical bound SENDING retries return the record with UNSPECIFIED outcome; completed Committed/Closing/Closed retries return their recorded completed outcome; cancelled outcomes refuse. Keep the lost-bind-response fixture aligned."
+    }
+  ],
+  "report": "Incremental design-code review of c12f7cc..c055592 excluding report.md, plus affected root/wire/lifecycle and #52 grant/collection seams. R2 mechanisms addressed; one Medium retry-contract gap and one Nit remain. Checked new disk record/page byte offsets, persistence ordering, typed recovery correlation, grant transaction bounds and collection eligibility against current source/dependency contracts. git diff --check passed; issue worktree clean at reviewed HEAD. No repository/dependency edits, subagents, runtime tests or lab actions."
+}

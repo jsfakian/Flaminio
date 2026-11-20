@@ -1,0 +1,61 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review62_r1_code",
+  "reviewed_commit": "f920db069130df65d57874d88ea729ce9f4d56d8",
+  "dependency_commits": {
+    "18": "b00ac22d8de3783ce01a183d1f095abcfe7e295d",
+    "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+    "47": "189305c8c757ca3e3d956a254a0857be6c4b1599",
+    "61": "4fe0f143a4e8780ae5c0a861996f6b1d5a638646",
+    "71": "35ad29f01e447354df04cf6295b260c4c5cc460c",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "86": "0ad06129c43d4b5a3d1254919cdcc53da678a96e",
+    "90": "c9231b243dceb196a0eccb615055887c9879bb73"
+  },
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "Medium",
+      "summary": "The shared stats v1 contract no longer exists in #47 and contradicts the owning telemetry contract.",
+      "evidence": "62/spec.md S7 and design.md:18,91-109,146,151 build a new root-control-socket stats [VOLUME] response with version=1, 1024 peers and a 4 MiB limit. At actual #47 HEAD 189305c8c757ca3e3d956a254a0857be6c4b1599, design.md:167-218 explicitly supplies latency through #71 observe, schema 2, and says #62 must move its traffic onto that path. #71/contracts.md Telemetry socket and #71/spec.md S3 allow observations only on the separate observe socket, with 64 KiB replies, at most four targets, one pending snapshot and one capture per second; its Go decoder rejects unknown keys/schema. #62 cannot preserve nonexistent latency fields by adding this incompatible root report.",
+      "fix": "Make #62 own the concrete whoever-lands-second composition with #71/#47: the observation command/path, versioned traffic schema and optional-latency combinations, exact Rust/Go decoder/fixture changes, upgrade behavior, collection concurrency and proved byte/row limits. Preserve exact totals or explicit bounded refusal, keep administration commands unchanged, and leave clear dependency plans read-only."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "Medium",
+      "summary": "The added topology refresh has no bounded single-flight schedule or isolation from authority metadata work.",
+      "evidence": "62/design.md:79-83 schedules one ListNodes every 5 s, coalescing results, but specifies neither an outstanding-call bound nor admission/priority isolation. Actual flaminio-metaclient/src/lib.rs:107-126 uses an unbounded mpsc queue and executes call_any synchronously one call at a time; :129-165 tries every endpoint for cfg.timeout. flaminio-io/src/node.rs:314 configures 3 s per endpoint, so a three-endpoint request can take 9 s. Engine::meta_call (engine.rs:608-613) also retains every wait. Observer calls can accumulate and sit ahead of heartbeats/GetVolume/ChangeIsr, or a single slow observer call can delay them, violating S6 and the no-outcome-change invariant rather than merely making zones stale.",
+      "fix": "Define a bounded observer schedule with one outstanding refresh, deadline/completion-based retry behavior, coalescing without queued ticks, and explicit stale-result handling. Give its RPC work an isolated bounded lane or another concrete mechanism that cannot queue authority/heartbeat work behind observation. Keep failed refresh diagnostic-only. Add slow/unavailable-metadata tests proving bounded pending state and unchanged foreground/control scheduling and outcomes."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "Medium",
+      "summary": "The receive design does not account decoded Refused frames before transport discards them.",
+      "evidence": "S1 requires every decoded remote target frame to count. 62/design.md:47-52 exposes length beside decoded Frame/NetEvent, but actual flaminio-node/src/net.rs:278-294 handles Frame::Refused by immediately returning SessionError::Refused and emits only NetEvent::Lost; Lost carries a reason, not that frame or its byte length. Refusals at Hello or on an established session therefore bypass the normal Reply observer path. The test table at :141 covers Hello/Fenced and request/reply purposes, with no refusal receipt test.",
+      "fix": "Specify the outgoing receive hook before the Refused-to-Lost conversion, or a bounded receipt event carrying immutable target generation/peer and actual length. Count a decoded Refused exactly once as Other while retaining existing session failure behavior, and add real codec/transport tests for initial and established-session refusal, including replacement-generation isolation."
+    },
+    {
+      "id": "R1-C4",
+      "severity": "Medium",
+      "summary": "The only planned baseline environment is refused by the current physical-clock dependency.",
+      "evidence": "62/design.md:119-135 and intent.md Why9/What we want6 require the existing fl-a/fl-b/fl-c VM lab for loads and drain, without an environment gate or a supported alternative. Current #83/spec.md S1 and design.md admission/profile rules explicitly refuse observed virtualization and state that the existing lab VMs are unqualified, with no force bypass. #90/design.md Lab and documentation already distinguishes pre-#83 exploratory VM evidence from qualified physical fixtures. Thus #62 S10 has no runnable supported baseline when these plans are composed.",
+      "fix": "State that VM execution is an explicitly authorized pre-#83 exploratory campaign only, unavailable once #83 admission is active. Define the equivalent separately authorized qualified physical fixture/workload and truthful blocked/unavailable result when it does not exist. Add environment-refusal fixtures and preserve cleanup, unknown-zone coverage and the prohibition on invented attestations or bypasses."
+    },
+    {
+      "id": "R1-C5",
+      "severity": "Low",
+      "summary": "Replica identity and topology paging are attributed to dependency plans that do not provide them.",
+      "evidence": "62/design.md:18-19,54-57 names #61/#72 as owners of ReplicaRef(node,UUID) and multidisk routes; :83 proposes using future #72 paging for node-label snapshots, and spec.md S4 similarly defers identity/routing gates to #61/#72. Current #61/design.md is only a composition wrapper; #90/contracts.md explicitly owns ReplicaRef and says #72 supplies capacity, not ReplicaRef. #90/core-design.md and wire-contracts.md own exact session/ref/generation and version4 frames. The read #72 spec/design offers capacity through existing ListNodes, with no node-label paging facility. This leaves the traffic adapter tied to nonexistent integration seams.",
+      "fix": "Point to actual #90 identity/session/wire contracts and #72 capacity only. State #62 own concrete whoever-lands-second mapping from validated exact-ref/session attribution to a physical-node counter, retaining generation/ref admission before grouping and supporting the real codec profiles. Remove the nonexistent #72 paging assumption; specify bounded topology behavior using an actual available contract. Leave dependency plans read-only."
+    },
+    {
+      "id": "R1-C6",
+      "severity": "Low",
+      "summary": "The zone write floor is stated as applying to a requested zone level even under bestEffort fallback.",
+      "evidence": "62/intent.md Why2 says that under zone every write crosses R-1 zones at least and calls this the failure-domain rule; design.md:113-115 repeats zone RF=R without the zone-separated qualifier used correctly in spec.md S9. #18/spec.md S1 deliberately stores the requested level/policy, not a bestEffort placement effective level; S10 permits per-chunk fallback. Actual domain.go resolveDomain falls zone to rack/node under bestEffort. A reported zone/bestEffort RF2 volume can therefore have both replicas in one zone and zero payload crossings, legitimately below the stated floor.",
+      "fix": "Qualify the R-1 floor consistently as requiring R distinct known replica zones, or strict zone placement under its assumptions. Explain that requested zone/bestEffort alone does not establish it; use the actual per-chunk placement for a floor comparison and add a fallback fixture. No cost-policy value is needed."
+    }
+  ],
+  "report": "Fresh R1 full intent/spec/design/decisions correctness and design-code review, including the cached issue body/comments, repository instructions/reviewer role/supervisor instructions, current source at the actual reviewed HEAD, accepted ADR constraints, and relevant mapped dependency contracts. Verified target inflight purpose retention, request/reply lifecycle, retransmit/late joiner behavior, target generations and remote key attribution, NetCommand/NetEvent and codec receive/refusal paths, local dispatch exclusion, frontend final pre-commit hooks on copied/zero-copy and fast/slow paths, metadata queue/timeouts, existing control command/CSI/lab helper behavior, report bounds/overflow/topology/lifetime requirements and current identity/framing/placement contracts. The final ublk hook is feasible and correctly placed before submit_io_commit_cmd await; no new replication safety policy or simulator mutant is required for measurement alone. Historical engine-handoff TX, decoded RX, report-time zone classification and frontend-success-offered denominators were preserved. Six genuine comments: four Medium and two Low; no additional Nits. Dependency hashes identify actual checkout HEADs read, not human approvals: #90 technical-clear 331f337d3b847ff2d4faabc572f4ceae74837cd7 with actual report HEAD c9231b243dceb196a0eccb615055887c9879bb73; #47 technical-clear 3bb708eec85f3a1a9476b57cfa8843e2e0a3fac7 with actual latest report HEAD 189305c8c757ca3e3d956a254a0857be6c4b1599. Dependency drafts are not implemented merely because reviewed. No repository/dependency/tracker/runtime/lab/disk/benchmark mutation or tests were performed. Only this /tmp JSON artifact was written. #62 HEAD and clean status were reverified unchanged."
+}

@@ -1,0 +1,87 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review59_r1_combined",
+  "reviewed_commit": "4f9eff31e79b4ffa7410cee868ab3b90a8c0fe07",
+  "dependency_commits": {
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "53": "105dac041ccfca18ba1bcd4984e84115efceb200",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "74": "5a1423d9ed403aae74561d29e58fa86a8acfc1b3",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138"
+  },
+  "findings": [
+    {
+      "id": "R1-C1",
+      "severity": "High",
+      "summary": "The wire shaper, window gate and privileged setup still have no implementable mechanism.",
+      "evidence": "#59 design.md:56\u201376,128\u2013129,159\u2013165 defer exact qdisc/offload/buffer settings and tail to qualification, without choosing a shaper/gate or a helper interface/lifetime. #74 design/spec cover ublk/disk privilege separation, retain SYS_ADMIN only, and provide no network-namespace/shaper setup operation. #52's same Rust worker also opens metadata and snapshot-reader connections, which cannot all be placed behind the store window gate.",
+      "fix": "Specify a concrete proposed Linux profile now: topology and object-only connector isolation, IP packet accounting/offload settings, qdisc/buffer limits and how B is derived, packet gate update/control ownership, root setup entry point with validated bounded inputs, worker credentials, failure/kill/restart cleanup and refusal behavior. Keep measured qualification results pending, but do not defer the mechanism. Add ownership, forged-input, partial-setup and killed-worker/gate tests. Do not infer that #74 supplies an unplanned networking helper."
+    },
+    {
+      "id": "R1-C2",
+      "severity": "High",
+      "summary": "Socket-readiness exclusion can suppress genuine stalls forever; shaper waiting can also trigger false connection/header timeouts.",
+      "evidence": "#59 design.md:80\u201385 advances upload idle elapsed only when 'window/budget/socket readiness permit sending'. A peer that stops reading makes the socket nonwritable, so remote-progress idle never reaches120s. Conversely, cap min1byte/sec (line40) can delay even a TCP SYN beyond connect30s, independently of the userspace payload limiter. No concrete way to distinguish qdisc wait, TCP progress and server response progress is specified.",
+      "fix": "Define phase-specific eligible elapsed and observable progress events. Exclude only explicit local pacing/gate suspension, count remote-caused backpressure as stall time, and account for shaper delay in connect/header/response timing. Identify the actual connector/transport signals used. Add tests for a peer that accepts but never reads, a full send buffer, a server that consumes but never responds, and a1byte/sec handshake/response with qualified local shaping."
+    },
+    {
+      "id": "R1-C3",
+      "severity": "High",
+      "summary": "SDK admission/progress/cancellation remains an unspecified implementation gate.",
+      "evidence": "#59 design.md:49\u201354,80\u201387,171\u2013178 and decisions.md's historical SDK gate still ask whether the chosen SDK exposes needed controls. Current #52 contracts.md:417\u2013425 chooses aws-sdk-s3 and specifies an adapter seam, not an existing implementation of those hooks; current Cargo workspace has no backup/SDK code. Merely naming before_attempt does not define per-byte pacing, remote progress, retry ownership, or cancellation of pooled sockets.",
+      "fix": "Research and choose a concrete proposed aws-sdk-s3/Smithy HTTP integration: pinned compatible API/profile, attempt admission location, explicit SDK retry/redirect/credential behavior, connector/body wrapper and transport progress/idle/cancel controls, including pooled connections. Where SDK hooks cannot supply the contract, name the custom connector/HTTP implementation that does. Record research evidence and conformance fixtures; measured backend qualification may remain future."
+    },
+    {
+      "id": "R1-C4",
+      "severity": "High",
+      "summary": "The 'pacing only delays work' integration does not preserve #53's deadline and automatic-completion behavior.",
+      "evidence": "#59 design.md:97\u2013109 only says to check retention and use #52's original commit protocol. Current #53 design.md:80\u2013107 and contracts.md 'One root per operation' require store-time D/E, at most one re-cover, a pre-PUT allowance, and permanent incomplete status for a root accepted late, requiring an administrator's abort and a new operation. A gate may defer the root PUT over a closed window after its deadline check; a tiny cap can make root transmission itself exceed D. These are realistic configured cases where this living run cannot finish automatically even after the link returns.",
+      "fix": "Specify the exact #53-aware admission sequence after every limiter/window wait: refresh qualified store time, revalidate/renew exact-version retention, budget cover/root transfer under the policy, and never dispatch a known-stale root. Preserve #53's one-root/late-root semantics; explicitly diagnose incompatible budget/policy or the unavoidable late-root terminal outcome instead of promising unconditional eventual completion. Add close-during-cover, close-before-root, low-rate large-root, lost-root-ACK and late-root tests."
+    },
+    {
+      "id": "R1-C5",
+      "severity": "Medium",
+      "summary": "A sender's shaper does not prove the same arbitrary-interval envelope at the remote arrival point.",
+      "evidence": "#59 spec.md:35\u201338 requires bytes<=R*dt+B at the remote observation point; design.md:58\u201365 shapes the local namespace and captures remotely. A downstream queue can accumulate shaped traffic and release it in a burst larger than B, even when local departures satisfy the envelope. No path delay/buffering assumption or enlarged remote B is defined.",
+      "fix": "Choose an exact authoritative enforcement/observation boundary. Either guarantee the envelope at the owned local egress and treat remote arrival captures as diagnostics, marking the spec adjustment unapproved, or define and qualify downstream buffering/jitter bounds and include them in the remote envelope. Add a delayed/batched-path counterexample to the qualification tests."
+    },
+    {
+      "id": "R1-C6",
+      "severity": "Medium",
+      "summary": "S6's bounded resume/control traffic has no concrete accounting bound or resume protocol.",
+      "evidence": "#59 spec.md:57\u201361 requires separately bounded control/manifest traffic; design.md:97\u2013101 gives only K and 'small bounded protocol overhead', and115\u2013116 provides a counter. Current #52 contracts.md:383\u2013399 permits encoded blocks up to4194384 bytes and pages/roots up to1048656 bytes;429\u2013433 requires revalidating previously referenced versions, while a lost PUT can require a full exact-version GET. This is graph-sized inbound traffic and request work, not merely a small fixed overhead after a cut.",
+      "fix": "State the exact encoded in-flight payload bound K*(4194304+80), separately define page/root/control and verification-GET budgets/counts as functions of the bounded archive graph, and define what the 'resume episode' ends at. Count both directions and requests before the first new upload, distinguish retransmitted PUT payload from required GET readback, and add large-manifest/receipt-revalidation/lost-ACK fixtures. Keep the outbound cap boundary explicit."
+    },
+    {
+      "id": "R1-C7",
+      "severity": "Medium",
+      "summary": "The lab section is not runnable on the actual dependency topology and ignores #83's VM exclusion.",
+      "evidence": "#59 design.md:131\u2013165 names scripts/target but no setup grammar, run ownership, endpoint routing, capture location, fixture sizes/window duration or cleanup sequence. Current #52 design.md:334 onward runs both worker and candidate store on fl-w, with a2GiB file-backed store and <=1GiB test data; current #53 has a different8334 store. #83 design.md 'Profile admission' refuses the current lab VMs and supplies no unsafe bypass.",
+      "fix": "Provide concrete proposed target/subcommands and a bounded fixture workflow using a specified store instance/port, worker location, namespace path and independent capture boundary, exact snapshot/restore/verification and retention-aware cleanup. State the permitted execution order before #83 admission lands, or move the future full write-load qualification to an authorized disposable qualified physical environment. Keep VM fake/pure checks distinct and add parser/setup/cleanup fixtures."
+    },
+    {
+      "id": "R1-C8",
+      "severity": "Low",
+      "summary": "Default no-policy behavior conflicts with #52's exit-on-store-failure contract.",
+      "evidence": "#59 spec.md:33 says 'No cap/window preserves #52 behavior', while S4/design.md:103\u2013109 require living-run automatic outage retry. Current #52 design.md:85\u201386,183\u2013187 and contracts.md CLI explicitly exit1 on store failure, retaining grant/checkpoint for a rerun. The #59 text does not say whether automatic retry is enabled only when a transfer policy is supplied.",
+      "fix": "Explicitly choose the activation/default semantics and update S1/S4/CLI consistently. Add a no-flags compatibility fixture and a policy-enabled outage fixture, preserving the historical approval record and marking the changed default interpretation unapproved."
+    },
+    {
+      "id": "R1-C9",
+      "severity": "Low",
+      "summary": "Recording a tzdb version does not define deterministic cross-language or restart behavior when zone rules change.",
+      "evidence": "#59 design.md:22,33\u201343,124\u2013126 records tzdb version and policy hash but neither chooses a time-zone data source/version for Rust/Go nor says whether restart under another tzdb is accepted. Identical IANA zone/window config can produce different admissions after a rule update, despite S1's settings consistency and S8's shared deterministic rules.",
+      "fix": "Specify a proposed tzdb source/version contract, persisted policy identity and restart/update behavior; reject an unacknowledged rules mismatch or explicitly revision it. Include actual UTC transition vectors for repeated/nonexistent times, crossing midnight and rule-version mismatch, rather than leaving host tzdb behavior implicit."
+    },
+    {
+      "id": "R1-N1",
+      "severity": "Nit",
+      "summary": "Active prose still presents already settled choices as unresolved.",
+      "evidence": "#59 design.md:75\u201378 calls the window wording a clarification gate immediately before stating it was settled;171\u2013178 repeats the gate and #52 object-choice prerequisite. adr-proposal.md Consequences says 'No choice is Accepted' immediately before acceptance. spec.md Open questions similarly retains 'remain unaccepted' before the settlement.",
+      "fix": "Preserve dated approvals and historical settlements, but label superseded questions explicitly as historical or rewrite the current-state prose. Keep genuinely new revisions/proposals unapproved; do not erase or fabricate acceptance."
+    }
+  ],
+  "report": "R1 whole-plan combined correctness/security review: 4 High, 3 Medium, 2 Low, 1 Nit; not clear. Read issue59 intent/spec/design/decisions/adr-proposal in full, current dependency plan sections listed by hash, current workspace/crate layout, chaos.sh, lab.conf, placement/store error/stats facts and accepted ADR0001/0004 plus Proposed0011. No runtime implementation, lab, repository edits or external messages performed. Findings concern concrete missing mechanisms and integration fallout, not missing human approval alone. Existing accepted dependency decisions are not reopened."
+}

@@ -1,0 +1,62 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review58_r2_code",
+  "reviewed_commit": "c12f7cc1ccf739730b73b9e94a2e6f08adb16efd",
+  "prior_findings": {
+    "R1-C1": "Substantially addressed by concrete root/page/journal/reader/manifest contracts; incremental manifest installation/persistence/recovery ABI gaps remain as R2-C2.",
+    "R1-C2": "Source/destination/promotion binding and named workers addressed; source manifest publication seam remains as R2-C1, and deletion enum drift as R2-C4.",
+    "R1-C3": "Fixed: trusted current-target immutable-root/join barrier and bounded header/epoch/target/relationship/incoming/pair CAS replace staged ISR-vector assertions.",
+    "R1-C4": "Separate identities, deterministic grants and signed DR completion outcomes addressed; grant creation/cancellation interleaving remains as R2-C3.",
+    "R1-C5": "Fixed: persistent object ID profiles, capability admission, explicit stop-all-old-services activation and unsupported mixed-version deletion/rollback limits.",
+    "R1-C6": "Fixed: disjoint #54 destination resources, #83 pre-mutation VM refusal, direct mode and RF1 evidence limits.",
+    "R1-N1": "Fixed: historical approvals preserved and review revisions consistently unapproved.",
+    "R1-S1": "Corresponding pair-CAS/admission mechanism present; separate security reviewer owns security closure.",
+    "R1-S2": "Corresponding FLDT/typed node-control isolation present; separate security reviewer owns security closure.",
+    "R1-S3": "Corresponding #73 roles/#76 system ownership matrix present; separate security reviewer owns security closure.",
+    "R1-S4": "Corresponding finite wait/admission/allocation/spool bounds present; separate security reviewer owns security closure."
+  },
+  "dependency_commits": {
+    "17": "4154dfdd649a0e495e78104010105b0c1eefc847",
+    "50": "e8f0fe21abb0ebd47c1e5f80ea932d73fab96baa",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "54": "5ffa0c263bed16af8ac7eebaa3d5f88ad5fcf3c0",
+    "64": "86307ffa383e79a1eb4c50ed4a56216108e0c383",
+    "68": "4a52edbff62b2c5a06917c24d43c2c39691aa058",
+    "77": "bb8df5b057e1e26f6e73e1319c9afc49a3c72994",
+    "80": "cc4bb4d7fe491b4c21b76fa53ae5c172457b7ced",
+    "81": "15b0c35d137a324a257cb845e2f9b2531cd27745",
+    "83": "67862ad667ac3121b453c9227cef1e8ec5248138",
+    "73": "e2ffe00634a511b2cb3ec05f1b4ab7fe81eefb9e"
+  },
+  "findings": [
+    {
+      "id": "R2-C1",
+      "severity": "High",
+      "summary": "The source worker has no operation that binds its newly constructed manifest into Outgoing before completion verification.",
+      "evidence": "contracts.md:66-69,83-88; lifecycle.md:54-57,72-73,182-188; wire-contracts.md:268-271. StartShip accepts a target snapshot and optional prior base hash, not the target manifest. The worker constructs that manifest later. ReportDrProgress accepts only bytes/error, and no other source RPC writes the manifest or enters Sending. RecordDrCompletion nevertheless must compare the receipt manifest against the outgoing tuple.",
+      "fix": "Add an exact worker-owned idempotent manifest-binding RPC (or extend ReportDrProgress explicitly) before foreign Begin. Validate canonical ManifestRootV1 against the authorized target/base refs and outgoing immutable destination, CAS the current noncancelled outgoing to a manifest-bound Sending state, persist the root/hash, and define identical/conflicting retry behavior. Specify how close barriers advance the outgoing to Closed. Add construct/bind/send/restart/lost-reply/conflicting-manifest/completion fixtures."
+    },
+    {
+      "id": "R2-C2",
+      "severity": "High",
+      "summary": "The replica ABI cannot install and later recover the manifest commitment needed to authenticate pages and receipts.",
+      "evidence": "wire-contracts.md:145-164,172-181; root-format.md:80,103-107,118-124,131-138,154-155; contracts.md:73,91-93. CreateRoot carries no ManifestRootV1; PutRootManifestPage carries only a page and sibling path. ManifestRootV1 first arrives at PrepareRoot, after pages/ranges must already have verified proofs and durable receipts. RootDescriptor/RootSeal retain only manifest_id, RootBlob retains pages/proofs, and metadata Admit retains only refs/hash/page count. No local read operation returns the full manifest root or persisted manifest pages/proofs for takeover/catch-up, despite the required complete copy/reconciliation. A SHA256 manifest_id cannot recover its Merkle root/preimage.",
+      "fix": "Define an immutable manifest-init/bind operation before any page/range ACK, its exact durable root/blob/journal representation (including the complete bounded ManifestRootV1), and replay/order/idempotency rules. Add bounded local get-manifest-root/page-proof operations for takeover and base-first catch-up, with typed session/root correlation and proof validation before receipt admission. Cover empty incremental manifests, crash before seal, restart on another node and joining-member transfer without contacting the foreign sender in vectors/crash/model fixtures."
+    },
+    {
+      "id": "R2-C3",
+      "severity": "High",
+      "summary": "Grant creation is not serialized with source cancellation, allowing a cancelled ship to acquire a new reader grant.",
+      "evidence": "lifecycle.md:167-171,199-205,332-335; #52 contracts.md Reader grant/RPC/lifecycle and Transactions: AuthorizeSnapshotRead compares header/catalog/reader, with no DR outgoing predicate. StartShip queues the outgoing and then creates target/base grants one at a time before recording their references. CancelShip can mark it Cancelled and close the grants currently present while an earlier handler subsequently creates another deterministic grant or has not yet published its reference. The defined #52 close barrier cannot prevent creation of a different/absent grant.",
+      "fix": "Extend the internal DR grant-claim transaction to compare the exact current noncancelled outgoing and source guard, and atomically publish its GrantRef or a durable per-kind claim. Cancellation must block further claims first and discover/close both deterministic grant identities even across a crash before reference publication; Closed/EndDrSource must require this phase complete. State transaction counts and test cancel before/between/after each target/base grant claim and reference update, including restart and lost response; add a caught late-grant-after-cancel mutation."
+    },
+    {
+      "id": "R2-C4",
+      "severity": "Low",
+      "summary": "Deletion assigns relationship states that its enum does not define.",
+      "evidence": "lifecycle.md:82 says deletion marks the relationship Closed/Cancelled; contracts.md:38-40 defines only STANDBY, PROMOTING, PROMOTED, REVOKED (SOURCE_PAIRED is explicitly not a relationship state). CANCELLED exists only on Incoming and Outgoing.",
+      "fix": "Specify deletion as a concrete existing relationship state (for example REVOKED with generation/fence change), or allocate a terminal relationship state and define its RPC/status/retry behavior. Keep incoming/outgoing cancellation separate and add the terminal enum to deletion/recreation fixtures."
+    }
+  ],
+  "report": "Incremental design-code review only of 3822c48..c12f7cc excluding report, plus affected implementation/dependency seams. Three High and one Low; zero additional Nits. Exact size arithmetic and existing format header/page allocations checked. No repository/dependency edits, subagents, runtime tests, lab actions, push or merge. Snapshot remained clean at c12f7cc."
+}

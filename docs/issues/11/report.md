@@ -92,3 +92,14 @@ run passed the check. Results: [docs/benchmarks/2026-11-04-reconcile-order.md](.
 ## ADRs
 
 None relied on beyond the protocol (`docs/replication-protocol.md`); none proposed.
+
+## Batch disposition — 2026-11-20
+
+Cleared from the remaining plan-review queue at the user's explicit request because this
+implementation is complete. [Issue #11](https://github.com/jsfakian/Flaminio/issues/11) is closed;
+[PR #38](https://github.com/jsfakian/Flaminio/pull/38) merged into `main` on 2026-11-04T15:11:12Z.
+Merge `4a9db451b69eb96cacb122c0be329e20441cd563` is an ancestor of audit snapshot `57b4b18b3447513d3b7447d7916dffd16b448b8e`.
+
+Disposition: `cleared_completed`. This records completed scope, not a new zero-comment
+review or a change to historical approvals/results. Evidence:
+[completed-issue verification](../review-inputs/completed-issues-2026-11-20.json).

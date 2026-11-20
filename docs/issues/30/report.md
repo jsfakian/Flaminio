@@ -87,3 +87,14 @@ way ("epoch 2001397 on fl-b, the volume is at 2001398").
 
 Relied on: 0002 (a future store must keep revisions growing, now said in `KV`'s comment).
 None proposed.
+
+## Batch disposition — 2026-11-20
+
+Cleared from the remaining plan-review queue at the user's explicit request because this
+implementation is complete. [Issue #30](https://github.com/jsfakian/Flaminio/issues/30) is closed;
+[PR #34](https://github.com/jsfakian/Flaminio/pull/34) merged into `main` on 2026-11-04T11:14:12Z.
+Merge `19d797e62063ab77bf65ee1d00a74dc2955d71a5` is an ancestor of audit snapshot `57b4b18b3447513d3b7447d7916dffd16b448b8e`.
+
+Disposition: `cleared_completed`. This records completed scope, not a new zero-comment
+review or a change to historical approvals/results. Evidence:
+[completed-issue verification](../review-inputs/completed-issues-2026-11-20.json).

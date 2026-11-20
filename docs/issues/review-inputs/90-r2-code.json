@@ -1,0 +1,43 @@
+{
+  "reviewer": "/root/remaining_plan_reviews/review90_r2_code",
+  "reviewed_commit": "c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8",
+  "dependency_commits": {
+    "13": "db7b1942e3ec49aab7e71051f2b1f1e2637d7c57",
+    "45": "eae9ecc59beb66ecf1b256ac1d22aa7c14f25285",
+    "51": "7d57d5afda9ef40af08c952f89056a36fc50fb4a",
+    "52": "ae97cf548eaf1196789e4b19609fe4eb2dbe2d72",
+    "58": "c74a5e2489dfc2e61c73b1575213afba4ae80b3a",
+    "72": "5c76e87bbef9356beec51bcf665f8e568020f21f",
+    "76": "628e337accb5729f5b649b41bf5a1fcb0f58c7b4",
+    "79": "81aac40bc3a7b29fb825e89d0aeb0f437334a6b6"
+  },
+  "prior_findings": [
+    {
+      "id": "R1-C1",
+      "status": "fixed",
+      "evidence": "core-design.md Consumable initial materialization defines per-chunk exact pending refs/operation, trusted durable-create attestation, bounded own-IO completion CAS and mandatory new MEMBER Hello. All pending copies bar application/source credit; replay never restores a consumed bit. Independent initial_durable_before_earned and initial_consumed_never_reissued assertions/caught mutants plus real first-attach/restart/lost-reply fixtures address the original missing transition."
+    },
+    {
+      "id": "R1-C2",
+      "status": "fixed",
+      "evidence": "contracts.md Exact cleanup authority replaces aggregate tombstones with capped schema3 roots, exact-ref rows/indexes, restartable BUILDING publication, revision-bound confirmations and bounded reclaim. ListTombstones limits examined keys/results/bytes and preserves sweep tails. budgets.md Cleanup storage, transport and migration envelopes supplies stored/transaction/RPC caps and streaming legacy-source projections; migration.md inventories those bounded units. Boundary/maximal-union and both-backend/Go-Rust fixtures are specified."
+    },
+    {
+      "id": "R1-C3",
+      "status": "fixed",
+      "evidence": "budgets.md Delete-only NOSPACE exception preserves #76 unpublished rollback/root revocation/orphan deletion with exact mode/header/root/key revisions and no Put. INITIAL authority is independent of collectible private manifests. Published authority/ledger changes remain gated. NoLiveAuthorityGC/identity_gc_weak_classifier and isolated embedded-etcd NOSPACE schedules cover the exception."
+    },
+    {
+      "id": "R1-C4",
+      "status": "fixed",
+      "evidence": "budgets.md Reports and replacement charges explicitly retains #45 own-IO/admin authorization, refuses agents, composes node/node-state/mode comparisons with UUID/G, preserves Missing recovery/Failed state, and uses multi-op TTL plus commit-revision lease registration. Named second-to-land hook and both-backend ordering/race fixtures preserve dependency behavior."
+    },
+    {
+      "id": "R1-C5",
+      "status": "fixed",
+      "evidence": "migration.md Proven legacy first_epoch=0 and wire-contracts.md profiles3/4 define immutable LID, signed FLCTv3, exact metadata/session binding, positive-profile cross-refusal and bootstrap without DeleteEarlierIncarnation. Existing fences/bytes/snapshot keys/views remain intact; incompatible positive-only root/export records quarantine. Both-backend and real Store legacy data/history fixtures plus legacy_no_destructive_cleanup/caught mutant cover preservation."
+    }
+  ],
+  "findings": [],
+  "report": "Fresh bounded incremental design-code and changed-spec review of98390ae141d287ec9e8e7443bac6389bd3ade9f7..c734bacfb0502e5198a3dbabb0dcf0fe87c5abf8 excluding report.md: zero comments including Nits. Reviewed all changed normative appendices and affected actual domain creation, service heartbeat/tombstone, KV TTL, capability-token and Store fence/delete call paths. Checked affected dependency slices for #13 release/fence limits, #45 heartbeat/lease ordering, #51 snapshot views, #52/#58 source identity, #72 accounting, #76 delete-only recovery and #79 initialization history. dependency_commits records actual worktree HEADs read, distinct from ledger technical-clear hashes (13:6129791,45:e7dc214,51:a450dc6,52:48d4d82,58:d557e13,72:186074f,76:9642649,79:52f7a96). Dependency proposals were not treated as implemented or reopened. Also inspected correction-generation/CAS fallout and new storage/transport/transaction bounds. No runtime tests were run; named tests are future implementation requirements. No repository mutations or lab/disk/tracker actions. Final HEAD remains c734bac and status is clean."
+}

@@ -7,13 +7,13 @@ block storage pool. You add a disk and it joins the pool. You pull a disk and th
 somewhere else. You lose a node and your volumes keep serving I/O. You lose a whole cluster
 and you restore from an encrypted, immutable backup.
 
-> **Status: MVP data plane, in the lab.** A Rust data plane serves volumes as Linux block
-> devices (`/dev/ublkbN`) from its own [on-disk format](docs/format/on-disk-format-v1.md), with
-> synchronous replication to a second server. Reads through the full stack reach 86–98% of the
-> raw disk, and replication survives a replica outage with no failed writes. There is no control
-> plane yet (no Kubernetes integration, metadata service or TLS), so nothing here is ready for
-> real data. See the [MVP plan](docs/mvp-plan.md), [lab](docs/lab.md) and
-> [benchmarks](docs/benchmarks/).
+> **Status: replicated Phase-1 system, in the lab.** Metadata over etcd, mutual TLS,
+> epoch/ISR fencing, CSI integration, failover and drain are implemented. Installation,
+> recovery and operational completeness are still under development; the operator,
+> encryption at rest and backups are planned. This is not ready for production data.
+> The [2026-11-12 correctness audit](docs/audits/2026-11-12/README.md) records known defects,
+> validation evidence and unsupported environments. Historical results are in the
+> [MVP plan](docs/mvp-plan.md), [lab guide](docs/lab.md) and [benchmarks](docs/benchmarks/).
 >
 > **Phase 1 under way** ([plan](docs/phase1-plan.md)). The failover and consistency rules
 > (in-sync replica sets, epoch fencing, replica-confirmed leases, reconciliation after

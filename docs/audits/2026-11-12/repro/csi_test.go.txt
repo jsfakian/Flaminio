@@ -1,0 +1,30 @@
+package csi
+
+import (
+ "context"
+ "path/filepath"
+ "testing"
+ "github.com/container-storage-interface/spec/lib/go/csi"
+)
+
+func TestAuditPublishRejectsWrongExistingMount(t *testing.T) {
+ target:=filepath.Join(t.TempDir(),"target")
+ m:=&fakeMounter{fs:map[string]string{},mounts:map[string]string{target:"/some/other/volume"}}
+ n:=&Node{Dataplane:&fakeDataplane{volume:"wanted",device:"/dev/wanted"},Mounter:m}
+ _,err:=n.NodePublishVolume(context.Background(),&csi.NodePublishVolumeRequest{VolumeId:"wanted",StagingTargetPath:"/stage/wanted",TargetPath:target,VolumeCapability:mountCap("ext4")})
+ if err==nil {t.Fatalf("publish accepted unrelated existing mount: %s -> %s",target,m.mounts[target])}
+}
+
+type auditMountOptions struct { fakeMounter; calls int }
+func(m *auditMountOptions) Mount(ctx context.Context,source,target,fs string,options []string)error{m.calls++;return m.fakeMounter.Mount(ctx,source,target,fs,options)}
+func TestAuditReadonlyRetryDoesNotAcceptWritableMount(t *testing.T){
+ target:=filepath.Join(t.TempDir(),"target")
+ m:=&auditMountOptions{fakeMounter:fakeMounter{fs:map[string]string{},mounts:map[string]string{}}}
+ n:=&Node{Dataplane:&fakeDataplane{volume:"v",device:"/dev/v"},Mounter:m}
+ req:=&csi.NodePublishVolumeRequest{VolumeId:"v",StagingTargetPath:"/stage/v",TargetPath:target,VolumeCapability:mountCap("ext4")}
+ if _,err:=n.NodePublishVolume(context.Background(),req);err!=nil{t.Fatal(err)}
+ before:=m.calls
+ req.Readonly=true
+ _,err:=n.NodePublishVolume(context.Background(),req)
+ if err==nil && m.calls==before{t.Fatal("read-only publish succeeded over an existing writable mount without checking or changing its flags")}
+}

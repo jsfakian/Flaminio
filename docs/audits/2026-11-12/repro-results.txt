@@ -1,0 +1,18 @@
+Audited main: 8aaa7a3a9151995d13abce717c7f7a9c6cf9977e
+Normal checks: make lint test race hygiene contracts sim crash-test miri sanitize -> exit 0
+
+Desired-contract adversarial tests (intentionally failing on audited main):
+F01: retry cannot resume interrupted creation: AlreadyExists: volume "v"
+F02: mixed old header epoch/RF=2 with replacement chunk replicas=[a]
+F03: created new placement [a] after its only node was marked draining
+F04a: publish accepted unrelated existing mount target -> /some/other/volume
+F04b: read-only publish succeeded over writable mount without checking/changing flags
+F05a: metadata-accepted geometry cannot open: size=1 MiB, chunk=256 MiB
+F05b: frame encoder panics: too many chunks in Hello (65,537)
+F06: target generated 65 changes; Go service rejects more than 64
+F07: asserted node shutdown from absence signals only: [mark a]
+F08: rejected batch's later write observed: before byte=0, after byte=90 (0x5a)
+     subsequent flush: UnexpectedEof, short transfer: 4096 of 0 bytes
+
+Sources and portable rerun commands: see README.md and repro/run.py.
+No use-after-free was intentionally induced; F08 retained the small borrowed allocation.

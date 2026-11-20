@@ -1,0 +1,55 @@
+use flaminio_format::{Uuid, layout::LayoutParams, mkfs::FormatOptions};
+use flaminio_net::{frame::{Frame, MAX_CHUNKS}, session::Accepted, token::Claims};
+use flaminio_node::replica::ReplicaService;
+use flaminio_store::{MemDevice, Store, StoreConfig};
+
+#[test]
+fn metadata_accepted_partial_chunk_volume_can_open() {
+    // Metadata accepts size=1 MiB, chunk=256 MiB, RF=1; CSI rounds to 1 MiB.
+    let dev = MemDevice::new(256 << 20);
+    Store::<MemDevice>::format(&dev, &FormatOptions {
+        disk_uuid: Uuid([1; 16]), cluster_uuid: Uuid::NIL,
+        format_nonce: 9, created_unix_secs: 0,
+        layout: LayoutParams { journal_size: Some(16 << 20), ..Default::default() },
+        label: String::new(),
+    }).unwrap();
+    let mut service = ReplicaService::new(Store::open(dev, StoreConfig::default()).unwrap());
+    let accepted = Accepted {
+        peer_node: "a".into(), req: 1, epoch: 10, session: 1,
+        claims: Claims { volume: "v".into(), epoch: 10, node: "a".into(), issued_at: 0, first_epoch: 0 },
+        size: 1 << 20, chunk_size: 256 << 20, chunks: vec![0],
+    };
+    assert!(service.hello(&accepted).is_ok(), "metadata-accepted geometry cannot open");
+}
+
+#[test]
+fn metadata_accepted_chunk_count_does_not_panic_encoder() {
+    // Metadata accepts up to 2^20 chunks, while one RF=1 node holds all of them.
+    let frame = Frame::Hello {
+        req: 1, epoch: 10, session: 1, volume: "v".into(), token: vec![],
+        size: (MAX_CHUNKS as u64 + 1) << 20, chunk_size: 1 << 20,
+        chunks: (0..=MAX_CHUNKS as u32).collect(),
+    };
+    assert!(std::panic::catch_unwind(|| frame.encode()).is_ok(), "metadata-accepted volume panics transport encoding");
+}
+
+#[test]
+fn shrink_after_losing_peer_fits_metadata_rpc_limit() {
+    use flaminio_repl::{meta::{ChunkMeta, VolumeMeta, MetaRequest}, msg::{Request, Response, FromReplica}, target::{Target, Output}, types::Timing};
+    let timing = Timing { request_timeout: 100_000_000, heartbeat: 100_000_000, refresh: 100_000_000, ..Timing::default() };
+    let view = VolumeMeta {
+        epoch: 1, target: Some(0), min_isr: 1, blocks_per_chunk: 256,
+        chunks: (0..65).map(|_| ChunkMeta { replicas: vec![0,1], isr: [0,1].into_iter().collect(), isr_ver: 0, moving: None }).collect(),
+    };
+    let mut target = Target::<Vec<u64>>::new(0, 0, &view, timing, 256, 0);
+    let hello = target.take_output().into_iter().find_map(|o| match o {
+        Output::Send { to: 0, msg } if matches!(msg.body, Request::Hello) => Some(msg), _ => None,
+    }).unwrap();
+    target.on_reply(1, 0, &FromReplica { vol: 0, epoch: 1, session: hello.session, req: hello.req, body: Response::Fenced { uncertain: vec![] } });
+    target.take_output();
+    target.tick(1 + timing.takeover_wait());
+    let count = target.take_output().into_iter().find_map(|o| match o {
+        Output::Meta { body: MetaRequest::ChangeIsr { changes, .. }, .. } => Some(changes.len()), _ => None,
+    }).expect("an ISR shrink was proposed");
+    assert!(count <= 64, "target generated {count} changes; the Go service rejects more than 64");
+}

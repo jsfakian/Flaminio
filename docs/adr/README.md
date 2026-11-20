@@ -12,3 +12,19 @@ its consequences. An ADR's status is one of **Proposed**, **Accepted**, **Supers
 | [0004](0004-target-environments.md) | Bare metal first, then edge, then cloud | Accepted |
 | [0005](0005-replica-confirmed-leases.md) | Replica-confirmed I/O leases | Accepted |
 | [0006](0006-edge-two-node-degraded-writes.md) | 2-node edge sites keep writing on a single copy | Accepted |
+
+The 2026-11-12 review found that ADR 0005's immediate-read rule predates the stricter,
+implemented takeover protocol. Proposed ADR 0007 records the correction; do not use the old
+wording to relax the current protocol. Accepted ADR files remain unchanged pending acceptance
+of a superseding decision.
+
+| Proposed ADR | Title | Status |
+|---|---|---|
+| [0007](0007-takeover-readiness-and-clock-contract.md) | Takeover readiness and clock contract (supersedes 0005 upon acceptance) | Proposed |
+| [0008](0008-metadata-recovery-authority.md) | Metadata recovery authority barrier | Proposed |
+| [0009](0009-encrypted-data-and-key-retention.md) | Encrypted integrity and retained-key lifetimes | Proposed |
+| [0010](0010-block-device-durability-contract.md) | Block-device durability contract | Proposed |
+| [0011](0011-snapshot-and-backup-commit-boundaries.md) | Snapshot and backup commit boundaries | Proposed |
+| [0012](0012-privileged-data-plane-pod.md) | A privileged data-plane pod, until privilege separation | Proposed |
+| [0013](0013-certificates-rotate-by-file-replacement.md) | A certificate is rotated by replacing its files; every process watches its own | Proposed |
+| [0014](0014-maintenance-attach-only-while-not-held.md) | A target that no client asked for is admitted only while no client holds the volume | Proposed |

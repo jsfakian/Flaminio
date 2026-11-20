@@ -1,6 +1,6 @@
 # Flaminio Architecture
 
-> **Status:** Draft v0.2, for review. Agreed decisions are recorded as ADRs in
+> **Status:** Draft v0.3, for review. Agreed decisions are recorded as ADRs in
 > [`docs/adr/`](adr/). Items marked **[OPEN]** are listed again in
 > [§20 Open questions](#20-open-questions).
 >
@@ -14,6 +14,14 @@
 > | [0004](adr/0004-target-environments.md) | Bare metal first, then small edge clusters, then cloud | Accepted |
 > | [0005](adr/0005-replica-confirmed-leases.md) | I/O leases are confirmed by replicas, not by the metadata service | Accepted |
 > | [0006](adr/0006-edge-two-node-degraded-writes.md) | 2-node edge sites keep accepting writes on a single copy while one node is down | Accepted |
+
+The [2026-11-12 correctness audit](audits/2026-11-12/README.md) separates implemented
+behavior from intended features and records known defects. Proposed ADRs
+[0007](adr/0007-takeover-readiness-and-clock-contract.md)–
+[0011](adr/0011-snapshot-and-backup-commit-boundaries.md) specify the reviewed contracts;
+they are **not accepted decisions or implemented guarantees**. In particular, ADR 0005's
+immediate-read wording conflicts with the stricter current protocol. Do not relax the
+implemented takeover gate to match that historical wording.
 
 ## Contents
 
@@ -100,9 +108,10 @@ Edge-specific requirements:
 
 ## 2. Design principles
 
-1. **The Kubernetes API server is never on the data path.** I/O, failover and rebuild keep
-   working when the API server is slow or down. CRDs express *intent* and show *summarized
-   status*. They are not the system of record for high-churn internal state.
+1. **The Kubernetes API server is never on the data path.** Existing I/O and storage safety
+   do not depend on it. Storage-side recovery is designed to progress from metadata state;
+   Kubernetes pod eviction/rescheduling and new intent necessarily wait for the API (§5.5).
+   CRDs express *intent* and show *summarized status*, not high-churn authoritative state.
 2. **Safety without timing assumptions where possible.** Write safety (no split-brain, no lost
    acked writes) comes from epochs and linearizable metadata, not from timeouts. Timing (leases)
    is used only where it cannot be avoided, and every such place is documented (§8.5).
@@ -161,7 +170,7 @@ flowchart TB
 | Component | Runs as | Language | Responsibility |
 |---|---|---|---|
 | **flaminio-io** | DaemonSet container | Rust | Data plane: volume targets, replica store, replication protocol, frontends |
-| **Node Agent** | DaemonSet container | Rust | Device discovery and health, lifecycle execution, node liveness heartbeat |
+| **Node Agent** | DaemonSet container | Go (`control/agent`) | Device discovery and health, lifecycle execution, node liveness heartbeat |
 | **Privileged helper** | DaemonSet container | Rust | The only privileged process. Opens devices and passes fds, sets up ublk, mounts |
 | **Metadata service** | StatefulSet | Go | System of record: topology, placement, epochs, ISR, node liveness, catalogs |
 | **Controllers** | Deployment | Go | Placement, rebuild, rebalance, scrub scheduling, backup, DR, failover |
@@ -195,8 +204,11 @@ Why chunks rather than whole-volume replicas:
 - **Volumes bigger than any one disk.**
 
 Trade-off: there is more metadata than with per-volume replicas. At 256 MiB chunks, 1 PiB of
-logical data is about 4 M chunks, or about 1–2 GB of metadata. That is manageable but drives the
-choice of metadata backend (§5.4).
+logical data is about 4 M chunks. The earlier 1–2 GB estimate is an unvalidated payload
+estimate, not an etcd storage or supported-scale guarantee: replicas, versions, MVCC history,
+tombstones, indexes, catalogs and operational headroom also consume space. Publish measured
+limits for chunks per volume/node/cluster, targets, sessions, recovery throughput and memory
+before claiming PiB-scale support (§16.3).
 
 ## 5. Components
 
@@ -279,10 +291,14 @@ data.
 - **Members:** 3 by default, or 5 when there are ≥ 3 zones or racks (spread 2-2-1, which
   survives losing any one zone). Members are spread across failure domains on nodes labelled
   `flaminio.io/meta`, with the Raft log on a dedicated small partition.
-- **Automatic member replacement:** if a member stays down past a timeout (default 15 min), the
-  operator adds a replacement on a healthy eligible node and then removes the dead one. It does
-  this one member at a time and never drops below quorum, so a series of single failures cannot
-  slowly turn into a quorum loss.
+- **Automatic member replacement (planned, #43):** while quorum is healthy, persist one
+  replacement operation at a time. Add the replacement as a non-voting **learner**, start it
+  and wait for catch-up; remove the failed voter and promote the caught-up learner in a
+  quorum-checked sequence supported by the pinned etcd version. Recheck health/topology before
+  each step, and resume from recorded member IDs after an operator restart. Never add an
+  unstarted voting member or force membership changes without quorum. Quorum loss requires the
+  separate recovery procedure, not this reconciler. Preserve ADR 0002's dedicated etcd boundary.
+  See [etcd runtime reconfiguration](https://etcd.io/docs/v3.5/op-guide/runtime-configuration/).
 - **Witness members** for 2-node edge sites (§1.2).
 - **Encrypted snapshots** of the metadata, written to the backup target (§11.5).
 
@@ -294,18 +310,31 @@ service is kept out of the I/O permission path entirely (§8.5).
 The metadata service is involved in I/O **only** for ISR changes when a replica fails, and for
 attach/failover (epoch issuance). It is not involved in normal reads, writes or lease renewal.
 
-**Restoring etcd.** A volume's epochs start at the etcd revision of the claim that created it
-(§8.4), which holds only while the revision never goes back. A restore from a snapshot must raise
-it above every revision the replaced cluster made: `etcdutl snapshot restore --bump-revision
-1000000000 --mark-compacted`. The bump must exceed the revisions made since the snapshot; 10^9
-does for any plausible gap, and keeps epochs far below 2^53. Copying the keys to a new cluster
-is not supported, and an etcd wiped while nodes keep their data is the same hazard: the nodes
-must be wiped too.
+**Restoring etcd.** Revision-based first epochs (§8.4) require revisions never to go backwards.
+An in-place snapshot restore must establish a revision above the old cluster's **proven**
+high-water bound, compact stale watches, and validate surviving fences before issuing tokens.
+`--bump-revision 1000000000 --mark-compacted` is only an example: a fixed bump is not itself
+proof of that bound. If authority or the bound is unknown, refuse writable recovery. Copying
+keys or starting an empty metadata store while data survives is unsupported. Preserve the
+surviving disks; do not wipe the only recoverable data to make startup succeed.
+
+A new recovery identity, exclusion of old targets/tokens, disk inventory and explicit
+force-recovery semantics are specified in proposed [ADR 0008](adr/0008-metadata-recovery-authority.md).
+These are prerequisites for #54, not implemented disk-only recovery.
 
 ### 5.5 Controllers
 
-These are stateless reconcilers with leader election. They act on metadata-service state, and
-they also mirror summaries into CRDs.
+These are reconcilers with recoverable operation state and conditional metadata writes, not
+exclusive authority based only on an in-memory leader flag. They act on metadata-service
+state and mirror summaries into CRDs. Data-plane reconciliation and safety must not require
+the Kubernetes API. Controllers that must progress without it use metadata-backed ownership
+or idempotent conditional operations; a lost leader cannot commit stale work.
+
+**Availability boundary:** Kubernetes pod rescheduling/eviction and applying new Kubernetes
+intent necessarily wait for its API. The existing failover controller also reads Node state
+and writes an out-of-service taint, so automatic pod failover currently waits for the API.
+Storage fencing/leases continue to enforce safety throughout; marking a Node out of service
+or deleting its API object is not physical fencing of the machine or its other side effects.
 
 - **Placement.** Picks disks for new chunks and replacement replicas (§9).
 - **Rebuild / resync.** Restores redundancy and prioritizes chunks with the least redundancy left.
@@ -353,16 +382,22 @@ and its reference implementation is the `flaminio-format` crate.
   `DeferredWrite` journal record and are applied in place in the background. The latency cost is
   one sequential, group-committed journal write.
 
-So **every write is all-or-nothing on a replica**, and checksums never disagree with data
-because of a torn write. A group of writes needs **one flush**. Data and journal batch go to the device together, and
+The store's committed journal updates and dependent data recover together. This does **not**
+promise atomicity for an exported multi-block request split across chunks or store batches;
+failed or unanswered requests may partially land. The tested replication history is per
+logical block. See proposed [ADR 0010](adr/0010-block-device-durability-contract.md). A group of writes needs **one flush**. Data and journal batch go to the device together, and
 recovery checks the last batch's data against the checksums its records carry (format spec
 §6.2). Each replica acknowledges a write only once it is durable. A volatile
-device cache is flushed with FUA or a flush command; disks with power-loss protection skip the
-flush.
+device cache is flushed with FUA or a flush command. Do not skip this solely because a drive
+advertises power-loss protection: the complete device/controller/virtualization stack must
+provide a verified stable-write completion contract. The current store uses explicit flushes.
 
-**Self-description.** Every disk holds enough to rebuild the metadata service from scratch: the
-per-chunk headers, plus a small replicated *volume descriptor* (size, chunk size, replication
-factor, wrapped DEK reference) for every volume that has chunks on the disk (§11.5).
+**Self-description (partly implemented).** Chunk headers record volume identity, geometry,
+fences and layer references. The format reserves a *volume descriptor* page, but recovery of
+complete volume/ISR/deletion/key/catalog state from disks is not implemented. Highest epoch
+or sequence number alone cannot establish authoritative acknowledged history. #54 must define
+and persist sufficient recovery evidence before advertising disk-only metadata reconstruction
+(§11.5; proposed ADR 0008).
 
 ## 7. I/O paths
 
@@ -405,29 +440,39 @@ With data locality enabled, one replica is on the consumer's node, so write late
 
 - It reads from **any ISR replica**: the local one if it is in sync, otherwise the replica with
   the fewest outstanding I/Os and lowest recent latency.
-- It verifies the checksum. On a mismatch it reads another ISR replica, returns the good data,
-  and asynchronously **repairs** the bad copy (§12).
+- It verifies the stored checksum. On a mismatch it retries an eligible ISR source. Automatic
+  repair and scrub are planned in #46; a checksum failure must never be reported as good data.
+  Target-generated end-to-end checksums are also planned: current write frames carry payloads
+  over TLS and storage checksums are generated by the receiving store, not carried from the target.
 - Because writes are acked only after every ISR member is durable, a read issued after a write
   completes sees that write on any ISR replica.
 
 ### 7.3 Flush and FUA
 
-Replicas acknowledge only durable writes, so `FLUSH` is effectively a barrier through the target
-and costs almost nothing. An optional **write-back mode** (acknowledge before durable, honor
-`FLUSH`) can be enabled per StorageClass for scratch workloads. It is **off by default**.
+The current frontend advertises **no volatile write cache**: every completed write is already
+durable on its effective ISR. Its FLUSH is therefore a no-op under that mode; do not infer
+an independent cross-queue ordering guarantee over outstanding operations. FUA cannot weaken
+durability. Any future cached frontend or explicit drain barrier requires conformance tests
+covering all queues and partial failures. Write-back is deferred pending a separate ADR and
+recovery model; it is not a supported StorageClass mode today (proposed ADR 0010).
 
 ### 7.4 Discard / TRIM
 
-Discards turn into map updates that free clusters (unless a snapshot references them).
-Discarding a whole chunk frees the chunk replica on every disk.
+Client discard currently succeeds as a **hint**, without reclamation or a read-zero guarantee.
+The protocol's discard operation is used for holes during resync, not yet exposed as a
+replicated client discard. A future deterministic unmap/zero operation must be fenced,
+ordered, durable and reconciled like a write. Snapshot/clone references pin their data, and
+whole-chunk reclamation must retain the fencing/incarnation evidence needed to reject stale
+sessions. Do not delete a chunk's last data/fence record merely because its contents are holes.
 
 ## 8. Replication and consistency model
 
 ### 8.1 Guarantees
 
-- **Linearizable single-volume block semantics** for one attached target (RWO). A write that has
-  been acknowledged is never lost while at least one ISR member survives, and every later read
-  returns it.
+- **Linearizable per-block semantics** for one attached target (RWO). An acknowledged block
+  write is not lost while a valid authoritative ISR copy survives, and later reads observe it
+  or a later write. There is no multi-block/cross-chunk transaction guarantee. An error on a
+  larger request does not mean no part landed (proposed ADR 0010).
 - **Durability:** an acknowledged write exists on `|ISR|` replicas, and `|ISR| ≥ minInSyncReplicas`
   always holds.
 - **No split-brain:** at most one target can complete writes for a volume at any time (§8.4).
@@ -482,17 +527,20 @@ The ISR is tracked **per chunk** and versioned (`isr_ver`).
 
 ### 8.5 Leases: who may serve I/O
 
-*Decided in [ADR 0005](adr/0005-replica-confirmed-leases.md).*
+*Replica confirmation was decided in [ADR 0005](adr/0005-replica-confirmed-leases.md).
+Its early-read shortcut is contradicted by the current protocol; proposed
+[ADR 0007](adr/0007-takeover-readiness-and-clock-contract.md) records the correction and clock contract.*
 
 Epochs (§8.4) stop an old target from completing writes. They do not stop it from *reading* a
 replica that the new target could not reach, and so could not fence. Leases close that gap.
 **The leases are confirmed by the replicas, not granted by the metadata service**, so the
 metadata service stays off the I/O path.
 
-- **Replica-confirmed lease.** A target may serve I/O for a chunk only while **every ISR member**
+- **Replica-confirmed lease.** A target may complete a read for a chunk only while **every ISR member**
   of that chunk has confirmed its epoch within the last `L` (default 5 s). Confirmations ride
   on I/O replies and on one heartbeat per *pair of nodes* that covers all volumes between them.
-  The cost does not grow with the number of volumes.
+  This is a target batching design, not a proven constant-work bound. Current target sessions
+  and heartbeat processing are per volume; measure aggregate work under the supported limits.
 - **Why it is safe.** A fenced replica refuses to confirm an older epoch. A new target must fence
   at least one ISR member of every chunk anyway, because it needs an up-to-date source. From that
   moment the old target cannot renew, because it needs *all* ISR members, and its lease expires
@@ -504,8 +552,14 @@ metadata service stays off the I/O path.
   disagree about an unfinished write. An old target never reads from a member whose ISR
   removal is in flight. The exact rules, checked by simulation, are in
   [replication-protocol.md](replication-protocol.md).
-- **Timing assumption:** only a bounded clock *rate* drift ρ. Both sides measure durations on
-  their own monotonic clocks, so no clock synchronization is required.
+- **Timing assumption:** bounded relative clock *rate* drift ρ throughout takeover. A
+  confirmation expires at the request's **send time + L**, not the response's receipt time + L.
+  Process pauses, host suspend and stopped/rolled-back VM clocks are different cases. Linux
+  `CLOCK_MONOTONIC` stops during host suspend; `CLOCK_BOOTTIME` includes it but cannot by itself
+  make VM rollback safe. Current runtime clocks use `std::time::Instant`; suspend, unbounded VM
+  clock pauses and snapshot rollback are unsupported until enforcement and model coverage exist.
+  No wall-clock synchronization is required within the supported rate assumption. See
+  [Linux timekeeping](https://www.kernel.org/doc/html/latest/core-api/timekeeping.html).
 - The same rule protects writes (all ISR members must ack) and leases (all ISR members must
   confirm). There is one invariant to reason about, not two.
 - **Node liveness** records in the metadata service still exist, but only to decide *when* to
@@ -522,9 +576,11 @@ What this changes compared with leases granted by the metadata service:
 | Remote witness over a slow WAN (edge) | Lease renewals cross the WAN | Unaffected. The witness is never on the I/O path |
 
 **Failover timing.** A volume moves away from a node only after the node's liveness record has
-expired plus a margin, **or** after explicit fencing confirmation: the
-`node.kubernetes.io/out-of-service` taint, the Node object being deleted, or the cloud provider
-reporting the instance stopped.
+expired plus a margin, **or** after trustworthy external fencing evidence. An
+out-of-service taint or deleted Node object is orchestration intent, not proof the machine
+stopped. A provider's stopped-instance evidence needs a defined freshness/identity contract.
+In every case the new target still fences, waits where required and reconciles (§6 of the
+protocol); it cannot skip that gate because Kubernetes marked a node.
 
 ## 9. Placement and failure domains
 
@@ -638,6 +694,14 @@ chunks are resynced.
 
 ### 11.2 Fast, safe pod failover
 
+**Audit finding #82:** the current controller taints an entire node from NotReady plus missing
+metadata liveness, without shutdown proof or the per-volume opt-in below. Those absence
+signals can also describe a live partition. Node-wide out-of-service taints require verified
+shutdown/power-fence evidence; otherwise recovery must be scoped to explicitly opted-in
+Flaminio workloads without detaching unrelated storage. Storage fencing does not fence a
+process's network/database side effects. See
+[Kubernetes node shutdown guidance](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#non-graceful-node-shutdown).
+
 Kubernetes by default waits about 5 minutes before evicting pods from a `NotReady` node, and a
 StatefulSet will not recreate a pod until the old one is gone. Because Flaminio fences the old
 writer itself, it can safely speed this up:
@@ -669,20 +733,23 @@ writer itself, it can safely speed this up:
   redundancy is low, gentle when only one replica is missing.
 - **Resync (returning replica).** It copies only the blocks in the dirty bitmaps kept by ISR
   peers since its removal (§8.3), and only for chunks whose ISR it was actually removed from.
-- **In-flight reconciliation after a target crash.** Writes that were in flight but not acked
-  may have landed on some replicas and not others. The new target asks each ISR replica for the
-  per-chunk sequence numbers in its recent journal window. Where replicas differ, the
-  missing writes are copied from the most advanced replica (rolled forward). Overlapping writes
-  were serialized by the range lock, so the union is well defined. Block semantics allow either
-  value for an unacknowledged write; the only requirement is that replicas **converge**.
+- **In-flight reconciliation after a target crash.** Fence the effective ISR and collect the
+  union of its uncertain extents. Compare per-block digests for that union. Where they differ,
+  select the protocol's authority from the current fenced ISR and durably copy its data to the
+  effective ISR under the new epoch. Serve the affected chunk only after convergence. Do not
+  choose an arbitrary disk by its maximum sequence number. Blocks outside the union must
+  already agree; after a replica restart uncertainty conservatively covers its whole chunk.
+  See [protocol §6](replication-protocol.md#6-failover-fencing-and-reconciliation).
 
 ### 11.5 Metadata disaster recovery
 
-- The metadata service writes **periodic snapshots** (encrypted) to the backup target.
-- `kubectl flaminio recover meta` rebuilds a metadata store from the **self-describing disks**
-  (§6). It scans every disk's chunk headers and volume descriptors, chooses the highest epoch and
-  sequence number per chunk, and reconciles against the last metadata snapshot when there is
-  one. It is a last resort, but it means losing the metadata store never means losing the data.
+Planned in #54. Periodic encrypted metadata snapshots and self-describing disks are inputs,
+not proof of current authority. Recovery must establish exclusion of old writable targets,
+validate volume incarnations/deletions and authoritative ISR evidence, preserve fences, recover
+snapshot/clone/key references, and quarantine ambiguous or returning disks. A stale backup must
+not resurrect deleted volumes or silently promote an out-of-ISR copy. Refuse no-data-loss
+recovery when the proof is incomplete; force recovery is a separate, audited administrator
+choice that explicitly accepts possible data loss. See proposed ADR 0008 and §5.4.
 
 ### 11.6 Capacity safety
 
@@ -692,13 +759,16 @@ hard watermark. New volumes may not. Alerts fire well before any write can see E
 
 ## 12. Data integrity
 
-- **Checksums:** crc32c (hardware accelerated) per 4 KiB block, computed **by the target** on the
-  bytes as stored (ciphertext if encrypted) and verified by the replica on write and by the
-  target on read. The data is protected end to end, across the network and the disk.
-- **Authenticated mode** (for encrypted volumes, **[OPEN]** whether to make it the default): a
-  keyed MAC (truncated BLAKE3-keyed, 16 B) replaces the crc, so a compromised replica node cannot
-  forge data and checksum together. Known limitation: a node could replay an older version of
-  the same block. Sequence numbers make this detectable during scrub, but not on every read.
+- **Checksums:** current storage CRC-32C covers each 4 KiB block and is verified on reads.
+  Target-generated checksums over bytes as stored (ciphertext if encrypted), carried and
+  checked across replication, are a planned end-to-end extension (#46/#50/#84), not current
+  frame behavior. TLS authenticates transport; it does not replace that checksum contract.
+- **Authenticated encrypted mode (proposed ADR 0009):** protection against a malicious replica
+  requires keyed integrity bound to data identity, logical address and version context. XTS
+  and CRC alone do not provide it. Specify the tag/key/format and encrypted-clone sharing rules
+  before #50 ships. A valid old ciphertext/tag can still be replayed unless reads check trusted
+  freshness evidence. Do not claim read-time replay protection based only on future scrub.
+  Until that choice is implemented, describe encryption as confidentiality, not Byzantine integrity.
 - **NVMe PI / metadata** is used when the device supports it, so the device itself also verifies.
 - **Scrubbing:** a background full pass over every disk (default every 14 days, throttled). It
   verifies checksums and compares per-chunk digests across replicas. Mismatches are repaired from
@@ -706,16 +776,20 @@ hard watermark. New volumes may not. Alerts fire well before any write can see E
 
 ## 13. Snapshots and clones
 
-- **O(1) snapshots.** A snapshot bumps the volume's *snapshot generation* in the metadata service
-  and in the target. No fan-out is needed. Writes carry the generation, and a replica that
-  receives a write with a newer generation first creates a new layer (redirect-on-write) for
-  that chunk. Chunks that are never written again cost nothing.
+- **Lazy snapshots (planned, #51).** A durable operation ID, epoch-conditional generation
+  transition and I/O barrier define the snapshot. Writes carry the generation; a replica
+  materializes layers lazily. Untouched chunks must remain readable at the correct generation
+  after takeover, restart and moves. O(1) describes metadata work, not a bound on draining I/O.
+  Proposed [ADR 0011](adr/0011-snapshot-and-backup-commit-boundaries.md) defines commit/recovery obligations.
 - **Crash-consistent** by default (the target briefly drains in-flight I/O at the generation
   bump). **Application-consistent** through `fsfreeze` on filesystem volumes, or pre/post exec
   hooks declared by annotation.
 - **Group snapshots** (Kubernetes `VolumeGroupSnapshot`): every target in the group drains and
   bumps its generation inside one coordinated barrier, giving crash consistency across all of an
-  application's PVCs.
+  application's PVCs. Persist the coordinated prepare/commit decision and expose the group
+  only when committed; interrupted quiesce must be completed/aborted and thawed idempotently.
+  Deletion, cloning, hydration and backup readers pin layers and keys until durable references
+  allow GC. A generation counter alone does not establish those guarantees.
 - **Clones.** A linked clone references the parent snapshot's layers on the same disks. That is
   instant, with an optional background *hydration* that fully detaches it. A full clone is a
   rebuild-style copy to new placement.
@@ -747,9 +821,11 @@ hard watermark. New volumes may not. Alerts fire well before any write can see E
 
 ### 14.2 Asynchronous cross-cluster replication (phase 4)
 
-- **Snapshot shipping.** The primary takes periodic snapshots (RPO = interval, down to about
-  1 min) and ships layer diffs over mTLS to the DR cluster's Flaminio, or through a shared
-  bucket. Trust between clusters comes from an explicit CA-bundle exchange.
+- **Snapshot shipping.** The primary takes periodic snapshots and ships layer diffs over mTLS
+  to the DR cluster's Flaminio, or through a shared bucket. The configured interval (targeting
+  about 1 min) is not actual RPO: actual RPO is the age of the latest completely transferred,
+  restorable recovery point, including backlog and outages. Publish manifests only after
+  referenced objects/keys are durable, and report recovery-point age and transfer backlog. Trust between clusters comes from an explicit CA-bundle exchange.
 - **Standby volumes** are read-only and cannot be attached until promoted.
 - **Promote** breaks the relationship. **Failback** reverse-replicates from the last common
   snapshot, so no full resync is needed.
@@ -763,7 +839,8 @@ cluster (restore from backup); ransomware (restore from immutable backups to a c
 and a failed upgrade (rollback).
 
 Restoring the metadata from an etcd snapshot raises the revision above the replaced cluster's:
-`etcdutl snapshot restore --bump-revision 1000000000 --mark-compacted` (§5.4). Without it, a
+a proven revision high-water bound and resets stale watches (§5.4; proposed ADR 0008).
+A fixed example bump alone is not enough. Without a valid recovery barrier, a
 volume created after the restore may start below an earlier volume of its name, whose fences
 then depose it, and whose data it adopts.
 
@@ -819,7 +896,11 @@ then depose it, and whose data it adopts.
   excluded from core dumps (`MADV_DONTDUMP`), and never logged.
 - **Rekey of the KEK** is cheap: re-wrap the DEK. A **DEK rotation** requires rewriting the data
   and runs as a background migration.
-- **Crypto-erase:** destroying the DEK makes every replica and backup of the volume unreadable.
+- **Key lifetime / crypto-erase (proposed ADR 0009):** retained snapshots, clones, backups and
+  legal holds pin the required keys. Ordinary live-volume deletion must not destroy retained
+  recovery points. Destruction of every recoverable copy is a separate authorized operation
+  that checks the complete reference graph and external escrow limitations. Disk release must
+  not destroy keys used by other live copies or retained backups.
 - OPAL self-encrypting drives are supported as an extra layer (phase 6).
 - **TPM-sealed KEK** for edge nodes that cannot reach a KMS at boot (phase 4, §1.2).
 
@@ -843,13 +924,23 @@ process.
 
 ## 16. Performance design
 
+**Scale acceptance (#72/#75).** Measure encoded metadata plus etcd MVCC/compaction headroom,
+transaction sizes/rates, full-list/watch recovery cost, heap/buffer use and failure-storm work
+for the published maximum geometry. Validate one agreed bound across metadata, wire frames,
+store tables and frontend integer widths. Per-node-pair heartbeat batching bounds message
+count, not processing or payload independent of volume count. Bound control/foreground/bulk
+queues and reservations, reserve resources for fencing/lease traffic, apply backpressure, and
+test fairness and progress under overload. API outages must not prevent storage-side safety.
+Do not infer supported scale from asymptotic claims alone.
+
+
 ### 16.1 Techniques
 
 | Area | Technique |
 |---|---|
 | Kernel boundary | ublk + `io_uring`, batched submissions, registered buffers and files, optional SQPOLL |
 | Copies | ublk zero-copy where the kernel supports it; `io_uring` zero-copy send; receive into registered buffers |
-| Concurrency | Thread-per-core, shared-nothing, no locks on the hot path, per-core connections between node pairs |
+| Concurrency | Target: thread-per-core, shared-nothing, no hot-path locks. Current ublk queues share an engine mutex; redesign tracked by #15, with contention measured in #75 |
 | Disk I/O | `O_DIRECT` to raw devices, no host filesystem, group-committed journal, large writes are redirect-on-write |
 | Network | Dedicated storage network supported (Multus or host interface selection), kTLS offload, RDMA in phase 6 |
 | Reads | Local short-circuit when in sync, least-loaded replica selection |

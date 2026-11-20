@@ -1,0 +1,524 @@
+diff --git a/docs/issues/73/intent.md b/docs/issues/73/intent.md
+index 4736c0c..2ca465f 100644
+--- a/docs/issues/73/intent.md
++++ b/docs/issues/73/intent.md
+@@ -1,39 +1,72 @@
+ # Issue #73: Tenant policy and destructive-operation audit — intent
+ 
+ [Issue #73](https://github.com/jsfakian/Flaminio/issues/73), ARCHITECTURE §15.3.
+-Draft covering base infrastructure and the required encryption/snapshot/backup integrations.
++Draft. It covers the issue's first step, the metadata service's authority; see "This step".
+ 
+ ## Why
+ 
+ 1. **Authentication is not tenant authorization.** `Authorize` treats every certificate with an
+-   Admin name as an administrator for create/delete/move/drain (`meta/service/auth.go:58–65`).
++   Admin name as an administrator for create/delete/move/drain (`meta/service/auth.go:57,64–65`).
+    It has no namespace, device-class quota or deletion-protection check. Node identities have
+    narrow per-method rules, which must be preserved.
+ 2. **CSI supplies no trusted tenant identity.** Its CreateVolume sends geometry and placement
+-   policy only (`control/csi/controller.go:246–252`); DeleteVolume supplies only the volume name
+-   (`:283–291`). A namespace string added by a caller would not establish ownership.
++   policy only (`control/csi/controller.go:231–236`); DeleteVolume supplies only the volume name
++   (`:261–269`). A namespace string added by a caller would not establish ownership.
+ 3. **Kubernetes admission is not the last authority.** Direct authenticated metadata RPCs bypass
+    it. CRDs/operator remain #43 planned work. Existing `deploy/csi/rbac.yaml` grants sidecars
+    their operational rights, not a product admin/tenant policy layer.
+ 4. **Current logs are not a complete durable audit.** `logConfirmation` logs identity, peer,
+-   serial and revision for a newly confirmed tombstone (`meta/service/service.go:675–693`).
+-   It is diagnostic slog, with no durable operation outbox, append-only store, retention or
+-   export recovery. A crash between an external key operation and logging loses attribution.
+-5. **Quota and lifecycle commits must agree.** #76 creation resumes after ambiguous commits;
+-   #72 capacity counts physical commitments separately. Namespace quota, owner/protection and
+-   audit events must compose with their durable decisions, including growth and deletion.
++   serial and revision for a newly confirmed tombstone (`meta/service/service.go:675–694`).
++   It is diagnostic slog, with no append-only store, retention or export recovery.
++5. **Quota and lifecycle commits must agree.** A charge, an owner, a protection state and an
++   audit event that are not written with the volume's own transactions can disagree with it
++   after a crash, a lost reply or a concurrent request.
++
++## This step
++
++The issue lists five steps and depends on #43 and #50–#53, which have no code and, for #52 and
++#53, no plan. Its last line allows the base to start first. This plan is that base: **the
++metadata service's authority**, for the operations that exist today.
++
++- **Issue step 3, whole:** deletion protection enforced in the service that deletes, and the
++  explicitly authorized override.
++- **Issue step 4, for today's destructive operations** (volume deletion, forced confirmation,
++  policy, owner and pruning changes): append-only events, their persistence, retention, export
++  and failure behaviour, and what they must never hold.
++- **Issue step 2, the service half:** RF=1 and unencrypted restrictions by namespace, quotas per
++  device class and required protection, checked on every request path and safe under
++  concurrent requests. The CSI controller supplies the verified owner.
++- **Issue step 5, the service half:** the role and policy matrix by direct RPC, refusals included.
++
++What stays open, and keeps the issue open after this step:
++
++- **Issue step 1:** the Kubernetes RBAC split and the admin resources. They need #43's CRDs.
++- **Issue step 2, the Kubernetes half:** the admission webhook or ValidatingAdmissionPolicy and a
++  policy resource. They need #43's installer, and a Kubernetes client and test fixture this
++  repository does not have. The service's check stays the authority when they arrive.
++- **Key operations, snapshots and backups:** their audit events, protection checks and quota
++  belong to #50–#53, which add those operations; growth quota belongs to #70.
++- **An exporter daemon and a SIEM forwarder:** this step ships the export API and its CLI.
++- **Durable records of refused attempts:** a refusal is logged here, not stored. Storing it
++  needs a bounded design that no refused caller can use to fill the store.
++- **Activating the lab cluster.**
++
++Against "Done when": after this step, forbidden namespace combinations, over-quota requests and
++protected deletions are refused under concurrent requests on every path to the metadata service;
++permitted PVC workflows work; volume deletions have durable, attributable records; an export
++interruption loses no record and changes no authorization. Early refusal at admission, the RBAC
++split and key-operation records are not yet there.
+ 
+ ## What we want
+ 
+-1. Ship an explicit admin/tenant and component-role matrix, tenant storage policy admission,
+-   authoritative service checks, concurrent-safe per-class namespace quotas and protection.
+-2. Bind namespace/PVC/class UIDs and full effective intent to trusted controller identities;
+-   reject forged ownership and direct-RPC bypasses. Keep protected resources protected through
+-   namespace deletion, failed provisioning and alternate API paths.
+-3. Durably record authenticated refused/destructive/key operations, and couple mutations to
+-   audit decisions. Resume external operations safely; retain/export records without secrets.
+-4. Verify allowed and forbidden paths on Kubernetes and both metadata backends. Keep integration
+-   stages explicit until #43/#50–#53 supply their runtime operations; do not claim them present.
++1. An explicit role for each caller of the metadata service, replacing the Admin name, with the
++   override and the audit roles separately credentialed.
++2. Owners bound to namespace and PVC UIDs that the CSI controller read from Kubernetes; forged
++   owners and direct-RPC bypasses refused. Protected volumes stay protected through namespace
++   deletion, failed provisioning and every API path.
++3. Destructive operations recorded durably with their mutation; records exported and pruned
++   without loss, and without secrets. A refusal costs the store nothing.
++4. Allowed and forbidden paths verified on both metadata backends.
+ 
+ ## Out of scope
+ 
+diff --git a/docs/issues/73/spec.md b/docs/issues/73/spec.md
+index 9b97d28..059e3ad 100644
+--- a/docs/issues/73/spec.md
++++ b/docs/issues/73/spec.md
+@@ -1,116 +1,158 @@
+ # Issue #73: Tenant policy and destructive-operation audit — specification
+ 
+-[Intent](intent.md). [Design](design.md). Draft; no approvals or accepted risks.
++[Intent](intent.md). [Design](design.md). [Decisions](decisions.md). Draft; no approvals or
++accepted risks. It specifies the issue's first step, the metadata service's authority (intent,
++"This step"); the issue stays open after it.
+ 
+ ## Terms
+ 
+-- **Owner:** immutable cluster, namespace UID and PVC/snapshot UID; names are display fields.
+-- **Tenant policy:** administrator-managed class permissions, quotas and required protection
+-  bound to namespace/class UIDs and a metadata policy generation.
+-- **Effective intent:** normalized complete operation parameters, owner and class identity;
+-  arbitrary RPC fields, Kubernetes labels and namespace names alone are not proof.
+-- **Quota:** logical admitted user bytes/object counts per namespace UID and device-class UID;
+-  distinct from #72 physical capacity/reserve. Reservations count before objects become visible.
+-- **Protection:** authoritative service state requiring a separately authorized deletion override.
+-- **Audit decision:** immutable event committed before/with an auditable mutation; external side
+-  effects have durable intent before execution and outcome after, including unknown outcomes.
++- **Active:** tenancy has been activated in the metadata store. It is permanent. Until then a
++  binary of this step behaves as today's.
++- **Role:** a named set of methods, bound to an exact administrator SPIFFE ID in each
++  instance's authorization file.
++- **Owner:** a volume's owner record: a tenant (namespace UID and PVC UID) or `system`.
++  **Unassigned:** a volume with no owner record. Names and labels are never owners.
++- **Tenant policy:** an administrator's record per namespace UID: RF=1 allowed, unencrypted
++  allowed, protection required, and a byte and a volume limit per device class.
++- **Device class:** #72's pool name; `default` for every volume until #72 gives requests one.
++- **Quota:** logical volume bytes and volume count charged per namespace UID and device class;
++  distinct from #72 physical capacity/reserve.
++- **Protection:** owner-record state fixed at creation; deleting the volume then needs the
++  override.
++- **Audit event:** an immutable, hash-linked record committed in the transaction of the mutation
++  it describes. **Audited method:** one that writes an event (design, the method table).
+ 
+ ## The invariant
+ 
+-Every tenant operation is bound to a verified owner, current permitted class/policy and charged
+-quota. No alternate path can bypass protection or authorization. A destructive/key operation
+-cannot become authorized or disappear from the required audit history because a webhook,
+-exporter, requester or metadata instance failed. Audit records never contain credentials or data.
++Once active: a tenant volume exists only with an owner the CSI controller verified, a policy
++that permitted it and its quota charge. No request path to the metadata service deletes a
++protected or an unassigned volume, except the override of that exact volume. Every audited
++mutation commits with its event. No failure of an exporter, a receiver, a requester or a
++metadata instance authorizes an operation or loses an event. A refusal writes nothing to the
++store. Events never hold credentials or data.
+ 
+ ## Behaviour
+ 
+-**S1. RBAC and component roles.** Administrators alone manage DevicePolicy, Disk, StorageNode,
+-KMSProvider, BackupTarget, policy/quota, class and override settings. Tenants use namespaced PVCs
+-and snapshots and cannot alter policy, protection, audit, role bindings or privileged credentials.
+-Controllers have explicit least-privilege roles rather than an unrestricted administrator name.
+-Preserve node self-only and target/epoch authorization. Undeployed CRDs/features remain disabled.
+-
+-**S2. Admission.** Validate Flaminio PVC/snapshot create/update/delete, including alternate API
+-versions and policy removal attempts, for namespace/class encryption and RF=1 restrictions,
+-quota eligibility and required protection. Fail closed on unavailable/unknown policy. Dry-run
+-and denied admission have no storage/quota side effects. Namespace selectors cannot provide a
+-tenant-controlled opt-out. Surface actionable rejections without disclosing another tenant.
+-
+-**S3. Trusted ownership and policy.** The metadata service enforces the same rules for CSI,
+-operator, CLI and direct RPCs. A trusted provisioning broker verifies persisted Kubernetes UIDs
+-and intent and records it under restricted authority; tenants cannot fabricate a namespace or
+-use another PVC's authorization. Service decisions compare their policy/owner generation.
+-Policy revocation blocks new decisions once committed; already admitted durable work completes
+-under its recorded authority unless explicitly fenced. No ordinary I/O consults this policy.
+-
+-**S4. Race-safe quotas.** Atomically reserve logical bytes/count with admission; every retry uses
+-its operation/owner identity. Include hidden creates, growth, clone/snapshot/backup commitments
+-according to documented units; reject checked-arithmetic overflow. Concurrent requests cannot
+-spend the same quota. Release only by an incarnation-matched terminal lifecycle transition;
+-crash, namespace recreation, physical report or failed response cannot erase another charge.
+-Policy reductions block new admission without deleting existing resources.
+-
+-**S5. Protection.** Store required protection and owner before the first resource claim. Enforce
+-it before delete marks, cleanup/key deletion and all destructive APIs. Tenant field/finalizer
+-patches or namespace deletion cannot clear it. Retained-resource/key pins and legal holds from
+-#50–#53 are independently enforced; a protection override does not bypass them. A denied delete
+-writes no destructive mark and is durably audited.
+-
+-**S6. Explicit override.** A separately bound override role names exact resource/incarnation,
+-expected protection revision, correlation operation and reason. Ordinary admin/CSI/node identity
+-alone is insufficient. Override is idempotent, applies only to that decision and cannot authorize
+-a later recreation or silently turn protection off globally. Record caller, target, reason and
+-outcome durably. Quota, tombstones, epoch fencing and retained references still apply.
+-
+-**S7. Required audit.** Record authenticated destructive/key attempts, refusals and outcomes:
+-identity/role, resource owner/incarnation, operation, stable correlation ID, policy decision and
+-sanitized reason/time. Successful metadata changes and their audit decision commit atomically.
+-External KMS/backup deletion uses durable intent plus idempotent execution/reconciliation;
+-unknown outcomes remain explicit and never become fabricated success or a fresh untracked call.
+-Retries can add attempt evidence, but cannot execute or charge the logical operation twice.
+-
+-**S8. Append-only and retention.** Service roles cannot update/delete committed event bodies;
+-append order/hash linkage exposes gaps/reordering. Export independently verifiable batches and
+-checkpoints. Retain the configured minimum and unacknowledged export backlog. Document that
+-etcd/root compromise can rewrite local history before independent anchoring; do not call a hash
+-chain alone immutable against that adversary. Retention deletion itself is authorized/audited.
+-
+-**S9. Failure behavior.** Metadata audit persistence failure rejects auditable mutations before
+-effects. Export outage leaves durable queued evidence and retries, without changing authorization.
+-Before bounded audit capacity is exhausted, stop new auditable operations, reserve room to finish
+-already admitted ones, and alert. Existing I/O, fencing and safety-critical membership changes
+-must not depend on SIEM availability. An unavailable denial sink still denies the request.
+-
+-**S10. Data minimization and isolation.** Never record tokens, credentials, wrapped/unwrapped
+-keys, payloads or arbitrary request bodies. Sanitize bounded identifiers/reasons and prevent
+-log injection. Only audit readers/exporter see cross-tenant records; tenant status discloses its
+-own decisions only. Export credentials have no mutation/policy/override privileges.
+-
+-**S11. Rollout and integrations.** Exclude old writers; inventory legacy owner/protection/quota
+-state before enabling tenant operation. Unknown legacy ownership is quarantined for administrator
+-assignment, never guessed from a volume name. Add the same policy/protection/audit hooks to #50
+-key lifecycle, #51 snapshots/clones, #52 backup intents and #53 repository/retention operations.
+-Base policy/audit can ship first, but #73 remains open until full integration tests pass.
++**S1. Roles.** Once active, an administrator name alone grants nothing: every method other than
++the three open reads needs a role bound to the caller's exact SPIFFE ID, as the design's method
++table lists for every method. The CSI controller, system provisioning, cluster administration,
++deletion override, audit reading and audit export are separate roles; the override and the
++exporter cannot be combined with a role that provisions, administers or sets policy. Node
++self-only rules and ChangeIsr's target and epoch check are unchanged. The Kubernetes RBAC split
++of admin resources is not in this step.
++
++**S2. Namespace restrictions.** A tenant creation is refused unless its namespace has a policy,
++RF=1 is allowed if it asks for one replica, unencrypted is allowed if it is unencrypted (every
++volume is, until #50), and its device class has a limit. A missing or unreadable policy refuses.
++A refusal names only the caller's own namespace, limit and usage. Kubernetes admission is not in
++this step: the service's check is the authority on every path.
++
++**S3. Owner.** The CSI controller reads the PVC and its namespace from the Kubernetes API, checks
++that the PVC's UID is the one in the provisioner's volume name, and states the owner. The service
++accepts a tenant owner from the CSI controller's role only, requires the volume id to be
++`pvc-<PVC UID>`, and writes the owner record in the creation's claim. A creation without an owner
++makes a system volume and needs the system provisioning role. A decision compares the policy
++revision it read; a policy change applies to later decisions only. No I/O, attach or ISR change
++consults a policy or an owner.
++
++**S4. Race-safe quotas.** The claim charges the volume's bytes and one volume to its namespace
++and device class, in the same transaction, against the usage it read: concurrent creations
++cannot spend the same quota, and checked arithmetic refuses overflow. The charge is released
++only in the transaction that deletes that volume's header. A crash, a lost reply, an interrupted
++creation, a namespace recreated under the same name or a physical report never releases or moves
++a charge. Lowering a limit refuses new creations and deletes nothing. Growth, snapshots and
++backups are charged by the issues that add them.
++
++**S5. Protection.** A volume created under a policy that requires protection is protected from
++its claim on. DeleteVolume refuses a protected volume and an unassigned one before any write,
++whoever calls, and whether or not its header parses. Nothing a tenant can change in Kubernetes
++(fields, finalizers, namespace deletion) reaches the owner record. A refused deletion writes no
++mark, and nothing else (S7).
++
++**S6. Explicit override.** The deletion-override role, bound to an identity with no other role,
++deletes one volume by naming its id, its owner record's revision, an operation id and a reason.
++A stale revision (the volume was replaced or changed) is refused. The override performs the
++deletion itself, through the same mark, tombstone and quota release as DeleteVolume; it changes
++no policy and no other volume, and cannot authorize a later recreation's deletion. Its events
++name the caller and the reason. Tombstones and epoch fencing apply as for any deletion.
++
++**S7. Required audit.** Every audited method commits its event in the transaction of its
++mutation: identity, role, certificate serial, peer address, method, resource, owner, operation
++id, outcome and reason. A deletion writes one event with its mark and one with its tombstone,
++under one operation id; a retry adds no event and deletes nothing twice. A refusal writes
++nothing to the store, so no caller can grow it or delay a mutation by being refused: refusals
++are logged, at a bounded rate, with identity, method and a fixed reason word. Durable records of
++refused attempts are not in this step. Key operations and snapshot or backup deletions are
++audited by the issues that add them (#50–#53), through this step's append.
++
++**S8. Append-only, export and pruning.** No role can change an event, and only pruning deletes
++one. Each chain's order and hash linkage expose a gap, a reordering or an altered event. An
++exporter reads pages, and acknowledges a sequence only with the receiver's signature over that
++sequence and the chain's hash there; the service checks both against its own chain and its
++configured receiver key, and an acknowledgement only moves forward. An administrator prunes only
++acknowledged events, and the prune is itself an event. Without a receiver key nothing is
++acknowledged and nothing is pruned. etcd or root access can rewrite history that no receiver has
++signed: the chain alone is not called immutable against that adversary.
++
++**S9. Capacity and failure.** Events held in the metadata store, exported or not, count against
++a fixed budget, with room reserved to finish every admitted deletion. At the budget, new audited
++operations are refused; admitted deletions finish; creations, attaches, ISR changes, moves,
++heartbeats, acknowledgements and pruning are not refused. A reservation is released by its
++deletion's completion, never by time. An event that cannot be written refuses its mutation. An
++exporter or receiver outage changes no authorization. The store's own space limit is a
++deployment requirement the design states.
++
++**S10. Data minimization and identifiers.** Events hold only their listed fields: no request
++bodies, tokens, credentials, keys or payloads. Every identifier that enters a key, an event or a
++log line has a fixed format and length, checked before any key is built; reasons are bounded
++printable text. Audit reads need the reader or the exporter role; the exporter can
++change the export cursor and nothing else.
++
++**S11. Activation and legacy volumes.** Activation is one conditional write, made only after
++every listed metadata instance reports that it has loaded its roles and is not insecure. After
++it, a binary of this step refuses to start without its authorization file or with `--insecure`,
++and an instance already running without the file refuses administrator calls. Owner, policy,
++quota and audit records are separate from the volume header, so a writer that does not know them
++cannot strip them. A binary older than this step cannot be stopped by the store: running one
++after activation is unsupported, and what it leaves behind is reported. Volumes that exist at
++activation are unassigned: they attach and serve as before, and are deleted only after an
++administrator assigns an owner, which is audited and, for a tenant, charged. No owner is guessed
++from a name.
+ 
+ ## Tests
+ 
+-- **S1–S3/S10:** Kubernetes RBAC/admission and metadata mTLS matrix: allowed tenant workflows,
+-  forbidden admin CRs/role escalation, forged owner/class, changed namespace UID, alternate API
+-  versions, direct RPC bypass, stale/unavailable policies, dry-run and cross-tenant reads.
+-- **S4–S6:** both-backend deterministic interleavings: quota boundary/overflow, concurrent
+-  create/grow/delete, hidden/restarted operation, protection toggle/delete race, stale override,
+-  namespace removal, retained-key pins and delete/recreate. No unauthorized mark or free quota.
+-- **S7–S9:** each audit/mutation/intent/external-effect/outcome boundary crashes or loses its
+-  reply; exporter outage/restart, duplicate/gap/tamper, exhausted backlog and reserved completion
+-  budget. Side effects have durable attributable decisions; safety traffic remains independent.
+-- **S10/S11:** redaction/fuzz corpus, identity/export-role isolation, legacy migration and each
+-  #50–#53 destructive/key path, including refusal and unknown external outcome.
++- **S1:** every method by every role, by node identities and by an unbound identity, on a
++  secured active service; the same table on an inactive store gives today's answers.
++- **S2–S4:** on both backends: forbidden RF=1, unencrypted and class, a missing policy; quota at
++  the limit and one byte over, overflow, two creators racing for the last bytes (exactly one
++  wins), a policy change between read and claim, a lost reply and its retry (one charge), delete
++  then recreate. CSI owner lookup: UID mismatch, a PVC recreated under the same name, missing
++  provisioner metadata, Kubernetes API failure.
++- **S5–S6:** a protected deletion by each role, with a header that does not parse, of an
++  unassigned volume; the override with a stale revision, against a replacement, retried after
++  each step; role combinations refused at load.
++- **S7–S9:** a failure and a lost reply at each transaction of a deletion; chain verification
++  catches an altered, missing and reordered event; acknowledgements that are stale, replayed,
++  forged, beyond the tail, or sent with no receiver key; pruning only below the acknowledgement,
++  with its event; the budget full with the exporter down: new deletions refused, a marked one
++  finishes, Attach and ChangeIsr commit; a node identity and a retried deletion of a protected
++  volume flood refusals while another namespace creates and deletes: no store write comes from
++  the refusals, and the other namespace's operations commit.
++- **S10:** identifier and reason tables (malformed, oversized, newlines, key separators); events
++  hold only allowlisted fields; audit reads by the wrong roles.
++- **S11:** activation refused while a listed instance is older, insecure or without roles; an
++  instance without the file after activation; a header rewritten in the old format keeps its
++  protection; a legacy volume attaches, its deletion is refused, then succeeds after assignment;
++  a deletion by an old binary is reported.
+ 
+ ## Open questions
+ 
+-- **Q1:** authoritative policy mirroring and durable quota/audit coupling add provisioning
+-  dependencies. Fail-closed mutation behavior is proposed; no availability trade-off accepted.
+-- **Q2:** retention duration/export durability/independent anchoring and audit-capacity defaults
+-  require administrator agreement. An independent SIEM acknowledgement is not inherently WORM.
+-- **Q3:** exact legacy-owner assignment and separately credentialed override role are Proposed;
+-  no broad administrator bypass or deletion of retained key material is approved.
++- **Q1:** creation now depends on a policy record and deletion on audit space. Fail-closed
++  behaviour is proposed; no availability trade-off is accepted.
++- **Q2:** the budget's size, the receiver's signature as the only gate to pruning (no local time
++  minimum) and pruning by hand need administrator agreement. A receiver's signature is not WORM
++  storage.
++- **Q3:** who assigns legacy owners and from what evidence, the separately credentialed override
++  role, and the CSI controller as the one party trusted to state owners are Proposed.
++- **Q4:** nothing in the store stops a binary older than this step after activation. The plan
++  states it as unsupported and reports what it leaves; that is not an accepted risk.
+diff --git a/docs/issues/73/contracts.md b/docs/issues/73/contracts.md
+new file mode 100644
+index 0000000..aebaf1b
+--- /dev/null
++++ b/docs/issues/73/contracts.md
+@@ -0,0 +1,160 @@
++# Issue #73: contracts — draft
++
++Normative appendix to the [design](design.md). Everything here is Proposed. Protobuf notation:
++`name:tag:type`; a response not listed is an empty message.
++
++## Identifiers
++
++Checked before any key is built or any record read; a failure is `InvalidArgument`.
++
++| Value | Format |
++|---|---|
++| volume id, node id, device class | `domain.ValidID`: `^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$` |
++| namespace UID, PVC UID | `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` |
++| operation id | 32 lowercase hex digits; the service draws 128 random bits where it makes one |
++| reason | 1–256 bytes, each 0x20–0x7e |
++| partition | 0–15 |
++| chain hash, receipt | exactly 32 bytes, exactly 64 bytes |
++
++## `flaminio-meta serve`
++
++- `--authorization-policy FILE`: `{"schema":1,"bindings":{"<SPIFFE ID>":["<role>",…]}}`, at
++  most 256 bindings, read at start only. Roles: `csi-controller`, `system-provisioner`,
++  `cluster-admin`, `deletion-override`, `audit-reader`, `audit-exporter`. Exit 1, naming the
++  entry, on: an unknown field or role; an ID that `pki.ParseID` refuses, that is not an
++  administrator ID, or that is outside `--trust-domain`; `deletion-override` with any other
++  role; `audit-exporter` with any role but `audit-reader`.
++- `--audit-receiver-key FILE`: the receiver's Ed25519 public key (PKIX PEM). Absent:
++  AckAuditExport answers `FailedPrecondition`.
++- `--audit-budget-bytes N`: default 268435456; a multiple of 16.
++- Exit 1 at start on an active store: `tenancy is active in this store: --authorization-policy
++  is required`, and `tenancy is active in this store: --insecure is refused`.
++
++## Records
++
++Under `/flaminio/v1/tenant/`. Values are JSON with `"schema":1`. A record that does not parse,
++or has another schema, fails the method with `Internal`, and nothing is written.
++
++| Key | Value |
++|---|---|
++| `activation` | `{schema, time}`; written once, never changed or deleted |
++| `policies/<namespace UID>` | `{schema, allow_rf1, allow_unencrypted, required_protection, classes}`; `classes` maps a device class to `{max_bytes, max_volumes}`, at most 16 |
++| `quota/<namespace UID>/<class>` | `{schema, bytes, volumes}` |
++| `owners/<volume id>` | `{schema, system, namespace_uid, pvc_uid, class, bytes, protected, deleting_op}` |
++| `audit/tail/<pp>` | `{schema, next, hash, stored, reserved}` |
++| `audit/events/<pp>/<sequence>` | one event; never rewritten |
++| `audit/cursor/<pp>` | `{schema, acked, pruned}` |
++
++`<pp>`: the partition as two decimal digits. `<sequence>`: 20 decimal digits, from 1.
++
++**Event:** at most 2048 bytes, these fields in this order: `schema, partition, sequence, prev,
++time, kind, operation, actor, role, cert_serial, peer, method, resource, owner, outcome, reason`.
++- `prev`: the previous chain hash in hex; 64 zeros for sequence 1. An event's chain hash is
++  SHA-256(previous chain hash ‖ the event's stored bytes).
++- `actor`: the SPIFFE ID. `cert_serial`, `peer`: as `logConfirmation` reads them today.
++- `resource`: a volume id, a namespace UID, or `audit/<pp>`. `owner`: `system`, `unassigned`,
++  or `<namespace UID>/<PVC UID>`.
++- `time`: RFC 3339 UTC from the instance's clock. Information only: nothing orders by it.
++- `reason`: the override's reason, else empty. `outcome`: a fixed word per kind.
++
++**Partition of an event:** about a volume, `SHA-256(volume id)[0] & 15`; about a namespace's
++policy, `SHA-256(namespace UID)[0] & 15`; `audit.pruned`, the pruned chain; `tenancy.activated`, 0.
++
++| Kind | Committed with | Outcome words |
++|---|---|---|
++| `tenancy.activated` | the activation record | `ok` |
++| `policy.put`, `policy.deleted` | the policy record | `ok` |
++| `owner.assigned` | the owner record and its charge | `ok` |
++| `delete.admitted` | the mark | `ok`, `override` |
++| `delete.committed` | the header's deletion and the tombstone | `ok`, `header-missing`, `marked-before-activation` |
++| `confirm.forced` | a `cluster-admin`'s confirmation for a node | `ok` |
++| `audit.pruned` | the prune; `reason` holds `first-last` sequences | `ok` |
++
++**Budget.** A chain's cap is the budget / 16. `stored` is the bytes of the events present in the
++chain; `reserved` is 2048 for each deletion admitted and not yet committed.
++- `delete.admitted` is admitted when `stored + reserved + len(event) + 2048 <= cap`, and adds
++  2048 to `reserved`.
++- `delete.committed` is always admitted, and takes 2048 from `reserved`, unless its outcome is
++  `marked-before-activation`, which is admitted as any other event.
++- `audit.pruned` is always admitted: a prune removes at least one event.
++- Any other event is admitted when `stored + reserved + len(event) <= cap`.
++- Not admitted: `ResourceExhausted`, nothing written.
++
++## Protobuf
++
++`Owner{namespace_uid:1:string, pvc_uid:2:string}`. `CreateVolumeRequest.owner:30:Owner`; absent
++means a system volume. Tag 30 is clear of #72's 9–10, #70's 11–14 and #50's 20 in that message.
++No existing response changes.
++
++| RPC | Request | Response |
++|---|---|---|
++| `TenantStatus` | `{}` | `schema:1:u32, active:2:bool, secure:3:bool, roles_loaded:4:bool, caller_roles:5:repeated string, chains:6:repeated ChainStatus, unassigned:7:u64, unassigned_ids:8:repeated string, orphan_owners:9:u64, orphan_owner_ids:10:repeated string` |
++| `ActivateTenancy` | `{}` | |
++| `PutTenantPolicy` | `namespace_uid:1:string, expected_revision:2:u64, policy:3:TenantPolicy` | `revision:1:u64` |
++| `GetTenantPolicy` | `namespace_uid:1:string` | `policy:1:TenantPolicy, revision:2:u64, usage:3:repeated ClassUsage` |
++| `DeleteTenantPolicy` | `namespace_uid:1:string, expected_revision:2:u64` | |
++| `GetVolumeOwner` | `volume:1:string` | `assigned:1:bool, system:2:bool, owner:3:Owner, device_class:4:string, bytes:5:u64, protected:6:bool, deleting:7:bool, revision:8:u64` |
++| `AssignOwner` | `volume:1:string, system:2:bool, owner:3:Owner, protected:4:bool` | `revision:1:u64` |
++| `OverrideDelete` | `volume:1:string, owner_revision:2:u64, operation:3:string, reason:4:string` | |
++| `ListAudit` | `partition:1:u32, after_sequence:2:u64, limit:3:u32` | `records:1:repeated AuditRecord, next:2:u64, acked:3:u64, pruned:4:u64` |
++| `AckAuditExport` | `partition:1:u32, last_sequence:2:u64, batch_hash:3:bytes, receipt:4:bytes` | |
++| `PruneAudit` | `partition:1:u32, through_sequence:2:u64` | `pruned_through:1:u64` |
++
++- `ChainStatus{partition:1:u32, next:2:u64, stored:3:u64, reserved:4:u64, cap:5:u64,
++  acked:6:u64, pruned:7:u64}`. The two id lists hold at most 100 ids each.
++- `TenantPolicy{allow_rf1:1:bool, allow_unencrypted:2:bool, required_protection:3:bool,
++  classes:4:repeated ClassQuota}`; `ClassQuota{device_class:1:string, max_bytes:2:u64,
++  max_volumes:3:u64}`; `ClassUsage{device_class:1:string, bytes:2:u64, volumes:3:u64}`.
++- `PutTenantPolicy.expected_revision` 0 means the policy must not exist.
++- `AuditRecord{sequence:1:u64, value:2:bytes, hash:3:bytes}`: the stored bytes and the chain
++  hash at that sequence. `limit` 1–256; 0 means 64. `next` is the tail's next sequence.
++- **Receipt:** the receiver's Ed25519 signature over `"flaminio-audit-receipt-v1"` ‖ partition
++  (u32, big-endian) ‖ last_sequence (u64, big-endian) ‖ batch_hash.
++
++**Errors.**
++
++| Code | When |
++|---|---|
++| `InvalidArgument` | a malformed identifier; a tenant creation whose id is not `pvc-<PVC UID>`; a tenant owner on a creation by `system-provisioner`, or none on one by `csi-controller` |
++| `PermissionDenied` | no role for the method; a tenant volume's deletion by `system-provisioner` or a system volume's by `csi-controller`; a creation its namespace's policy forbids or that has no policy or no limit for its class; a receipt that does not verify |
++| `ResourceExhausted` | over quota (the message names that namespace's limit and usage only); the audit budget |
++| `FailedPrecondition` | deleting a protected or an unassigned volume; a new RPC other than `TenantStatus` and `ActivateTenancy` on an inactive store; any administrator call on an active store through an instance without roles; no receiver key; a batch hash that is not the chain's; pruning beyond the acknowledgement; deleting a policy with usage |
++| `OutOfRange` | an acknowledgement behind the cursor, or at or beyond the tail's next sequence |
++| `NotFound` | a volume with neither header nor owner record; a policy that does not exist |
++| `Aborted` | a stale `expected_revision` or `owner_revision`; contention, as today |
++
++CreateVolume's policy refusals are `PermissionDenied`, never `FailedPrecondition`, which the CSI
++controller turns into `ResourceExhausted` (`control/csi/controller.go:248–249`).
++
++## CLI
++
++`flaminio-meta` gains two commands; each prints JSON on success and exits 1 on any error.
++
++```
++tenant status
++tenant activate --servers HOST:PORT,...
++tenant policy-get <namespace-uid>
++tenant policy-put <namespace-uid> --expect-revision N [--allow-rf1] [--allow-unencrypted]
++                  [--no-protection] --class NAME=MAX_BYTES:MAX_VOLUMES ...
++tenant policy-delete <namespace-uid> --expect-revision N
++tenant owner <volume>
++tenant assign <volume> (--system | --namespace-uid U --pvc-uid P [--protected])
++tenant override-delete <volume> --owner-revision N --operation HEX --reason TEXT
++audit list <partition> [--after N] [--limit N]      # one record per line
++audit ack <partition> <last-sequence> <batch-hash-hex> <receipt-hex>
++audit prune <partition> <through-sequence>
++```
++
++`tenant activate` calls `TenantStatus` on every server of `--servers`, and refuses, naming the
++server, unless each answers `schema` 1, `secure`, `roles_loaded`, and `cluster-admin` among
++`caller_roles`; an older binary answers `Unimplemented`. Then it calls `ActivateTenancy` on the
++first. `--servers` is required and is not defaulted from `--server`.
++
++## Kubernetes
++
++- `csi-provisioner` gains `--extra-create-metadata`; `--volume-name-prefix` and
++  `--volume-name-uuid-length` stay at their defaults, so the CSI volume name is `pvc-<PVC UID>`.
++- The CSI controller reads `csi.storage.k8s.io/pvc/namespace` and `csi.storage.k8s.io/pvc/name`
++  from the request's parameters, then `GET /api/v1/namespaces/<ns>/persistentvolumeclaims/<name>`
++  and `GET /api/v1/namespaces/<ns>`, taking `metadata.uid` of each.
++- `ClusterRole flaminio-csi-controller` gains `get` on `namespaces`.
