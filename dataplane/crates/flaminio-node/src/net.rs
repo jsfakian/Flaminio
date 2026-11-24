@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use flaminio_net::frame::Frame;
@@ -82,9 +82,29 @@ pub struct NetConfig {
 pub type Sink = Arc<dyn Fn(NetEvent) + Send + Sync>;
 
 /// The engine's handle on the network thread.
+///
+/// Cloning shares the command channel. When the last `Net` is dropped the command channel
+/// closes and the worker thread is joined, so TLS/accept state is gone before ASan/LSan runs
+/// (engine tests used to leak the thread past process teardown).
 #[derive(Clone)]
 pub struct Net {
     cmds: channel::Sender<NetCommand>,
+    /// Shared so every clone keeps the worker alive; the last drop joins it.
+    #[allow(dead_code)] // held for Arc drop → NetWorker::drop → join
+    worker: Arc<NetWorker>,
+}
+
+/// Owns the join handle; dropped only after every `Net` sender is gone.
+struct NetWorker {
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl Drop for NetWorker {
+    fn drop(&mut self) {
+        if let Some(h) = self.join.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl Net {
@@ -100,7 +120,13 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
         Some(s) => Some(smol::Async::new(s.listener.try_clone()?)?),
         None => None,
     };
-    thread::Builder::new()
+    // Close the listen socket when the command loop ends so a blocked accept wakes and the
+    // detached accept_loop can be dropped with the executor.
+    let shutdown_listener = match &cfg.server {
+        Some(s) => Some(s.listener.try_clone()?),
+        None => None,
+    };
+    let join = thread::Builder::new()
         .name("flaminio-net".into())
         .spawn(move || {
             let ex = Rc::new(smol::LocalExecutor::new());
@@ -160,9 +186,17 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
                         }
                     }
                 }
+                // Unblock accept before the executor (and its detached accept_loop) is dropped.
+                drop(shutdown_listener);
+                drop(outgoing);
             }));
         })?;
-    Ok(Net { cmds })
+    Ok(Net {
+        cmds,
+        worker: Arc::new(NetWorker {
+            join: Mutex::new(Some(join)),
+        }),
+    })
 }
 
 async fn accept_loop(
