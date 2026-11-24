@@ -92,6 +92,7 @@ lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellch
 	@bash scripts/tools/bench-reference-test.sh
 	@bash scripts/tools/node-scripts-test.sh
 	@bash scripts/tools/lab-deletion-test.sh
+	@bash scripts/tools/failover-policy-test.sh
 	$(ACTIONLINT)
 
 fmt: ## Format Rust and Go code
@@ -380,7 +381,7 @@ csi-logs: ## Recent logs of the CSI controller and node plugins
 csi-test: ## A pod writes to a Flaminio PVC, moves to the other node, verifies its data (KEEP=1 keeps it)
 	KEEP=$(KEEP) $(LAB) csi test
 
-csi-failover: ## Power off the test pod's data VM: the pod must come back on the other one with its data; the VM rejoins (KEEP=1)
+csi-failover: ## Refused on lab VMs (issue #82): no supported shutdown authority; physical-host qualification is separate
 	KEEP=$(KEEP) $(LAB) csi failover
 
 csi-undeploy: ## Remove the CSI driver (and the test namespace)

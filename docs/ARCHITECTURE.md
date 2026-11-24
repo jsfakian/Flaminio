@@ -702,25 +702,34 @@ chunks are resynced.
 
 ### 11.2 Fast, safe pod failover
 
-**Audit finding #82:** the current controller taints an entire node from NotReady plus missing
-metadata liveness, without shutdown proof or the per-volume opt-in below. Those absence
-signals can also describe a live partition. Node-wide out-of-service taints require verified
-shutdown/power-fence evidence; otherwise recovery must be scoped to explicitly opted-in
-Flaminio workloads without detaching unrelated storage. Storage fencing does not fence a
-process's network/database side effects. See
-[Kubernetes node shutdown guidance](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#non-graceful-node-shutdown).
+Node-wide recovery (the `node.kubernetes.io/out-of-service` taint) requires verified shutdown
+evidence from an explicitly configured authority for the exact Node UID and machine
+incarnation. NotReady/Unknown, missing metadata heartbeat, elapsed Grace, a deleted Node, or
+another Ready node may select **candidates** only; none of them authorize the taint.
+Without an authority the failover controller is observe-only (`evidence-unavailable`). The
+first production profile is manual physical lockout (`manual-lockout-v1`): a trusted signed
+assertion held until terminal old-UID retirement; lab VMs and sampled power state are not
+supported. Cleanup of an owned mark needs a return permit; Ready plus heartbeat is not enough,
+and that profile refuses Clear in favour of fresh node name/PKI.
+
+**Scoped partition recovery** (force-delete only opted-in Flaminio pods / VolumeAttachments
+without asserting node shutdown) is **unavailable**. The controller has no pod or
+VolumeAttachment mutation permissions. Storage fencing still does not stop a partitioned
+process's network or other external side effects. See
+[Kubernetes node shutdown guidance](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#non-graceful-node-shutdown)
+and [issue #82](issues/82/spec.md).
 
 Kubernetes by default waits about 5 minutes before evicting pods from a `NotReady` node, and a
-StatefulSet will not recreate a pod until the old one is gone. Because Flaminio fences the old
-writer itself, it can safely speed this up:
+StatefulSet will not recreate a pod until the old one is gone. After a verified shutdown mark,
+Kubernetes's existing recovery moves pods and attachments. Flaminio attach/failover still
+always fences, waits when needed, and reconciles under the replication protocol; orchestration
+marks never skip that gate:
 
-1. The node's liveness record expires and the safety margin passes (or out-of-service is
-   confirmed).
-2. The failover controller bumps the epoch of every RWO volume attached to that node.
-3. It force-deletes the affected pods (policy `nodeDownPodDeletion: fenced`, opt-in per
-   StorageClass) and removes the stale VolumeAttachment.
-4. The pod is rescheduled. A new target attaches, fences the replicas, reconciles in-flight
-   writes and serves I/O.
+1. A candidate is selected from readiness and metadata liveness; shutdown evidence is verified.
+2. The controller conditionally patches the out-of-service taint and an owned operation record.
+3. Kubernetes deletes pods and detaches volumes on that node; a new target attaches elsewhere.
+4. The new target fences the effective ISR, waits for leases when required, reconciles, then
+   serves I/O.
 
 ### 11.3 Gray-failure detection
 
