@@ -21,3 +21,12 @@ Approved with the recommended answer to each open question (see Settled at appro
   not a new accepted operational risk; existing fail-stop policy remains.
 - Review85-R1-C2: only a Submitted flush group owner may consume a flush CQE; success is exactly0.
   Waiting/Covered/Done and duplicate/impossible completions cannot mutate outcomes.
+- Review85-R2-F1: oversized `start_commit` sync fallback advances `next_gen` only after
+  `write_many`+`flush` succeed; prep/layout/I/O rejection leaves `next_gen` unchanged so early
+  writes are not stranded under a skipped generation.
+- Review85-R2-F2: publication-failure abort after a published prefix is exercised via a
+  `cfg(test)` SQ push-failure inject for both the synchronous window and commit publish loops.
+- Review85-R2-F3: when an earlier window recorded a device/short error, a later-window preparation
+  failure returns that earlier error (S7), not the prep failure.
+- Review85-R2-F4: commit SQEs are built during preparation, before the ownership guard is armed
+  and before the publish loop installs tags / pushes.
