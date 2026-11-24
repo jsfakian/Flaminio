@@ -12,6 +12,7 @@ its consequences. An ADR's status is one of **Proposed**, **Accepted**, **Supers
 | [0004](0004-target-environments.md) | Bare metal first, then edge, then cloud | Accepted |
 | [0005](0005-replica-confirmed-leases.md) | Replica-confirmed I/O leases | Accepted |
 | [0006](0006-edge-two-node-degraded-writes.md) | 2-node edge sites keep writing on a single copy | Accepted |
+| [0015](0015-node-wide-shutdown-requires-held-fence.md) | Node-wide shutdown recovery requires a held shutdown fence | Accepted |
 
 The 2026-11-12 review found that ADR 0005's immediate-read rule predates the stricter,
 implemented takeover protocol. Proposed ADR 0007 records the correction; do not use the old

@@ -43,3 +43,28 @@ Approved with the recommended answer to each open question (see Settled at appro
   failover deployment; the node daemon has no such flag.
 
 - **Review82-R3-N1:** use the existing Deployment name `flaminio-failover` from driver.yaml.
+
+## Implementation review (code/security findings)
+
+Settled while fixing Low+ review findings on branch `issue/82-failover-partitioned-node-shutdown`:
+
+- **Proof↔target binding:** `Mark` and `ValidateShutdown(expected, proof)` refuse when
+  `proof.Identity` does not match the mark-target identity (name/UID/provider/machine as
+  applicable). Crossed-proof unit/httptest coverage added.
+- **ValidateShutdown re-bind:** after signature/inventory checks, `Reference` must equal the
+  signed on-disk `operation_id` and `FenceGeneration` the signed `machine_id`.
+- **Owned:** `toNode` sets `Owned` only when the parsed record's `NodeUID` matches the live Node
+  UID (and machine generation matches `providerID` when both are set); otherwise foreign.
+- **File-backed verify in CI:** `trustedFileOwnerUID` test hook lets non-root CI exercise the
+  on-disk VerifyShutdown→ValidateShutdown success path; production stays root-only.
+- **S6 mid-flight owner annotation:** httptest cases for a different owned operation and for a
+  NodeUID-mismatched annotation (foreign, not Owned).
+- **S9 resolve mapping:** `ResolveIdentity` errors wrapping `ErrEvidenceInvalid` log
+  `evidence-invalid` (not `evidence-unavailable`).
+- **Cleanup identity:** `handleCleanup` calls `Authority.ResolveIdentity` before `VerifyReturn`
+  and refuses when the resolved UID does not match the owned record.
+- **Clear permit bind / foreign error:** `Clear` requires permit identity and operation ID to
+  match `ClearRequest`; foreign marks use typed `ErrForeignMark`.
+- **ADR:** numbered the accepted issue-local proposal as
+  [ADR 0015](../../adr/0015-node-wide-shutdown-requires-held-fence.md) (next free after
+  proposed 0007–0014); no number clash.
