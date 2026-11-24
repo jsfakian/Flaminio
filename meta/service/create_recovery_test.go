@@ -146,42 +146,105 @@ func TestCreateMissingRootFailsClosed(t *testing.T) {
 	})
 }
 
-// docs/issues/76 S7: four populated sources keep page tails bounded; wrap only after the tail
-// is examined; every stable eligible key is eventually examined under a tight mutation budget.
+// countingKV instruments ScanKeys / GetBounded / Txn for large-inventory ceilings (docs/issues/76 S7).
+type countingKV struct {
+	kv.KV
+	scanCalls, getCalls, txnCalls int
+	scanKeys, scanBytes           int
+	mutations                     int
+}
+
+func (c *countingKV) ScanKeys(ctx context.Context, prefix, after string, limit int) (kv.ScanPage, error) {
+	c.scanCalls++
+	page, err := c.KV.ScanKeys(ctx, prefix, after, limit)
+	c.scanKeys += len(page.Entries)
+	for _, e := range page.Entries {
+		c.scanBytes += len(e.Key)
+	}
+	return page, err
+}
+
+func (c *countingKV) GetBounded(ctx context.Context, key string, maxBytes int) (kv.Entry, bool, error) {
+	c.getCalls++
+	return c.KV.GetBounded(ctx, key, maxBytes)
+}
+
+func (c *countingKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	c.txnCalls++
+	if len(ops) > 0 {
+		c.mutations++
+	}
+	return c.KV.Txn(ctx, cmps, ops)
+}
+
+func (c *countingKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	c.txnCalls++
+	if len(ops) > 0 {
+		c.mutations++
+	}
+	return c.KV.TxnRev(ctx, cmps, ops)
+}
+
+func (c *countingKV) reset() {
+	c.scanCalls, c.getCalls, c.txnCalls = 0, 0, 0
+	c.scanKeys, c.scanBytes, c.mutations = 0, 0, 0
+}
+
+// docs/issues/76 S7: four sources each with ≥64 stable eligible keys; page tails stay bounded;
+// every eligible key is eventually examined under the 64-item / 8-mutation budget.
 func TestCreateRecoveryRespectsPageTailBudget(t *testing.T) {
 	store := kv.NewMem(nil)
 	ctx := context.Background()
 	s := New(store, Options{})
 	const n = recoveryPageSize
+	chunkJSON := []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)
+
 	for i := 0; i < n; i++ {
-		op := fmt.Sprintf("%032x", i)
+		// srcPlanOrphans: plans with no live root.
+		planOp := fmt.Sprintf("p%031x", i)
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: createPlanKey(planOp, 0), Value: chunkJSON}}); err != nil {
+			t.Fatal(err)
+		}
+		// srcChunkOrphans: public chunks with no header.
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: chunkKey(fmt.Sprintf("c%03d", i), 0), Value: chunkJSON}}); err != nil {
+			t.Fatal(err)
+		}
+		// srcRoots: complete roots whose published header matches CreateOperation → GC-eligible.
+		rootOp := fmt.Sprintf("r%031x", i)
+		vol := fmt.Sprintf("rv%03d", i)
 		root := createRoot{
-			Schema: createRootSchema, Volume: fmt.Sprintf("v%03d", i),
+			Schema: createRootSchema, Volume: vol,
 			Spec:  domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1},
 			State: rootComplete, ChunkCount: 1, Staged: 1, Next: 1,
 		}
 		rb, _ := encodeRecord(root)
-		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: createRootKey(op), Value: rb}}); err != nil {
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: createRootKey(rootOp), Value: rb}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: createPlanKey(op, 0), Value: []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)}}); err != nil {
+		rh := domain.Header{
+			ID: vol, SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1,
+			CreateOperation: rootOp, Epoch: 1,
+		}
+		rhb, _ := encodeRecord(rh)
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey(vol), Value: rhb}}); err != nil {
 			t.Fatal(err)
 		}
-		h := domain.Header{ID: fmt.Sprintf("h%03d", i), SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1}
-		hb, _ := encodeRecord(h)
-		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey(h.ID), Value: hb}}); err != nil {
-			t.Fatal(err)
+		// srcHeaders: never-published Creating+Deleting → unpublished rollback.
+		hid := fmt.Sprintf("uh%03d", i)
+		uh := domain.Header{
+			ID: hid, SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1,
+			Creating: true, Deleting: true, Epoch: 0,
 		}
-		// Orphan public chunks (no matching header): eligible for delete-only cleanup.
-		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: chunkKey(fmt.Sprintf("c%03d", i), 0), Value: []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)}}); err != nil {
+		uhb, _ := encodeRecord(uh)
+		if _, err := store.Txn(ctx, nil, []kv.Op{{Key: volumeKey(hid), Value: uhb}}); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	sawPendingTail := false
-	// recoveryMaxMutations=8: when the chunk-orphan source leads a pass it stops mid-page and
-	// must retain the unexamined tail (never advance after to fetched next alone).
-	// Rotate firstSrc like the worker — RunCreateRecovery alone does not.
-	for pass := 0; pass < n+int(srcCount); pass++ {
+	// Enough passes for 4×64 eligible items at ≤8 mutations/pass, rotating firstSrc.
+	const maxPasses = (n*int(srcCount))/recoveryMaxMutations + n + int(srcCount)
+	for pass := 0; pass < maxPasses; pass++ {
 		s.recoveryFirstSrc = pass % int(srcCount)
 		if err := s.RunCreateRecovery(ctx); err != nil {
 			t.Fatal(err)
@@ -208,12 +271,103 @@ func TestCreateRecoveryRespectsPageTailBudget(t *testing.T) {
 	if !sawPendingTail {
 		t.Fatal("expected a retained unexamined page tail under the mutation budget")
 	}
-	left, err := store.ScanKeys(ctx, "/flaminio/v1/chunks/", "", recoveryPageSize)
-	if err != nil {
+	for _, pfx := range []string{createPlanPrefix, "/flaminio/v1/chunks/", createRootPrefix} {
+		left, err := store.ScanKeys(ctx, pfx, "", recoveryPageSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(left.Entries) != 0 {
+			t.Fatalf("%s leftovers after fairness passes: %d (sample %+v)", pfx, len(left.Entries), left.Entries[0])
+		}
+	}
+	// Unpublished headers must be gone; published rv* headers remain (root GC only).
+	for i := 0; i < n; i++ {
+		if _, ok, _ := store.Get(ctx, volumeKey(fmt.Sprintf("uh%03d", i))); ok {
+			t.Fatalf("unpublished header uh%03d not rolled back", i)
+		}
+		if _, ok, _ := store.Get(ctx, volumeKey(fmt.Sprintf("rv%03d", i))); !ok {
+			t.Fatalf("published header rv%03d must remain after root GC", i)
+		}
+	}
+}
+
+// docs/issues/76 S7/S8: large plan-key inventory; one recovery pass stays within page/RPC/mutation ceilings.
+func TestCreateRecoveryLargeInventoryBounds(t *testing.T) {
+	const largeN = 1_000_000
+	if testing.Short() {
+		t.Skip("million-key inventory skipped under -short")
+	}
+	inner := kv.NewMem(nil)
+	store := &countingKV{KV: inner}
+	ctx := context.Background()
+	s := New(store, Options{})
+
+	chunkJSON := []byte(`{"replicas":["a"],"isr":["a"],"isr_ver":1}`)
+	ops := make([]kv.Op, 0, kv.MaxTxnOps)
+	flush := func() {
+		t.Helper()
+		if len(ops) == 0 {
+			return
+		}
+		if ok, err := inner.Txn(ctx, nil, ops); err != nil || !ok {
+			t.Fatalf("seed: %v %v", ok, err)
+		}
+		ops = ops[:0]
+	}
+	for i := 0; i < largeN; i++ {
+		op := fmt.Sprintf("%032x", i)
+		ops = append(ops, kv.Op{Key: createPlanKey(op, 0), Value: chunkJSON})
+		if len(ops) >= kv.MaxTxnOps {
+			flush()
+		}
+	}
+	flush()
+	// A handful of roots/headers so all four sources are populated above the page size.
+	for i := 0; i < recoveryPageSize+1; i++ {
+		op := fmt.Sprintf("root%028x", i)
+		root := createRoot{
+			Schema: createRootSchema, Volume: fmt.Sprintf("big%03d", i),
+			Spec: domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1},
+			State: rootPreparing, ChunkCount: 1,
+		}
+		rb, _ := encodeRecord(root)
+		if _, err := inner.Txn(ctx, nil, []kv.Op{{Key: createRootKey(op), Value: rb}}); err != nil {
+			t.Fatal(err)
+		}
+		h := domain.Header{ID: fmt.Sprintf("bh%03d", i), SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1, Creating: true, Epoch: 0}
+		hb, _ := encodeRecord(h)
+		if _, err := inner.Txn(ctx, nil, []kv.Op{{Key: volumeKey(h.ID), Value: hb}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := inner.Txn(ctx, nil, []kv.Op{{Key: chunkKey(fmt.Sprintf("bc%03d", i), 0), Value: chunkJSON}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store.reset()
+	s.recoveryFirstSrc = int(srcPlanOrphans)
+	if err := s.RunCreateRecovery(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if len(left.Entries) != 0 {
-		t.Fatalf("chunk orphans not eventually examined/cleaned: %d left (sample %+v)", len(left.Entries), left.Entries[0])
+	if store.scanKeys > recoveryMaxItems+recoveryPageSize*int(srcCount) {
+		// A pass examines ≤recoveryMaxItems but may fetch one page per source; keys returned
+		// across ScanKeys calls stay O(pages × page size), never the full million.
+		t.Fatalf("scan returned too many keys in one pass: %d", store.scanKeys)
+	}
+	if store.scanCalls > recoveryMaxKVCalls || store.getCalls > recoveryMaxKVCalls || store.txnCalls > recoveryMaxKVCalls {
+		t.Fatalf("KV call ceiling exceeded: scan=%d get=%d txn=%d (max %d)",
+			store.scanCalls, store.getCalls, store.txnCalls, recoveryMaxKVCalls)
+	}
+	if store.mutations > recoveryMaxMutations {
+		t.Fatalf("mutations %d > budget %d", store.mutations, recoveryMaxMutations)
+	}
+	if store.scanBytes > kv.ScanKeysMaxReplyBytes*store.scanCalls {
+		t.Fatalf("scan reply bytes %d exceed per-call cap × calls", store.scanBytes)
+	}
+	// Inventory must still be largely intact after one bounded pass.
+	left, err := inner.ScanKeys(ctx, createPlanPrefix, "", recoveryPageSize)
+	if err != nil || len(left.Entries) == 0 {
+		t.Fatalf("expected remaining plan orphans after one pass: %+v %v", left, err)
 	}
 }
 

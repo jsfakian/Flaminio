@@ -66,9 +66,18 @@ Settled while fixing Low+ code/security review findings on `issue/76-interrupted
 - **Seal uses the staged root:** `stagePlans` returns the updated root (including `Staged`) so seal
   does not persist a stale `Staged:0` over an already-written plan prefix.
 - **NOSPACE proof:** mem fixture rejecting Puts covers unpublished rollback and orphan plan GC;
-  published DeleteVolume fails closed under the same fixture.
-- **Page-tail fairness:** recovery budget tests require a retained unexamined tail after the first
-  pass and eventual examination/cleanup of every stable chunk-orphan key.
+  published DeleteVolume fails closed under the same fixture. Embedded etcd also activates a real
+  NOSPACE alarm (`kvtest.Cluster.ActivateNoSpace`): Put-containing control fails with
+  ResourceExhausted; delete-only unpublished rollback and orphan plan GC still apply;
+  published DeleteVolume fails closed with the header retained.
+- **Page-tail fairness:** recovery budget tests seed ≥64 stable eligible keys in each of the four
+  sources (plan orphans, chunk orphans, GC-able complete roots, unpublished Creating headers),
+  require a retained unexamined tail under the 8-mutation budget, and eventually examine/clean
+  every eligible key. A million plan-key inventory plus extra roots/headers asserts one pass
+  stays within ScanKeys page, KV-call and mutation ceilings (skipped under `-short`).
+- **Birth-fence schedule replay:** `meta/testdata/create-recovery.json` schedules run as real
+  Go `kv.Txn` compares/ops on mem and embedded etcd (including the missing_birth_compare and
+  weakened_unpublished_classifier counterexamples), matching the Rust model driver.
 - **helpCreate nil CreateSpec:** fail closed with DataLoss (no panic).
 - **Attach/token vs unpublished proof:** Attach on Creating yields NotFound/no token; after
   publication + Attach, `isUnpublishedCreating` and proof-based rollback refuse.
