@@ -1,0 +1,96 @@
+{
+  "schedules": [
+    {
+      "name": "birth_fence_blocks_resurrection",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "create_root",
+          "op": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "volume": "vol-a",
+          "root": "{\"schema\":1,\"volume\":\"vol-a\",\"state\":\"preparing\",\"chunk_count\":1,\"staged\":0,\"next\":0}"
+        },
+        {
+          "action": "gc_root",
+          "op": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "action": "replay_create_root",
+          "op": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "volume": "vol-a",
+          "root": "{\"schema\":1,\"volume\":\"vol-a\",\"state\":\"preparing\",\"chunk_count\":1,\"staged\":0,\"next\":0}",
+          "birth_rev": 0
+        }
+      ]
+    },
+    {
+      "name": "missing_birth_compare_counterexample",
+      "mutant": "missing_birth_compare",
+      "expect_violation": "NoRootResurrection",
+      "steps": [
+        {
+          "action": "create_root",
+          "op": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "volume": "vol-b",
+          "root": "{\"schema\":1,\"volume\":\"vol-b\",\"state\":\"preparing\",\"chunk_count\":1,\"staged\":0,\"next\":0}"
+        },
+        {
+          "action": "gc_root",
+          "op": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        {
+          "action": "replay_create_root",
+          "op": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "volume": "vol-b",
+          "root": "{\"schema\":1,\"volume\":\"vol-b\",\"state\":\"preparing\",\"chunk_count\":1,\"staged\":0,\"next\":0}",
+          "birth_rev": 0
+        }
+      ]
+    },
+    {
+      "name": "unpublished_rollback_allowed",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "unpublished_rollback",
+          "volume": "vol-c",
+          "header_rev": 1,
+          "header": {
+            "id": "vol-c",
+            "creating": true,
+            "deleting": false,
+            "epoch": 0,
+            "target": ""
+          }
+        }
+      ]
+    },
+    {
+      "name": "weakened_unpublished_classifier_counterexample",
+      "mutant": "weakened_unpublished_classifier",
+      "expect_violation": "NoUnprovedTombstoneBypass",
+      "steps": [
+        {
+          "action": "mark_published",
+          "volume": "vol-d"
+        },
+        {
+          "action": "mark_token",
+          "volume": "vol-d"
+        },
+        {
+          "action": "unpublished_rollback",
+          "volume": "vol-d",
+          "header_rev": 1,
+          "header": {
+            "id": "vol-d",
+            "creating": true,
+            "deleting": false,
+            "epoch": 5,
+            "target": "node-a"
+          }
+        }
+      ]
+    }
+  ]
+}

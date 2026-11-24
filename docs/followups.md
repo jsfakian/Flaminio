@@ -28,7 +28,8 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 ## Correctness audit (2026-11-12)
 
 The [audit report](audits/2026-11-12/README.md) adds confirmed defects outside the original
-follow-ups: [#76](https://github.com/jsfakian/Flaminio/issues/76) interrupted creation,
+follow-ups: [#76](https://github.com/jsfakian/Flaminio/issues/76) interrupted creation
+  (immutable plan + recovery; [ADR 0016](adr/0016-create-retains-immutable-admitted-plan.md)),
 [#77](https://github.com/jsfakian/Flaminio/issues/77) inconsistent volume reads,
 [#78](https://github.com/jsfakian/Flaminio/issues/78) drain admission,
 [#79](https://github.com/jsfakian/Flaminio/issues/79) CSI mount ownership,

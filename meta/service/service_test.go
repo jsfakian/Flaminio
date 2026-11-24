@@ -643,6 +643,14 @@ func (k *interleaveKV) Get(ctx context.Context, key string) (kv.Entry, bool, err
 	return e, ok, err
 }
 
+func (k *interleaveKV) GetBounded(ctx context.Context, key string, maxBytes int) (kv.Entry, bool, error) {
+	e, ok, err := k.KV.GetBounded(ctx, key, maxBytes)
+	if key == k.key {
+		k.runHook()
+	}
+	return e, ok, err
+}
+
 func (k *interleaveKV) List(ctx context.Context, prefix string) ([]kv.Entry, error) {
 	es, err := k.KV.List(ctx, prefix)
 	if k.prefix != "" && prefix == k.prefix {
@@ -1020,9 +1028,12 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 		if _, err := move(ctx, s, "a", "c"); code(err) != codes.NotFound {
 			t.Fatalf("move of a volume being deleted: %v", err)
 		}
-		// A create over it finishes the deletion: its caller may never come back.
+		// Create refuses a Deleting header (docs/issues/76); it does not run the public deleter.
 		if _, err := create(s, "v", 2, 2, 1); code(err) != codes.Aborted {
 			t.Fatalf("create over a volume being deleted: %v", err)
+		}
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+			t.Fatal(err)
 		}
 		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok || !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
 			t.Fatal("the deletion was not finished: header left, or tombstone missing")
@@ -1030,10 +1041,10 @@ func TestDeleteVolumeFinishesAnInterruptedDeletion(t *testing.T) {
 	})
 }
 
-// A deletion during a creation stops the creation: it adds no chunk after the deletion's listing,
-// and does not bring the volume back by clearing the deletion's mark (docs/issues/8). The deletion
-// runs after the creation's first batch of chunk records (120), so it lists them and tombstones
-// their nodes, and the creation's second batch is refused.
+// A deletion during a creation stops the creation: it adds no chunk after the deletion fences
+// the claim, and does not bring the volume back (docs/issues/8). For a never-published Creating
+// claim, DeleteVolume uses proof-based header removal without a new tombstone (docs/issues/76 S8);
+// orphan public chunk keys are paged away under header absence.
 func TestDeleteVolumeDuringItsCreation(t *testing.T) {
 	interleaveStores(t, func(t *testing.T, store *interleaveKV) {
 		ctx := context.Background()
@@ -1049,8 +1060,8 @@ func TestDeleteVolumeDuringItsCreation(t *testing.T) {
 		if _, err := create(s, "v", 130, 2, 1); code(err) != codes.Aborted {
 			t.Fatalf("a creation deleted midway: %v, want Aborted", err)
 		}
-		if !tombstoned(t, s, "a", "v") || !tombstoned(t, s, "b", "v") {
-			t.Fatal("the first batch's nodes are not on the tombstone")
+		if tombstoned(t, s, "a", "v") || tombstoned(t, s, "b", "v") {
+			t.Fatal("unpublished create rollback must not create a tombstone")
 		}
 		if _, ok, _ := store.KV.Get(ctx, volumeKey("v")); ok {
 			t.Fatal("the creation brought the deleted volume back")

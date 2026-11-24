@@ -107,7 +107,12 @@ rule, then adds them again. The rules are **not persistent**: after a server reb
   - `Attach` issues signed capability tokens;
   - it is a sandboxed systemd service with a dynamic, unprivileged user, and gets its keys as
     systemd credentials;
-  - it is built on the workstation (`GOOS=linux`) and copied in by `make meta-up`.
+  - it is built on the workstation (`GOOS=linux`) and copied in by `make meta-up`;
+  - a periodic create-recovery worker resumes interrupted volume creates and reclaims private
+    plan keys with delete-only transactions (docs/issues/76, [ADR 0016](adr/0016-create-retains-immutable-admitted-plan.md)).
+    Under etcd NOSPACE those deletes can proceed, but clearing the alarm still needs the usual
+    operator compaction/defrag/disarm. Roll out metadata writers under a maintenance barrier so
+    old create writers are excluded before relying on the never-published rollback exception.
 
 ```bash
 make cluster-up      # fl-w, port forwards, overlay, identities, etcd and flaminio-meta

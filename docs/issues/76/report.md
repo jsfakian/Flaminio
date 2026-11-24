@@ -102,3 +102,29 @@ No comments from the requested review scopes, including Nits.
 Changes/resolution: Both fresh reviewers confirmed all R2 findings resolved: independent root-resurrection and tombstone-bypass invariants/caught mutations, actual backend replays, retained page tails and examination-based cursor fairness. Affected code/dependency paths checked; #78 technical9f0a4b0 current f672280 adds report only. Zero comments including Nits. Runtime implementation/tests and approval remain separate.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+## Review rounds
+
+### Code loop, round 1
+Findings High/Medium/Low; addressed.
+
+### Code loop, round 2
+**CLEAR**.
+
+## Tests
+S1–S9 covered; make lint/test/race/hygiene/contracts + make sim before PR.
+
+Post-ready leftovers (2026-11-24): embedded-etcd NOSPACE alarm proof
+(`TestEmbeddedEtcdNoSpaceDeleteOnlyGC`); four-source ≥64 eligible fairness + million-key
+inventory ceilings (`TestCreateRecoveryRespectsPageTailBudget`,
+`TestCreateRecoveryLargeInventoryBounds`); Go txn replay of `create-recovery.json` on mem+etcd
+(`TestCreateRecoverySchedulesReplay`).
+
+## Conformance
+PASS pending formal checker; ADR 0016 accepted; #78 gate deferred.
+
+## Lab
+None claimed for correctness of this metadata defect.
+
+## ADRs
+Accepted ADR 0016.

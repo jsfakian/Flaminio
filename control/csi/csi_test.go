@@ -170,6 +170,26 @@ func TestController(t *testing.T) {
 	}
 }
 
+// docs/issues/76 S9: full-identity conflicts stay AlreadyExists; identical resumes succeed.
+func TestControllerCreateIdentityConflicts(t *testing.T) {
+	m := metaFixture(t)
+	c := &Controller{Meta: m}
+	ctx := context.Background()
+	create := func(name string, params map[string]string) error {
+		_, err := c.CreateVolume(ctx, &csi.CreateVolumeRequest{
+			Name: name, CapacityRange: &csi.CapacityRange{RequiredBytes: 1 << 20},
+			Parameters: params, VolumeCapabilities: []*csi.VolumeCapability{blockCap()},
+		})
+		return err
+	}
+	wantCode(t, "create zone", create("pvc-id", map[string]string{"replicas": "1", "failureDomain": "zone"}), codes.OK)
+	wantCode(t, "identical retry", create("pvc-id", map[string]string{"replicas": "1", "failureDomain": "zone"}), codes.OK)
+	// Policy-only conflict: metadata returns AlreadyExists; CSI must not turn a scalar match into success.
+	wantCode(t, "failureDomain conflict", create("pvc-id", map[string]string{"replicas": "1", "failureDomain": "rack"}), codes.AlreadyExists)
+	wantCode(t, "failureDomainPolicy conflict", create("pvc-id", map[string]string{"replicas": "1", "failureDomain": "zone", "failureDomainPolicy": "bestEffort"}), codes.AlreadyExists)
+	wantCode(t, "replicas conflict", create("pvc-id", map[string]string{"replicas": "2", "failureDomain": "zone"}), codes.AlreadyExists)
+}
+
 type fakeDataplane struct {
 	volume, device string
 	tokens         int

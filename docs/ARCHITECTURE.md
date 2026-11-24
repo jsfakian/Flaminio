@@ -597,7 +597,15 @@ avoiding disks that share failure history (same model or batch, as an optional h
 Other placement rules:
 
 - Placement for all chunks is decided **at volume creation** (metadata only). Physical space is
-  allocated on first write, so the hot path never waits for placement.
+  allocated on first write, so the hot path never waits for placement. The metadata service
+  persists the full normalized create identity and an immutable initial placement plan before
+  admitting the name, then publishes through bounded conditional progress so identical retries
+  and a recovery worker can finish an interrupted create ([ADR 0016](adr/0016-create-retains-immutable-admitted-plan.md),
+  docs/issues/76). Incomplete creates stay hidden and unattachable. Private plan GC is delete-only
+  (executable under etcd NOSPACE); a recognized never-published Creating claim (epoch 0, empty
+  target, old writers excluded) may be CAS-removed without a new tombstone. Upgrade under a
+  maintenance barrier that excludes old writers; rolling mixed-version safety is not claimed.
+  Legacy visible headers keep scalar-only identity matching.
 - **Locality migration.** With `dataLocality: preferred`, when a volume attaches on a node with
   no local replicas, a background task migrates one replica of each chunk to that node (only if
   the node has a suitable disk).

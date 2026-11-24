@@ -2,10 +2,12 @@
 package kvtest
 
 import (
+	"context"
 	"net/url"
 	"testing"
 	"time"
 
+	pb "go.etcd.io/etcd/api/v3/etcdserverpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/server/v3/embed"
 	"go.uber.org/zap"
@@ -14,9 +16,47 @@ import (
 )
 
 // Etcd runs a single-member etcd in a temporary directory for the test, and returns a KV on it.
-func Etcd(t *testing.T) *kv.Etcd { return kv.NewEtcd(startEtcd(t)) }
+func Etcd(t *testing.T) *kv.Etcd {
+	t.Helper()
+	_, c := startEtcd(t)
+	return kv.NewEtcd(c)
+}
 
-func startEtcd(t *testing.T) *clientv3.Client {
+// Cluster is an embedded etcd plus its KV wrapper (docs/issues/76 NOSPACE proofs).
+type Cluster struct {
+	KV     *kv.Etcd
+	Client *clientv3.Client
+	Embed  *embed.Etcd
+}
+
+// Start runs a single-member etcd and returns the cluster handle.
+func Start(t *testing.T) *Cluster {
+	t.Helper()
+	e, c := startEtcd(t)
+	return &Cluster{KV: kv.NewEtcd(c), Client: c, Embed: e}
+}
+
+// ActivateNoSpace raises etcd's NOSPACE alarm so Put-containing transactions fail
+// while delete-only transactions still apply (etcdserver/apply/capped.go).
+func (cl *Cluster) ActivateNoSpace(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ml, err := cl.Client.MemberList(ctx)
+	if err != nil || len(ml.Members) == 0 {
+		t.Fatalf("MemberList: %v members=%d", err, len(ml.Members))
+	}
+	mc := pb.NewMaintenanceClient(cl.Client.ActiveConnection())
+	if _, err := mc.Alarm(ctx, &pb.AlarmRequest{
+		Action:   pb.AlarmRequest_ACTIVATE,
+		MemberID: ml.Members[0].ID,
+		Alarm:    pb.AlarmType_NOSPACE,
+	}); err != nil {
+		t.Fatalf("activate NOSPACE: %v", err)
+	}
+}
+
+func startEtcd(t *testing.T) (*embed.Etcd, *clientv3.Client) {
 	t.Helper()
 	cfg := embed.NewConfig()
 	cfg.Dir = t.TempDir()
@@ -45,5 +85,6 @@ func startEtcd(t *testing.T) *clientv3.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c
+	// Caller closes the client via kv.Etcd.Close (or Cluster.KV.Close).
+	return e, c
 }
