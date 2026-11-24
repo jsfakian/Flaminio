@@ -19,10 +19,10 @@ type scheduleFile struct {
 }
 
 type schedule struct {
-	Name             string `json:"name"`
-	Mutant           string `json:"mutant"`
-	ExpectViolation  string `json:"expect_violation"`
-	Steps            []step `json:"steps"`
+	Name            string `json:"name"`
+	Mutant          string `json:"mutant"`
+	ExpectViolation string `json:"expect_violation"`
+	Steps           []step `json:"steps"`
 }
 
 type step struct {

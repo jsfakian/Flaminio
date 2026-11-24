@@ -327,7 +327,7 @@ func TestCreateRecoveryLargeInventoryBounds(t *testing.T) {
 		op := fmt.Sprintf("root%028x", i)
 		root := createRoot{
 			Schema: createRootSchema, Volume: fmt.Sprintf("big%03d", i),
-			Spec: domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1},
+			Spec:  domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1},
 			State: rootPreparing, ChunkCount: 1,
 		}
 		rb, _ := encodeRecord(root)
