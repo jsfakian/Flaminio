@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -120,12 +120,6 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
         Some(s) => Some(smol::Async::new(s.listener.try_clone()?)?),
         None => None,
     };
-    // Close the listen socket when the command loop ends so a blocked accept wakes and the
-    // detached accept_loop can be dropped with the executor.
-    let shutdown_listener = match &cfg.server {
-        Some(s) => Some(s.listener.try_clone()?),
-        None => None,
-    };
     let join = thread::Builder::new()
         .name("flaminio-net".into())
         .spawn(move || {
@@ -134,8 +128,10 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
                 if let (Some(listener), Some(server)) = (listener, cfg.server.as_ref()) {
                     let acceptor = TlsAcceptor::from(server.tls.clone());
                     let (td, key) = (cfg.trust_domain.clone(), server.token_key.clone());
+                    // Weak: a strong Rc in a task the executor holds is a cycle, and the
+                    // executor, the listener and the TLS config would never be freed.
                     ex.spawn(accept_loop(
-                        ex.clone(),
+                        Rc::downgrade(&ex),
                         listener,
                         acceptor,
                         td,
@@ -186,10 +182,10 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
                         }
                     }
                 }
-                // Unblock accept before the executor (and its detached accept_loop) is dropped.
-                drop(shutdown_listener);
-                drop(outgoing);
             }));
+            // Dropping the executor drops its tasks: the accept loop with its listener, and
+            // the sessions.
+            drop(ex);
         })?;
     Ok(Net {
         cmds,
@@ -200,7 +196,7 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
 }
 
 async fn accept_loop(
-    ex: Rc<smol::LocalExecutor<'_>>,
+    ex: Weak<smol::LocalExecutor<'_>>,
     listener: smol::Async<TcpListener>,
     acceptor: TlsAcceptor,
     trust_domain: String,
@@ -225,6 +221,8 @@ async fn accept_loop(
             key.clone(),
             sink.clone(),
         );
+        // The executor runs this task, so it is alive whenever this runs.
+        let Some(ex) = ex.upgrade() else { return };
         ex.spawn(async move {
             if let Err(e) = serve_conn(conn, io, &acceptor, &td, &key, sink).await {
                 eprintln!("flaminio-net: session from {peer}: {e}");
