@@ -3,8 +3,9 @@
 The rules that keep a replicated volume consistent through replica failures, target failover,
 partitions and metadata outages. This refines ARCHITECTURE §8 into something precise enough to
 implement and to check by simulation. The reference implementation is the crate
-`dataplane/crates/flaminio-repl`. It has no I/O, and its simulator checks every rule below
-([§9](#9-how-it-is-checked)).
+`dataplane/crates/flaminio-repl`. It has no I/O, and its simulator checks the replication rules
+below ([§9](#9-how-it-is-checked)). Metadata response acquisition is also checked against
+both KV backends ([§2](#2-metadata-transitions)).
 
 ## 1. Actors and state
 

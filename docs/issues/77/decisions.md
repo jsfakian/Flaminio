@@ -49,3 +49,14 @@ policy; the review must still examine allocations introduced by ReadSet.
   header JSON errors to Unavailable. Preserve that explicit existing error classification;
   the new validated-prefix rule classifies stable chunk corruption as Internal. New tests
   distinguish the two rather than changing a pre-existing header status under this issue.
+
+## Code review round 1 — commit accounting
+
+- **R1-C1:** use one actual-header-history observer in concurrent, superseded and ambiguous
+  Attach tests. Record direct Mem applications below the injected retry, and replay native
+  etcd header PUT ModRevisions from the known starting revision through the known final
+  revision, under a bounded context. Deduplicate applied revisions; do not infer count from
+  API success, outer TxnRev results or the final epoch. Existing kvtest.Start exposes the
+  client, so this needs only service_test.go and introduces no production hook or API.
+  Restoring the old observer in an isolated overlay fails on both backends (count 1 versus
+  epoch delta 2); the shared corrected observer and focused race checks pass.

@@ -37,6 +37,30 @@ Changes/resolution: Both fresh reviewers confirmed duplicate-input compatibility
 
 Status: clear. Approval remains separate; no approval is inferred.
 
+### Code/security review round 1 — 4a5dcb05c82b82b1d7b2b58a2943ec8c9f18b3f2
+
+Full range: `880066e..4a5dcb0`, all 13 source/test/documentation files. Fresh code and
+security reviewers used direct high-effort review because built-in review skills are not
+available. The security review is clear with no nits; code review found one Medium and no
+production correctness findings or additional comments.
+
+**R1-C1 — Medium:** `TestConcurrentTargets` observes successful returns from outer
+backend.TxnRev, above its internal retry boundary. A CAS can apply epoch E+1, lose its reply,
+retry to a failed compare, then a later Attach attempt applies E+2. Two writes applied but
+only one revision is counted. The separate ambiguous-response test uses another recorder,
+so it does not prove this observer. An isolated read-only reproducer confirms applied=2,
+counted=1 and final epoch delta=2. Required fix: observe actual applied header revisions below
+retries, deduplicate them and force this history through the same concurrency-test observer.
+A fresh implementer replaces the observer with one shared header-history harness across
+concurrent, superseded and ambiguous tests. It records direct Mem applications below retries
+and replays native etcd header PUT revisions through the final revision under a bounded
+context. Only service_test.go changes; exact epoch and ISR assertions remain. Restoring the
+old observer in an isolated overlay fails on both backends with count=1 versus epoch delta=2.
+The corrected observer, focused race checks and full service suite pass. Renewed
+`make fmt lint test race hygiene contracts` also passes, including both mutual-TLS interop
+cases. The prior `make sim` pass (20,000 normal seeds and 163 release tests) remains valid:
+no Rust/model source changed. Fresh incremental review follows; no exception is accepted.
+
 ## Implementation — 2026-11-27
 
 Branch: `issue/77-coherent-volume-reads`, based on
@@ -79,8 +103,12 @@ replacement chunks, and changing-header corruption tests prematurely return Inte
 corruption controls still pass. The unmodified counterparts all pass; production bytes on
 the branch were untouched by the experiment.
 
-Full required gates pending: `make test race hygiene contracts sim`; formatting/lint already
-pass on the same source. No shared-lab or unsafe-code change is involved.
+Full required gates pass at `4a5dcb0`: `make fmt lint` and
+`make test race hygiene contracts sim`. This includes both mutual-TLS interoperability cases,
+20,000 normal simulation seeds and all 163 release tests with ignored mutation controls.
+After the test-observer correction, `make fmt lint test race hygiene contracts` passes again.
+Rust/model source is unchanged, so the same simulation result applies. Incremental review
+of the test fix remains pending. No shared-lab or unsafe-code change is involved.
 
 ## Conformance
 

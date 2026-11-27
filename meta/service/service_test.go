@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -52,6 +53,101 @@ func backends(t *testing.T, f func(t *testing.T, store kv.KV)) {
 		defer e.Close()
 		f(t, e)
 	})
+}
+
+// headerHistory observes applied header revisions below transaction retries. Mem has no
+// internal retries, so its direct application result is definitive; etcd's native watch
+// history also includes writes whose reply was lost inside Etcd.TxnRev.
+type headerHistory struct {
+	kv.KV
+	key       string
+	client    *clientv3.Client
+	mu        sync.Mutex
+	revisions map[int64]bool
+}
+
+func headerHistoryBackends(t *testing.T, key string, f func(*testing.T, *headerHistory)) {
+	t.Run("mem", func(t *testing.T) {
+		f(t, &headerHistory{KV: kv.NewMem(nil), key: key, revisions: map[int64]bool{}})
+	})
+	t.Run("etcd", func(t *testing.T) {
+		cl := kvtest.Start(t)
+		defer cl.KV.Close()
+		f(t, &headerHistory{KV: cl.KV, key: key, client: cl.Client})
+	})
+}
+
+func (h *headerHistory) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := h.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (h *headerHistory) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	rev, ok, err := h.KV.TxnRev(ctx, cmps, ops)
+	if h.client == nil && ok && err == nil {
+		for _, op := range ops {
+			if op.Key == h.key && !op.Delete {
+				h.mu.Lock()
+				h.revisions[rev] = true
+				h.mu.Unlock()
+			}
+		}
+	}
+	return rev, ok, err
+}
+
+func (h *headerHistory) revision(t *testing.T) int64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	e, ok, err := h.KV.Get(ctx, h.key)
+	if err != nil || !ok {
+		t.Fatalf("header history revision: found=%v err=%v", ok, err)
+	}
+	return e.Rev
+}
+
+func (h *headerHistory) appliedAfter(t *testing.T, after int64) map[int64]bool {
+	t.Helper()
+	revisions := map[int64]bool{}
+	if h.client == nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for rev := range h.revisions {
+			if rev > after {
+				revisions[rev] = true
+			}
+		}
+		return revisions
+	}
+	// Writers have finished. Replay from the initial revision through the final header
+	// revision; replay avoids relying on watch registration timing or API responses.
+	final := h.revision(t)
+	if final == after {
+		return revisions
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	watch := h.client.Watch(ctx, h.key, clientv3.WithRev(after+1))
+	for {
+		select {
+		case response, ok := <-watch:
+			if !ok || response.Err() != nil {
+				t.Fatalf("header history watch: open=%v err=%v", ok, response.Err())
+			}
+			for _, event := range response.Events {
+				if event.Type != clientv3.EventTypePut {
+					t.Fatalf("unexpected header history event: %v", event)
+				}
+				revisions[event.Kv.ModRevision] = true
+				if event.Kv.ModRevision == final {
+					return revisions
+				}
+			}
+		case <-ctx.Done():
+			t.Fatalf("header history stopped before revision %d: %v", final, ctx.Err())
+		}
+	}
 }
 
 func code(err error) codes.Code { return status.Code(err) }
@@ -514,7 +610,7 @@ func TestFailureDomainPlacement(t *testing.T) {
 // its chunk's version by exactly one, every attach bumped the epoch, and no ISR ever fell
 // below the minimum.
 func TestConcurrentTargets(t *testing.T) {
-	backends(t, func(t *testing.T, backend kv.KV) {
+	headerHistoryBackends(t, volumeKey("v"), func(t *testing.T, backend *headerHistory) {
 		store := &scheduledKV{KV: backend}
 		s := New(store, Options{})
 		ctx := context.Background()
@@ -524,22 +620,7 @@ func TestConcurrentTargets(t *testing.T) {
 			t.Fatal(err)
 		}
 		var applied atomic.Int64
-		var commitsMu sync.Mutex
-		commits := map[int64]bool{}
-		// Observe successful backend application, before any response assembly can fail.
-		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
-			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
-			if ok && err == nil {
-				for _, op := range ops {
-					if op.Key == volumeKey("v") && !op.Delete {
-						commitsMu.Lock()
-						commits[rev] = true
-						commitsMu.Unlock()
-					}
-				}
-			}
-			return rev, ok, err
-		}
+		initialRevision := backend.revision(t)
 		perChunk := make([]atomic.Int64, len(v.Chunks))
 		var wg sync.WaitGroup
 		for w := range 8 {
@@ -594,6 +675,7 @@ func TestConcurrentTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		commits := backend.appliedAfter(t, initialRevision)
 		if g.Volume.Epoch != v.Epoch+uint64(len(commits)) {
 			t.Fatalf("epoch %d after %d committed attaches from %d", g.Volume.Epoch, len(commits), v.Epoch)
 		}
@@ -2203,15 +2285,14 @@ func TestChangeIsrCASReadRetriesAndCommitPoint(t *testing.T) {
 }
 
 func TestAttachSupersededCommitAccounting(t *testing.T) {
-	backends(t, func(t *testing.T, backend kv.KV) {
+	headerHistoryBackends(t, volumeKey("v"), func(t *testing.T, backend *headerHistory) {
 		s, store, old := coherentFixture(t, backend, Options{})
-		commits := map[int64]bool{}
+		initialRevision := backend.revision(t)
 		successes := 0
 		var firstRevision int64
 		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
 			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
 			if ok && err == nil {
-				commits[rev] = true
 				if firstRevision == 0 {
 					firstRevision = rev
 					if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b"}); err != nil {
@@ -2227,6 +2308,7 @@ func TestAttachSupersededCommitAccounting(t *testing.T) {
 			successes++
 		}
 		requireCommittedError(t, err, codes.Aborted, old.Epoch+1, firstRevision)
+		commits := backend.appliedAfter(t, initialRevision)
 		if len(commits) != 2 || successes != 1 || header(t, backend, "v").Epoch != old.Epoch+2 || header(t, backend, "v").Target != "b" {
 			t.Fatalf("commits=%v successes=%d header=%+v", commits, successes, header(t, backend, "v"))
 		}
@@ -2234,23 +2316,26 @@ func TestAttachSupersededCommitAccounting(t *testing.T) {
 }
 
 func TestAttachAmbiguousBackendRetryCountsEveryAppliedEpoch(t *testing.T) {
-	backends(t, func(t *testing.T, backend kv.KV) {
+	headerHistoryBackends(t, volumeKey("v"), func(t *testing.T, backend *headerHistory) {
 		s, store, old := coherentFixture(t, backend, Options{})
-		var commits []int64
+		initialRevision := backend.revision(t)
+		var lostRevision int64
 		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
 			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
-			if ok && err == nil {
-				commits = append(commits, rev)
-				if len(commits) == 1 {
-					// The backend applies the write, loses its reply, and retries the same CAS.
-					// Its outer result reports a failed compare despite that earlier application.
-					return backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil && lostRevision == 0 {
+				lostRevision = rev
+				// The backend applies the write, loses its reply, and retries the same CAS.
+				// Its outer result reports a failed compare despite that earlier application.
+				rev, ok, err = backend.TxnRev(ctx, cmps, ops)
+				if ok || err != nil {
+					t.Fatalf("retry of applied CAS: applied=%v err=%v", ok, err)
 				}
 			}
 			return rev, ok, err
 		}
 		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
-		if err != nil || len(commits) != 2 || commits[0] == commits[1] || r.GetVolume().GetEpoch() != old.Epoch+2 || header(t, backend, "v").Epoch != old.Epoch+2 {
+		commits := backend.appliedAfter(t, initialRevision)
+		if err != nil || len(commits) != 2 || !commits[lostRevision] || r.GetVolume().GetEpoch() != old.Epoch+2 || header(t, backend, "v").Epoch != old.Epoch+uint64(len(commits)) {
 			t.Fatalf("ambiguous retry lost epoch: %v %v applied=%v", r, err, commits)
 		}
 	})
