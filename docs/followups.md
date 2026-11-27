@@ -35,7 +35,7 @@ header/prefix snapshots, commit-pinned Attach responses and atomic named ISR vie
 [implementation and validation report](issues/77/report.md)),
 [#78](https://github.com/jsfakian/Flaminio/issues/78) drain admission,
 [#79](https://github.com/jsfakian/Flaminio/issues/79) CSI mount ownership,
-[#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation (shared whole-chunk
+[#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation (fixed: shared whole-chunk
 admission and future-view budget, checked CSI capacity/identity retries, and validation before
 engine/session/store mutation; [implementation and validation report](issues/80/report.md),
 [ADR 0018](adr/0018-admit-only-representable-volume-geometries.md)),

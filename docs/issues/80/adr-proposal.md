@@ -1,6 +1,6 @@
 # Proposal: Admit only complete, representable volume geometries
 
-- **Status:** Accepted with the plan, 2026-11-13; numbered and moved into docs/adr/ when implemented.
+- **Status:** Accepted with the plan, 2026-11-13; implemented and recorded in ADR 0018 after review/conformance on 2026-11-27.
 - **Implementation record:** [ADR 0018](../../adr/0018-admit-only-representable-volume-geometries.md).
 - **Date:** 2026-11-12
 - **Issue:** [#80](https://github.com/jsfakian/Flaminio/issues/80)
@@ -59,6 +59,5 @@ Settled at approval, 2026-11-13: higher limits wait for a separate design; opera
 
 Shared Go/Rust geometry vectors, CSI range/idempotency cases, real Hello count boundaries,
 maximum protobuf future-move fixtures and memory-store table/slot tests in the design.
-Keep proposed audit ADR 0010 separate; accepted fencing/ISR ADRs are unchanged. This proposal
-has no global ADR number to avoid batch branch collisions and has not been accepted.
+Keep proposed audit ADR 0010 separate; accepted fencing/ISR ADRs are unchanged. The numbered implementation decision is recorded in ADR 0018 after review and conformance.
 Settled at approval, 2026-11-13: accepted with the plan (see decisions.md, Settled at approval).

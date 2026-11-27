@@ -50,6 +50,15 @@ Clippy pass. `make fmt lint test race hygiene contracts sim` passes after the fi
 20,000 normal seeds, all 165 release tests and all three TLS interop tests. Fresh incremental
 code/security review follows.
 
+### Code/security review round 2 — 892bb6055af07a222a6434f89607bafa0e7052ce
+
+Incremental range: `f735f89..892bb60`, all six changed source/test/documentation paths.
+Fresh code and security reviewers independently confirm R1-R-C1 fixed and report no new
+Low-or-higher findings. The code review's one documentation status nit is corrected here;
+security reports no nits. The loop is **clear after two rounds** with no open findings.
+The workflow's Sonnet model is unavailable, so code review uses the inherited default model
+at medium effort; direct incremental review follows the workflow.
+
 ## Implementation — 2026-11-27
 
 Branch: `issue/80-supported-geometry`, based on
@@ -62,7 +71,7 @@ Both implementation halves are complete and the joined `make fmt lint` passes, i
 Rust/fuzz all-target clippy, Go vet, protobuf lint and script checks. The Go compatibility RPC
 uses #77's coherent reads, while Rust extends #86's existing checked encoder. [Units](units.md)
 tracks the remaining independent acceptance, code/security review and final conformance.
-Acceptance and project checks pass; the review correction awaits incremental clearance.
+Acceptance and project checks pass; code/security review is clear after two rounds, and final conformance passes S1–S8.
 
 ## Tests
 
@@ -121,15 +130,40 @@ Incremental review and final conformance remain before publication; final CI rep
 
 ## Conformance
 
-Pending correction of R1-R-C1, incremental review clearance and the final independent rule check.
+Independent read-only checker on source `892bb60` and the final documentation. The requested
+Sonnet model is unavailable, so the checker uses the inherited default model at medium effort.
+Its rule table and findings follow:
+
+PASS
+
+| Rule | Implemented | Tested | Evidence |
+|---|---|---|---|
+| S1 Direct creation | yes | yes | `pkg/geometry/geometry.go` enforces the frozen envelope/B formula; `TestGeometryAdmissionNoMutation`, `TestGeometryPlacement`, `TestGeometryWorstMetadataReplies` and shared Go/Rust vectors cover rejection, placement and every RF cap. |
+| S2 CSI capacity | yes | yes | `control/csi/controller.go` checks signed ranges, rounds by chunk and returns actual capacity; `TestGeometryCapacityRanges` and `TestGeometryInvalidParametersMakeNoRPC` verify boundaries and zero RPCs on invalid input. |
+| S3 Idempotency | yes | yes | `meta/service/check_create.go` compares full non-capacity identity through coherent read-only metadata; `TestCheckCreateVolumeIdentityAndStates`, `TestCheckCreateVolumeReplacementIsAuthoritative`, `TestAuthorization` and `TestGeometryAuthoritativeRetry` cover lifecycle, conflicts, grown capacity and missing-RPC refusal. |
+| S4 Checked arithmetic | yes | yes | Checked geometry/count helpers, CSI/admin quantity multiplication and bounded identity decoding precede narrowing; shared vectors, `TestCheckedGeometry`, `TestGeometryAdminRejectsOverflowBeforeRPC` and `TestCheckCreateVolumeNestedTypeCorruptionAfterInitialRead` cover arithmetic and controlled corruption errors. |
+| S5 Attach/session boundaries | yes | yes | Engine initial/refresh/ISR validation and replica Hello preflight precede mutation; `every_metadata_membership_refusal_precedes_peer_cache_and_core_mutation`, `isr_saved_indices_are_unique_bounded_and_reply_rows_remain_positional`, `higher_epoch_malformed_metadata_deposes_before_conversion` and authenticated hostile-Hello tests verify refusal and fencing. |
+| S6 Wire refusal | yes | yes | `Frame::encode_checked` extends the existing `Conn::send` preflight; `checked_hello_bounds_round_trip_and_refusal_preserves_connection` proves 65,536 acceptance, 65,537 refusal and zero-byte failures; Hello fuzz regressions and merged #86 Fenced coverage remain active. |
+| S7 Store constraints | yes | yes | `Store::preflight_chunks` reuses actual layout validation and counts unique missing slots before cleanup; `session_preflight_checks_actual_layout_and_is_read_only`, insufficient-session-slot and partial-create retry tests cover all five clusters, bounds, exhaustion and durable retry. |
+| S8 Compatibility/documentation | yes | yes | Unsupported stored geometry is refused without rewrite; `TestGeometryUnsupportedStoredVolumesStayUnchanged` and `startup_bad_geometry_is_read_only_and_explicit_delete_remains_available` verify preservation. Architecture, format, README, lab, followups and ADR documentation describe limits, resources and coordinated upgrades. |
+
+Contract drift: none. RPC/messages/generated consumers, administrator authorization, error statuses, fixed geometry/B/caps and normal 4 MiB limits match the accepted contract. Control-socket syntax, token fields, data-plane wire fields and on-disk records remain unchanged; ISR association preserves the documented positional contract.
+
+ADR conformance: consistent. ADRs 0001/0002/0005/0006 remain consistent; numbered ADR 0018 exists in the index with Proposed status pending this gate.
+
+Scope drift: none. Additional helper/test/documentation paths support the approved work; test-only maximum-view fixtures are recorded in decisions.md. Unmodified store `state.rs` and transport `session.rs` already supply the reused validation and checked-send behavior.
+
+Docs: done. Required geometry, CSI, resource, upgrade and follow-up documentation is present; no migration, larger limit or scale certification is claimed.
+
+Open review findings: none. R1-R-C1 is corrected and covered across initial/refresh/ISR adoption and legal move stages; round 2 is clear. Recorded post-fix project checks, vectors, crash campaign and all three TLS interop tests pass. Parent-commit quick ASAN/TSAN results are accurately qualified; final CI repeats sanitizers.
 
 ## Lab
 
-None required by the approved design. No shared-lab actions are authorized for this run.
+None required by the approved design. No shared-lab actions were run.
 
 ## ADRs
 
 The geometry/admission policy was accepted with the approved plan. Numbered
-[ADR 0018](../../adr/0018-admit-only-representable-volume-geometries.md) is prepared for review
-with Proposed status until code/security review and conformance pass.
+[ADR 0018](../../adr/0018-admit-only-representable-volume-geometries.md) is Accepted after
+clear code/security review and PASS conformance, as covered by the plan approval.
 Existing language/etcd/fencing/ISR decisions remain unchanged.

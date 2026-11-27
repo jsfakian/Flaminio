@@ -1,6 +1,6 @@
 # 0018. Admit only complete and representable volume geometries
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-27
 - **Issue:** [#80](https://github.com/jsfakian/Flaminio/issues/80)
 
@@ -16,8 +16,8 @@ Admission must cover future legal views as well as initial placement. See the
 [approved decisions](../issues/80/decisions.md).
 
 The policy was accepted with the plan on 2026-11-13 and the published clear snapshot on
-2026-11-20. This numbered record remains Proposed until implementation review and conformance
-clear. [ADR 0017](0017-bound-uncertainty-with-per-chunk-covers.md) independently bounds retained
+2026-11-20. Implementation code/security review is clear after two rounds and conformance
+passes S1–S8 on 2026-11-27; this numbered record is accepted under that approval. [ADR 0017](0017-bound-uncertainty-with-per-chunk-covers.md) independently bounds retained
 uncertainty so normal reconnect reports remain representable.
 
 ## Decision
