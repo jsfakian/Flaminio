@@ -730,6 +730,16 @@ impl Replica {
 
     /// Handles one request. Returns the reply, or `None` if the request is dropped.
     pub fn handle(&mut self, m: &ToReplica<Vec<Value>>) -> Option<FromReplica<Vec<Value>>> {
+        self.handle_observed(m, |_| {})
+    }
+
+    /// Lets the simulator observe admission before any device action or reply. This hook is
+    /// on the in-memory adapter only; the production core retains no checker history.
+    pub(crate) fn handle_observed(
+        &mut self,
+        m: &ToReplica<Vec<Value>>,
+        mut observe: impl FnMut(&Action<Vec<Value>>),
+    ) -> Option<FromReplica<Vec<Value>>> {
         let mut action = self.core.handle(m);
         if matches!(action, Action::Fence { .. })
             && let Request::Hello { chunks } = &m.body
@@ -755,6 +765,7 @@ impl Replica {
             self.create_chunk(m.vol, chunk, blocks).ok()?;
             action = self.core.handle(m);
         }
+        observe(&action);
         let body = match action {
             Action::CreateChunk { .. } => unreachable!("created above"),
             Action::Reply(r) | Action::Fence { reply: r, .. } => r,

@@ -125,6 +125,12 @@ read-only authority queries are available to normal simulator builds; their temp
 warnings will end when Unit 4 consumes them. Target/engine acceptance tests and independent
 simulator assurance are next.
 
+Unit 4 source is complete: independent exact-version/restart/session shadow, admitted-action
+observation before simulated I/O, budget/report/authority checks and opt-in chaos-only fault
+injection. All-target type checking and ten baseline clean seeds pass. New acceptance and
+mutation campaigns remain pending; first integrated lint also identified two test-helper
+issues in Unit 3 acceptance, being corrected before final checks.
+
 Pending the mapped core/reference, node, frame/session, target/engine, simulator/mutation and
 fuzz regressions; `make lint test race hygiene contracts sim`; and `make sanitize QUICK=1` for
 the arena/lifecycle changes.

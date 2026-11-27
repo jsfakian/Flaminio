@@ -4,9 +4,287 @@
 //! is compositional, so a history is linearizable exactly when each block's sub-history is.
 //! The search follows Wing & Gong, with memoization on (linearized set, current value).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
-use crate::types::Value;
+use crate::extent::Extent;
+use crate::msg::{Request, Response, ToReplica};
+use crate::replica::{Action, ReplicaCore, UNCERTAINTY_BUDGET};
+use crate::target::FencedAuthority;
+use crate::types::{Block, ChunkIdx, Epoch, Value, Version, VolumeId};
+
+/// Independent reference state for bounded simulator inputs. Every admitted attempt keeps
+/// its exact extent/version, including duplicate and unanswered writes. There is deliberately
+/// no arena, coarse mode, maximum-version summary, or completed-operation history here.
+#[derive(Debug, Default)]
+pub(super) struct Uncertainty {
+    fenced: Epoch,
+    session: Option<(Epoch, u64)>,
+    chunks: BTreeMap<ChunkIdx, ShadowChunk>,
+    pub stats: UncertaintyEvents,
+}
+
+#[derive(Debug, Default)]
+struct ShadowChunk {
+    blocks: Block,
+    records: Vec<(Extent, Version)>,
+    restarted_at: Option<Epoch>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct UncertaintyEvents {
+    pub writes: u64,
+    pub repairs: u64,
+    pub prunes: u64,
+    pub settles: u64,
+}
+
+pub(super) struct CheckedUncertainty {
+    pub coarsened: bool,
+    pub restarted_chunks: usize,
+}
+
+impl Uncertainty {
+    pub fn add_chunk(&mut self, chunk: ChunkIdx, blocks: Block) {
+        // Existing chunks retain every reason for uncertainty.
+        self.chunks.entry(chunk).or_insert_with(|| ShadowChunk {
+            blocks,
+            ..ShadowChunk::default()
+        });
+    }
+
+    pub fn remove_chunk(&mut self, chunk: ChunkIdx) {
+        self.chunks.remove(&chunk);
+    }
+
+    pub fn restart(&mut self) {
+        self.session = None;
+        for c in self.chunks.values_mut() {
+            c.records.clear();
+            c.restarted_at = Some(self.fenced);
+        }
+    }
+
+    fn prune(&mut self, chunk: ChunkIdx, below: Version) {
+        if let Some(c) = self.chunks.get_mut(&chunk) {
+            c.records.retain(|(_, version)| *version >= below);
+            if c.restarted_at.is_some_and(|epoch| epoch < below.epoch) {
+                c.restarted_at = None;
+            }
+        }
+    }
+
+    /// Admission is observed before I/O, not inferred from a successful response. Session
+    /// and fence proof are tracked independently; a foreign or stale bound proves nothing.
+    pub fn observe<P>(&mut self, m: &ToReplica<P>, action: &Action<P>, blocks: Block) {
+        if let (Request::Hello { chunks }, Action::Fence { .. }) = (&m.body, action) {
+            if m.epoch >= self.fenced {
+                self.fenced = m.epoch;
+                if self.session.is_none_or(|old| old < (m.epoch, m.session)) {
+                    self.session = Some((m.epoch, m.session));
+                }
+                for &chunk in chunks {
+                    self.add_chunk(chunk, blocks);
+                }
+            }
+            return;
+        }
+        let current = self.session == Some((m.epoch, m.session)) && m.epoch == self.fenced;
+        match (&m.body, action) {
+            (
+                Request::Write {
+                    chunk,
+                    ext,
+                    version,
+                    prune,
+                    ..
+                },
+                Action::Write { .. },
+            ) => {
+                self.stats.writes += 1;
+                self.stats.repairs += u64::from(prune.is_none());
+                let proof = prune.filter(|bound| current && bound.epoch == m.epoch);
+                // Original exact-record semantics: retain the accepted attempt first,
+                // then apply only independently valid strict completion proof.
+                if let Some(c) = self.chunks.get_mut(chunk) {
+                    c.records.push((*ext, *version));
+                }
+                if let Some(below) = proof {
+                    self.stats.prunes += 1;
+                    self.prune(*chunk, below);
+                }
+            }
+            (Request::Settle { chunk, below }, Action::Reply(Response::Ok))
+                if current && below.epoch == m.epoch =>
+            {
+                self.stats.settles += 1;
+                self.prune(*chunk, *below);
+            }
+            (Request::BeginResync { chunk }, Action::Reply(Response::Ok)) => {
+                self.add_chunk(*chunk, blocks);
+            }
+            _ => {}
+        }
+    }
+
+    /// Check the live demand and retained allocation before constructing another report.
+    pub fn check_core(
+        &self,
+        core: &ReplicaCore,
+        vol: VolumeId,
+    ) -> Result<CheckedUncertainty, String> {
+        let stats = core.uncertainty_stats(vol);
+        let budget = core.budget() as usize;
+        if stats.chunks > budget
+            || stats.records > budget.saturating_sub(stats.chunks)
+            || stats.allocated_slots > budget
+            || stats.records > stats.allocated_slots
+        {
+            return Err(format!(
+                "uncertainty budget exceeded: chunks {} records {} allocated {} budget {budget}",
+                stats.chunks, stats.records, stats.allocated_slots
+            ));
+        }
+        let report = core.report(vol);
+        let extents = report
+            .iter()
+            .map(|(_, extents)| extents.len())
+            .sum::<usize>();
+        if report.len() > budget || extents > budget {
+            return Err(format!(
+                "uncertainty budget exceeded: report rows {} extents {extents} budget {budget}",
+                report.len()
+            ));
+        }
+        self.check_report(&report)?;
+        Ok(CheckedUncertainty {
+            coarsened: self.chunks.values().map(|c| c.records.len()).sum::<usize>() > stats.records,
+            restarted_chunks: self
+                .chunks
+                .values()
+                .filter(|c| c.restarted_at.is_some())
+                .count(),
+        })
+    }
+
+    pub fn check_report(&self, report: &[(ChunkIdx, Vec<Extent>)]) -> Result<(), String> {
+        if report.len() != self.chunks.len() {
+            return Err("uncertainty not covered: held chunk rows differ".to_string());
+        }
+        for ((&chunk, expected), (reported_chunk, extents)) in self.chunks.iter().zip(report) {
+            if chunk != *reported_chunk {
+                return Err(format!("uncertainty not covered: chunk {chunk} has no row"));
+            }
+            let mut previous_end = 0;
+            for extent in extents {
+                let Some(end) = extent.start.checked_add(extent.len) else {
+                    return Err(format!(
+                        "uncertainty not covered: malformed chunk {chunk} row"
+                    ));
+                };
+                if extent.len == 0 || extent.start < previous_end || end > expected.blocks {
+                    return Err(format!(
+                        "uncertainty not covered: malformed chunk {chunk} row"
+                    ));
+                }
+                previous_end = end;
+            }
+            let missing = if expected.restarted_at.is_some() {
+                (!covers(extents, Extent::new(0, expected.blocks))).then_some("restart")
+            } else {
+                expected
+                    .records
+                    .iter()
+                    .find_map(|(extent, _)| (!covers(extents, *extent)).then_some("accepted write"))
+            };
+            if let Some(reason) = missing {
+                return Err(format!("uncertainty not covered: chunk {chunk} {reason}"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Interval containment, independent of the producer's ExtentSet and coarsening algorithms.
+fn covers(report: &[Extent], expected: Extent) -> bool {
+    let mut next = expected.start;
+    for extent in report {
+        if extent.start > next {
+            break;
+        }
+        next = next.max(extent.end());
+        if next >= expected.end() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Validate an entire Hello answer independently of Target::valid_fenced. The required set
+/// is the one captured when the pending Hello was sent, even after placement changes.
+pub(super) fn valid_fenced<P>(
+    body: &Response<P>,
+    required: &[ChunkIdx],
+    chunks: u32,
+    blocks: Block,
+) -> bool {
+    let Response::Fenced { uncertain } = body else {
+        return false;
+    };
+    let mut required = required.iter().copied().peekable();
+    let mut previous_chunk = None;
+    let mut total = 0usize;
+    if uncertain.len() > UNCERTAINTY_BUDGET as usize {
+        return false;
+    }
+    for (chunk, extents) in uncertain {
+        if *chunk >= chunks || previous_chunk.is_some_and(|previous| previous >= *chunk) {
+            return false;
+        }
+        previous_chunk = Some(*chunk);
+        if required.peek().is_some_and(|needed| *needed < *chunk) {
+            return false;
+        }
+        if required.peek() == Some(chunk) {
+            required.next();
+        }
+        let Some(count) = total.checked_add(extents.len()) else {
+            return false;
+        };
+        total = count;
+        if total > UNCERTAINTY_BUDGET as usize {
+            return false;
+        }
+        let mut previous_end = 0;
+        for extent in extents {
+            let Some(end) = extent.start.checked_add(extent.len) else {
+                return false;
+            };
+            if extent.len == 0 || extent.start < previous_end || end > blocks {
+                return false;
+            }
+            previous_end = end;
+        }
+    }
+    required.next().is_none()
+        && uncertain
+            .len()
+            .checked_add(total)
+            .and_then(|n| n.checked_mul(8))
+            .and_then(|n| n.checked_add(13))
+            .is_some_and(|body| body <= 1_048_704)
+}
+
+pub(super) fn check_fenced_authority(
+    before: &Option<FencedAuthority>,
+    after: &Option<FencedAuthority>,
+) -> Result<(), String> {
+    if before != after {
+        return Err(
+            "invalid Fenced accepted: authority changed after invalid Hello answer".to_string(),
+        );
+    }
+    Ok(())
+}
 
 /// One operation on a block, with real (simulator) times.
 #[derive(Debug, Clone, Copy)]

@@ -570,6 +570,8 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         move_pct: 0,
         fast_reads: false,
         local_read_fail_pct: 0,
+        forge_epoch_pct: 0,
+        invalid_fenced_pct: 0,
     }
 }
 
