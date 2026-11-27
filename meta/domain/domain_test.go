@@ -365,3 +365,47 @@ func indexOf(nodes []NodeLoad, id string) int {
 	}
 	panic(id)
 }
+
+// S1/S4: checked persisted counts reject unsupported legacy geometry before division or allocation.
+func TestCheckedGeometry(t *testing.T) {
+	for _, x := range []struct {
+		name string
+		v, c uint64
+		r, i uint32
+		ok   bool
+		n    int
+	}{
+		{"minimum", 1 << 20, 1 << 20, 1, 1, true, 1},
+		{"partial", (1 << 20) + 4096, 1 << 20, 1, 1, false, 0},
+		{"zero-chunk", 1 << 20, 0, 1, 1, false, 0},
+		{"zero-volume", 0, 1 << 20, 1, 1, false, 0},
+		{"small", 4096, 4096, 1, 1, false, 0},
+		{"huge-chunk", 2 << 30, 2 << 30, 1, 1, false, 0},
+		{"u64", ^uint64(0), 1 << 20, 1, 1, false, 0},
+		{"i64", uint64(1<<63) - 1, 1 << 20, 1, 1, false, 0},
+		{"wire-cap", 65536 << 20, 1 << 20, 1, 1, false, 0},
+		{"wire-next", 65537 << 20, 1 << 20, 1, 1, false, 0},
+	} {
+		t.Run(x.name, func(t *testing.T) {
+			s := Spec{ID: "v", SizeBytes: x.v, ChunkBytes: x.c, Replicas: x.r, MinISR: x.i}
+			if e := s.Validate(); (e == nil) != x.ok {
+				t.Fatalf("Spec %v", e)
+			}
+			h := Header{ID: s.ID, SizeBytes: s.SizeBytes, ChunkBytes: s.ChunkBytes, Replicas: s.Replicas, MinISR: s.MinISR}
+			n, e := h.ChunkCount()
+			if (e == nil) != x.ok || n != x.n {
+				t.Fatalf("ChunkCount %d,%v", n, e)
+			}
+		})
+	}
+	for r, n := range []uint64{5137, 3881, 3119, 2607, 2239} {
+		s := Spec{ID: "v", SizeBytes: n << 20, ChunkBytes: 1 << 20, Replicas: uint32(r + 1), MinISR: 1}
+		if e := s.Validate(); e != nil {
+			t.Fatal(e)
+		}
+		s.SizeBytes += 1 << 20
+		if e := s.Validate(); e == nil {
+			t.Fatalf("RF%d over budget accepted", r+1)
+		}
+	}
+}

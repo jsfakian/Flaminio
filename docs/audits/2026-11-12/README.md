@@ -186,3 +186,17 @@ committed; tests count backend-applied revisions and require exact error context
 The original audited revision and reproduction above remain historical evidence. The
 [implementation report](../../issues/77/report.md) records current acceptance, review and
 project-check results; it does not infer hardware or deployment certification from those tests.
+
+## F05 implementation follow-up — 2026-11-27
+
+[#80](https://github.com/jsfakian/Flaminio/issues/80) applies one whole-chunk envelope across
+metadata, CSI and data-plane boundaries. It reserves for future-move protobuf replies under
+the normal 4 MiB cap, checks Hello before transmission, and preflights local layout/slots
+before cleanup or creation. Unsupported stored geometry is refused without automatic rewrite
+or deletion. Authoritative read-only CSI compatibility preserves full creation identity.
+
+Shared Go/Rust vectors, both-backend service/CSI cases, authenticated hostile Hello tests,
+layout/slot/partial-create tests and all five real maximum-view TLS cases provide regression
+evidence. Controlled omissions reproduce overflow, admission, slot and validation failures.
+The [implementation report](../../issues/80/report.md) records the review correction and final
+gates. These representation checks do not certify operating scale or physical capacity.

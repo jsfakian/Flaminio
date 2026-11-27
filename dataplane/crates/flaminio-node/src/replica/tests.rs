@@ -246,7 +246,10 @@ fn unsupported_chunk_index_is_refused_and_kept() {
     let mut s = ReplicaService::with_budget(store, 4);
     let uuid = volume_uuid("wide-index");
     let before = s.store().chunks();
-    assert_eq!(s.unsupported.get(&uuid), Some(&"chunk index out of range"));
+    assert_eq!(
+        s.unsupported.get(&uuid),
+        Some(&"chunk index outside stored volume")
+    );
     assert!(
         s.vols.is_empty(),
         "unsupported indices are not narrowed into core IDs"
@@ -256,7 +259,7 @@ fn unsupported_chunk_index_is_refused_and_kept() {
         a.claims.first_epoch = first_epoch;
         assert_eq!(
             s.hello(&a).unwrap_err(),
-            "volume unsupported on this node: chunk index out of range"
+            "volume unsupported on this node: chunk index outside stored volume"
         );
         assert_eq!(s.store().chunks(), before);
         assert!(s.vols.is_empty());
@@ -559,7 +562,193 @@ fn a_volume_keeps_its_geometry() {
     assert!(s.hello(&other).unwrap_err().contains("exists here"));
     let mut bad = accepted(2, 1, &[7]);
     bad.size = 4 * CHUNK;
-    assert!(s.hello(&bad).unwrap_err().contains("beyond the volume"));
+    assert!(
+        s.hello(&bad)
+            .unwrap_err()
+            .contains("unique and within the volume")
+    );
+}
+
+#[test]
+fn malformed_session_never_deletes_fences_or_creates_before_refusal() {
+    for case in 0..12 {
+        let mut s = service();
+        let (old, _) = s.hello(&accepted(9, 1, &[0, 3])).unwrap();
+        s.handle(&[(old, write(old, 2, 0, 0, &[42], 1))]);
+        let before = s.store().chunks();
+        let mutations = s.store().device().mutations();
+        let mut a = accepted_first(20, 21, 2, &[0, 1]);
+        match case {
+            0 => a.size = 0,
+            1 => a.chunk_size = 0,
+            2 => a.chunk_size = 4096,
+            3 => a.chunk_size = 2 << 30,
+            4 => a.chunk_size = (1 << 20) + 4096,
+            5 => a.size += 4096,
+            6 => a.size = u64::MAX,
+            7 => a.size = 65_537 * CHUNK,
+            8 => a.chunks = vec![0, 0],
+            9 => a.chunks = vec![0, 4],
+            10 => a.chunks = vec![u32::MAX],
+            _ => a.chunks = vec![0, 1, 2, 3, 4],
+        }
+        assert!(s.hello(&a).is_err(), "case {case}");
+        assert_eq!(s.store().chunks(), before, "case {case}");
+        assert_eq!(s.store().device().mutations(), mutations, "case {case}");
+        assert_eq!(
+            s.handle(&[(old, read(3, 0, 0, 1))])
+                .iter()
+                .map(blocks)
+                .collect::<Vec<_>>(),
+            [vec![42]],
+            "old session remains usable, case {case}"
+        );
+        let s = restart(s);
+        assert_eq!(s.store().chunks(), before, "durable state, case {case}");
+    }
+}
+
+#[test]
+fn insufficient_session_slots_refuse_before_old_incarnation_cleanup() {
+    let mut store = store_on(formatted());
+    let slots = flaminio_format::layout::Layout::compute(
+        256 * MIB,
+        LayoutParams {
+            journal_size: Some(16 * MIB),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .chunk_slots;
+    store
+        .create_chunk(
+            ChunkKey {
+                volume: volume_uuid("pvc-1"),
+                index: 3,
+            },
+            CHUNK,
+            4 * CHUNK,
+            9,
+        )
+        .unwrap();
+    for index in 1..slots {
+        store
+            .create_chunk(
+                ChunkKey {
+                    volume: volume_uuid("other"),
+                    index,
+                },
+                CHUNK,
+                slots * CHUNK,
+                9,
+            )
+            .unwrap();
+    }
+    let mut s = ReplicaService::new(store);
+    let before = s.store().chunks();
+    let mutations = s.store().device().mutations();
+    assert!(
+        s.hello(&accepted_first(20, 21, 2, &[0]))
+            .unwrap_err()
+            .contains("chunk slots")
+    );
+    assert_eq!(s.store().chunks(), before);
+    assert_eq!(s.store().device().mutations(), mutations);
+    assert_eq!(s.delete_volume("pvc-1"), Ok(1));
+    s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
+    assert_eq!(s.store().chunks().len() as u64, slots);
+}
+
+#[test]
+fn startup_bad_geometry_is_read_only_and_explicit_delete_remains_available() {
+    for case in 0..6 {
+        let mut store = store_on(formatted());
+        let uuid = volume_uuid("legacy");
+        let (chunk, size, index) = match case {
+            0 => (65536, CHUNK, 0), // A legacy small chunk still legal to the store.
+            1 => (CHUNK, 0, 0),
+            2 => (CHUNK, CHUNK + 4096, 0),
+            3 => (CHUNK, 65_537 * CHUNK, 0),
+            4 => (CHUNK, 4 * CHUNK, 4),
+            _ => (CHUNK, 4 * CHUNK, 0),
+        };
+        store
+            .create_chunk(
+                ChunkKey {
+                    volume: uuid,
+                    index,
+                },
+                chunk,
+                size,
+                9,
+            )
+            .unwrap();
+        if case == 5 {
+            store
+                .create_chunk(
+                    ChunkKey {
+                        volume: uuid,
+                        index: 1,
+                    },
+                    2 * CHUNK,
+                    4 * CHUNK,
+                    9,
+                )
+                .unwrap();
+        }
+        let before = store.chunks();
+        let mutations = store.device().mutations();
+        let mut s = ReplicaService::new(store);
+        assert!(s.unsupported.contains_key(&uuid), "case {case}");
+        assert!(!s.vols.contains_key(&uuid));
+        assert_eq!(s.store().device().mutations(), mutations);
+        let mut a = accepted_in("legacy", 4, 21, 1, &[0]);
+        a.claims.first_epoch = 20;
+        assert!(
+            s.hello(&a)
+                .unwrap_err()
+                .contains("unsupported on this node")
+        );
+        assert_eq!(s.store().chunks(), before);
+        assert_eq!(s.store().device().mutations(), mutations);
+        assert_eq!(s.delete_volume("legacy").unwrap(), before.len());
+        assert!(s.store().chunks().is_empty());
+    }
+}
+
+#[test]
+fn io_failure_after_first_session_create_preserves_durable_work_and_retries() {
+    // Measure one real ChunkCreate commit rather than relying on its write count.
+    let mut measure = store_on(formatted());
+    let before = measure.device().mutations();
+    measure
+        .create_chunk(
+            ChunkKey {
+                volume: volume_uuid("pvc-1"),
+                index: 0,
+            },
+            CHUNK,
+            4 * CHUNK,
+            21,
+        )
+        .unwrap();
+    let one_create = measure.device().mutations() - before;
+    let mut s = service();
+    s.store().device().fail_after(Some(one_create));
+    let a = accepted_first(20, 21, 1, &[0, 1]);
+    assert!(s.hello(&a).unwrap_err().contains("I/O error"));
+    assert_eq!(chunks_of(&s), [(0, 21)]);
+    s.store().device().fail_after(None);
+    let mut s = restart(s);
+    assert_eq!(chunks_of(&s), [(0, 21)]);
+    let (_, reply) = s.hello(&a).unwrap();
+    assert_eq!(chunks_of(&s), [(0, 21), (1, 21)]);
+    let Frame::Fenced { uncertain, .. } = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(uncertain, [(0, vec![Extent::new(0, BLOCKS)]), (1, vec![])]);
+    assert!(Frame::Fenced { req: 1, uncertain }.encode_checked().is_ok());
+    s.store().fsck(false).unwrap();
 }
 
 #[test]

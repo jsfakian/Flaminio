@@ -1,5 +1,5 @@
-//! Replication frames come from the network: decoding must never panic, and whatever decodes
-//! must encode back to the same bytes (except a refusal's reason, which is decoded lossily).
+//! Replication frames come from the network: decoding must never panic. Valid frames round-trip
+//! canonically; structurally decoded Hello can still fail bounded semantic validation.
 //! The harness is `flaminio_fuzz::repl_frame`, which the regression test replays too.
 #![no_main]
 

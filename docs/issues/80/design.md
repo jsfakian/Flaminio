@@ -1,7 +1,10 @@
 # Issue #80: One supported volume geometry — design
 
 Implementation of [spec](spec.md); [decisions](decisions.md), if any.
-Approved 2026-11-13; not implemented.
+Published clear snapshot approved 2026-11-20; implementation and validation are recorded in [report.md](report.md).
+
+The facts below describe the audited starting point. The implementation base now includes
+#86's shared checked encoder and #77's coherent metadata reads; this issue extends them.
 
 The facts it starts from:
 - Metadata validates 4 KiB capacity, unbounded power-of-two chunks and floor N≤2^20;

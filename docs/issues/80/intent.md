@@ -1,7 +1,7 @@
 # Issue #80: One supported volume geometry — intent
 
 [Issue #80](https://github.com/jsfakian/Flaminio/issues/80); [follow-ups](../../followups.md).
-Approved 2026-11-13; not implemented.
+Published clear snapshot approved 2026-11-20; implementation and validation are recorded in [report.md](report.md).
 
 ## Why
 

@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"github.com/flaminio/flaminio/pkg/geometry"
 	"github.com/flaminio/flaminio/pkg/pki"
 )
 
@@ -42,6 +43,7 @@ func dialMeta(endpoints []string, opts ...grpc.DialOption) (*Meta, error) {
 		return nil, errors.New("no metadata service endpoints")
 	}
 	m := &Meta{}
+	opts = append(opts, grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(geometry.MetadataBytes)))
 	for _, e := range endpoints {
 		c, err := grpc.NewClient(e, opts...)
 		if err != nil {
@@ -88,6 +90,12 @@ func metaCall[T any](ctx context.Context, m *Meta, f func(context.Context, metav
 func (m *Meta) CreateVolume(ctx context.Context, r *metav1.CreateVolumeRequest) (*metav1.CreateVolumeResponse, error) {
 	return metaCall(ctx, m, func(ctx context.Context, c metav1.MetadataServiceClient) (*metav1.CreateVolumeResponse, error) {
 		return c.CreateVolume(ctx, r)
+	})
+}
+
+func (m *Meta) CheckCreateVolume(ctx context.Context, r *metav1.CheckCreateVolumeRequest) (*metav1.CheckCreateVolumeResponse, error) {
+	return metaCall(ctx, m, func(ctx context.Context, c metav1.MetadataServiceClient) (*metav1.CheckCreateVolumeResponse, error) {
+		return c.CheckCreateVolume(ctx, r)
 	})
 }
 

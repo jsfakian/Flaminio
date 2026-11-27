@@ -29,9 +29,10 @@ What the targets check:
 - **`race`:** every Go test under the race detector, in random order. Every Go test package checks
   at its end that no goroutine its tests started is still running (`goleak`, in its
   `main_test.go`).
-- **`contracts`:** the generated protobuf code and the metadata transition vectors match their
-  sources; the fuzz crate's lockfile is current; the data plane's Rust metadata client works
-  against the Go service over mutual TLS.
+- **`contracts`:** the generated protobuf code and metadata transition vectors match their
+  sources; Go and Rust check the same geometry admission vectors; the fuzz crate's lockfile
+  is current; the Rust metadata client works against the Go service over mutual TLS, including
+  admitted maximum future-move views under the normal 4 MiB receive limit.
 - **`sim`:** the replication-protocol simulator, 20 000 random runs, then every injected bug
   must be caught.
 - **`sanitize`** (nightly toolchain): the tests of the crates with threads, io_uring or unsafe code

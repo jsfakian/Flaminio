@@ -381,6 +381,18 @@ placement has distinct domains (see docs/followups.md §4). Volumes are `ReadWri
 container engine (`crane`, on a pinned Ubuntu base) and imported into each node's containerd;
 nothing is pushed to a registry.
 
+`chunkSize` must be a power of two from 1 MiB through 1 GiB. CSI returns a whole-chunk
+capacity within the requested range: with 256 MiB chunks, requesting 300 MiB selects 512 MiB,
+while a 400 MiB limit refuses that request. With no required size it prefers 1 GiB; a smaller
+positive limit is rounded down, with at least one chunk required. Direct metadata creates
+must already be whole chunks. The stricter per-RF chunk ceilings and 4 MiB metadata budget
+are documented in [architecture §4](ARCHITECTURE.md#4-core-concepts).
+
+Upgrade metadata admission before CSI/nodes and pause creates while admission versions are
+mixed. Unsupported existing volumes are refused without automatic migration or deletion.
+Local chunk-slot exhaustion is a resource error even when geometry fits; freeing/reclaiming
+space is separate from choosing supported geometry.
+
 ### Phase-1 benchmark and chaos run (step 8)
 
 ```bash

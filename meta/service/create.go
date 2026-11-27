@@ -104,9 +104,17 @@ func decodeHeaderBounded(b []byte) (domain.Header, error) {
 		return domain.Header{}, status.Errorf(codes.DataLoss, "volume header: %v", err)
 	}
 	if h.CreateSpec != nil {
-		if err := h.CreateSpec.Validate(); err != nil {
+		var raw struct {
+			CreateSpec json.RawMessage `json:"create_spec"`
+		}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return domain.Header{}, status.Errorf(codes.DataLoss, "volume header: %v", err)
+		}
+		identity, err := domain.DecodeCreateSpec(raw.CreateSpec)
+		if err != nil {
 			return domain.Header{}, status.Errorf(codes.DataLoss, "create_spec: %v", err)
 		}
+		h.CreateSpec = &identity
 	}
 	return h, nil
 }
@@ -268,6 +276,9 @@ func (s *Service) resumeOrRefuse(ctx context.Context, id string, want domain.Cre
 		// Published Deleting: conservative public path owns it.
 		return nil, status.Errorf(codes.Aborted, "volume %q is being deleted", id)
 	}
+	if (h.CreateOperation == "") != (h.CreateSpec == nil) {
+		return nil, status.Errorf(codes.DataLoss, "volume %q has an incomplete create identity", id)
+	}
 	if h.Creating {
 		if h.CreateOperation == "" || h.CreateSpec == nil {
 			// Legacy creating claim: incompatible with adoption; may finish via rollback then fresh admit.
@@ -316,8 +327,12 @@ func (s *Service) planPlacement(ctx context.Context, spec domain.Spec) ([][]stri
 			candidates = append(candidates, domain.LoadFromLabels(n.GetId(), load[n.GetId()], n.GetLabels()))
 		}
 	}
-	h := domain.Header{ID: spec.ID, SizeBytes: spec.SizeBytes, ChunkBytes: spec.ChunkBytes}
-	return domain.Place(candidates, h.ChunkCount(), int(spec.Replicas), spec.PreferNode, spec.Domain, spec.Policy)
+	h := domain.Header{ID: spec.ID, SizeBytes: spec.SizeBytes, ChunkBytes: spec.ChunkBytes, Replicas: spec.Replicas, MinISR: spec.MinISR}
+	count, err := h.ChunkCount()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", domain.ErrInvalid, err)
+	}
+	return domain.Place(candidates, count, int(spec.Replicas), spec.PreferNode, spec.Domain, spec.Policy)
 }
 
 // replicaLoad pages public chunk keys and counts replicas. Private create-plans are not listed.

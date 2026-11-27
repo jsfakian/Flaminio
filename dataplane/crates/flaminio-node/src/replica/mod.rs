@@ -146,25 +146,42 @@ impl<D: BlockDevice> ReplicaService<D> {
             grouped.entry(chunk.key.volume).or_default().push(chunk);
         }
         for (uuid, chunks) in grouped {
-            let reason = if chunks.len() > budget as usize {
-                Some("too many chunks")
-            } else if chunks.iter().any(|c| u32::try_from(c.key.index).is_err()) {
-                Some("chunk index out of range")
-            } else {
-                None
-            };
-            if let Some(reason) = reason {
-                eprintln!("flaminio-node: volume {uuid:?} unsupported on this node: {reason}");
-                s.unsupported.insert(uuid, reason);
-                continue;
-            }
             let Some(shape) = chunks.first() else {
                 continue;
+            };
+            let inventory = (|| {
+                if chunks.len() > budget as usize {
+                    return Err("too many chunks");
+                }
+                let geometry =
+                    flaminio_repl::geometry::validate_scalar(shape.volume_size, shape.chunk_size)
+                        .map_err(|e| e.0)?;
+                if chunks
+                    .iter()
+                    .any(|c| c.volume_size != shape.volume_size || c.chunk_size != shape.chunk_size)
+                {
+                    return Err("inconsistent stored volume geometry");
+                }
+                if chunks
+                    .iter()
+                    .any(|c| c.key.index >= u64::from(geometry.chunks))
+                {
+                    return Err("chunk index outside stored volume");
+                }
+                Ok(geometry)
+            })();
+            let geometry = match inventory {
+                Ok(geometry) => geometry,
+                Err(reason) => {
+                    eprintln!("flaminio-node: volume {uuid:?} unsupported on this node: {reason}");
+                    s.unsupported.insert(uuid, reason);
+                    continue;
+                }
             };
             let id = s.vol_id(uuid, shape.volume_size, shape.chunk_size);
             for c in chunks {
                 let index = c.key.index as u32; // The complete inventory was checked above.
-                let blocks = (c.chunk_size / BLOCK as u64) as Block;
+                let blocks = geometry.blocks_per_chunk;
                 if let Err(error) = s.core.recover_chunk(id, c.fenced_epoch, index, blocks) {
                     let reason = match error {
                         ChunkError::Exists => "duplicate chunk index",
@@ -217,24 +234,40 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// held group first (docs/issues/10, S5): the store may land it here.
     pub fn hello(&mut self, a: &Accepted) -> Result<(SessionRef, Frame), String> {
         let (size, chunk_size) = (a.size, a.chunk_size);
-        if chunk_size == 0
-            || !chunk_size.is_multiple_of(BLOCK as u64)
-            || size == 0
-            || !size.is_multiple_of(chunk_size)
+        let geometry = flaminio_repl::geometry::validate_scalar(size, chunk_size)
+            .map_err(|e| format!("unsupported volume geometry: {e}"))?;
+        if a.chunks.len() > geometry.chunks as usize
+            || a.chunks.iter().any(|&c| c >= geometry.chunks)
+            || a.chunks.iter().copied().collect::<BTreeSet<_>>().len() != a.chunks.len()
         {
-            return Err(
-                "volume size must be a non-zero multiple of a 4 KiB-aligned chunk size".into(),
-            );
-        }
-        let count = size / chunk_size;
-        if a.chunks.iter().any(|&c| u64::from(c) >= count) {
-            return Err("a placed chunk is beyond the volume".into());
+            return Err("placed chunks must be unique and within the volume".into());
         }
         let uuid = volume_uuid(&a.claims.volume);
         if let Some(reason) = self.unsupported.get(&uuid) {
             return Err(format!("volume unsupported on this node: {reason}"));
         }
         let first = a.claims.first_epoch;
+        if let Some(v) = self.vols.get(&uuid)
+            && (first == 0 || self.core.fenced(v.id) >= first)
+            && (v.chunk_size != chunk_size || v.size != size)
+        {
+            return Err(format!(
+                "volume exists here with {} bytes in {}-byte chunks",
+                v.size, v.chunk_size
+            ));
+        }
+        let keys: Vec<_> = a
+            .chunks
+            .iter()
+            .map(|&index| ChunkKey {
+                volume: uuid,
+                index: u64::from(index),
+            })
+            .collect();
+        // Count occupied older-incarnation slots conservatively before any cleanup/fence.
+        self.store
+            .preflight_chunks(&keys, chunk_size)
+            .map_err(|e| e.to_string())?;
         if first > 0 {
             // Chunks of the name fenced below the volume's first epoch are an earlier volume's:
             // every epoch the volume's sessions fence and create at is above it, and every epoch
@@ -298,7 +331,7 @@ impl<D: BlockDevice> ReplicaService<D> {
             Action::Fence { epoch, .. } => {
                 // Create the chunks placed here that do not exist yet, fenced at this epoch,
                 // then fence the others: durable before the reply.
-                let blocks = (chunk_size / BLOCK as u64) as Block;
+                let blocks = geometry.blocks_per_chunk;
                 for c in missing {
                     self.core
                         .can_add_chunk(vol, c)

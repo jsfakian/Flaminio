@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/kv"
@@ -90,10 +91,10 @@ func TestController(t *testing.T) {
 		})
 	}
 
-	// Defaults, and the size aligned up to 1 MiB.
+	// Defaults, and capacity rounded up to a full 256 MiB chunk.
 	r, err := create("pvc-1", 1<<30+1, nil)
 	wantCode(t, "create", err, codes.OK)
-	if r.Volume.CapacityBytes != 1<<30+1<<20 {
+	if r.Volume.CapacityBytes != 1<<30+256<<20 {
 		t.Fatalf("capacity %d", r.Volume.CapacityBytes)
 	}
 	v, err := m.GetVolume(ctx, "pvc-1")
@@ -325,5 +326,145 @@ func TestNode(t *testing.T) {
 func TestUnescapeMountinfo(t *testing.T) {
 	if got := unescapeMountinfo(`/var/lib/kubelet/a\040b\134c`); got != `/var/lib/kubelet/a b\c` {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// A fake wire service records the complete desired identity and rejects unsafe Get fallback.
+type geometryMetaFake struct {
+	metav1.UnimplementedMetadataServiceServer
+	creates, checks, gets int
+	created               *metav1.CreateVolumeRequest
+	checked               *metav1.CheckCreateVolumeRequest
+	createCode, checkCode codes.Code
+	actual                uint64
+}
+
+func (f *geometryMetaFake) CreateVolume(_ context.Context, r *metav1.CreateVolumeRequest) (*metav1.CreateVolumeResponse, error) {
+	f.creates++
+	f.created = proto.Clone(r).(*metav1.CreateVolumeRequest)
+	if f.createCode != codes.OK {
+		return nil, status.Error(f.createCode, "fake create")
+	}
+	return &metav1.CreateVolumeResponse{Volume: &metav1.Volume{Id: r.Id, SizeBytes: r.SizeBytes, ChunkBytes: r.ChunkBytes, Replicas: r.Replicas, MinIsr: r.MinIsr}}, nil
+}
+func (f *geometryMetaFake) CheckCreateVolume(_ context.Context, r *metav1.CheckCreateVolumeRequest) (*metav1.CheckCreateVolumeResponse, error) {
+	f.checks++
+	f.checked = proto.Clone(r).(*metav1.CheckCreateVolumeRequest)
+	if f.checkCode != codes.OK {
+		return nil, status.Error(f.checkCode, "fake check")
+	}
+	d := r.Desired
+	return &metav1.CheckCreateVolumeResponse{Volume: &metav1.Volume{Id: d.Id, SizeBytes: f.actual, ChunkBytes: d.ChunkBytes, Replicas: d.Replicas, MinIsr: d.MinIsr}}, nil
+}
+func (f *geometryMetaFake) GetVolume(context.Context, *metav1.GetVolumeRequest) (*metav1.GetVolumeResponse, error) {
+	f.gets++
+	return nil, status.Error(codes.Internal, "unsafe scalar fallback")
+}
+
+func TestGeometryCapacityRanges(t *testing.T) {
+	const m = int64(1 << 20)
+	for _, x := range []struct {
+		name            string
+		required, limit int64
+		chunk           string
+		rf              string
+		want            int64
+		code            codes.Code
+	}{
+		{"default", 0, 0, "1Mi", "1", 1 << 30, codes.OK}, {"nil-default", 0, 0, "256Mi", "2", 1 << 30, codes.OK},
+		{"one-byte", 1, 0, "1Mi", "1", m, codes.OK}, {"aligned", m, 0, "1Mi", "1", m, codes.OK},
+		{"round-up", m + 1, 0, "1Mi", "1", 2 * m, codes.OK}, {"round-at-limit", m + 1, 2 * m, "1Mi", "1", 2 * m, codes.OK},
+		{"limit-only", 0, 3*m + 4096, "1Mi", "1", 3 * m, codes.OK}, {"limit-default", 0, 2 << 30, "1Mi", "1", 1 << 30, codes.OK},
+		{"negative-required", -1, 0, "1Mi", "1", 0, codes.InvalidArgument}, {"negative-limit", 0, -1, "1Mi", "1", 0, codes.InvalidArgument},
+		{"both-negative", -1, -1, "1Mi", "1", 0, codes.InvalidArgument}, {"contradiction", 2 * m, m, "1Mi", "1", 0, codes.InvalidArgument},
+		{"round-exceeds-limit", m + 1, m + 4096, "1Mi", "1", 0, codes.OutOfRange}, {"limit-less-chunk", 0, m - 1, "1Mi", "1", 0, codes.OutOfRange},
+		{"max-i64", 1<<63 - 1, 0, "1Mi", "1", 0, codes.OutOfRange}, {"minimum-i64", -1 << 63, 0, "1Mi", "1", 0, codes.InvalidArgument},
+		{"budget", 5138 * m, 0, "1Mi", "1", 0, codes.OutOfRange}, {"budget-max", 5137 * m, 0, "1Mi", "1", 5137 * m, codes.OK},
+		{"invalid-chunk", m, 0, "4Ki", "1", 0, codes.InvalidArgument}, {"huge-chunk", m, 0, "2Gi", "1", 0, codes.InvalidArgument},
+		{"quantity-wrap", m, 0, "17592186044417Mi", "1", 0, codes.InvalidArgument}, {"rf-zero", m, 0, "1Mi", "0", 0, codes.InvalidArgument},
+	} {
+		t.Run(x.name, func(t *testing.T) {
+			f := &geometryMetaFake{}
+			c := &Controller{Meta: serveMeta(t, f)}
+			req := &csi.CreateVolumeRequest{Name: "v", VolumeCapabilities: []*csi.VolumeCapability{blockCap()}, CapacityRange: &csi.CapacityRange{RequiredBytes: x.required, LimitBytes: x.limit}, Parameters: map[string]string{ParamChunkSize: x.chunk, ParamReplicas: x.rf}}
+			if x.name == "nil-default" {
+				req.CapacityRange = nil
+			}
+			got, e := c.CreateVolume(context.Background(), req)
+			wantCode(t, x.name, e, x.code)
+			if x.code != codes.OK {
+				if f.creates+f.checks+f.gets != 0 {
+					t.Fatalf("invalid request sent RPCs: %+v", f)
+				}
+				return
+			}
+			if got.Volume.CapacityBytes != x.want || f.created.SizeBytes != uint64(x.want) {
+				t.Fatalf("selected=%v desired=%v", got, f.created)
+			}
+			if got.Volume.CapacityBytes < x.required || x.limit > 0 && got.Volume.CapacityBytes > x.limit {
+				t.Fatal("capacity escaped range")
+			}
+		})
+	}
+}
+
+func TestGeometryAuthoritativeRetry(t *testing.T) {
+	for _, x := range []struct {
+		name   string
+		check  codes.Code
+		actual uint64
+		want   codes.Code
+	}{
+		{"larger-current", codes.OK, 4 << 20, codes.OK}, {"identity-conflict", codes.AlreadyExists, 0, codes.AlreadyExists},
+		{"missing-rpc", codes.Unimplemented, 0, codes.FailedPrecondition}, {"in-progress", codes.Aborted, 0, codes.Aborted},
+		{"corrupt-identity", codes.DataLoss, 0, codes.DataLoss}, {"bad-returned-range", codes.OK, 8 << 20, codes.Internal},
+		{"bad-returned-signed", codes.OK, ^uint64(0), codes.Internal},
+	} {
+		t.Run(x.name, func(t *testing.T) {
+			f := &geometryMetaFake{createCode: codes.AlreadyExists, checkCode: x.check, actual: x.actual}
+			c := &Controller{Meta: serveMeta(t, f)}
+			req := &csi.CreateVolumeRequest{Name: "v", VolumeCapabilities: []*csi.VolumeCapability{blockCap()}, CapacityRange: &csi.CapacityRange{RequiredBytes: (1 << 20) + 1, LimitBytes: 5 << 20}, Parameters: map[string]string{ParamChunkSize: "1Mi", ParamReplicas: "3", ParamMinISR: "2", ParamFailureDomain: "zone", ParamFailureDomainPolicy: "bestEffort"}, AccessibilityRequirements: &csi.TopologyRequirement{Preferred: []*csi.Topology{{Segments: map[string]string{TopologyKey: "preferred"}}}}}
+			got, e := c.CreateVolume(context.Background(), req)
+			wantCode(t, x.name, e, x.want)
+			want := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: 2 << 20, ChunkBytes: 1 << 20, Replicas: 3, MinIsr: 2, PreferNode: "preferred", FailureDomain: "zone", FailureDomainPolicy: "bestEffort"}
+			if f.creates != 1 || f.checks != 1 || f.gets != 0 || !proto.Equal(f.created, want) || !proto.Equal(f.checked.Desired, want) || f.checked.RequiredBytes != req.CapacityRange.RequiredBytes || f.checked.LimitBytes != req.CapacityRange.LimitBytes {
+				t.Fatalf("unsafe/incomplete retry %+v", f)
+			}
+			if e == nil && got.Volume.CapacityBytes != int64(x.actual) {
+				t.Fatal("response reported initial candidate rather than actual capacity")
+			}
+		})
+	}
+}
+
+func TestGeometryQuantityGrammar(t *testing.T) {
+	for _, x := range []struct {
+		s    string
+		want uint64
+	}{{"1Ki", 1024}, {"1Mi", 1 << 20}, {"1Gi", 1 << 30}, {"1Ti", 1 << 40}, {"18446744073709551615", ^uint64(0)}, {"17592186044415Mi", 18446744073708503040}} {
+		n, e := parseQuantity(x.s)
+		if e != nil || n != x.want {
+			t.Fatalf("%s = %d,%v", x.s, n, e)
+		}
+	}
+	for _, s := range []string{"17592186044416Mi", "17592186044417Mi", "18014398509481984Ki", "17179869184Gi", "16777216Ti", "1M", "1mi", "-1", "1.5Mi", ""} {
+		if _, e := parseQuantity(s); e == nil {
+			t.Errorf("accepted %q", s)
+		}
+	}
+}
+
+func TestGeometryInvalidParametersMakeNoRPC(t *testing.T) {
+	for _, p := range []map[string]string{
+		{ParamChunkSize: "0"}, {ParamChunkSize: "3Mi"}, {ParamReplicas: "6"}, {ParamReplicas: "4294967296"},
+		{ParamMinISR: "0"}, {ParamReplicas: "2", ParamMinISR: "3"}, {ParamFailureDomain: "future"}, {ParamFailureDomainPolicy: "future"},
+		{ParamChunkSize: "18014398509481984Ki"}, {ParamChunkSize: "17179869184Gi"}, {ParamChunkSize: "16777216Ti"},
+	} {
+		f := &geometryMetaFake{}
+		c := &Controller{Meta: serveMeta(t, f)}
+		_, e := c.CreateVolume(context.Background(), &csi.CreateVolumeRequest{Name: "v", Parameters: p, VolumeCapabilities: []*csi.VolumeCapability{blockCap()}})
+		if status.Code(e) != codes.InvalidArgument || f.creates+f.checks+f.gets != 0 {
+			t.Fatalf("invalid parameters %v reached metadata: %v %+v", p, e, f)
+		}
 	}
 }

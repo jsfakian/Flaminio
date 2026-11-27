@@ -126,8 +126,8 @@ pub fn journal(data: &[u8]) {
     }
 }
 
-/// Replication frames come from the network: decoding must never panic, and whatever decodes
-/// must encode back to the same bytes (except a refusal's reason, which is decoded lossily).
+/// Replication frames come from the network: decoding must never panic. Valid frames encode
+/// canonically; Hello may decode structurally and then fail bounded semantic validation.
 pub fn repl_frame(data: &[u8]) {
     // The length-prefix gate runs before body allocation in Conn::recv. Exercise it
     // independently without changing the existing body-input corpus grammar.
@@ -137,9 +137,39 @@ pub fn repl_frame(data: &[u8]) {
     if let Ok(f) = Frame::decode(data)
         && !matches!(f, Frame::Refused { .. })
     {
-        let b = f
-            .encode_checked()
-            .expect("decoded frames must pass checked encoding");
+        // Hello's wire decoder is structural; scalar and session-set validation happen
+        // before accepting it. Hostile but structurally valid input need not be sendable.
+        // Keep the stronger round trip for every semantically valid Hello and other frame.
+        let valid = match &f {
+            Frame::Hello {
+                size,
+                chunk_size,
+                chunks,
+                token,
+                ..
+            } => {
+                let chunk_ok =
+                    (1 << 20..=1 << 30).contains(chunk_size) && chunk_size.is_power_of_two();
+                chunk_ok
+                    && *size > 0
+                    && size.is_multiple_of(*chunk_size)
+                    && size / chunk_size <= 65_536
+                    && token.len() <= TOKEN_MAX_LEN
+                    && chunks.iter().all(|&c| u64::from(c) < size / chunk_size)
+                    && chunks
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        == chunks.len()
+            }
+            _ => true,
+        };
+        let encoded = f.encode_checked();
+        if !valid {
+            assert!(encoded.is_err(), "invalid Hello must be refused");
+            return;
+        }
+        let b = encoded.expect("valid decoded frames must pass checked encoding");
         assert_eq!(&b[4..], data);
     }
 }

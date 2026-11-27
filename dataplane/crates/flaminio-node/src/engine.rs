@@ -21,7 +21,7 @@
 //! length the engine asked for. Otherwise it is dropped, and the target's timeout treats the
 //! replica as failed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -34,6 +34,7 @@ use flaminio_net::frame::Frame;
 use flaminio_net::session::Accepted;
 use flaminio_net::token::{Claims, decode_unverified};
 use flaminio_repl::extent::Extent;
+use flaminio_repl::geometry::{self, Geometry};
 use flaminio_repl::meta::{ChunkMeta, MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, VolumeMeta};
 use flaminio_repl::msg::{FromReplica, Request, Response, ToReplica};
 use flaminio_repl::target::{FastRead, Op, OpResult, Output as TOut, Target};
@@ -409,34 +410,27 @@ impl TargetRt {
 
     /// Validate a complete metadata payload before assigning any new peer IDs.
     fn valid_chunks(&self, chunks: &[pb::ChunkMeta]) -> bool {
-        chunks.iter().all(|c| {
-            let replicas = &c.replicas;
-            let moving = !c.moving_from.is_empty() || !c.moving_to.is_empty();
-            let unique = |names: &[String]| {
-                names
-                    .iter()
-                    .enumerate()
-                    .all(|(i, name)| valid_node_name(name) && !names[..i].contains(name))
-            };
-            replicas.len() >= self.replica_count
-                && replicas.len() <= self.replica_count + usize::from(moving)
-                && unique(replicas)
-                && c.isr.len() >= self.view.min_isr
-                && c.isr.len() <= replicas.len()
-                && unique(&c.isr)
-                && c.isr.iter().all(|n| replicas.contains(n))
-                && (!moving
-                    || (valid_node_name(&c.moving_from)
-                        && valid_node_name(&c.moving_to)
-                        && c.moving_from != c.moving_to
-                        && replicas.contains(&c.moving_from)
-                        && (replicas.len() == self.replica_count
-                            || replicas.contains(&c.moving_to))))
-        })
+        if !valid_chunk_membership(chunks, self.replica_count, self.view.min_isr) {
+            return false;
+        }
+        let mut added = BTreeSet::new();
+        for c in chunks {
+            for name in c.replicas.iter().chain([&c.moving_from, &c.moving_to]) {
+                if !name.is_empty() && !self.nodes.contains(name) {
+                    added.insert(name);
+                }
+            }
+        }
+        // Peer IDs are retained across moves, so bound the accumulated map before narrowing.
+        self.nodes
+            .len()
+            .checked_add(added.len())
+            .and_then(|n| n.checked_sub(1))
+            .is_some_and(|last| NodeId::try_from(last).is_ok())
     }
 
     fn valid_refresh(&self, volume: &str, v: &pb::Volume) -> bool {
-        v.id == volume
+        validate_volume(volume, v).is_ok()
             && v.size_bytes == self.size
             && v.chunk_bytes == self.chunk_size
             && v.replicas as usize == self.replica_count
@@ -476,6 +470,60 @@ fn valid_node_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+fn valid_chunk_membership(chunks: &[pb::ChunkMeta], replica_count: usize, min_isr: usize) -> bool {
+    chunks.len() <= geometry::MAX_CHUNKS as usize
+        && chunks.iter().all(|c| {
+            let replicas = &c.replicas;
+            let moving = !c.moving_from.is_empty() || !c.moving_to.is_empty();
+            let unique = |names: &[String]| {
+                names
+                    .iter()
+                    .enumerate()
+                    .all(|(i, name)| valid_node_name(name) && !names[..i].contains(name))
+            };
+            replicas.len() >= replica_count
+                && replicas.len() <= replica_count + usize::from(moving)
+                && unique(replicas)
+                && c.isr.len() >= min_isr
+                && c.isr.len() <= replicas.len()
+                && unique(&c.isr)
+                && c.isr.iter().all(|n| replicas.contains(n))
+                && (!moving
+                    || (valid_node_name(&c.moving_from)
+                        && valid_node_name(&c.moving_to)
+                        && c.moving_from != c.moving_to
+                        && replicas.contains(&c.moving_from)
+                        && (replicas.contains(&c.moving_to)
+                            == (replicas.len() == replica_count + 1))))
+        })
+}
+
+/// Metadata chunk rows carry no index: their exact position is the volume's chunk index.
+fn validate_volume(volume: &str, v: &pb::Volume) -> Result<Geometry, String> {
+    let shape = geometry::validate(v.size_bytes, v.chunk_bytes, v.replicas, v.min_isr)
+        .map_err(|e| format!("unsupported volume geometry: {e}"))?;
+    if v.id != volume || !valid_node_name(&v.id) || !valid_node_name(&v.target) {
+        return Err("invalid volume or target identity in metadata".into());
+    }
+    if v.chunks.len() != shape.chunks as usize {
+        return Err("volume chunk-record count does not match its geometry".into());
+    }
+    if !valid_chunk_membership(&v.chunks, v.replicas as usize, v.min_isr as usize) {
+        return Err("invalid replica, ISR or move membership in metadata".into());
+    }
+    // Exact positional rows form unique in-range chunk IDs. Every node's placed/moving
+    // union is a subset of those rows and therefore also fits the scalar Hello limit.
+    Ok(shape)
+}
+
+/// Saved request order is the reply order; ChangeIsr's ChunkMeta rows have no wire index.
+fn valid_isr_indices(chunks: &[u32], count: usize) -> bool {
+    !chunks.is_empty()
+        && chunks.len() <= MAX_CHANGES_PER_REQUEST
+        && chunks.iter().all(|&c| (c as usize) < count)
+        && chunks.iter().copied().collect::<BTreeSet<_>>().len() == chunks.len()
 }
 
 struct Attaching {
@@ -1602,8 +1650,8 @@ impl<D: BlockDevice> Engine<D> {
                     self.drain(now, &volume);
                     return;
                 }
-                if r.chunks.len() != chunks.len()
-                    || chunks.iter().any(|&c| c as usize >= rt.view.chunks.len())
+                if !valid_isr_indices(&chunks, rt.view.chunks.len())
+                    || r.chunks.len() != chunks.len()
                     || !rt.valid_chunks(&r.chunks)
                 {
                     return;
@@ -1699,17 +1747,12 @@ impl<D: BlockDevice> Engine<D> {
 
     fn start_target(&mut self, now: Instant, volume: &str, a: Attaching) -> Result<u64, String> {
         let v = a.volume.ok_or("no such volume")?;
+        let geometry = validate_volume(volume, &v)?;
         if v.target != self.cfg.node {
             return Err(format!(
                 "the volume's target is {:?}, not this node",
                 v.target
             ));
-        }
-        if v.chunk_bytes == 0
-            || !v.chunk_bytes.is_multiple_of(BLOCK as u64)
-            || v.size_bytes % v.chunk_bytes != 0
-        {
-            return Err("unusable volume geometry".into());
         }
         // The local replica takes the volume's first epoch from the token, so the token must be
         // this attach's: epochs of different volumes of a name never overlap, so the epoch fixes
@@ -1724,6 +1767,7 @@ impl<D: BlockDevice> Engine<D> {
                 claims.volume, claims.epoch, claims.node, v.epoch
             ));
         }
+        // Validated record/member caps bound this map to 1 + N*(R+1), below u32::MAX.
         let mut nodes: Vec<String> = Vec::new();
         let id = |name: &str, nodes: &mut Vec<String>| -> NodeId {
             match nodes.iter().position(|n| n == name) {
@@ -1759,7 +1803,7 @@ impl<D: BlockDevice> Engine<D> {
             epoch: v.epoch,
             target: Some(local),
             min_isr: v.min_isr as usize,
-            blocks_per_chunk: (v.chunk_bytes / BLOCK as u64) as Block,
+            blocks_per_chunk: geometry.blocks_per_chunk,
             chunks,
         };
         let us = self.us(now);
@@ -1905,10 +1949,13 @@ impl<D: BlockDevice> Engine<D> {
                         continue;
                     }
                     let rt = self.targets.get(volume).expect("target");
+                    let chunks: Vec<u32> = changes.iter().map(|c| c.chunk).collect();
+                    if !valid_isr_indices(&chunks, rt.view.chunks.len()) {
+                        continue;
+                    }
                     let names = |s: &std::collections::BTreeSet<NodeId>| -> Vec<String> {
                         s.iter().map(|n| rt.nodes[*n as usize].clone()).collect()
                     };
-                    let chunks: Vec<u32> = changes.iter().map(|c| c.chunk).collect();
                     let mut summary: BTreeMap<Vec<String>, usize> = BTreeMap::new();
                     for c in &changes {
                         *summary.entry(names(&c.new_isr)).or_default() += 1;
@@ -2568,7 +2615,7 @@ mod metadata_tests {
                 epoch: 7,
                 target: Some(0),
                 min_isr: 1,
-                blocks_per_chunk: 16,
+                blocks_per_chunk: 256,
                 chunks: (0..2)
                     .map(|_| ChunkMeta {
                         replicas: vec![0, 1],
@@ -2674,8 +2721,8 @@ mod metadata_tests {
                     generation,
                     token: vec![],
                     first_epoch: 7,
-                    size: 2 * (64 << 10),
-                    chunk_size: 64 << 10,
+                    size: 2 << 20,
+                    chunk_size: 1 << 20,
                     replica_count: 2,
                     nodes: vec!["fl-a".into(), "fl-b".into()],
                     addrs: vec![Some("127.0.0.1:1".parse().unwrap()); 2],
@@ -2706,8 +2753,8 @@ mod metadata_tests {
             );
             let volume = pb::Volume {
                 id: "v".into(),
-                size_bytes: 2 * (64 << 10),
-                chunk_bytes: 64 << 10,
+                size_bytes: 2 << 20,
+                chunk_bytes: 1 << 20,
                 replicas: 2,
                 min_isr: 1,
                 epoch: 7,
@@ -2910,24 +2957,31 @@ mod metadata_tests {
     #[test]
     fn higher_epoch_malformed_metadata_deposes_before_conversion() {
         for id in [ISR, REFRESH] {
-            let mut f = Fixture::new(7);
-            if id == ISR {
-                f.isr(vec![], 8);
-            } else {
+            for malformed_move in [false, true] {
+                let mut f = Fixture::new(7);
                 let mut v = f.volume.clone();
                 v.epoch = 8;
-                v.size_bytes = 0;
-                v.chunks.clear();
-                v.target = "bad\nnode".into();
-                f.refresh(v);
+                if malformed_move {
+                    v.chunks[0].moving_from = "fl-a".into();
+                    v.chunks[0].moving_to = "fl-b".into();
+                } else {
+                    v.size_bytes = 0;
+                    v.chunks.clear();
+                    v.target = "bad\nnode".into();
+                }
+                if id == ISR {
+                    f.isr(v.chunks, v.epoch);
+                } else {
+                    f.refresh(v);
+                }
+                assert!(!f.engine.targets.contains_key("v"));
+                assert!(
+                    f.engine
+                        .take_output()
+                        .iter()
+                        .any(|o| matches!(o, Output::Deposed { volume } if volume == "v"))
+                );
             }
-            assert!(!f.engine.targets.contains_key("v"));
-            assert!(
-                f.engine
-                    .take_output()
-                    .iter()
-                    .any(|o| matches!(o, Output::Deposed { volume } if volume == "v"))
-            );
         }
     }
 
@@ -2962,10 +3016,11 @@ mod metadata_tests {
 
     #[test]
     fn malformed_refresh_geometry_preserves_cache_and_live_request() {
-        for case in 0..7 {
+        for (case, epoch) in (0..19).flat_map(|case| [6, 7].map(|epoch| (case, epoch))) {
             let mut f = Fixture::new(7);
             let before = f.engine.targets["v"].view.clone();
             let mut v = f.volume.clone();
+            v.epoch = epoch;
             match case {
                 0 => v.id = "other".into(),
                 1 => v.size_bytes += BLOCK as u64,
@@ -2975,13 +3030,375 @@ mod metadata_tests {
                 5 => {
                     v.chunks.pop();
                 }
-                _ => v.target = "fl-b".into(),
+                6 => v.id = "bad/id".into(),
+                7 => v.size_bytes = 0,
+                8 => v.size_bytes = u64::MAX,
+                9 => v.chunk_bytes = 0,
+                10 => v.chunk_bytes = 4096,
+                11 => v.chunk_bytes = 2 << 30,
+                12 => v.chunk_bytes = (1 << 20) + 4096,
+                13 => v.size_bytes = 65_537 << 20,
+                14 => v.size_bytes = 3882 << 20,
+                15 => v.replicas = u32::MAX,
+                16 => v.min_isr = 0,
+                17 => v.chunks.push(v.chunks[0].clone()),
+                _ => v.target = "bad\nnode".into(),
             }
             f.refresh(v);
             let rt = &f.engine.targets["v"];
             assert_eq!(rt.view, before, "case {case}");
             assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
             assert!(rt.sm.accepts_meta_reply(f.refresh_req));
+        }
+        let mut f = Fixture::new(7);
+        let mut v = f.volume.clone();
+        v.target = "fl-b".into();
+        f.refresh(v);
+        assert!(f.engine.targets["v"].sm.accepts_meta_reply(f.refresh_req));
+    }
+
+    /// The first row introduces a legal new peer; a bad later row must not leave that
+    /// peer in the runtime map before the complete payload has been validated.
+    fn malformed_memberships(base: &[pb::ChunkMeta]) -> Vec<(&'static str, Vec<pb::ChunkMeta>)> {
+        let mut cases = Vec::new();
+        for case in 0..16 {
+            let mut chunks = base.to_vec();
+            chunks[0].replicas = vec!["fl-a".into(), "new-peer".into()];
+            chunks[0].isr = vec!["fl-a".into()];
+            chunks[0].isr_ver = 100;
+            let c = &mut chunks[1];
+            let name = match case {
+                0 => {
+                    c.replicas.clear();
+                    "empty replicas"
+                }
+                1 => {
+                    c.replicas.pop();
+                    "short replicas"
+                }
+                2 => {
+                    c.replicas.push("extra".into());
+                    "extra replicas without move"
+                }
+                3 => {
+                    c.replicas[1] = c.replicas[0].clone();
+                    "duplicate replicas"
+                }
+                4 => {
+                    c.replicas[1] = "bad\nnode".into();
+                    "invalid replica id"
+                }
+                5 => {
+                    c.isr.clear();
+                    "empty ISR"
+                }
+                6 => {
+                    c.isr.push("fl-a".into());
+                    "duplicate ISR"
+                }
+                7 => {
+                    c.isr = vec!["outsider".into()];
+                    "ISR outside replicas"
+                }
+                8 => {
+                    c.moving_from = "fl-b".into();
+                    "missing move destination"
+                }
+                9 => {
+                    c.moving_to = "fl-c".into();
+                    "missing move source"
+                }
+                10 => {
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "fl-b".into();
+                    "self move"
+                }
+                11 => {
+                    c.moving_from = "outsider".into();
+                    c.moving_to = "fl-c".into();
+                    "unplaced move source"
+                }
+                12 => {
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "bad/node".into();
+                    "invalid move id"
+                }
+                13 => {
+                    c.replicas.push("fl-c".into());
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "fl-d".into();
+                    "grown move omits destination"
+                }
+                14 => {
+                    c.moving_from = "fl-a".into();
+                    c.moving_to = "fl-b".into();
+                    "planned move destination already placed"
+                }
+                _ => {
+                    c.replicas[1] = "x".repeat(129);
+                    "overlong node id"
+                }
+            };
+            cases.push((name, chunks));
+        }
+        cases
+    }
+
+    #[test]
+    fn every_metadata_membership_refusal_precedes_peer_cache_and_core_mutation() {
+        let base = Fixture::new(7).volume;
+        for (case, chunks) in malformed_memberships(&base.chunks) {
+            let mut initial = base.clone();
+            initial.chunks = chunks.clone();
+            assert!(validate_volume("v", &initial).is_err(), "initial {case}");
+            let mut f = Fixture::new(7);
+            f.engine.targets.clear();
+            let before = f.engine.service.store().device().mutations();
+            let error = f
+                .engine
+                .start_target(
+                    f.engine.start,
+                    "v",
+                    Attaching {
+                        attempt: 1,
+                        token: vec![],
+                        volume: Some(initial.clone()),
+                        nodes: Some(vec![]),
+                    },
+                )
+                .unwrap_err();
+            assert!(error.contains("membership"), "initial {case}: {error}");
+            assert!(f.engine.targets.is_empty());
+            assert_eq!(f.engine.service.store().device().mutations(), before);
+            for id in [ISR, REFRESH] {
+                for epoch in [6, 7] {
+                    let mut f = Fixture::new(7);
+                    let rt = &f.engine.targets["v"];
+                    let before = (rt.view.clone(), rt.nodes.clone(), rt.addrs.clone());
+                    if id == ISR {
+                        f.isr(chunks.clone(), epoch);
+                    } else {
+                        let mut v = initial.clone();
+                        v.epoch = epoch;
+                        f.refresh(v);
+                    }
+                    let rt = &f.engine.targets["v"];
+                    assert_eq!(
+                        (rt.view.clone(), rt.nodes.clone(), rt.addrs.clone()),
+                        before,
+                        "{case}, reply {id}, epoch {epoch}"
+                    );
+                    assert!(rt.sm.accepts_meta_reply(if id == ISR {
+                        f.isr_req
+                    } else {
+                        f.refresh_req
+                    }));
+                    assert!(!rt.sm.is_deposed());
+                    assert!(f.engine.take_output().is_empty(), "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn initial_geometry_and_identity_refuse_before_target_or_replica_creation() {
+        for case in 0..15 {
+            let mut f = Fixture::new(7);
+            f.engine.targets.clear();
+            let mut v = f.volume.clone();
+            match case {
+                0 => v.size_bytes = 0,
+                1 => v.chunk_bytes = 0,
+                2 => v.chunk_bytes = 4096,
+                3 => v.chunk_bytes = 2 << 30,
+                4 => v.size_bytes = u64::MAX,
+                5 => v.size_bytes += 4096,
+                6 => v.size_bytes = 65_537 << 20,
+                7 => v.size_bytes = 3_882 << 20, // RF2's first over-budget count.
+                8 => v.replicas = u32::MAX,
+                9 => v.min_isr = 0,
+                10 => v.min_isr = 3,
+                11 => v.chunks.clear(),
+                12 => v.chunks.push(v.chunks[0].clone()),
+                13 => v.id = "different-volume".into(),
+                _ => v.target = "bad/node".into(),
+            }
+            let before = f.engine.service.store().chunks();
+            let result = f.engine.start_target(
+                f.engine.start,
+                "v",
+                Attaching {
+                    attempt: 1,
+                    token: vec![],
+                    volume: Some(v),
+                    nodes: Some(vec![]),
+                },
+            );
+            let error = result.unwrap_err();
+            assert!(
+                !error.contains("token"),
+                "case {case}: geometry must fail first: {error}"
+            );
+            assert!(f.engine.targets.is_empty());
+            assert_eq!(f.engine.service.store().chunks(), before);
+        }
+    }
+
+    #[test]
+    fn generic_refresh_rejects_even_self_consistent_immutable_geometry_changes() {
+        for case in 0..4 {
+            let mut f = Fixture::new(7);
+            let before = f.engine.targets["v"].view.clone();
+            let mut v = f.volume.clone();
+            match case {
+                0 => {
+                    v.size_bytes *= 2;
+                    v.chunks.extend(v.chunks.clone());
+                }
+                1 => {
+                    v.chunk_bytes *= 2;
+                    v.chunks.pop();
+                }
+                2 => {
+                    v.replicas = 3;
+                    for c in &mut v.chunks {
+                        c.replicas.push("fl-c".into());
+                    }
+                }
+                _ => v.min_isr = 2,
+            }
+            assert!(
+                validate_volume("v", &v).is_ok(),
+                "valid geometry case {case}"
+            );
+            f.refresh(v);
+            let rt = &f.engine.targets["v"];
+            assert_eq!(rt.view, before);
+            assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+            assert!(rt.sm.accepts_meta_reply(f.refresh_req));
+        }
+    }
+
+    #[test]
+    fn isr_saved_indices_are_unique_bounded_and_reply_rows_remain_positional() {
+        for indices in [
+            vec![],
+            vec![0, 0],
+            vec![0, 2],
+            vec![u32::MAX, 0],
+            vec![0; MAX_CHANGES_PER_REQUEST + 1],
+        ] {
+            let mut f = Fixture::new(7);
+            let before = f.engine.targets["v"].view.clone();
+            let MetaWait::Isr { chunks, .. } = f.engine.meta_waits.get_mut(&ISR).unwrap() else {
+                unreachable!()
+            };
+            *chunks = indices.clone();
+            f.isr(vec![f.shrunk(4)[0].clone(); indices.len()], 7);
+            let rt = &f.engine.targets["v"];
+            assert_eq!(rt.view, before, "indices {indices:?}");
+            assert!(rt.sm.accepts_meta_reply(f.isr_req));
+        }
+        let mut f = Fixture::new(7);
+        let MetaWait::Isr { chunks, .. } = f.engine.meta_waits.get_mut(&ISR).unwrap() else {
+            unreachable!()
+        };
+        *chunks = vec![1, 0];
+        let mut rows = f.shrunk(4);
+        rows[1].isr_ver = 5;
+        f.isr(rows, 7);
+        let rt = &f.engine.targets["v"];
+        assert_eq!(rt.view.chunks[1].isr_ver, 4);
+        assert_eq!(rt.view.chunks[0].isr_ver, 5);
+        assert!(!rt.sm.accepts_meta_reply(f.isr_req));
+    }
+
+    #[test]
+    fn legal_move_stages_are_adopted_from_refresh_and_isr_replies() {
+        for id in [ISR, REFRESH] {
+            for stage in 0..3 {
+                let mut f = Fixture::new(7);
+                let mut v = f.volume.clone();
+                for c in &mut v.chunks {
+                    c.isr_ver = 100;
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "fl-c".into();
+                    if stage >= 1 {
+                        c.replicas.push(c.moving_to.clone());
+                    }
+                    if stage == 2 {
+                        c.isr.push(c.moving_to.clone());
+                    }
+                }
+                assert!(validate_volume("v", &v).is_ok());
+                if id == ISR {
+                    f.isr(v.chunks, v.epoch);
+                } else {
+                    f.refresh(v);
+                }
+                let rt = &f.engine.targets["v"];
+                assert_eq!(rt.nodes, ["fl-a", "fl-b", "fl-c"]);
+                for c in &rt.view.chunks {
+                    assert_eq!(c.isr_ver, 100);
+                    assert_eq!(c.moving, Some((1, 2)));
+                    assert_eq!(
+                        c.replicas,
+                        if stage == 0 {
+                            vec![0, 1]
+                        } else {
+                            vec![0, 1, 2]
+                        }
+                    );
+                    assert_eq!(
+                        c.isr,
+                        if stage == 2 {
+                            [0, 1, 2].into()
+                        } else {
+                            [0, 1].into()
+                        }
+                    );
+                }
+                assert!(!rt.sm.accepts_meta_reply(if id == ISR {
+                    f.isr_req
+                } else {
+                    f.refresh_req
+                }));
+                assert!(!rt.sm.is_deposed());
+            }
+        }
+    }
+
+    #[test]
+    fn valid_concentrated_and_moving_views_at_every_rf_cap() {
+        for (rf, count) in (1..=5).zip([5137, 3881, 3119, 2607, 2239]) {
+            let mut v = Fixture::new(7).volume;
+            v.size_bytes = count * (1 << 30);
+            v.chunk_bytes = 1 << 30;
+            v.replicas = rf;
+            v.min_isr = rf;
+            let members: Vec<_> = (0..rf).map(|i| format!("n{i}")).collect();
+            let mut c = pb::ChunkMeta {
+                replicas: members.clone(),
+                isr: members,
+                isr_ver: u64::MAX,
+                ..Default::default()
+            };
+            v.chunks = vec![c.clone(); count as usize];
+            assert_eq!(validate_volume("v", &v).unwrap().chunks, count as u32);
+            // Requested moves may have only R members; in-progress moves have R+1.
+            c.moving_from = "n0".into();
+            c.moving_to = format!("n{rf}");
+            v.chunks.fill(c.clone());
+            assert!(validate_volume("v", &v).is_ok());
+            c.replicas.push(c.moving_to.clone());
+            v.chunks.fill(c.clone());
+            assert!(validate_volume("v", &v).is_ok());
+            c.isr = c.replicas.clone();
+            v.chunks.fill(c.clone());
+            assert!(validate_volume("v", &v).is_ok());
+            v.chunks.push(c);
+            v.size_bytes += 1 << 30;
+            assert!(validate_volume("v", &v).unwrap_err().contains("budget"));
         }
     }
 
@@ -3081,7 +3498,7 @@ mod metadata_tests {
                 assert_eq!(node, "fl-b");
                 assert!(
                     matches!(*hello, Frame::Hello { req, epoch, session, size, chunk_size, ref chunks, .. }
-                    if (req, epoch, session) == ids && size == 2 * (64 << 10) && chunk_size == 64 << 10 && *chunks == captured)
+                    if (req, epoch, session) == ids && size == 2 << 20 && chunk_size == 1 << 20 && *chunks == captured)
                 );
                 assert!(commands.try_recv().is_err());
             }

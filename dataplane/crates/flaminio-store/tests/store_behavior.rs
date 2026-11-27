@@ -11,6 +11,66 @@ use flaminio_store::{
 
 const CLUSTER: u64 = 64 * 1024;
 
+#[test]
+fn session_preflight_checks_actual_layout_and_is_read_only() {
+    use flaminio_format::layout::Layout;
+    for cluster in [16384, 32768, 65536, 131072, 262144] {
+        let mut opts = options(16);
+        opts.layout.cluster_size = cluster;
+        let layout = Layout::compute(DEVICE, opts.layout).unwrap();
+        let dev = MemDevice::new(DEVICE);
+        Store::format(&dev, &opts).unwrap();
+        let mut s = Store::open(dev, StoreConfig::default()).unwrap();
+        let table_bytes = layout.max_clusters_per_chunk() * u64::from(cluster);
+        // This is the actual layout's bound, even when 1 GiB is the tighter bound.
+        let largest = table_bytes.min(1 << 30);
+        let before = s.device().mutations();
+        for chunk in [1 << 20, largest] {
+            s.preflight_chunks(&[key(0)], chunk).unwrap();
+        }
+        assert_eq!(
+            s.preflight_chunks(&[key(0)], table_bytes).is_ok(),
+            table_bytes <= 1 << 30,
+            "the exact table bound is subject to the separate 1 GiB maximum"
+        );
+        for chunk in [
+            0,
+            u64::from(cluster) - 1,
+            (1 << 30) + u64::from(cluster),
+            table_bytes + u64::from(cluster),
+        ] {
+            assert!(
+                matches!(
+                    s.preflight_chunks(&[key(0)], chunk),
+                    Err(StoreError::Invalid(_))
+                ),
+                "cluster {cluster}, chunk {chunk}"
+            );
+            assert!(s.chunks().is_empty());
+        }
+        assert_eq!(s.device().mutations(), before);
+        // Exercise accepted creation too; preflight alone must not paper over create limits.
+        s.create_chunk(key(0), largest, largest, 9).unwrap();
+        s.fsck(false).unwrap();
+        let before = s.device().mutations();
+        let available = layout.chunk_slots - 1;
+        let mut exact: Vec<_> = (1..=available).map(key).collect();
+        exact.extend([key(0), key(0), key(1), key(1)]);
+        s.preflight_chunks(&exact, largest).unwrap();
+        exact.push(key(available + 1));
+        assert!(matches!(
+            s.preflight_chunks(&exact, largest),
+            Err(StoreError::OutOfSpace("chunk slots"))
+        ));
+        assert_eq!(s.device().mutations(), before);
+        assert_eq!(s.chunks().len(), 1);
+        assert_eq!(s.chunk_info(key(0)).unwrap().fenced_epoch, 9);
+        let s = reopen(s);
+        assert_eq!(s.chunks().len(), 1);
+        assert_eq!(s.chunk_info(key(0)).unwrap().chunk_size, largest);
+    }
+}
+
 fn read(
     store: &flaminio_store::Store<flaminio_store::MemDevice>,
     k: u64,

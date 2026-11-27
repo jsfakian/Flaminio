@@ -123,6 +123,24 @@ func TestAuthorization(t *testing.T) {
 	created, err := admin.CreateVolume(ctx, req)
 	expect("admin creates a volume", err, codes.OK)
 	first := created.GetVolume().GetEpoch()
+	// CheckCreateVolume is explicitly admin-only, even for identities allowed scalar reads.
+	check := &metav1.CheckCreateVolumeRequest{Desired: req, RequiredBytes: mib}
+	if _, err := admin.CheckCreateVolume(ctx, check); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]metav1.MetadataServiceClient{"io": nodeA, "agent": agentA, "meta": metaA, "reader": as("reader", pki.NodeID(td, "fl-a", "reader"))} {
+		_, err := c.CheckCreateVolume(ctx, check)
+		expect(name+" compatibility", err, codes.PermissionDenied)
+	}
+	_, err = foreign.CheckCreateVolume(ctx, check)
+	expect("foreign compatibility", err, codes.Unauthenticated)
+	called := false
+	_, err = svc.Authorize(context.Background(), check, &grpc.UnaryServerInfo{FullMethod: metav1.MetadataService_CheckCreateVolume_FullMethodName}, func(context.Context, any) (any, error) { called = true; return nil, nil })
+	expect("anonymous compatibility", err, codes.Unauthenticated)
+	if called {
+		t.Fatal("anonymous compatibility reached handler")
+	}
+
 	_, err = nodeA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("node attaches itself", err, codes.PermissionDenied)
 	_, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})

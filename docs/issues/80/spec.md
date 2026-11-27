@@ -1,6 +1,6 @@
 # Issue #80: One supported volume geometry — specification
 
-Approved 2026-11-13; not implemented. [Intent](intent.md); settled choices, if any: [decisions](decisions.md).
+Published clear snapshot approved 2026-11-20; implementation and validation are recorded in [report.md](report.md). [Intent](intent.md); settled choices, if any: [decisions](decisions.md).
 How: [design](design.md). Proposed geometry policy: [ADR proposal](adr-proposal.md).
 Settled at approval, 2026-11-13: the geometry policy is accepted with the plan (see decisions.md, Settled at approval).
 

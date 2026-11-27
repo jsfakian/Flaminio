@@ -56,7 +56,7 @@ help: ## Show this help
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test sim fuzz fuzz-regressions meta-interop lint fmt proto meta-vectors disk-demo clean
+.PHONY: build release test crash-test sim fuzz fuzz-regressions meta-interop lint fmt proto meta-vectors geometry-vectors disk-demo clean
 build: ## Build the data plane (debug) and the Go services
 	cd $(DATAPLANE) && $(CARGO) build
 	$(GO) build ./...
@@ -110,6 +110,10 @@ proto: ## Regenerate Go code from api/proto (buf and plugins run at pinned versi
 meta-vectors: ## Regenerate the metadata transition vectors from the Rust model
 	cd $(DATAPLANE) && $(CARGO) run -q -p flaminio-repl --example meta_vectors > ../meta/testdata/isr-vectors.jsonl
 
+geometry-vectors: ## Check shared volume-geometry admission vectors in Go and Rust
+	$(GO) test ./pkg/geometry -count=1
+	cd $(DATAPLANE) && $(CARGO) test -p flaminio-repl geometry::tests::shared_vectors -- --exact
+
 ##@ Checks (CI runs these too: docs/ci.md)
 
 .PHONY: hygiene race contracts miri sanitize
@@ -126,8 +130,8 @@ hygiene: ## Advisories and licenses (cargo-deny), unused crates, rustdoc, static
 race: ## Go tests under the race detector, in random order, with goroutine-leak checks (COUNT=1)
 	$(GO) test -race -shuffle=on -count=$(COUNT) -timeout=$(RACE_TIMEOUT) ./...
 
-contracts: ## Generated code and vectors match their sources; fuzz lockfile; Rust client vs Go service
-	$(MAKE) --no-print-directory proto meta-vectors
+contracts: ## Generated code, metadata/geometry vectors, fuzz lockfile and Rust/Go interop
+	$(MAKE) --no-print-directory proto meta-vectors geometry-vectors
 	git diff --exit-code -- api/gen meta/testdata
 	cd $(DATAPLANE)/fuzz && $(CARGO) metadata --locked --format-version 1 >/dev/null
 	$(MAKE) --no-print-directory meta-interop

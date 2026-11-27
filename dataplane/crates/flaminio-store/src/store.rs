@@ -1185,6 +1185,28 @@ impl<D: BlockDevice> Store<D> {
     // ---------------------------------------------------------------------------------------
     // Chunk management
 
+    /// Checks geometry and free slots for a whole session without writing or reclaiming
+    /// anything. Existing keys and duplicates cost no new slots. A later I/O failure can
+    /// still leave durable partial work for a retry.
+    pub fn preflight_chunks(&self, keys: &[ChunkKey], chunk_size: u64) -> Result<(), StoreError> {
+        self.state.validate_chunk_size(chunk_size)?;
+        let missing: HashSet<_> = keys
+            .iter()
+            .copied()
+            .filter(|key| !self.state.by_key.contains_key(key))
+            .collect();
+        let free = self
+            .state
+            .chunks
+            .iter()
+            .filter(|slot| slot.is_none())
+            .count();
+        if missing.len() > free {
+            return Err(StoreError::OutOfSpace("chunk slots"));
+        }
+        Ok(())
+    }
+
     /// Creates an empty chunk replica.
     pub fn create_chunk(
         &mut self,

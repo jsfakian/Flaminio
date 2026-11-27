@@ -66,6 +66,11 @@ Sizing at format time (`N` = data clusters, `E` = map entries per page, §5.5):
 The formatter solves for the largest `N` that fits. With default parameters, metadata takes about
 0.6% of the device.
 
+The 64 MiB value is a slot-sizing baseline, not the minimum admitted chunk size. The volume
+geometry contract permits power-of-two chunks from 1 MiB through 1 GiB. Smaller chunks can
+exhaust the finite slot table before data space. Creation/preflight still checks actual cluster
+divisibility, page-table capacity and free slots; no layout sizing or format version changes.
+
 All of these values are **stored in the superblock**. Readers never recompute the layout.
 
 ## 3. Superblock
