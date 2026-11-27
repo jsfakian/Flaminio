@@ -68,8 +68,7 @@ higher authenticated epoch deposing before payload conversion. Production models
 same service bound. Wire/API/disk formats and replication policy are unchanged.
 
 Targeted acceptance tests and required local checks pass. Independent code/security review
-is clear after two rounds. Final spec conformance remains pending; issue closure occurs on
-merge.
+is clear after two rounds, and final spec conformance is PASS. Issue closure occurs on merge.
 
 ## Tests
 
@@ -102,7 +101,28 @@ oversized refusal is unchanged.
 
 ## Conformance
 
-Pending final implementation, review clearance and acceptance results.
+Checked `f5573d1b394d551a7ecedb614d06e7709202ed2f` against the approved spec/design and the
+actual validation logs. Checker output follows verbatim.
+
+PASS
+
+| Rule | Implemented | Tested | Evidence |
+|---|---|---|---|
+| S1 Bounded requests | yes | yes | `target.rs:2438` selects ≤64 unique chunks; `engine.rs:1902` guards forwarding; `shrink_after_losing_peer_fits_metadata_rpc_limit`, `TestChangeIsrBatchBoundary` and real interop verify boundaries. |
+| S2 Preserve deferred work | yes | yes | Selection preserves pending chunk state; `deferred_shrink_keeps_write_waiting` and `deferred_joiner_counts_for_write_and_lease` verify deferred state and acknowledgement requirements. |
+| S3 Authoritative per-chunk progress | yes | yes | `engine.rs:1579` correlates replies with saved request order; boundary, mixed-move and interop tests verify independently committed chunks and versions. |
+| S4 Recover ambiguous outcomes | yes | yes | Live-request, generation and monotonic merge guards protect cache/core state; hidden-commit, expired-reply, malformed-count and stale-version regressions pass. |
+| S5 Epoch fencing | yes | yes | Higher epochs depose before payload conversion; `takeover_between_batches_fences_old_owner`, replacement-generation regressions and real interop verify obsolete-owner refusal. |
+| S6 Membership safety | yes | yes | Deferred shrink/join/move tests preserve effective quorum, leases, synchronization-before-removal and minimum ISR; simulator catches all three membership mutations. |
+| S7 Eventual progress | yes | yes | Cursor advances on emission; `round_robin_batches_do_not_starve_tail`, 129-chunk engine recovery and real-service shrink/rejoin interop verify progress. |
+| S8 Production-model agreement | yes | yes | Simulator and engine fixture enforce production refusal behavior; oversized-emission and membership mutations are caught; 20,000 seeds and all 115 release tests pass. |
+| S9 Existing service and compatibility rules | yes | yes | Production service/auth/contracts remain unchanged; Go boundary/auth tests and real mTLS interop verify atomic refusal, target-only mutation and epoch/version enforcement. |
+
+Contract drift: none; API/generated code, RPCs, control-socket lines, frames, disk records, tokens and CLI contracts are unchanged; `make contracts` passes.
+ADR conformance: consistent; accepted ADRs 0001, 0002, 0005 and 0006 are preserved, including existing stricter readiness; proposed ADRs remain unaccepted.
+Scope drift: none; all planned implementation files are touched; additional test dev-dependency/lockfile and workflow documentation changes are explained in `decisions.md`.
+Docs: done; protocol §2 and follow-ups reflect bounded transactions and validated recovery; spec/design changes only update implementation status.
+Open review findings: none; Code81-R1-C1 and Sec81-R1-S1 are fixed with an ordered authoritative duplicate-refusal regression; both fresh round-two reviews are clear.
 
 ## Lab
 
