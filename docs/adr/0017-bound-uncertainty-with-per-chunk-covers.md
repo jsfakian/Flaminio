@@ -1,6 +1,6 @@
 # 0017. Bound uncertainty with per-chunk maximum-Version covers
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-27
 - **Issue:** [#86](https://github.com/jsfakian/Flaminio/issues/86)
 
@@ -15,8 +15,8 @@ holds the volume's prune bound. See the [spec](../issues/86/spec.md),
 [replication protocol](../replication-protocol.md).
 
 The policy was accepted with the issue plan on 2026-11-13 and the clear post-review snapshot
-on 2026-11-20. This numbered record remains Proposed until implementation review and
-conformance finish, as required by the issue pipeline.
+on 2026-11-20. Implementation code/security review is clear after two rounds and final
+conformance passes S1–S9 on 2026-11-27; the numbered record is accepted under that approval.
 
 ## Decision
 

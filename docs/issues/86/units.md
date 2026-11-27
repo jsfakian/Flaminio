@@ -14,6 +14,9 @@ are part of wiring; new acceptance tests follow implementation.
 
 Acceptance also repaired rejected-write replay, pre-snapshot pending coverage and stable
 move-source retirement; permanent clean regressions and independent mutation controls pass.
-Next: finish full project checks; complete independent code and
-security review/address rounds and conformance; record the approved ADR; submit one PR and
-wait for its merge. No shared-lab action is required or authorized.
+Full `make fmt lint test race hygiene contracts sim` passes after the atomic adapter
+preflight review fix; code/security review is clear after two rounds. Local sanitizers pass.
+Final conformance passes S1–S9; ADR 0017 is accepted and the report records all gates.
+Publish the final documentation and mark PR #103 ready after final CI. Wait for the user's
+merge before the next issue.
+No shared-lab action is required or authorized.
