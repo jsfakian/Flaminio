@@ -36,3 +36,44 @@ No comments from the requested review scopes, including Nits.
 Changes/resolution: Both fresh reviewers confirmed duplicate-input compatibility resolved, checked the changed ReadSet/policy/test contract against Go and Rust duplicate refusal, and reported no new comments including Nits. Previous round-one findings had already been confirmed resolved. This clears the draft plan, not implementation or human approval.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+## Implementation — 2026-11-27
+
+Branch: `issue/77-coherent-volume-reads`, based on
+`880066e928369f26ff901b851e01b4312620a15a` after the user's merge of #86 / PR #103.
+The published clear spec/design were approved on 2026-11-20. Dependency inspection for #80
+confirmed that its authoritative compatibility RPC requires #77's coherent read, which is
+not yet implemented on main. #77 therefore ships first as its own PR; #80 groundwork is
+preserved separately and will resume only after the user's merge of this prerequisite.
+
+One implementer completed the shared KV/service response contract in four production files.
+`readVolumeView` validates header revisions around the atomic prefix, Attach pins responses
+and token claims to TxnRev, and ChangeIsr assembles coherent header/named snapshots through
+ReadSet. No proto, Rust, geometry or #80 runtime work is included. Independent acceptance
+tests, code/security review and final conformance follow. No lab or new ADR is required.
+
+## Tests
+
+Implementation checkpoint: `make fmt` passes. Rust/fuzz clippy and formatting, Go vet
+and Go formatting pass; unprivileged lint reaches buf but its module-cache lock is read-only.
+Scoped Go tests compile; localhost restrictions block etcd fixtures. Executed memory cases
+pass except the expected `TestConcurrentTargets` accounting change: known committed but
+superseded Attach responses can advance the epoch while returning Aborted. The independent
+test stage must count actual backend-applied modification revisions and preserve final epoch
+and ISR assertions, as the approved design requires.
+
+Independent S1–S7 acceptance is pending. Required project checks will run with the authorized
+local cache/socket access: `make lint test race hygiene contracts sim`.
+
+## Conformance
+
+Pending implementation, tests and clear code/security review.
+
+## Lab
+
+None required by the approved design. No shared-lab actions are authorized for this run.
+
+## ADRs
+
+Existing Go/etcd and fencing decisions remain unchanged. No new architectural decision or
+numbered ADR is proposed by this design.

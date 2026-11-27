@@ -103,6 +103,31 @@ func (m *Mem) List(ctx context.Context, prefix string) ([]Entry, error) {
 	return out, nil
 }
 
+func (m *Mem) ReadSet(ctx context.Context, keys []string) ([]ReadResult, error) {
+	if len(keys) > MaxReadSetKeys {
+		return nil, fmt.Errorf("read set too large: %d keys, max %d", len(keys), MaxReadSetKeys)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := charge(ctx); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.expireAll()
+	out := make([]ReadResult, len(keys))
+	for i, key := range keys {
+		e, ok := m.data[key]
+		e.Value = slices.Clone(e.Value)
+		out[i] = ReadResult{Entry: e, Found: ok}
+	}
+	return out, nil
+}
+
 func (m *Mem) ScanKeys(ctx context.Context, prefix, after string, limit int) (ScanPage, error) {
 	if err := checkScanLimit(limit); err != nil {
 		return ScanPage{}, err

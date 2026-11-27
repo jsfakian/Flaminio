@@ -1,6 +1,6 @@
 # Issue #77: Consistent volume reads across replacement — design
 
-[Specification](spec.md). Approved 2026-11-13; not implemented.
+[Specification](spec.md). Published clear snapshot approved 2026-11-20; implementation and validation are recorded in [report.md](report.md).
 
 The facts it starts from:
 - `readHeader` returns parsed header and modification revision; Creating/Deleting are hidden.
@@ -62,8 +62,10 @@ the no-write path. Do not introduce durable attach-operation IDs under this issu
 ## Coherent named ISR responses (S5–S7)
 
 Add internal `KV.ReadSet(ctx, keys)` returning exactly one `{Entry, Found}` per requested key,
-in request order, at one linearizable read point. Maximum65keys, bounded response under the
-existing metadata receive cap; cap the raw ChangeIsr list at64 before construction, as today.
+in request order, at one linearizable read point. Maximum 65 keys; cap the raw ChangeIsr list at 64 before construction, as today.
+ReadSet inherits the internal KV client's existing transport receive limit, not a new
+4 MiB byte guarantee. The internal etcd client currently uses its default MaxInt32 cap;
+external metadata admission/client budgets remain #80's work (see decisions.md).
 ReadSet accepts repeated keys and returns each occurrence in order from the same snapshot;
 do not reject or deduplicate a request merely because it repeats a valid chunk index. Mem clones those values under one mutex; etcd performs one read-only
 Txn with one OpGet per key (not sequential Get calls or writable TxnRev). Backend errors return

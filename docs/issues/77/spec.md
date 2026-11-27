@@ -1,6 +1,6 @@
 # Issue #77: Consistent volume reads across replacement — specification
 
-[Intent](intent.md) · [Design](design.md). Approved 2026-11-13; not implemented.
+[Intent](intent.md) · [Design](design.md). Published clear snapshot approved 2026-11-20; implementation and validation are recorded in [report.md](report.md).
 
 ## Terms
 

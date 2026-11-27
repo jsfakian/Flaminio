@@ -17,6 +17,12 @@ type Entry struct {
 	Rev   int64
 }
 
+// ReadResult is one requested key's position in an atomic ReadSet snapshot.
+type ReadResult struct {
+	Entry Entry
+	Found bool
+}
+
 // KeyRev is a key with its modification revision, without a value.
 type KeyRev struct {
 	Key string
@@ -48,6 +54,9 @@ type Op struct {
 // limit, with room to spare.
 const MaxTxnOps = 120
 
+// MaxReadSetKeys bounds one atomic named read (a volume header and up to 64 chunks).
+const MaxReadSetKeys = 65
+
 // ScanKeys limits (docs/issues/76).
 const (
 	ScanKeysMinLimit = 1
@@ -74,8 +83,13 @@ var ErrWorkBudget = errors.New("work budget exhausted")
 type KV interface {
 	// Get returns a key, or ok=false if it does not exist.
 	Get(ctx context.Context, key string) (e Entry, ok bool, err error)
-	// List returns every key under prefix, sorted by key.
+	// List returns every key under prefix, sorted by key, at one linearizable read point.
+	// Any pagination must retain that single snapshot across all pages.
 	List(ctx context.Context, prefix string) ([]Entry, error)
+	// ReadSet returns exactly one result per requested key, in request order, at one
+	// linearizable read point. Repeated keys retain their positions. At most
+	// MaxReadSetKeys keys may be requested; errors return no partial snapshot.
+	ReadSet(ctx context.Context, keys []string) ([]ReadResult, error)
 	// ScanKeys returns a latest linearizable keys-only page under prefix, exclusive of after
 	// (byte-lexicographic). limit must be in [1,64]. Values are never returned. An empty page
 	// is complete only with Done=true. No cross-page snapshot.
