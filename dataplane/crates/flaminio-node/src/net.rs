@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::rc::{Rc, Weak};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use flaminio_net::frame::Frame;
@@ -82,14 +82,49 @@ pub struct NetConfig {
 pub type Sink = Arc<dyn Fn(NetEvent) + Send + Sync>;
 
 /// The engine's handle on the network thread.
+///
+/// Cloning shares the command channel. When the last `Net` is dropped the command channel
+/// closes and the worker thread is joined, so TLS/accept state is gone before ASan/LSan runs
+/// (engine tests used to leak the thread past process teardown).
 #[derive(Clone)]
 pub struct Net {
     cmds: channel::Sender<NetCommand>,
+    /// Shared so every clone keeps the worker alive; the last drop joins it.
+    #[allow(dead_code)] // held for Arc drop → NetWorker::drop → join
+    worker: Arc<NetWorker>,
+}
+
+/// Owns the join handle; dropped only after every `Net` sender is gone.
+struct NetWorker {
+    join: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl Drop for NetWorker {
+    fn drop(&mut self) {
+        if let Some(h) = self.join.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = h.join();
+        }
+    }
 }
 
 impl Net {
     pub fn send(&self, c: NetCommand) {
         let _ = self.cmds.try_send(c);
+    }
+
+    /// Inspect engine adapter commands without starting a network worker in unit tests.
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, channel::Receiver<NetCommand>) {
+        let (cmds, receiver) = channel::unbounded();
+        (
+            Self {
+                cmds,
+                worker: Arc::new(NetWorker {
+                    join: Mutex::new(None),
+                }),
+            },
+            receiver,
+        )
     }
 }
 
@@ -100,7 +135,7 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
         Some(s) => Some(smol::Async::new(s.listener.try_clone()?)?),
         None => None,
     };
-    thread::Builder::new()
+    let join = thread::Builder::new()
         .name("flaminio-net".into())
         .spawn(move || {
             let ex = Rc::new(smol::LocalExecutor::new());
@@ -108,8 +143,10 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
                 if let (Some(listener), Some(server)) = (listener, cfg.server.as_ref()) {
                     let acceptor = TlsAcceptor::from(server.tls.clone());
                     let (td, key) = (cfg.trust_domain.clone(), server.token_key.clone());
+                    // Weak: a strong Rc in a task the executor holds is a cycle, and the
+                    // executor, the listener and the TLS config would never be freed.
                     ex.spawn(accept_loop(
-                        ex.clone(),
+                        Rc::downgrade(&ex),
                         listener,
                         acceptor,
                         td,
@@ -161,12 +198,20 @@ pub fn spawn(cfg: NetConfig, sink: Sink) -> std::io::Result<Net> {
                     }
                 }
             }));
+            // Dropping the executor drops its tasks: the accept loop with its listener, and
+            // the sessions.
+            drop(ex);
         })?;
-    Ok(Net { cmds })
+    Ok(Net {
+        cmds,
+        worker: Arc::new(NetWorker {
+            join: Mutex::new(Some(join)),
+        }),
+    })
 }
 
 async fn accept_loop(
-    ex: Rc<smol::LocalExecutor<'_>>,
+    ex: Weak<smol::LocalExecutor<'_>>,
     listener: smol::Async<TcpListener>,
     acceptor: TlsAcceptor,
     trust_domain: String,
@@ -191,6 +236,8 @@ async fn accept_loop(
             key.clone(),
             sink.clone(),
         );
+        // The executor runs this task, so it is alive whenever this runs.
+        let Some(ex) = ex.upgrade() else { return };
         ex.spawn(async move {
             if let Err(e) = serve_conn(conn, io, &acceptor, &td, &key, sink).await {
                 eprintln!("flaminio-net: session from {peer}: {e}");

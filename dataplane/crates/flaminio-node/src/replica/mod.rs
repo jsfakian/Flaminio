@@ -19,7 +19,7 @@ use flaminio_net::frame::Frame;
 use flaminio_net::session::Accepted;
 use flaminio_repl::extent::Extent;
 use flaminio_repl::msg::{Request, Response, ToReplica};
-use flaminio_repl::replica::{Action, ReplicaCore};
+use flaminio_repl::replica::{Action, ChunkError, ReplicaCore, UNCERTAINTY_BUDGET};
 use flaminio_repl::types::{Block, VolumeId};
 use flaminio_store::{BlockDevice, ChunkKey, ReadReq, Started, Store, StoreError, WriteReq};
 
@@ -71,6 +71,8 @@ pub struct ReplicaService<D: BlockDevice> {
     store: Store<D>,
     core: ReplicaCore,
     vols: BTreeMap<Uuid, Vol>,
+    /// Unsupported held inventories retain their durable chunks/fences, but open no session.
+    unsupported: BTreeMap<Uuid, &'static str>,
     next_id: VolumeId,
     /// The group commits in flight, oldest first (several with pipelined commits). A group
     /// whose requests were all answered without a commit waits here too, for its turn.
@@ -125,22 +127,78 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// Starts on an open store. The chunks found on it are known to the core, fenced at their
     /// recorded epochs and wholly uncertain, as after any restart.
     pub fn new(store: Store<D>) -> Self {
+        Self::with_budget(store, UNCERTAINTY_BUDGET)
+    }
+
+    pub(crate) fn with_budget(store: Store<D>, budget: u32) -> Self {
         let mut s = Self {
             store,
-            core: ReplicaCore::default(),
+            core: ReplicaCore::with_budget(budget),
             vols: BTreeMap::new(),
+            unsupported: BTreeMap::new(),
             next_id: 1,
             flying: std::collections::VecDeque::new(),
             staged: None,
             hold_staged: false,
         };
-        for c in s.store.chunks() {
-            let id = s.vol_id(c.key.volume, c.volume_size, c.chunk_size);
-            let v = s.vols.get_mut(&c.key.volume).expect("just added");
-            v.chunks.insert(c.key.index as u32);
-            let blocks = (c.chunk_size / BLOCK as u64) as Block;
-            s.core
-                .recover_chunk(id, c.fenced_epoch, c.key.index as u32, blocks);
+        let mut grouped: BTreeMap<Uuid, Vec<_>> = BTreeMap::new();
+        for chunk in s.store.chunks() {
+            grouped.entry(chunk.key.volume).or_default().push(chunk);
+        }
+        for (uuid, chunks) in grouped {
+            let Some(shape) = chunks.first() else {
+                continue;
+            };
+            let inventory = (|| {
+                if chunks.len() > budget as usize {
+                    return Err("too many chunks");
+                }
+                let geometry =
+                    flaminio_repl::geometry::validate_scalar(shape.volume_size, shape.chunk_size)
+                        .map_err(|e| e.0)?;
+                if chunks
+                    .iter()
+                    .any(|c| c.volume_size != shape.volume_size || c.chunk_size != shape.chunk_size)
+                {
+                    return Err("inconsistent stored volume geometry");
+                }
+                if chunks
+                    .iter()
+                    .any(|c| c.key.index >= u64::from(geometry.chunks))
+                {
+                    return Err("chunk index outside stored volume");
+                }
+                Ok(geometry)
+            })();
+            let geometry = match inventory {
+                Ok(geometry) => geometry,
+                Err(reason) => {
+                    eprintln!("flaminio-node: volume {uuid:?} unsupported on this node: {reason}");
+                    s.unsupported.insert(uuid, reason);
+                    continue;
+                }
+            };
+            let id = s.vol_id(uuid, shape.volume_size, shape.chunk_size);
+            for c in chunks {
+                let index = c.key.index as u32; // The complete inventory was checked above.
+                let blocks = geometry.blocks_per_chunk;
+                if let Err(error) = s.core.recover_chunk(id, c.fenced_epoch, index, blocks) {
+                    let reason = match error {
+                        ChunkError::Exists => "duplicate chunk index",
+                        ChunkError::TooManyChunks => "too many chunks",
+                    };
+                    eprintln!("flaminio-node: volume {uuid:?} unsupported on this node: {reason}");
+                    s.unsupported.insert(uuid, reason);
+                    s.core.remove_volume(id);
+                    s.vols.remove(&uuid);
+                    break;
+                }
+                s.vols
+                    .get_mut(&uuid)
+                    .expect("registered volume")
+                    .chunks
+                    .insert(index);
+            }
         }
         s
     }
@@ -176,21 +234,40 @@ impl<D: BlockDevice> ReplicaService<D> {
     /// held group first (docs/issues/10, S5): the store may land it here.
     pub fn hello(&mut self, a: &Accepted) -> Result<(SessionRef, Frame), String> {
         let (size, chunk_size) = (a.size, a.chunk_size);
-        if chunk_size == 0
-            || !chunk_size.is_multiple_of(BLOCK as u64)
-            || size == 0
-            || !size.is_multiple_of(chunk_size)
+        let geometry = flaminio_repl::geometry::validate_scalar(size, chunk_size)
+            .map_err(|e| format!("unsupported volume geometry: {e}"))?;
+        if a.chunks.len() > geometry.chunks as usize
+            || a.chunks.iter().any(|&c| c >= geometry.chunks)
+            || a.chunks.iter().copied().collect::<BTreeSet<_>>().len() != a.chunks.len()
         {
-            return Err(
-                "volume size must be a non-zero multiple of a 4 KiB-aligned chunk size".into(),
-            );
-        }
-        let count = size / chunk_size;
-        if a.chunks.iter().any(|&c| u64::from(c) >= count) {
-            return Err("a placed chunk is beyond the volume".into());
+            return Err("placed chunks must be unique and within the volume".into());
         }
         let uuid = volume_uuid(&a.claims.volume);
+        if let Some(reason) = self.unsupported.get(&uuid) {
+            return Err(format!("volume unsupported on this node: {reason}"));
+        }
         let first = a.claims.first_epoch;
+        if let Some(v) = self.vols.get(&uuid)
+            && (first == 0 || self.core.fenced(v.id) >= first)
+            && (v.chunk_size != chunk_size || v.size != size)
+        {
+            return Err(format!(
+                "volume exists here with {} bytes in {}-byte chunks",
+                v.size, v.chunk_size
+            ));
+        }
+        let keys: Vec<_> = a
+            .chunks
+            .iter()
+            .map(|&index| ChunkKey {
+                volume: uuid,
+                index: u64::from(index),
+            })
+            .collect();
+        // Count occupied older-incarnation slots conservatively before any cleanup/fence.
+        self.store
+            .preflight_chunks(&keys, chunk_size)
+            .map_err(|e| e.to_string())?;
         if first > 0 {
             // Chunks of the name fenced below the volume's first epoch are an earlier volume's:
             // every epoch the volume's sessions fence and create at is above it, and every epoch
@@ -218,6 +295,23 @@ impl<D: BlockDevice> ReplicaService<D> {
                 v.size, v.chunk_size
             ));
         }
+        let missing: BTreeSet<u32> = a
+            .chunks
+            .iter()
+            .copied()
+            .filter(|chunk| {
+                self.vols
+                    .get(&uuid)
+                    .is_none_or(|v| !v.chunks.contains(chunk))
+            })
+            .collect();
+        let held = self.vols.get(&uuid).map_or(0, |v| v.chunks.len());
+        if missing.len() > (self.core.budget() as usize).saturating_sub(held) {
+            return Err(format!(
+                "volume would hold more than {} chunks on this node",
+                self.core.budget()
+            ));
+        }
         let vol = self.vol_id(uuid, size, chunk_size);
         let session = SessionRef {
             vol,
@@ -229,22 +323,25 @@ impl<D: BlockDevice> ReplicaService<D> {
             epoch: a.epoch,
             session: a.session,
             req: a.req,
-            body: Request::<()>::Hello,
+            body: Request::<()>::Hello {
+                chunks: a.chunks.clone(),
+            },
         };
         let reply = match self.core.handle(&msg) {
-            Action::Fence { epoch, reply } => {
+            Action::Fence { epoch, .. } => {
                 // Create the chunks placed here that do not exist yet, fenced at this epoch,
                 // then fence the others: durable before the reply.
-                let blocks = (chunk_size / BLOCK as u64) as Block;
-                let missing: Vec<u32> = {
-                    let v = &self.vols[&uuid];
-                    a.chunks
-                        .iter()
-                        .copied()
-                        .filter(|c| !v.chunks.contains(c))
-                        .collect()
-                };
+                let blocks = geometry.blocks_per_chunk;
                 for c in missing {
+                    self.core
+                        .can_add_chunk(vol, c)
+                        .map_err(|error| match error {
+                            ChunkError::TooManyChunks => format!(
+                                "volume would hold more than {} chunks on this node",
+                                self.core.budget()
+                            ),
+                            ChunkError::Exists => "chunk already exists in replica core".into(),
+                        })?;
                     let key = ChunkKey {
                         volume: uuid,
                         index: u64::from(c),
@@ -252,11 +349,15 @@ impl<D: BlockDevice> ReplicaService<D> {
                     self.store
                         .create_chunk(key, chunk_size, size, epoch)
                         .map_err(|e| e.to_string())?;
-                    self.core.add_chunk(vol, c, blocks);
+                    self.core
+                        .add_chunk(vol, c, blocks)
+                        .map_err(|error| format!("add chunk to replica core: {error:?}"))?;
                     self.vols.get_mut(&uuid).expect("volume").chunks.insert(c);
                 }
                 self.store.fence(uuid, epoch).map_err(|e| e.to_string())?;
-                reply
+                Response::Fenced {
+                    uncertain: self.core.report(vol),
+                }
             }
             Action::Reply(r) => r,
             other => return Err(format!("unexpected action for Hello: {other:?}")),
@@ -277,6 +378,15 @@ impl<D: BlockDevice> ReplicaService<D> {
         if u64::from(chunk) >= size.div_ceil(chunk_size) {
             return Err("out of range".into());
         }
+        self.core
+            .can_add_chunk(vol, chunk)
+            .map_err(|error| match error {
+                ChunkError::TooManyChunks => format!(
+                    "volume would hold more than {} chunks on this node",
+                    self.core.budget()
+                ),
+                ChunkError::Exists => "chunk already exists in replica core".into(),
+            })?;
         let key = ChunkKey {
             volume: uuid,
             index: u64::from(chunk),
@@ -285,7 +395,8 @@ impl<D: BlockDevice> ReplicaService<D> {
             .create_chunk(key, chunk_size, size, epoch)
             .map_err(|e| e.to_string())?;
         self.core
-            .add_chunk(vol, chunk, (chunk_size / BLOCK as u64) as Block);
+            .add_chunk(vol, chunk, (chunk_size / BLOCK as u64) as Block)
+            .map_err(|error| format!("add moved chunk to replica core: {error:?}"))?;
         self.vols
             .get_mut(&uuid)
             .expect("volume")
@@ -816,9 +927,12 @@ impl<D: BlockDevice> ReplicaService<D> {
             self.core.remove_volume(v.id);
         }
         // Every chunk, whatever its fence.
-        self.store
+        let deleted = self
+            .store
             .delete_volume(uuid, None)
-            .map_err(|e| format!("delete chunks: {e}"))
+            .map_err(|e| format!("delete chunks: {e}"))?;
+        self.unsupported.remove(&uuid);
+        Ok(deleted)
     }
 
     /// The epoch the volume of session `s` is fenced at now.

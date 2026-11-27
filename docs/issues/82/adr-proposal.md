@@ -1,6 +1,6 @@
 # Accepted with the plan, 2026-11-13: Node-wide shutdown recovery requires a held shutdown fence
 
-- **Status:** Accepted with the plan, 2026-11-13; numbered and moved into docs/adr/ when implemented.
+- **Status:** Accepted as [ADR 0015](../../adr/0015-node-wide-shutdown-requires-held-fence.md), 2026-11-20 (accepted with the plan 2026-11-13).
 - **Date:** 2026-11-12
 
 ## Context

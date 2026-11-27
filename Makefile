@@ -35,6 +35,10 @@ ACTIONLINT  := $(GO) run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 # installs it); NIGHTLY=nightly for the latest.
 NIGHTLY   ?= nightly-2026-10-28
 COUNT     ?= 1
+# go test's -timeout covers all COUNT runs of a package, and one meta/service run takes about
+# 40 s under -race: 10 minutes plus 2 per run. COUNT=20 gives 50, under the nightly job's 60,
+# so a real hang still prints its goroutine dump.
+RACE_TIMEOUT ?= $(shell expr 10 + 2 \* $(COUNT))m
 # The data plane crates with threads, io_uring or unsafe code, for the sanitizers.
 SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net
 # Instrumented builds go apart from the normal ones, under CARGO_TARGET_DIR when it is set (CI).
@@ -52,7 +56,7 @@ help: ## Show this help
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test sim fuzz fuzz-regressions meta-interop lint fmt proto meta-vectors disk-demo clean
+.PHONY: build release test crash-test sim fuzz fuzz-regressions meta-interop lint fmt proto meta-vectors geometry-vectors disk-demo clean
 build: ## Build the data plane (debug) and the Go services
 	cd $(DATAPLANE) && $(CARGO) build
 	$(GO) build ./...
@@ -92,6 +96,7 @@ lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellch
 	@bash scripts/tools/bench-reference-test.sh
 	@bash scripts/tools/node-scripts-test.sh
 	@bash scripts/tools/lab-deletion-test.sh
+	@bash scripts/tools/failover-policy-test.sh
 	$(ACTIONLINT)
 
 fmt: ## Format Rust and Go code
@@ -104,6 +109,10 @@ proto: ## Regenerate Go code from api/proto (buf and plugins run at pinned versi
 
 meta-vectors: ## Regenerate the metadata transition vectors from the Rust model
 	cd $(DATAPLANE) && $(CARGO) run -q -p flaminio-repl --example meta_vectors > ../meta/testdata/isr-vectors.jsonl
+
+geometry-vectors: ## Check shared volume-geometry admission vectors in Go and Rust
+	$(GO) test ./pkg/geometry -count=1
+	cd $(DATAPLANE) && $(CARGO) test -p flaminio-repl geometry::tests::shared_vectors -- --exact
 
 ##@ Checks (CI runs these too: docs/ci.md)
 
@@ -119,10 +128,10 @@ hygiene: ## Advisories and licenses (cargo-deny), unused crates, rustdoc, static
 	$(GO) mod tidy -diff
 
 race: ## Go tests under the race detector, in random order, with goroutine-leak checks (COUNT=1)
-	$(GO) test -race -shuffle=on -count=$(COUNT) ./...
+	$(GO) test -race -shuffle=on -count=$(COUNT) -timeout=$(RACE_TIMEOUT) ./...
 
-contracts: ## Generated code and vectors match their sources; fuzz lockfile; Rust client vs Go service
-	$(MAKE) --no-print-directory proto meta-vectors
+contracts: ## Generated code, metadata/geometry vectors, fuzz lockfile and Rust/Go interop
+	$(MAKE) --no-print-directory proto meta-vectors geometry-vectors
 	git diff --exit-code -- api/gen meta/testdata
 	cd $(DATAPLANE)/fuzz && $(CARGO) metadata --locked --format-version 1 >/dev/null
 	$(MAKE) --no-print-directory meta-interop
@@ -380,7 +389,7 @@ csi-logs: ## Recent logs of the CSI controller and node plugins
 csi-test: ## A pod writes to a Flaminio PVC, moves to the other node, verifies its data (KEEP=1 keeps it)
 	KEEP=$(KEEP) $(LAB) csi test
 
-csi-failover: ## Power off the test pod's data VM: the pod must come back on the other one with its data; the VM rejoins (KEEP=1)
+csi-failover: ## Refused on lab VMs (issue #82): no supported shutdown authority; physical-host qualification is separate
 	KEEP=$(KEEP) $(LAB) csi failover
 
 csi-undeploy: ## Remove the CSI driver (and the test namespace)

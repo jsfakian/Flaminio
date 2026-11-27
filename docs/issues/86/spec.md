@@ -1,7 +1,8 @@
 # Issue #86: Bound conservative Fenced uncertainty — specification
 
 [Intent](intent.md), [design](design.md), [proposed ADR](adr-proposal.md),
-[decisions](decisions.md). Approved 2026-11-13; not implemented.
+[decisions](decisions.md). Published clear snapshot approved 2026-11-20;
+implementation and validation are recorded in [report](report.md).
 
 ## Terms
 

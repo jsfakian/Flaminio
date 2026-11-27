@@ -172,8 +172,13 @@ spec:
         - name: ca-crt
           hostPath: {path: /etc/flaminio/pki/ca.crt, type: File}
 ---
-# The failover controller (control/failover): marks a lost data node out of service, so that
-# its pods and volumes move. On the witness, which survives the loss of either data node.
+# The failover controller (control/failover): investigates NotReady storage nodes and marks
+# them out of service only with verified shutdown evidence. Default (no authority config) is
+# observe-only: candidates log evidence-unavailable and no taint is written. To enable
+# manual-lockout-v1, mount a root-owned config and proof directory and pass
+# --failover-authority-config=/etc/flaminio/failover/config.json (see docs/issues/82).
+# Lab VMs are not a supported authority. Scoped partition recovery is unavailable.
+# On the witness, which survives the loss of either data node.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -209,15 +214,24 @@ spec:
             - --key=/etc/flaminio/tls/tls.key
             - --ca=/etc/flaminio/tls/ca.crt
             - --grace=40s
+            # Optional: --failover-authority-config=/etc/flaminio/failover/config.json
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: tls, mountPath: /etc/flaminio/tls, readOnly: true}
+            # Optional for manual-lockout-v1 (root-owned, not group/world writable):
+            # - {name: failover-config, mountPath: /etc/flaminio/failover, readOnly: true}
+            # - {name: failover-proofs, mountPath: /var/lib/flaminio/failover-proofs, readOnly: true}
       volumes:
         - name: tls
           secret: {secretName: flaminio-csi-controller-tls, defaultMode: 0440}
+        # Optional:
+        # - name: failover-config
+        #   hostPath: {path: /etc/flaminio/failover, type: Directory}
+        # - name: failover-proofs
+        #   hostPath: {path: /var/lib/flaminio/failover-proofs, type: Directory}
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass

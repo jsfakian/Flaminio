@@ -42,6 +42,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -63,6 +64,7 @@ import (
 	"github.com/flaminio/flaminio/control/drain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/service"
+	"github.com/flaminio/flaminio/pkg/geometry"
 	"github.com/flaminio/flaminio/pkg/pki"
 )
 
@@ -204,7 +206,13 @@ func parseSize(s string) (uint64, error) {
 		}
 	}
 	v, err := strconv.ParseUint(s, 10, 64)
-	return v * mult, err
+	if err != nil {
+		return 0, err
+	}
+	if v > math.MaxUint64/mult {
+		return 0, fmt.Errorf("size overflows uint64")
+	}
+	return v * mult, nil
 }
 
 func argOr(args []string, i int, def string) string {
@@ -340,7 +348,8 @@ func client(args []string, stdout, stderr io.Writer) error {
 		}
 		creds = credentials.NewTLS(cfg)
 	}
-	conn, err := grpc.NewClient(*server, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(*server, grpc.WithTransportCredentials(creds),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(geometry.MetadataBytes)))
 	if err != nil {
 		return err
 	}

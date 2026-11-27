@@ -1,11 +1,15 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strconv"
+	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -41,8 +45,8 @@ func (s *Service) ensurePlacementGate(ctx context.Context) (int64, error) {
 			return 0, err
 		}
 		if ok {
-			if e.Rev <= 0 {
-				return 0, status.Error(codes.DataLoss, "placement gate revision is not positive")
+			if err := validatePlacementGate(e); err != nil {
+				return 0, err
 			}
 			return e.Rev, nil
 		}
@@ -51,7 +55,16 @@ func (s *Service) ensurePlacementGate(ctx context.Context) (int64, error) {
 			[]kv.Op{{Key: placementGateKey, Value: []byte(placementGateValue)}},
 		)
 		if err != nil {
-			return 0, err
+			// An uncertain reply may follow a committed initialization. A reread discovers it;
+			// persistent storage/context errors still keep admissions unavailable.
+			e, ok, readErr := s.kv.Get(ctx, placementGateKey)
+			if readErr != nil || !ok {
+				return 0, err
+			}
+			if err := validatePlacementGate(e); err != nil {
+				return 0, err
+			}
+			return e.Rev, nil
 		}
 		if applied {
 			if rev <= 0 {
@@ -61,6 +74,13 @@ func (s *Service) ensurePlacementGate(ctx context.Context) (int64, error) {
 		}
 	}
 	return 0, status.Error(codes.Aborted, "too much contention")
+}
+
+func validatePlacementGate(e kv.Entry) error {
+	if e.Rev <= 0 || string(e.Value) != placementGateValue {
+		return status.Error(codes.DataLoss, "invalid placement gate")
+	}
+	return nil
 }
 
 // readPlacementGate returns the current gate revision after ensuring it exists.
@@ -75,6 +95,9 @@ func (s *Service) readPlacementGate(ctx context.Context) (int64, error) {
 	}
 	if !ok {
 		return 0, status.Error(codes.FailedPrecondition, "placement gate is unavailable")
+	}
+	if err := validatePlacementGate(e); err != nil {
+		return 0, err
 	}
 	if e.Rev != g {
 		// Advanced since ensure; use the fresh revision for planning.
@@ -118,6 +141,9 @@ func (s *Service) CheckDrain(ctx context.Context, r *metav1.CheckDrainRequest) (
 	if !ok || e.Rev != d {
 		return nil, status.Error(codes.FailedPrecondition, "drain generation is no longer current")
 	}
+	if string(e.Value) != "1" {
+		return nil, status.Error(codes.DataLoss, "invalid drain marker")
+	}
 
 	pending, err := s.countPendingCreations(ctx, d)
 	if err != nil {
@@ -151,15 +177,9 @@ func (s *Service) countPendingCreations(ctx context.Context, d int64) (uint64, e
 	}
 	var n uint64
 	for _, e := range entries {
-		if len(e.Value) > domain.MaxCreateRecordBytes {
-			return 0, status.Error(codes.DataLoss, "volume header exceeds bound")
-		}
-		var h domain.Header
-		if err := json.Unmarshal(e.Value, &h); err != nil {
-			return 0, status.Errorf(codes.DataLoss, "volume header: %v", err)
-		}
-		if h.AdmissionGeneration < 0 {
-			return 0, status.Error(codes.DataLoss, "volume header has negative admission_generation")
+		h, err := drainInventoryHeader(e)
+		if err != nil {
+			return 0, err
 		}
 		if h.Creating && h.AdmissionGeneration < d {
 			n++
@@ -174,12 +194,9 @@ func (s *Service) countDrainChunks(ctx context.Context, node string) (placement,
 		return 0, 0, err
 	}
 	for _, e := range entries {
-		if len(e.Value) > domain.MaxCreateRecordBytes {
-			return 0, 0, status.Error(codes.DataLoss, "chunk record exceeds bound")
-		}
-		var c domain.Chunk
-		if err := json.Unmarshal(e.Value, &c); err != nil {
-			return 0, 0, status.Errorf(codes.DataLoss, "chunk record: %v", err)
+		c, err := drainInventoryChunk(e)
+		if err != nil {
+			return 0, 0, err
 		}
 		for _, r := range c.Replicas {
 			if r == node {
@@ -192,6 +209,124 @@ func (s *Service) countDrainChunks(ctx context.Context, node string) (placement,
 		}
 	}
 	return placement, incoming, nil
+}
+
+// Inventory validates stored schema, not current geometry admission. Unsupported legacy
+// volumes and orphan/deleting chunks still count; no visible-header join may conceal them.
+func inventoryObject(b []byte, required ...string) error {
+	if len(b) > domain.MaxCreateRecordBytes {
+		return status.Error(codes.DataLoss, "inventory record exceeds bound")
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil || fields == nil {
+		return status.Error(codes.DataLoss, "inventory record is not a JSON object")
+	}
+	for _, field := range required {
+		if _, ok := fields[field]; !ok {
+			return status.Errorf(codes.DataLoss, "inventory record missing %s", field)
+		}
+	}
+	for field, value := range fields {
+		value = bytes.TrimSpace(value)
+		if bytes.Equal(value, []byte("null")) {
+			return status.Errorf(codes.DataLoss, "inventory record has null %s", field)
+		}
+		if len(value) > 0 && value[0] == '{' {
+			if err := inventoryObject(value); err != nil {
+				return err
+			}
+		}
+	}
+	// encoding/json otherwise accepts duplicate fields, including conflicting reservation
+	// flags or generations. Such a record is not a trustworthy completion inventory.
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	if _, err := decoder.Token(); err != nil {
+		return status.Error(codes.DataLoss, "invalid inventory object")
+	}
+	seen := make(map[string]bool, len(fields))
+	for decoder.More() {
+		field, err := decoder.Token()
+		if err != nil {
+			return status.Error(codes.DataLoss, "invalid inventory field")
+		}
+		name, ok := field.(string)
+		if !ok || seen[name] {
+			return status.Error(codes.DataLoss, "duplicate inventory field")
+		}
+		seen[name] = true
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return status.Error(codes.DataLoss, "invalid inventory value")
+		}
+	}
+	return nil
+}
+
+func drainInventoryHeader(e kv.Entry) (domain.Header, error) {
+	if err := inventoryObject(e.Value, "id", "size_bytes", "chunk_bytes", "replicas", "min_isr", "epoch"); err != nil {
+		return domain.Header{}, err
+	}
+	h, err := decodeHeaderBounded(e.Value)
+	if err != nil {
+		return domain.Header{}, err
+	}
+	if !domain.ValidID(h.ID) || e.Key != volumeKey(h.ID) || h.AdmissionGeneration < 0 ||
+		h.SizeBytes == 0 || h.ChunkBytes == 0 || h.Replicas == 0 || h.MinISR == 0 || h.MinISR > h.Replicas ||
+		h.Target != "" && !domain.ValidID(h.Target) || h.FirstEpoch > h.Epoch ||
+		h.Creating && (h.Epoch != 0 || h.Target != "" || h.FirstEpoch != 0) ||
+		!h.Creating && h.Epoch == 0 {
+		return domain.Header{}, status.Error(codes.DataLoss, "inconsistent volume header schema")
+	}
+	if (h.CreateOperation == "") != (h.CreateSpec == nil) {
+		return domain.Header{}, status.Error(codes.DataLoss, "incomplete create identity")
+	}
+	if h.CreateSpec != nil && (!domain.ValidID(h.CreateOperation) ||
+		h.ChunkBytes != h.CreateSpec.ChunkBytes || h.Replicas != h.CreateSpec.Replicas ||
+		h.MinISR != h.CreateSpec.MinISR || h.SizeBytes < h.CreateSpec.SizeBytes ||
+		h.Creating && h.SizeBytes != h.CreateSpec.SizeBytes) {
+		return domain.Header{}, status.Error(codes.DataLoss, "volume header disagrees with create identity")
+	}
+	return h, nil
+}
+
+func drainInventoryChunk(e kv.Entry) (domain.Chunk, error) {
+	if err := inventoryObject(e.Value, "replicas", "isr", "isr_ver"); err != nil {
+		return domain.Chunk{}, err
+	}
+	c, err := decodeChunkBounded(e.Value)
+	if err != nil {
+		return domain.Chunk{}, err
+	}
+	volume, index, found := strings.Cut(strings.TrimPrefix(e.Key, prefix+"chunks/"), "/")
+	i, parseErr := strconv.ParseUint(index, 10, 32)
+	if !found || !domain.ValidID(volume) || parseErr != nil || e.Key != chunkKey(volume, uint32(i)) ||
+		!inventoryNodeSet(c.Replicas) || !inventoryNodeSet(c.ISR) {
+		return domain.Chunk{}, status.Error(codes.DataLoss, "inconsistent chunk schema")
+	}
+	for _, node := range c.ISR {
+		if !slices.Contains(c.Replicas, node) {
+			return domain.Chunk{}, status.Error(codes.DataLoss, "chunk ISR is not a replica subset")
+		}
+	}
+	if m := c.Moving; m != nil && (!domain.ValidID(m.From) || !domain.ValidID(m.To) ||
+		m.From == m.To || !slices.Contains(c.Replicas, m.From)) {
+		return domain.Chunk{}, status.Error(codes.DataLoss, "inconsistent chunk move")
+	}
+	return c, nil
+}
+
+func inventoryNodeSet(nodes []string) bool {
+	if len(nodes) == 0 {
+		return false
+	}
+	seen := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		if !domain.ValidID(node) || seen[node] {
+			return false
+		}
+		seen[node] = true
+	}
+	return true
 }
 
 // bumpPlacementGateOp returns a Put of the gate to value "1" (advances its modification revision).

@@ -197,7 +197,17 @@ block devices and applies the claim policy:
 The command waits until `CheckDrain` reports complete. A volume that is not attached has no
 target to move it, and waits for its next attach. An interrupted creator can block completion
 until fenced `DeleteVolume` or create recovery resolves it; undrain/re-drain invalidates the
-old generation.
+old generation. A canceled command leaves its mark in place; restarting recovers the same
+current generation. Completion certifies metadata placement at the final marker comparison;
+it does not authorize shutdown or certify physical replica erasure.
+
+Upgrade this protocol under a maintenance barrier: stop old metadata writers and drain
+controllers before starting the new versions. Initialize the placement gate before admitting
+new work; it must have a positive revision newer than retained legacy drain markers, which
+keep their original generations. Legacy Creating headers without `admission_generation` count
+as earlier reservations. Mixed old/new writers are not supported. The inventory scan is
+conservative: an earlier interrupted creation on another node can also block completion until
+recovery or explicitly fenced deletion resolves it.
 
 **`make drain-test`:**
 1. fio writes 4 GiB of verified data to vol1 on fl-a while fl-b is drained into fl-c.
@@ -352,7 +362,7 @@ make node-up                      # the data plane on fl-a and fl-b (outside Kub
 make csi-deploy                   # build the image, import it on every VM, apply deploy/csi
 make csi-status                   # pods, StorageClass, PVs, VolumeAttachments
 make csi-test                     # a PVC is written on one node, then verified on the other
-make csi-failover                 # a data VM powered off: the pod comes back on the other node
+make csi-failover                 # refused on lab VMs (issue #82): no supported shutdown authority
 make csi-logs
 ```
 
@@ -373,14 +383,12 @@ The driver is one binary, `flaminio-csi` ([`control/csi`](../control/csi),
 
   A node serves one volume at a time (`MaxVolumesPerNode: 1`), so `csi-test` first detaches
   the lab volume vol1.
-- **Failover controller** (a Deployment on fl-w). It sets the standard
-  `node.kubernetes.io/out-of-service` taint on a data node only when both signals agree:
-  - Kubernetes has seen the node not Ready for 40 s;
-  - the node's data plane has stopped heartbeating to the metadata service.
-
-  Kubernetes then deletes the node's pods and detaches their volumes, and they start on the
-  other node. The controller removes its taint once the node is back. Fencing is what makes
-  this safe for the data, whatever the lost node still does (see `make partition-test`).
+- **Failover controller** (a Deployment on fl-w). Default is **observe-only**: NotReady plus
+  missing metadata heartbeat may select candidates, but without
+  `--failover-authority-config` no out-of-service taint is written (`evidence-unavailable`).
+  The only supported authority is `manual-lockout-v1` (physical lockout; lab VMs unsupported).
+  Scoped partition recovery is unavailable. `make csi-failover` refuses before power or
+  mutation. Epoch fencing still protects Flaminio volumes on attach (see `make partition-test`).
 
 The StorageClass `flaminio` takes `replicas` (default 2), `minIsr` (1), `chunkSize` (256Mi),
 `failureDomain` (`node`|`rack`|`zone`) and `failureDomainPolicy` (`strict`|`bestEffort`).
@@ -389,6 +397,18 @@ placement has distinct domains (see docs/followups.md §4). Volumes are `ReadWri
 `ReadWriteOncePod`, as a filesystem or a raw block device. The image is built without a
 container engine (`crane`, on a pinned Ubuntu base) and imported into each node's containerd;
 nothing is pushed to a registry.
+
+`chunkSize` must be a power of two from 1 MiB through 1 GiB. CSI returns a whole-chunk
+capacity within the requested range: with 256 MiB chunks, requesting 300 MiB selects 512 MiB,
+while a 400 MiB limit refuses that request. With no required size it prefers 1 GiB; a smaller
+positive limit is rounded down, with at least one chunk required. Direct metadata creates
+must already be whole chunks. The stricter per-RF chunk ceilings and 4 MiB metadata budget
+are documented in [architecture §4](ARCHITECTURE.md#4-core-concepts).
+
+Upgrade metadata admission before CSI/nodes and pause creates while admission versions are
+mixed. Unsupported existing volumes are refused without automatic migration or deletion.
+Local chunk-slot exhaustion is a resource error even when geometry fits; freeing/reclaiming
+space is separate from choosing supported geometry.
 
 ### Phase-1 benchmark and chaos run (step 8)
 
@@ -438,7 +458,7 @@ driver.
 | `make drain-test` | lab | 15–25 min | a node drained under a verified write load; the destination then serves every byte alone (needs `make data-node-up`) |
 | `make k8s-smoke` | lab | 1 min | Kubernetes over the overlay |
 | `make csi-test` | lab | 3 min | a PVC provisioned, formatted, written, moved to the other node, verified |
-| `make csi-failover` | lab | 10 min | a data VM powered off: the failover controller marks it, the pod moves with its data; the VM comes back and rejoins |
+| `make csi-failover` | lab | — | refused (issue #82): lab VMs have no supported shutdown authority; physical-host qualification is separate |
 | `make lab-test` | lab | about 30 min | every lab test above, in order |
 
 From an empty lab, before the lab tests:

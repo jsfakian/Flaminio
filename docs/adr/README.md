@@ -12,7 +12,10 @@ its consequences. An ADR's status is one of **Proposed**, **Accepted**, **Supers
 | [0004](0004-target-environments.md) | Bare metal first, then edge, then cloud | Accepted |
 | [0005](0005-replica-confirmed-leases.md) | Replica-confirmed I/O leases | Accepted |
 | [0006](0006-edge-two-node-degraded-writes.md) | 2-node edge sites keep writing on a single copy | Accepted |
+| [0015](0015-node-wide-shutdown-requires-held-fence.md) | Node-wide shutdown recovery requires a held shutdown fence | Accepted |
 | [0016](0016-create-retains-immutable-admitted-plan.md) | Creation retains an immutable admitted plan and cooperative progress | Accepted |
+| [0017](0017-bound-uncertainty-with-per-chunk-covers.md) | Bound uncertainty with per-chunk maximum-Version covers | Accepted |
+| [0018](0018-admit-only-representable-volume-geometries.md) | Admit only complete and representable volume geometries | Accepted |
 
 The 2026-11-12 review found that ADR 0005's immediate-read rule predates the stricter,
 implemented takeover protocol. Proposed ADR 0007 records the correction; do not use the old
@@ -29,3 +32,4 @@ of a superseding decision.
 | [0012](0012-privileged-data-plane-pod.md) | A privileged data-plane pod, until privilege separation | Proposed |
 | [0013](0013-certificates-rotate-by-file-replacement.md) | A certificate is rotated by replacing its files; every process watches its own | Proposed |
 | [0014](0014-maintenance-attach-only-while-not-held.md) | A target that no client asked for is admitted only while no client holds the volume | Proposed |
+| [0019](0019-fence-placement-admission-and-drain-completion.md) | Fence placement admission and validate drain generations | Proposed |

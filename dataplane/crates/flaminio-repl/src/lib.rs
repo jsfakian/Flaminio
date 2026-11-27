@@ -17,6 +17,7 @@
 //! uses buffer handles, and maps the same decisions onto real I/O.
 
 pub mod extent;
+pub mod geometry;
 pub mod meta;
 pub mod msg;
 pub mod replica;

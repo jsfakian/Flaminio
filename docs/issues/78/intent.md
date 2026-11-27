@@ -1,7 +1,7 @@
 # Issue #78: Placement admitted after drain marking — intent
 
 [Issue #78](https://github.com/jsfakian/Flaminio/issues/78), audit F03 at `8aaa7a3`.
-Approved 2026-11-13; not implemented.
+Published clear snapshot approved 2026-11-20; integration and validation are recorded in [report.md](report.md).
 
 ## Why
 

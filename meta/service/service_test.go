@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -27,12 +28,15 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/domain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/kv/kvtest"
+	"github.com/flaminio/flaminio/meta/testdata/geometry-interop/fixture"
 	"github.com/flaminio/flaminio/pkg/captoken"
+	"github.com/flaminio/flaminio/pkg/geometry"
 	"github.com/flaminio/flaminio/pkg/pki"
 )
 
@@ -51,6 +55,101 @@ func backends(t *testing.T, f func(t *testing.T, store kv.KV)) {
 		defer e.Close()
 		f(t, e)
 	})
+}
+
+// headerHistory observes applied header revisions below transaction retries. Mem has no
+// internal retries, so its direct application result is definitive; etcd's native watch
+// history also includes writes whose reply was lost inside Etcd.TxnRev.
+type headerHistory struct {
+	kv.KV
+	key       string
+	client    *clientv3.Client
+	mu        sync.Mutex
+	revisions map[int64]bool
+}
+
+func headerHistoryBackends(t *testing.T, key string, f func(*testing.T, *headerHistory)) {
+	t.Run("mem", func(t *testing.T) {
+		f(t, &headerHistory{KV: kv.NewMem(nil), key: key, revisions: map[int64]bool{}})
+	})
+	t.Run("etcd", func(t *testing.T) {
+		cl := kvtest.Start(t)
+		defer cl.KV.Close()
+		f(t, &headerHistory{KV: cl.KV, key: key, client: cl.Client})
+	})
+}
+
+func (h *headerHistory) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := h.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (h *headerHistory) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	rev, ok, err := h.KV.TxnRev(ctx, cmps, ops)
+	if h.client == nil && ok && err == nil {
+		for _, op := range ops {
+			if op.Key == h.key && !op.Delete {
+				h.mu.Lock()
+				h.revisions[rev] = true
+				h.mu.Unlock()
+			}
+		}
+	}
+	return rev, ok, err
+}
+
+func (h *headerHistory) revision(t *testing.T) int64 {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	e, ok, err := h.KV.Get(ctx, h.key)
+	if err != nil || !ok {
+		t.Fatalf("header history revision: found=%v err=%v", ok, err)
+	}
+	return e.Rev
+}
+
+func (h *headerHistory) appliedAfter(t *testing.T, after int64) map[int64]bool {
+	t.Helper()
+	revisions := map[int64]bool{}
+	if h.client == nil {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		for rev := range h.revisions {
+			if rev > after {
+				revisions[rev] = true
+			}
+		}
+		return revisions
+	}
+	// Writers have finished. Replay from the initial revision through the final header
+	// revision; replay avoids relying on watch registration timing or API responses.
+	final := h.revision(t)
+	if final == after {
+		return revisions
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	watch := h.client.Watch(ctx, h.key, clientv3.WithRev(after+1))
+	for {
+		select {
+		case response, ok := <-watch:
+			if !ok || response.Err() != nil {
+				t.Fatalf("header history watch: open=%v err=%v", ok, response.Err())
+			}
+			for _, event := range response.Events {
+				if event.Type != clientv3.EventTypePut {
+					t.Fatalf("unexpected header history event: %v", event)
+				}
+				revisions[event.Kv.ModRevision] = true
+				if event.Kv.ModRevision == final {
+					return revisions
+				}
+			}
+		case <-ctx.Done():
+			t.Fatalf("header history stopped before revision %d: %v", final, ctx.Err())
+		}
+	}
 }
 
 func code(err error) codes.Code { return status.Code(err) }
@@ -196,6 +295,114 @@ func TestVolumeLifecycle(t *testing.T) {
 		// Created again, it starts above every epoch the earlier volume reached.
 		if g, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); err != nil || len(g.Volume.Chunks) != 1 || g.Volume.Epoch <= e+4 {
 			t.Fatalf("recreated: %v %v", g, err)
+		}
+	})
+}
+
+func TestChangeIsrBatchBoundary(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		ctx := context.Background()
+		addNodes(t, s, "a", "b")
+		limit := domain.MaxChangesPerRequest
+		for _, tc := range []struct {
+			name    string
+			count   int
+			alter   func(*metav1.ChangeIsrRequest)
+			code    codes.Code
+			applied bool
+		}{
+			{name: "boundary", count: limit, code: codes.OK, applied: true},
+			{name: "oversized", count: limit + 1, code: codes.InvalidArgument},
+			{name: "stale-epoch", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Epoch--
+			}},
+			{name: "wrong-version", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Changes[len(r.Changes)-1].ExpectedVer++
+			}},
+			{name: "duplicate-chunk", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Changes[len(r.Changes)-1] = proto.Clone(r.Changes[0]).(*metav1.IsrChange)
+			}},
+			{name: "below-minimum", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Changes[len(r.Changes)-1].NewIsr = nil
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				id := "batch-" + tc.name
+				if _, err := create(s, id, uint64(limit+1), 2, 1); err != nil {
+					t.Fatal(err)
+				}
+				att, err := s.Attach(ctx, &metav1.AttachRequest{Volume: id, Node: "a"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Give chunk zero a distinct version, so comparing the reply to request
+				// order also detects a service that sorts the requested chunks.
+				first := att.Volume.Chunks[0]
+				seed, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{
+					Volume: id, Epoch: att.Volume.Epoch,
+					Changes: []*metav1.IsrChange{{Chunk: 0, ExpectedVer: first.IsrVer, NewIsr: first.Replicas[:1]}},
+				})
+				if err != nil || !seed.GetApplied() {
+					t.Fatalf("seed chunk version: %v %v", seed, err)
+				}
+				before, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: id})
+				if err != nil {
+					t.Fatal(err)
+				}
+				entries, err := s.kv.List(ctx, chunkPrefix(id))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req := &metav1.ChangeIsrRequest{Volume: id, Epoch: before.Volume.Epoch}
+				for i := tc.count - 1; i >= 0; i-- {
+					c := before.Volume.Chunks[i]
+					req.Changes = append(req.Changes, &metav1.IsrChange{
+						Chunk: uint32(i), ExpectedVer: c.IsrVer, NewIsr: c.Replicas[:1],
+					})
+				}
+				if tc.alter != nil {
+					tc.alter(req)
+				}
+				reply, err := s.ChangeIsr(ctx, req)
+				if code(err) != tc.code || reply.GetApplied() != tc.applied {
+					t.Fatalf("ChangeIsr: %v %v, want code %v applied %v", reply, err, tc.code, tc.applied)
+				}
+				after, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: id})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := proto.Clone(before.Volume).(*metav1.Volume)
+				if tc.applied {
+					for _, change := range req.Changes {
+						want.Chunks[change.Chunk].Isr = slices.Clone(change.NewIsr)
+						want.Chunks[change.Chunk].IsrVer++
+					}
+				}
+				if !proto.Equal(after.Volume, want) {
+					t.Fatalf("batch changed the wrong chunks: got %v, want %v", after.Volume, want)
+				}
+				if !tc.applied {
+					unchanged, err := s.kv.List(ctx, chunkPrefix(id))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !slices.EqualFunc(entries, unchanged, func(a, b kv.Entry) bool {
+						return a.Key == b.Key && a.Rev == b.Rev && bytes.Equal(a.Value, b.Value)
+					}) {
+						t.Fatal("refused batch wrote chunk metadata")
+					}
+				}
+				if tc.code == codes.OK {
+					if reply.Epoch != before.Volume.Epoch || len(reply.Chunks) != len(req.Changes) {
+						t.Fatalf("reply epoch/count: %v", reply)
+					}
+					for i, change := range req.Changes {
+						if !proto.Equal(reply.Chunks[i], want.Chunks[change.Chunk]) {
+							t.Fatalf("reply item %d does not describe requested chunk %d: %v", i, change.Chunk, reply.Chunks[i])
+						}
+					}
+				}
+			})
 		}
 	})
 }
@@ -405,14 +612,17 @@ func TestFailureDomainPlacement(t *testing.T) {
 // its chunk's version by exactly one, every attach bumped the epoch, and no ISR ever fell
 // below the minimum.
 func TestConcurrentTargets(t *testing.T) {
-	stores(t, func(t *testing.T, s *Service) {
+	headerHistoryBackends(t, volumeKey("v"), func(t *testing.T, backend *headerHistory) {
+		store := &scheduledKV{KV: backend}
+		s := New(store, Options{})
 		ctx := context.Background()
 		addNodes(t, s, "a", "b", "c", "d")
 		v, err := create(s, "v", 4, 3, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var attaches, applied atomic.Int64
+		var applied atomic.Int64
+		initialRevision := backend.revision(t)
 		perChunk := make([]atomic.Int64, len(v.Chunks))
 		var wg sync.WaitGroup
 		for w := range 8 {
@@ -425,13 +635,12 @@ func TestConcurrentTargets(t *testing.T) {
 					if view == nil || rng.IntN(5) == 0 {
 						r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "abcd"[w%4 : w%4+1]})
 						if code(err) == codes.Aborted {
-							continue // contention: nothing was committed
+							continue // A committed Attach may have been superseded before its response.
 						}
 						if err != nil {
 							t.Error(err)
 							return
 						}
-						attaches.Add(1)
 						view = r.Volume
 						continue
 					}
@@ -468,8 +677,9 @@ func TestConcurrentTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if g.Volume.Epoch != v.Epoch+uint64(attaches.Load()) {
-			t.Fatalf("epoch %d after %d attaches from %d", g.Volume.Epoch, attaches.Load(), v.Epoch)
+		commits := backend.appliedAfter(t, initialRevision)
+		if g.Volume.Epoch != v.Epoch+uint64(len(commits)) {
+			t.Fatalf("epoch %d after %d committed attaches from %d", g.Volume.Epoch, len(commits), v.Epoch)
 		}
 		for i, c := range g.Volume.Chunks {
 			if c.IsrVer != uint64(perChunk[i].Load()) {
@@ -479,7 +689,7 @@ func TestConcurrentTargets(t *testing.T) {
 				t.Fatalf("chunk %d: ISR %v below the minimum", i, c.Isr)
 			}
 		}
-		t.Logf("%d attaches, %d ISR changes applied", attaches.Load(), applied.Load())
+		t.Logf("%d backend-applied attaches, %d ISR changes applied", len(commits), applied.Load())
 	})
 }
 
@@ -616,6 +826,52 @@ func TestMoveAndDrain(t *testing.T) {
 // returning that read, or after the first write of `txnKey` that applied. The hook can make
 // another write land between a read and the write that follows it, or between two writes. It
 // counts the writes of `key` made outside the hook.
+// scheduledKV places deterministic interleavings at real storage operation boundaries.
+// Unset operations always reach the backend; hooks call KV directly to avoid recursion.
+type scheduledKV struct {
+	kv.KV
+	get     func(context.Context, string) (kv.Entry, bool, error)
+	list    func(context.Context, string) ([]kv.Entry, error)
+	readSet func(context.Context, []string) ([]kv.ReadResult, error)
+	txn     func(context.Context, []kv.Cmp, []kv.Op) (bool, error)
+	txnRev  func(context.Context, []kv.Cmp, []kv.Op) (int64, bool, error)
+}
+
+func (k *scheduledKV) Get(ctx context.Context, key string) (kv.Entry, bool, error) {
+	if k.get != nil {
+		return k.get(ctx, key)
+	}
+	return k.KV.Get(ctx, key)
+}
+
+func (k *scheduledKV) List(ctx context.Context, prefix string) ([]kv.Entry, error) {
+	if k.list != nil {
+		return k.list(ctx, prefix)
+	}
+	return k.KV.List(ctx, prefix)
+}
+
+func (k *scheduledKV) ReadSet(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+	if k.readSet != nil {
+		return k.readSet(ctx, keys)
+	}
+	return k.KV.ReadSet(ctx, keys)
+}
+
+func (k *scheduledKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	if k.txn != nil {
+		return k.txn(ctx, cmps, ops)
+	}
+	return k.KV.Txn(ctx, cmps, ops)
+}
+
+func (k *scheduledKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	if k.txnRev != nil {
+		return k.txnRev(ctx, cmps, ops)
+	}
+	return k.KV.TxnRev(ctx, cmps, ops)
+}
+
 type interleaveKV struct {
 	kv.KV
 	key    string
@@ -649,6 +905,14 @@ func (k *interleaveKV) GetBounded(ctx context.Context, key string, maxBytes int)
 		k.runHook()
 	}
 	return e, ok, err
+}
+
+func (k *interleaveKV) ReadSet(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+	rows, err := k.KV.ReadSet(ctx, keys)
+	if slices.Contains(keys, k.key) {
+		k.runHook()
+	}
+	return rows, err
 }
 
 func (k *interleaveKV) List(ctx context.Context, prefix string) ([]kv.Entry, error) {
@@ -1479,6 +1743,1083 @@ func TestCreateAfterAnInterruptedCreationStartsAboveItsClaim(t *testing.T) {
 		v, err := create(s, "v", 2, 2, 1)
 		if err != nil || v.Epoch <= uint64(claim) {
 			t.Fatalf("created at epoch %d (%v), want above the interrupted claim %d", v.GetEpoch(), err, claim)
+		}
+	})
+}
+
+func coherentFixture(t *testing.T, backend kv.KV, opts Options) (*Service, *scheduledKV, *metav1.Volume) {
+	t.Helper()
+	entries, err := backend.List(context.Background(), prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ops []kv.Op
+	for _, e := range entries {
+		ops = append(ops, kv.Op{Key: e.Key, Delete: true})
+	}
+	if len(ops) > 0 {
+		writeTestOps(t, backend, ops...)
+	}
+	store := &scheduledKV{KV: backend}
+	s := New(store, opts)
+	addNodes(t, s, "a", "b")
+	v, err := create(s, "v", 2, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addNodes(t, s, "c")
+	return s, store, v
+}
+
+func writeTestOps(t *testing.T, backend kv.KV, ops ...kv.Op) {
+	t.Helper()
+	if ok, err := backend.Txn(context.Background(), nil, ops); err != nil || !ok {
+		t.Fatalf("fixture transaction: %v %v", ok, err)
+	}
+}
+
+func writeTestHeader(t *testing.T, backend kv.KV, h domain.Header) {
+	t.Helper()
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestOps(t, backend, kv.Op{Key: volumeKey(h.ID), Value: b})
+}
+
+func replaceTestVolume(t *testing.T, s *Service) *metav1.Volume {
+	t.Helper()
+	deleteAndConfirm(t, s, "v", "a", "b", "c")
+	r, err := s.CreateVolume(context.Background(), &metav1.CreateVolumeRequest{
+		Id: "v", SizeBytes: 4 * mib, ChunkBytes: 2 * mib, Replicas: 3, MinIsr: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.Volume
+}
+
+// The audit F02 schedule keeps the chunk count equal while replacing every authority field.
+func TestGetVolumeSameCountReplacementIsCoherent(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		oldFirst := header(t, backend, "v").FirstEpoch
+		var replacement *metav1.Volume
+		store.get = func(ctx context.Context, key string) (kv.Entry, bool, error) {
+			e, ok, err := backend.Get(ctx, key)
+			if key == volumeKey("v") {
+				store.get = nil
+				replacement = replaceTestVolume(t, s)
+			}
+			return e, ok, err
+		}
+		got, err := s.GetVolume(context.Background(), &metav1.GetVolumeRequest{Id: "v"})
+		if err != nil || replacement == nil || !proto.Equal(got.GetVolume(), replacement) {
+			t.Fatalf("mixed replacement: old=%v replacement=%v got=%v err=%v", old, replacement, got, err)
+		}
+		v, _, err := s.readVolumeView(context.Background(), "v", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count, countErr := v.ChunkCount()
+		if countErr != nil || v.FirstEpoch <= oldFirst || v.FirstEpoch != replacement.Epoch || count != len(old.Chunks) {
+			t.Fatalf("incarnation/geometry: %+v %v, old first epoch %d", v, err, oldFirst)
+		}
+	})
+}
+
+func TestGetVolumeClassifiesChunksOnlyAfterHeaderValidation(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, damage := range []string{"json", "missing", "noncanonical"} {
+			for _, replacing := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/replacing=%t", damage, replacing), func(t *testing.T) {
+					s, store, _ := coherentFixture(t, backend, Options{})
+					e, _, err := backend.Get(context.Background(), chunkKey("v", 1))
+					if err != nil {
+						t.Fatal(err)
+					}
+					switch damage {
+					case "json":
+						writeTestOps(t, backend, kv.Op{Key: e.Key, Value: []byte("{")})
+					case "missing":
+						writeTestOps(t, backend, kv.Op{Key: e.Key, Delete: true})
+					case "noncanonical":
+						writeTestOps(t, backend, kv.Op{Key: e.Key, Delete: true}, kv.Op{Key: chunkPrefix("v") + "1", Value: e.Value})
+					}
+					var replacement *metav1.Volume
+					if replacing {
+						store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+							entries, err := backend.List(ctx, p)
+							if p == chunkPrefix("v") {
+								store.list = nil
+								// Restore the damaged old prefix so deletion can inspect it, after
+								// the reader already acquired its invalid candidate.
+								writeTestOps(t, backend, kv.Op{Key: e.Key, Value: e.Value}, kv.Op{Key: chunkPrefix("v") + "1", Delete: true})
+								replacement = replaceTestVolume(t, s)
+							}
+							return entries, err
+						}
+					}
+					got, err := s.GetVolume(context.Background(), &metav1.GetVolumeRequest{Id: "v"})
+					if replacing {
+						if err != nil || !proto.Equal(got.GetVolume(), replacement) {
+							t.Fatalf("changing header classified as corruption: %v %v", got, err)
+						}
+					} else if got != nil || code(err) != codes.Internal {
+						t.Fatalf("stable corruption returned partial/success: %v %v", got, err)
+					}
+				})
+			}
+		}
+	})
+}
+
+func TestGetVolumeHeaderChurnIsBounded(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, ending := range []string{"budget", "cancel", "deadline"} {
+			t.Run(ending, func(t *testing.T) {
+				s, store, _ := coherentFixture(t, backend, Options{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if ending == "deadline" {
+					var stop context.CancelFunc
+					ctx, stop = context.WithTimeout(context.Background(), 100*time.Millisecond)
+					defer stop()
+				}
+				reads := 0
+				store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+					es, err := backend.List(ctx, p)
+					if p == chunkPrefix("v") {
+						reads++
+						// Equal header values with a new revision still invalidate the candidate.
+						writeTestHeader(t, backend, header(t, backend, "v"))
+						if ending == "cancel" {
+							cancel()
+						}
+					}
+					return es, err
+				}
+				got, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
+				want := map[string]codes.Code{"budget": codes.Aborted, "cancel": codes.Canceled, "deadline": codes.DeadlineExceeded}[ending]
+				if got != nil || code(err) != want || reads == 0 || reads > retries || ending == "budget" && reads != retries || ending == "cancel" && reads != 1 {
+					t.Fatalf("churn: response=%v err=%v reads=%d", got, err, reads)
+				}
+			})
+		}
+	})
+}
+
+func requireCommittedError(t *testing.T, err error, want codes.Code, epoch uint64, rev int64) {
+	t.Helper()
+	context := fmt.Sprintf("attach committed volume=v epoch=%d revision=%d; response unavailable:", epoch, rev)
+	if code(err) != want || !strings.Contains(fmt.Sprint(err), context) {
+		t.Fatalf("want %s with exact known-commit context %q, got %v", want, context, err)
+	}
+}
+
+func TestAttachResponsePinnedToCommitRevision(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, phase := range []string{"commit", "first-header", "prefix", "final-header"} {
+			for _, action := range []string{"attach", "delete", "replace"} {
+				t.Run(phase+"/"+action, func(t *testing.T) {
+					pub, key, _ := ed25519.GenerateKey(nil)
+					s, store, old := coherentFixture(t, backend, Options{TokenKey: key})
+					oldFirst := header(t, backend, "v").FirstEpoch
+					var attachRev int64
+					triggered := false
+					trigger := func() {
+						if triggered {
+							return
+						}
+						triggered = true
+						store.get, store.list, store.txnRev = nil, nil, nil
+						switch action {
+						case "attach":
+							if _, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "b"}); err != nil {
+								t.Fatal(err)
+							}
+						case "delete":
+							if _, err := s.DeleteVolume(context.Background(), &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+								t.Fatal(err)
+							}
+						case "replace":
+							replaceTestVolume(t, s)
+						}
+					}
+					store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+						rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+						if ok && err == nil {
+							attachRev = rev
+							if phase == "commit" {
+								trigger()
+							}
+						}
+						return rev, ok, err
+					}
+					reads := 0
+					store.get = func(ctx context.Context, k string) (kv.Entry, bool, error) {
+						e, ok, err := backend.Get(ctx, k)
+						if k == volumeKey("v") {
+							reads++
+							if phase == "first-header" && reads == 2 || phase == "final-header" && reads == 3 {
+								trigger()
+							}
+						}
+						return e, ok, err
+					}
+					store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+						es, err := backend.List(ctx, p)
+						if p == chunkPrefix("v") && phase == "prefix" {
+							trigger()
+						}
+						return es, err
+					}
+					r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+					if !triggered || attachRev == 0 {
+						t.Fatalf("schedule did not run: triggered=%t rev=%d", triggered, attachRev)
+					}
+					if phase != "final-header" {
+						if r != nil {
+							t.Fatalf("superseded attach returned token/view: %v", r)
+						}
+						requireCommittedError(t, err, codes.Aborted, old.Epoch+1, attachRev)
+					} else {
+						// Supersession after the final snapshot may leave a valid older response;
+						// ordinary epoch fencing handles it. Its token and view must still agree.
+						if err != nil {
+							t.Fatal(err)
+						}
+						want := proto.Clone(old).(*metav1.Volume)
+						want.Epoch++
+						want.Target = "a"
+						claims, verifyErr := captoken.Verify(pub, r.Token)
+						if !proto.Equal(r.Volume, want) || verifyErr != nil || claims.Epoch != want.Epoch || claims.FirstEpoch != oldFirst || claims.Node != want.Target || claims.Volume != "v" {
+							t.Fatalf("unpinned token/view: %v claims=%+v err=%v", r, claims, verifyErr)
+						}
+					}
+					if action == "attach" && header(t, backend, "v").Epoch != old.Epoch+2 {
+						t.Fatal("committed epochs were rolled back")
+					}
+				})
+			}
+		}
+	})
+}
+
+func TestAttachKnownCommitThenReadFailureKeepsEpoch(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, phase := range []string{"first-header", "final-header"} {
+			for _, failure := range []string{"missing", "creating", "deleting", "backend", "list-backend", "corrupt-header", "wrong-type-header", "corrupt-chunk", "cancel", "deadline"} {
+				t.Run(phase+"/"+failure, func(t *testing.T) {
+					s, store, old := coherentFixture(t, backend, Options{})
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					var attachRev int64
+					var committed domain.Header
+					store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+						rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+						if ok && err == nil {
+							attachRev = rev
+							committed = header(t, backend, "v")
+						}
+						return rev, ok, err
+					}
+					reads := 0
+					store.get = func(ctx context.Context, k string) (kv.Entry, bool, error) {
+						if k == volumeKey("v") {
+							reads++
+							at := 2
+							if phase == "final-header" {
+								at = 3
+							}
+							if reads == at {
+								switch failure {
+								case "missing":
+									writeTestOps(t, backend, kv.Op{Key: k, Delete: true})
+								case "creating", "deleting":
+									h := committed
+									h.Creating = failure == "creating"
+									h.Deleting = failure == "deleting"
+									writeTestHeader(t, backend, h)
+								case "backend":
+									return kv.Entry{}, false, status.Error(codes.Unavailable, "injected read failure")
+								case "corrupt-header":
+									writeTestOps(t, backend, kv.Op{Key: k, Value: []byte("{")})
+								case "wrong-type-header":
+									writeTestOps(t, backend, kv.Op{Key: k, Value: []byte(`{"epoch":"wrong-type"}`)})
+								case "cancel":
+									cancel()
+									return kv.Entry{}, false, ctx.Err()
+								case "deadline":
+									return kv.Entry{}, false, context.DeadlineExceeded
+								}
+							}
+						}
+						return backend.Get(ctx, k)
+					}
+					if failure == "corrupt-chunk" {
+						store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+							writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: []byte("{")})
+							return backend.List(ctx, p)
+						}
+					}
+					if failure == "list-backend" {
+						store.list = func(context.Context, string) ([]kv.Entry, error) {
+							return nil, status.Error(codes.Unavailable, "injected prefix failure")
+						}
+					}
+					r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"})
+					want := codes.Aborted
+					switch failure {
+					case "backend", "list-backend", "corrupt-header", "wrong-type-header":
+						want = codes.Unavailable
+					case "corrupt-chunk":
+						want = codes.Internal
+					case "cancel":
+						want = codes.Canceled
+					case "deadline":
+						want = codes.DeadlineExceeded
+					}
+					if r != nil || attachRev == 0 || committed.Epoch != old.Epoch+1 {
+						t.Fatalf("lost commit evidence: response=%v rev=%d header=%+v", r, attachRev, committed)
+					}
+					requireCommittedError(t, err, want, old.Epoch+1, attachRev)
+					// Restore only deliberately removed/damaged publication, never its epoch.
+					if failure == "missing" || failure == "creating" || failure == "deleting" || failure == "corrupt-header" || failure == "wrong-type-header" {
+						writeTestHeader(t, backend, committed)
+					}
+					if h := header(t, backend, "v"); h.Epoch != committed.Epoch || h.Target != "a" {
+						t.Fatalf("postcommit error rolled back authority: %+v", h)
+					}
+				})
+			}
+		}
+	})
+}
+
+func TestAttachLostCommitReplyDoesNotRollBack(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		var applied []int64
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil {
+				applied = append(applied, rev)
+				store.txnRev = nil
+				return 0, false, status.Error(codes.Unavailable, "commit reply lost")
+			}
+			return rev, ok, err
+		}
+		if r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"}); r != nil || code(err) != codes.Unavailable {
+			t.Fatalf("ambiguous response: %v %v", r, err)
+		}
+		if len(applied) != 1 || header(t, backend, "v").Epoch != old.Epoch+1 {
+			t.Fatalf("actual application evidence: %v header=%+v", applied, header(t, backend, "v"))
+		}
+		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "b"})
+		if err != nil || r.Volume.Epoch != old.Epoch+2 {
+			t.Fatalf("fresh recovery attach: %v %v", r, err)
+		}
+	})
+}
+
+func TestChangeIsrRejectedViewIsCoherent(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, mutation := range []string{"replacement", "multi-chunk"} {
+			for _, refusal := range []string{"wrong-target", "stale-epoch", "invalid-change"} {
+				t.Run(mutation+"/"+refusal, func(t *testing.T) {
+					s, store, _ := coherentFixture(t, backend, Options{})
+					a, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					before := a.Volume
+					ctx := context.Background()
+					if refusal == "wrong-target" {
+						ctx = context.WithValue(ctx, identityKey{}, pki.Identity{Node: "c", Component: "io"})
+					}
+					req := &metav1.ChangeIsrRequest{Volume: "v", Epoch: before.Epoch, Changes: []*metav1.IsrChange{
+						{Chunk: 1, ExpectedVer: 0, NewIsr: []string{"a"}}, {Chunk: 0, ExpectedVer: 0, NewIsr: []string{"a"}},
+					}}
+					if refusal == "stale-epoch" {
+						req.Epoch--
+					}
+					if refusal == "invalid-change" {
+						req.Changes[0].ExpectedVer++
+					}
+					triggered := false
+					var postMutation []kv.Entry
+					trigger := func() {
+						if triggered {
+							return
+						}
+						triggered = true
+						store.get, store.readSet = nil, nil
+						if mutation == "replacement" {
+							replaceTestVolume(t, s)
+						} else {
+							var ops []kv.Op
+							for i, c := range before.Chunks {
+								changed := domain.Chunk{Replicas: c.Replicas, ISR: []string{"b"}, ISRVer: 7}
+								b, _ := json.Marshal(changed)
+								ops = append(ops, kv.Op{Key: chunkKey("v", uint32(i)), Value: b})
+							}
+							writeTestOps(t, backend, ops...)
+						}
+						postMutation, err = backend.List(context.Background(), prefix)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					store.readSet = func(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+						rows, err := backend.ReadSet(ctx, keys)
+						trigger()
+						return rows, err
+					}
+					// This also reproduces the old sequential-reader bug: replacement after
+					// its header, or a multi-key update after the first requested chunk.
+					store.get = func(ctx context.Context, k string) (kv.Entry, bool, error) {
+						e, ok, err := backend.Get(ctx, k)
+						if mutation == "replacement" && k == volumeKey("v") || mutation == "multi-chunk" && k == chunkKey("v", 1) {
+							trigger()
+						}
+						return e, ok, err
+					}
+					r, err := s.ChangeIsr(ctx, req)
+					if !triggered || err != nil || r.GetApplied() || r.GetEpoch() != before.Epoch || len(r.GetChunks()) != 2 || !proto.Equal(r.Chunks[0], before.Chunks[1]) || !proto.Equal(r.Chunks[1], before.Chunks[0]) {
+						t.Fatalf("torn refusal: %v %v, before=%v", r, err, before)
+					}
+					after, err := backend.List(context.Background(), prefix)
+					if err != nil || !equalTestEntries(postMutation, after) {
+						t.Fatalf("refusal changed storage: %v", err)
+					}
+				})
+			}
+		}
+	})
+}
+
+func equalTestEntries(a, b []kv.Entry) bool {
+	return slices.EqualFunc(a, b, func(a, b kv.Entry) bool { return a.Key == b.Key && a.Rev == b.Rev && bytes.Equal(a.Value, b.Value) })
+}
+
+func TestChangeIsrDuplicatePositionsAndRawCap(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, _ := coherentFixture(t, backend, Options{})
+		a, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := backend.List(context.Background(), prefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reads := 0
+		store.readSet = func(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+			reads++
+			if !slices.Equal(keys, []string{volumeKey("v"), chunkKey("v", 0), chunkKey("v", 0)}) {
+				t.Fatalf("deduplicated/reordered request positions: %v", keys)
+			}
+			return backend.ReadSet(ctx, keys)
+		}
+		change := &metav1.IsrChange{Chunk: 0, NewIsr: []string{"a"}}
+		r, err := s.ChangeIsr(context.Background(), &metav1.ChangeIsrRequest{Volume: "v", Epoch: a.Volume.Epoch, Changes: []*metav1.IsrChange{change, change}})
+		if err != nil || r.GetApplied() || r.GetEpoch() != a.Volume.Epoch || len(r.GetChunks()) != 2 || !proto.Equal(r.Chunks[0], a.Volume.Chunks[0]) || !proto.Equal(r.Chunks[1], a.Volume.Chunks[0]) || reads != 1 {
+			t.Fatalf("duplicate refusal: %v %v reads=%d", r, err, reads)
+		}
+		after, err := backend.List(context.Background(), prefix)
+		if err != nil || !equalTestEntries(before, after) {
+			t.Fatal("duplicate refusal wrote metadata")
+		}
+		tooMany := make([]*metav1.IsrChange, 65)
+		for i := range tooMany {
+			tooMany[i] = change
+		}
+		if r, err := s.ChangeIsr(context.Background(), &metav1.ChangeIsrRequest{Volume: "v", Epoch: a.Volume.Epoch, Changes: tooMany}); r != nil || code(err) != codes.InvalidArgument || reads != 1 {
+			t.Fatalf("raw cap did not precede ReadSet: %v %v reads=%d", r, err, reads)
+		}
+	})
+}
+
+func TestChangeIsrCASReadRetriesAndCommitPoint(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, schedule := range []string{"failed-cas", "commit-point", "cancel", "bounded"} {
+			t.Run(schedule, func(t *testing.T) {
+				s, store, v := coherentFixture(t, backend, Options{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				reads, writes := 0, 0
+				store.readSet = func(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+					reads++
+					return backend.ReadSet(ctx, keys)
+				}
+				store.txn = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+					writes++
+					if schedule == "cancel" {
+						cancel()
+						return false, nil
+					}
+					if schedule == "bounded" {
+						return false, nil
+					}
+					if schedule == "failed-cas" && writes == 1 {
+						changed := domain.Chunk{Replicas: v.Chunks[0].Replicas, ISR: []string{"b"}, ISRVer: 1}
+						b, _ := json.Marshal(changed)
+						writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: b})
+					}
+					ok, err := backend.Txn(ctx, cmps, ops)
+					if schedule == "commit-point" && ok {
+						// A newer authority immediately after CAS cannot rewrite its reply.
+						h := header(t, backend, "v")
+						h.Attach("b")
+						writeTestHeader(t, backend, h)
+					}
+					return ok, err
+				}
+				r, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: v.Epoch, Changes: []*metav1.IsrChange{{Chunk: 0, NewIsr: []string{"a"}}}})
+				switch schedule {
+				case "failed-cas":
+					if err != nil || r.GetApplied() || reads != 2 || writes != 1 || r.Chunks[0].IsrVer != 1 || !slices.Equal(r.Chunks[0].Isr, []string{"b"}) {
+						t.Fatalf("failed CAS did not acquire fresh snapshot: %v %v reads=%d writes=%d", r, err, reads, writes)
+					}
+				case "commit-point":
+					if err != nil || !r.GetApplied() || r.Epoch != v.Epoch || r.Chunks[0].IsrVer != 1 || !slices.Equal(r.Chunks[0].Isr, []string{"a"}) || reads != 1 || header(t, backend, "v").Epoch != v.Epoch+1 {
+						t.Fatalf("CAS reply lost its commit point: %v %v reads=%d", r, err, reads)
+					}
+				case "cancel":
+					if r != nil || code(err) != codes.Canceled || reads != 1 || writes != 1 {
+						t.Fatalf("CAS cancellation: %v %v reads=%d writes=%d", r, err, reads, writes)
+					}
+				case "bounded":
+					if r != nil || code(err) != codes.Aborted || reads != retries || writes != retries {
+						t.Fatalf("CAS retry budget: %v %v reads=%d writes=%d", r, err, reads, writes)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestAttachSupersededCommitAccounting(t *testing.T) {
+	headerHistoryBackends(t, volumeKey("v"), func(t *testing.T, backend *headerHistory) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		initialRevision := backend.revision(t)
+		successes := 0
+		var firstRevision int64
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil {
+				if firstRevision == 0 {
+					firstRevision = rev
+					if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b"}); err != nil {
+						t.Fatal(err)
+					}
+					successes++
+				}
+			}
+			return rev, ok, err
+		}
+		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if r != nil {
+			successes++
+		}
+		requireCommittedError(t, err, codes.Aborted, old.Epoch+1, firstRevision)
+		commits := backend.appliedAfter(t, initialRevision)
+		if len(commits) != 2 || successes != 1 || header(t, backend, "v").Epoch != old.Epoch+2 || header(t, backend, "v").Target != "b" {
+			t.Fatalf("commits=%v successes=%d header=%+v", commits, successes, header(t, backend, "v"))
+		}
+	})
+}
+
+func TestAttachAmbiguousBackendRetryCountsEveryAppliedEpoch(t *testing.T) {
+	headerHistoryBackends(t, volumeKey("v"), func(t *testing.T, backend *headerHistory) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		initialRevision := backend.revision(t)
+		var lostRevision int64
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil && lostRevision == 0 {
+				lostRevision = rev
+				// The backend applies the write, loses its reply, and retries the same CAS.
+				// Its outer result reports a failed compare despite that earlier application.
+				rev, ok, err = backend.TxnRev(ctx, cmps, ops)
+				if ok || err != nil {
+					t.Fatalf("retry of applied CAS: applied=%v err=%v", ok, err)
+				}
+			}
+			return rev, ok, err
+		}
+		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+		commits := backend.appliedAfter(t, initialRevision)
+		if err != nil || len(commits) != 2 || !commits[lostRevision] || r.GetVolume().GetEpoch() != old.Epoch+2 || header(t, backend, "v").Epoch != old.Epoch+uint64(len(commits)) {
+			t.Fatalf("ambiguous retry lost epoch: %v %v applied=%v", r, err, commits)
+		}
+	})
+}
+
+func TestChangeIsrSnapshotErrors(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, failure := range []string{"missing-header", "creating", "deleting", "missing-chunk", "bad-chunk", "bad-header", "wrong-type-header", "out-of-range", "backend", "cancel", "deadline"} {
+			t.Run(failure, func(t *testing.T) {
+				s, store, v := coherentFixture(t, backend, Options{})
+				req := &metav1.ChangeIsrRequest{Volume: "v", Epoch: v.Epoch, Changes: []*metav1.IsrChange{{Chunk: 0, NewIsr: []string{"a"}}}}
+				want := codes.Internal
+				switch failure {
+				case "missing-header":
+					writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Delete: true})
+					want = codes.NotFound
+				case "creating", "deleting":
+					h := header(t, backend, "v")
+					h.Creating = failure == "creating"
+					h.Deleting = failure == "deleting"
+					writeTestHeader(t, backend, h)
+					// Publication must be decoded before diagnosing the named chunk.
+					writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: []byte("{")})
+					want = codes.NotFound
+				case "missing-chunk":
+					writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Delete: true})
+				case "bad-chunk":
+					writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: []byte("{")})
+				case "bad-header":
+					writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Value: []byte("{")})
+					want = codes.Unavailable
+				case "wrong-type-header":
+					writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Value: []byte(`{"epoch":"wrong-type"}`)})
+					want = codes.Unavailable
+				case "out-of-range":
+					req.Changes[0].Chunk = 2
+					want = codes.InvalidArgument
+				case "backend", "cancel", "deadline":
+					err := status.Error(codes.Unavailable, "injected snapshot failure")
+					want = codes.Unavailable
+					if failure == "cancel" {
+						err = context.Canceled
+						want = codes.Canceled
+					}
+					if failure == "deadline" {
+						err = context.DeadlineExceeded
+						want = codes.DeadlineExceeded
+					}
+					store.readSet = func(context.Context, []string) ([]kv.ReadResult, error) { return nil, err }
+				}
+				before, err := backend.List(context.Background(), prefix)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r, err := s.ChangeIsr(context.Background(), req)
+				if r != nil || code(err) != want {
+					t.Fatalf("snapshot error: %v %v, want %s", r, err, want)
+				}
+				after, err := backend.List(context.Background(), prefix)
+				if err != nil || !equalTestEntries(before, after) {
+					t.Fatal("failed snapshot changed storage")
+				}
+			})
+		}
+	})
+}
+
+// S1/S4: invalid admission is rejected before any backend read or mutation, on both stores.
+func TestGeometryAdmissionNoMutation(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		store := &countingKV{KV: backend}
+		s := New(store, Options{})
+		for _, x := range []struct {
+			name string
+			v, c uint64
+			r, i uint32
+		}{
+			{"zero", 0, mib, 1, 1}, {"zero-chunk", mib, 0, 1, 1}, {"partial", mib + 4096, mib, 1, 1},
+			{"small", 4096, 4096, 1, 1}, {"huge-chunk", 2 << 30, 2 << 30, 1, 1}, {"u64", ^uint64(0), mib, 1, 1},
+			{"wire-next", 65537 * mib, mib, 1, 1}, {"old", (1 << 20) * mib, mib, 1, 1},
+			{"bad-rf", mib, mib, ^uint32(0), 1}, {"bad-isr", mib, mib, 1, 2},
+			{"rf1-budget", 5138 * mib, mib, 1, 1}, {"rf2-budget", 3882 * mib, mib, 2, 1},
+			{"rf3-budget", 3120 * mib, mib, 3, 1}, {"rf4-budget", 2608 * mib, mib, 4, 1}, {"rf5-budget", 2240 * mib, mib, 5, 1},
+		} {
+			t.Run(x.name, func(t *testing.T) {
+				req := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: x.v, ChunkBytes: x.c, Replicas: x.r, MinIsr: x.i}
+				store.reset()
+				_, e := s.CreateVolume(context.Background(), req)
+				if code(e) != codes.InvalidArgument {
+					t.Fatalf("Create %v", e)
+				}
+				_, e = s.CheckCreateVolume(context.Background(), &metav1.CheckCreateVolumeRequest{Desired: req})
+				if code(e) != codes.InvalidArgument {
+					t.Fatalf("Check %v", e)
+				}
+				if store.mutations != 0 || store.getCalls != 0 {
+					t.Fatalf("invalid request touched backend: %+v", store)
+				}
+				entries, e := backend.List(context.Background(), prefix)
+				if e != nil || len(entries) != 0 {
+					t.Fatalf("metadata changed: %v %v", entries, e)
+				}
+			})
+		}
+	})
+}
+
+// Every admitted count is independent of placement concentration, balancing and preference.
+func TestGeometryPlacement(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		addNodes(t, s, "a", "b", "c", "d", "e", "f")
+		for r := uint32(1); r <= 5; r++ {
+			for _, preferred := range []string{"", "f"} {
+				id := fmt.Sprintf("geometry-%d-%s", r, preferred)
+				got, e := s.CreateVolume(context.Background(), &metav1.CreateVolumeRequest{Id: id, SizeBytes: 11 * mib, ChunkBytes: mib, Replicas: r, MinIsr: r, PreferNode: preferred})
+				if e != nil {
+					t.Fatal(e)
+				}
+				if len(got.Volume.Chunks) != 11 {
+					t.Fatal("chunk count")
+				}
+				used := map[string]int{}
+				for _, ch := range got.Volume.Chunks {
+					if len(ch.Replicas) != int(r) || len(ch.Isr) != int(r) {
+						t.Fatal("RF")
+					}
+					seen := map[string]bool{}
+					for _, n := range ch.Replicas {
+						if seen[n] {
+							t.Fatal("duplicate placement")
+						}
+						seen[n] = true
+						used[n]++
+					}
+					if preferred != "" && !seen[preferred] {
+						t.Fatal("preference omitted")
+					}
+				}
+				if preferred == "" && len(used) != 6 {
+					t.Fatalf("unbalanced placement %v", used)
+				}
+				if preferred != "" && used[preferred] != 11 {
+					t.Fatal("preferred concentration")
+				}
+				deleteAndConfirm(t, s, id, "a", "b", "c", "d", "e", "f")
+			}
+		}
+	})
+}
+
+// S3: the only identity exception is capacity; checking compatibility never resumes or writes.
+func TestCheckCreateVolumeIdentityAndStates(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		store := &countingKV{KV: backend}
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b", "c")
+		req := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: 2 * mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1, PreferNode: "a", FailureDomain: "node", FailureDomainPolicy: "strict"}
+		_, e := s.CreateVolume(context.Background(), req)
+		if e != nil {
+			t.Fatal(e)
+		}
+		initial, e := backend.List(context.Background(), prefix)
+		if e != nil {
+			t.Fatal(e)
+		}
+		check := func(want *metav1.CreateVolumeRequest, required, limit int64, wantCode codes.Code, legacy bool) *metav1.CheckCreateVolumeResponse {
+			t.Helper()
+			store.reset()
+			before, e := backend.List(context.Background(), prefix)
+			if e != nil {
+				t.Fatal(e)
+			}
+			got, e := s.CheckCreateVolume(context.Background(), &metav1.CheckCreateVolumeRequest{Desired: want, RequiredBytes: required, LimitBytes: limit})
+			if code(e) != wantCode {
+				t.Fatalf("Check %v want %v", e, wantCode)
+			}
+			after, e := backend.List(context.Background(), prefix)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if store.mutations != 0 || !slices.EqualFunc(before, after, func(a, b kv.Entry) bool { return a.Key == b.Key && a.Rev == b.Rev && bytes.Equal(a.Value, b.Value) }) {
+				t.Fatal("Check mutated metadata")
+			}
+			if got != nil && got.LegacyIdentity != legacy {
+				t.Fatalf("legacy=%t", got.LegacyIdentity)
+			}
+			return got
+		}
+		smaller := proto.Clone(req).(*metav1.CreateVolumeRequest)
+		smaller.SizeBytes = mib
+		if got := check(smaller, mib, 3*mib, codes.OK, false); got.Volume.SizeBytes != 2*mib {
+			t.Fatal("did not return actual capacity")
+		}
+		for name, mut := range map[string]func(*metav1.CreateVolumeRequest){
+			"chunk": func(r *metav1.CreateVolumeRequest) { r.ChunkBytes = 2 * mib }, "rf": func(r *metav1.CreateVolumeRequest) { r.Replicas = 3 }, "min-isr": func(r *metav1.CreateVolumeRequest) { r.MinIsr = 2 },
+			"preference": func(r *metav1.CreateVolumeRequest) { r.PreferNode = "b" }, "domain": func(r *metav1.CreateVolumeRequest) { r.FailureDomain = "zone" }, "policy": func(r *metav1.CreateVolumeRequest) { r.FailureDomainPolicy = "bestEffort" },
+		} {
+			t.Run(name, func(t *testing.T) {
+				r := proto.Clone(req).(*metav1.CreateVolumeRequest)
+				mut(r)
+				check(r, 0, 0, codes.AlreadyExists, false)
+			})
+		}
+		for _, x := range []struct {
+			required, limit int64
+			code            codes.Code
+		}{{-1, 0, codes.InvalidArgument}, {0, -1, codes.InvalidArgument}, {3 * mib, 2 * mib, codes.InvalidArgument}, {3 * mib, 0, codes.AlreadyExists}, {0, mib, codes.AlreadyExists}} {
+			check(req, x.required, x.limit, x.code, false)
+		}
+		h := header(t, backend, "v")
+		original := h
+		// A supported grown current view retains its historical canonical creation size.
+		h.SizeBytes = 3 * mib
+		writeTestHeader(t, backend, h)
+		b, _ := json.Marshal(domain.Chunk{Replicas: []string{"a", "b"}, ISR: []string{"a", "b"}})
+		writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 2), Value: b})
+		if got := check(req, 2*mib, 3*mib, codes.OK, false); got.Volume.SizeBytes != 3*mib {
+			t.Fatal("lost current grown capacity")
+		}
+		writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 2), Delete: true})
+		writeTestHeader(t, backend, original)
+		h = original
+		h.CreateSpec = nil
+		h.CreateOperation = ""
+		writeTestHeader(t, backend, h)
+		check(smaller, mib, 0, codes.OK, true)
+		for _, state := range []string{"creating", "deleting", "missing", "tombstone", "operation-only", "identity-only", "unsupported"} {
+			t.Run(state, func(t *testing.T) {
+				h = original
+				wantCode := codes.DataLoss
+				switch state {
+				case "creating":
+					h.Creating = true
+					wantCode = codes.Aborted
+				case "deleting":
+					h.Deleting = true
+					wantCode = codes.AlreadyExists
+				case "operation-only":
+					h.CreateSpec = nil
+				case "identity-only":
+					h.CreateOperation = ""
+				case "unsupported":
+					h.SizeBytes = 65536 * mib
+					wantCode = codes.FailedPrecondition
+				case "missing", "tombstone":
+					wantCode = codes.Aborted
+				}
+				writeTestHeader(t, backend, h)
+				if state == "missing" || state == "tombstone" {
+					writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Delete: true})
+				}
+				if state == "tombstone" {
+					writeTestOps(t, backend, kv.Op{Key: tombstoneKey("v"), Value: []byte(`{"nodes":["a"]}`)})
+					wantCode = codes.AlreadyExists
+				}
+				check(req, 0, 0, wantCode, false)
+				writeTestOps(t, backend, kv.Op{Key: tombstoneKey("v"), Delete: true})
+			})
+		}
+		// Missing, null, unknown and invalid new-format canonical fields cannot become legacy.
+		originalJSON, _ := json.Marshal(original)
+		for _, damage := range []string{"missing", "null", "unknown", "invalid", "wrong-type"} {
+			t.Run("identity-"+damage, func(t *testing.T) {
+				var raw map[string]any
+				if e := json.Unmarshal(originalJSON, &raw); e != nil {
+					t.Fatal(e)
+				}
+				identity := raw["create_spec"].(map[string]any)
+				switch damage {
+				case "missing":
+					delete(identity, "min_isr")
+				case "null":
+					identity["chunk_bytes"] = nil
+				case "unknown":
+					identity["future_field"] = true
+				case "invalid":
+					identity["prefer_node"] = "../bad"
+				case "wrong-type":
+					identity["min_isr"] = "wrong-type"
+				}
+				b, _ := json.Marshal(raw)
+				writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Value: b})
+				check(req, 0, 0, codes.DataLoss, false)
+			})
+		}
+		// Restore every original byte to prove valid stored identities are not migrated by checks.
+		writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Value: originalJSON})
+		check(req, 0, 0, codes.OK, false)
+		final, _ := backend.List(context.Background(), prefix)
+		if !slices.EqualFunc(initial, final, func(a, b kv.Entry) bool { return a.Key == b.Key && bytes.Equal(a.Value, b.Value) }) {
+			t.Fatal("valid stored bytes changed")
+		}
+	})
+}
+
+// The largest legal future view must fit every response wrapper under the frozen B formula.
+func TestGeometryWorstMetadataReplies(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	for r, n := range fixture.Caps {
+		t.Run(fmt.Sprintf("rf%d", r+1), func(t *testing.T) {
+			v := fixture.Volume(r + 1)
+			v.Epoch = ^uint64(0)
+			if len(v.ID) != 128 || len(v.Target) != 128 || len(v.Chunks) != n {
+				t.Fatal("incomplete fixture")
+			}
+			tok, e := captoken.Sign(key, captoken.Claims{Volume: v.ID, Node: v.Target, Epoch: v.Epoch, FirstEpoch: 1, IssuedAt: 1<<63 - 1})
+			if e != nil {
+				t.Fatal(e)
+			}
+			// Maximum token permitted by the 128-byte service identity grammar (v2 adds first_epoch).
+			if len(tok) != 4+1+2+128+8+2+128+8+8+64 {
+				t.Fatalf("token len %d", len(tok))
+			}
+			p := volumePB(v)
+			b, e := geometry.MetadataBound(uint64(n), uint32(r+1))
+			if e != nil || b > 4<<20 {
+				t.Fatalf("budget %d,%v", b, e)
+			}
+			for name, msg := range map[string]proto.Message{"create": &metav1.CreateVolumeResponse{Volume: p}, "get": &metav1.GetVolumeResponse{Volume: p}, "attach": &metav1.AttachResponse{Volume: p, Token: tok}, "check": &metav1.CheckCreateVolumeResponse{Volume: p, LegacyIdentity: true}} {
+				size := proto.Size(msg)
+				if uint64(size) > b {
+					t.Errorf("%s proto.Size=%d exceeds B=%d", name, size, b)
+				}
+				t.Logf("%s RF=%d N=%d encoded=%d B=%d", name, r+1, n, size, b)
+			}
+			if _, e := geometry.Admit(uint64(n+1)<<30, 1<<30, uint32(r+1), 1); e == nil {
+				t.Fatal("next N accepted")
+			}
+		})
+	}
+}
+
+func TestCheckCreateVolumeRejectsMalformedDesiredBeforeRead(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		store := &countingKV{KV: backend}
+		s := New(store, Options{})
+		good := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinIsr: 1}
+		for name, mut := range map[string]func(*metav1.CreateVolumeRequest){
+			"id": func(r *metav1.CreateVolumeRequest) { r.Id = "../v" }, "preference": func(r *metav1.CreateVolumeRequest) { r.PreferNode = "../n" },
+			"domain": func(r *metav1.CreateVolumeRequest) { r.FailureDomain = "future" }, "policy": func(r *metav1.CreateVolumeRequest) { r.FailureDomainPolicy = "future" },
+		} {
+			t.Run(name, func(t *testing.T) {
+				r := proto.Clone(good).(*metav1.CreateVolumeRequest)
+				mut(r)
+				store.reset()
+				_, e := s.CheckCreateVolume(context.Background(), &metav1.CheckCreateVolumeRequest{Desired: r})
+				if code(e) != codes.InvalidArgument || store.getCalls != 0 || store.mutations != 0 {
+					t.Fatalf("invalid desired read/mutated backend: %v %+v", e, store)
+				}
+			})
+		}
+		store.reset()
+		_, e := s.CheckCreateVolume(context.Background(), &metav1.CheckCreateVolumeRequest{})
+		if code(e) != codes.InvalidArgument || store.getCalls != 0 || store.mutations != 0 {
+			t.Fatal("nil desired touched backend")
+		}
+	})
+}
+
+func TestCheckCreateVolumeReplacementIsAuthoritative(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, _ := coherentFixture(t, backend, Options{})
+		want := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: 2 * mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1}
+		calls := 0
+		store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+			entries, e := backend.List(ctx, p)
+			if p == chunkPrefix("v") {
+				store.list = nil
+				replaceTestVolume(t, s)
+				calls++
+			}
+			return entries, e
+		}
+		_, e := s.CheckCreateVolume(context.Background(), &metav1.CheckCreateVolumeRequest{Desired: want, RequiredBytes: mib})
+		if code(e) != codes.AlreadyExists || calls != 1 {
+			t.Fatalf("accepted mixed old identity/new replacement: %v calls=%d", e, calls)
+		}
+		current := header(t, backend, "v")
+		if current.ChunkBytes != 2*mib || current.Replicas != 3 || current.MinISR != 2 {
+			t.Fatal("replacement altered")
+		}
+	})
+}
+
+// Legacy unsupported bytes stay available to operator deletion, without attach mutation.
+func TestGeometryUnsupportedStoredVolumesStayUnchanged(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		ctx := context.Background()
+		store := &countingKV{KV: backend}
+		s := New(store, Options{})
+		for _, x := range []struct {
+			name string
+			v, c uint64
+		}{
+			{"zero-chunk", mib, 0}, {"zero-volume", 0, mib}, {"partial", mib + 4096, mib}, {"old-huge-chunk", 2 << 30, 2 << 30}, {"old-budget", 65536 * mib, mib}, {"max-u64", ^uint64(0), mib},
+		} {
+			t.Run(x.name, func(t *testing.T) {
+				h := domain.Header{ID: "v", SizeBytes: x.v, ChunkBytes: x.c, Replicas: 1, MinISR: 1, Epoch: 7, FirstEpoch: 1, Target: "a"}
+				writeTestHeader(t, backend, h)
+				before, _, _ := backend.Get(ctx, volumeKey("v"))
+				store.reset()
+				_, e := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
+				if code(e) != codes.FailedPrecondition {
+					t.Fatalf("Get %v", e)
+				}
+				_, e = s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b"})
+				if code(e) != codes.FailedPrecondition {
+					t.Fatalf("Attach %v", e)
+				}
+				after, _, _ := backend.Get(ctx, volumeKey("v"))
+				if store.mutations != 0 || before.Rev != after.Rev || !bytes.Equal(before.Value, after.Value) {
+					t.Fatal("unsupported volume rewritten")
+				}
+			})
+		}
+	})
+}
+
+// Corruption between the initial strict identity read and the coherent view cannot change
+// CheckCreateVolume's DataLoss classification or trigger a legacy/scalar fallback.
+func TestCheckCreateVolumeNestedTypeCorruptionAfterInitialRead(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, original := coherentFixture(t, backend, Options{})
+		req := &metav1.CreateVolumeRequest{Id: "v", SizeBytes: 2 * mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1}
+		var damaged []byte
+		reads, writes := 0, 0
+		store.txn = func(context.Context, []kv.Cmp, []kv.Op) (bool, error) {
+			writes++
+			return false, status.Error(codes.Internal, "unexpected compatibility write")
+		}
+		store.txnRev = func(context.Context, []kv.Cmp, []kv.Op) (int64, bool, error) {
+			writes++
+			return 0, false, status.Error(codes.Internal, "unexpected compatibility write")
+		}
+		store.get = func(ctx context.Context, key string) (kv.Entry, bool, error) {
+			if key == volumeKey("v") {
+				store.get = nil
+				reads++
+				entry, ok, e := backend.Get(ctx, key)
+				if e != nil || !ok {
+					t.Fatalf("fixture header %t,%v", ok, e)
+				}
+				var raw map[string]any
+				if e := json.Unmarshal(entry.Value, &raw); e != nil {
+					t.Fatal(e)
+				}
+				raw["create_spec"].(map[string]any)["min_isr"] = "wrong-type"
+				damaged, e = json.Marshal(raw)
+				if e != nil {
+					t.Fatal(e)
+				}
+				writeTestOps(t, backend, kv.Op{Key: key, Value: damaged})
+			}
+			return backend.Get(ctx, key)
+		}
+		got, e := s.CheckCreateVolume(context.Background(), &metav1.CheckCreateVolumeRequest{Desired: req, RequiredBytes: mib})
+		if code(e) != codes.DataLoss || got != nil || reads != 1 || writes != 0 {
+			t.Fatalf("nested identity corruption: got=%v error=%v injected=%d mutations=%d", got, e, reads, writes)
+		}
+		entry, ok, e := backend.Get(context.Background(), volumeKey("v"))
+		if e != nil || !ok || !bytes.Equal(entry.Value, damaged) {
+			t.Fatal("damaged identity rewritten")
+		}
+		var raw struct {
+			Epoch uint64 `json:"epoch"`
+		}
+		if e := json.Unmarshal(entry.Value, &raw); e != nil || raw.Epoch != original.Epoch {
+			t.Fatalf("corruption changed epoch: %d,%v", raw.Epoch, e)
 		}
 	})
 }

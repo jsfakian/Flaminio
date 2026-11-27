@@ -114,6 +114,12 @@ Findings High/Medium/Low; addressed.
 ## Tests
 S1–S9 covered; make lint/test/race/hygiene/contracts + make sim before PR.
 
+Post-ready leftovers (2026-11-24): embedded-etcd NOSPACE alarm proof
+(`TestEmbeddedEtcdNoSpaceDeleteOnlyGC`); four-source ≥64 eligible fairness + million-key
+inventory ceilings (`TestCreateRecoveryRespectsPageTailBudget`,
+`TestCreateRecoveryLargeInventoryBounds`); Go txn replay of `create-recovery.json` on mem+etcd
+(`TestCreateRecoverySchedulesReplay`).
+
 ## Conformance
 PASS pending formal checker; ADR 0016 accepted; #78 gate deferred.
 

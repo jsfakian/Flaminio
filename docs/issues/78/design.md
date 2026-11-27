@@ -1,6 +1,6 @@
 # Issue #78: Placement admitted after drain marking — design
 
-[Specification](spec.md). Approved 2026-11-13; not implemented.
+[Specification](spec.md). Published clear snapshot approved 2026-11-20; integration and validation are recorded in [report.md](report.md).
 Protocol choice: [proposed ADR](adr-proposal.md).
 Settled at approval, 2026-11-13: the protocol ADR is accepted with the plan (see decisions.md, Settled at approval).
 
@@ -133,7 +133,8 @@ its next check fails, requiring restart of that drain invocation.
 - **Errors:** invalid arguments `InvalidArgument`; absent registered destination/mark target
   `NotFound`; draining destination/stale generation `FailedPrecondition`; corrupt inventory
   `DataLoss`; contention `Aborted`; KV/context errors retain current mappings.
-- **Bounds:** gate initialization1compare/1op; create claim3compares/1op; registration at most
+- **Bounds:** gate initialization 1 compare/1 write; create claim 4 compares/2 writes (the
+  #76 root compare/write, volume absence, tombstone absence and gate compare); registration at most
   2/2; mark3/2; unmark2/2;
   completion 1/0. Move adds one gate compare to existing/#18 compares, well below 120. Chunk
   batches keep existing bounds. No node-count-sized reservation transaction.

@@ -7,7 +7,7 @@
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`c9083313e6389cfc9076e1bd1c1c6903d7725bd166ae449bec313cf62a05af1a`).
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
 
-Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
+Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Implementation status is recorded in [report.md](report.md).
 
 ## Settled at approval
 
@@ -94,3 +94,61 @@ Approved with the recommended answer to each open question (see Settled at appro
   an earlier incarnation is discarded as today. Three cases pin the position of the check.
 
 No finding was judged not to apply.
+
+## Implementation clarification — 2026-11-27
+
+- **U3 work bound:** the design's original combined "validation/merge O(N+T+V×RF)" sentence
+  omitted existing `ExtentSet`/B-tree union costs. Keep that existing representation and
+  remove repeated per-chunk report searches. New row/required/chunk/membership scans are
+  linear; indexed union adds O(T log U + A), with U existing runs and A absorbed runs removed.
+  A bulk helper would instead rescan the accumulated union on each peer reply. Document and
+  test the actual bounded scans/union calls rather than rewrite extent storage or claim
+  linear B-tree operations. This corrects the work description while preserving S1–S9,
+  uncertainty budgets, conservative coverage and all authority/durability rules.
+- **Target spatial retention:** the replica arena/report budget in S1 does not introduce a
+  new target-map admission policy. The existing target reconciliation union remains bounded
+  by active geometry: at most the sum of `ceil(blocks_per_chunk / 2)` disjoint runs. A
+  permanent reconnect regression retains 131,070 runs from two separately valid reports,
+  verifies replay adds no history and a whole-chunk row absorbs them into one run. This
+  evidence is included in the work bound above; aggregate resource policy remains #75.
+- **Engine adapter observation:** a minimal `cfg(test)` command-channel constructor in
+  `flaminio-node/src/net.rs` lets the regression inspect the real remote `Connect` command
+  alongside local `Accepted`. It spawns no worker and changes no runtime behavior; the test
+  verifies captured Hello chunks rather than adding a second TLS fixture.
+- **Rejected-write/resync integration:** clean forged seed 4 exposed a real admission gap,
+  independently confirmed against `Action::Drop` → `Reply::Nothing` while the stream stays
+  open. BeginResync Ack now replays all pending chunk Writes before snapshot work, retires
+  old same-chunk request receipts, and tracks live extents/fresh acknowledgements independently
+  of client completion. Existing S11 fixtures hold the new replay Ack to preserve their stale
+  receipt witness. This repairs the existing durable-write/join invariant without changing
+  client quorum, metadata, wire or disk contracts. A fresh deterministic proof and a real
+  replay-omission mutation are required before readiness.
+- **Receipt-mutation scope:** the new replay defense invalidates the old pinned
+  `keep_dropped_acks` witness. Its semantic old-generation evidence includes logical
+  acknowledgement bookkeeping and request-ID retirement; test-only mutation wiring may retain
+  both while leaving normal replay enabled. Establish an actual clean-passing same-seed
+  witness; never skip its assertion or compound it with the separate replay-omission bug.
+- **Stable source retirement:** clean cases 1833/9803/14081 showed that mutable move proposal
+  state can disappear while its conditional removal may already have committed. Remember the
+  emitted source/expected version independently, reject its source-read use/completion and
+  clear only on a strictly newer authoritative version. Retire pending normal receipts,
+  invalidate local fast-read generations and abort affected snapshot provenance. This enforces
+  the existing read-from-removing-member rule without using timeout as proof.
+- **Pre-snapshot pending extents:** new-round `force_copy` includes every current chunk write
+  before Mapped is sent, including writes that finish before BeginResync Ack. Restore that
+  evidence to dirty state on abort. An unmapped-source proof fails without the seed and passes
+  with it; the correction changes neither client quorum nor on-disk/wire format.
+
+- **Completion-history assurance:** the fresh replay defense made the old random receipt
+  witness obsolete. A small `cfg(test)` deferred Write completion hook provides a real
+  old-generation history, with normal replay enabled and clean matching execution passing.
+  It neither alters normal scheduling nor introduces RNG draws. The fast-fence mutation
+  has a directly verified witness at 1,001,529 after an honest no-catch [0,200000) search;
+  no unsearched first-catch claim is made.
+
+- **R1-A-C1 — atomic in-memory Hello admission:** the simulator's Replica adapter must
+  preflight the whole unique missing set against all held chunks before invoking the core
+  or creating chunks. A partial add followed by no reply diverged from production and S1.
+  Preserve the existing Stale response for an older epoch. The regression preserves fence,
+  session, data, filters and uncertainty in unopened/precise/coarse cases and tests exact-fit
+  duplicates. This applies the existing admission contract; it adds no production rule.

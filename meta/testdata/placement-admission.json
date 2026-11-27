@@ -4,11 +4,37 @@
       "name": "clean_mark_admit_elsewhere",
       "mutant": "none",
       "steps": [
-        { "action": "register", "node": "a" },
-        { "action": "register", "node": "b" },
-        { "action": "mark", "node": "a" },
-        { "action": "admit", "volume": "v1", "nodes": ["a", "b"] },
-        { "action": "publish", "volume": "v1" }
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "admit",
+          "volume": "v1",
+          "nodes": [
+            "b"
+          ]
+        },
+        {
+          "action": "clean",
+          "volume": "v1"
+        },
+        {
+          "action": "batch",
+          "volume": "v1"
+        },
+        {
+          "action": "publish",
+          "volume": "v1"
+        }
       ]
     },
     {
@@ -16,12 +42,17 @@
       "mutant": "omitted_admission_compare",
       "expect_violation": "PostMarkAdmission",
       "steps": [
-        { "action": "register", "node": "a" },
+        {
+          "action": "register",
+          "node": "a"
+        },
         {
           "action": "mark_then_admit",
           "mark_node": "a",
           "volume": "v",
-          "nodes": ["a"]
+          "nodes": [
+            "a"
+          ]
         }
       ]
     },
@@ -30,14 +61,45 @@
       "mutant": "omitted_reservation_count",
       "expect_violation": "PrematureOrStaleCompletion",
       "steps": [
-        { "action": "register", "node": "a" },
-        { "action": "register", "node": "b" },
-        { "action": "admit", "volume": "old", "nodes": ["b"] },
-        { "action": "mark", "node": "a" },
-        { "action": "check_start", "node": "a", "generation": 0 },
-        { "action": "header_scan" },
-        { "action": "chunk_scan", "node": "a" },
-        { "action": "final_validation", "node": "a", "generation": 0 }
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "admit",
+          "volume": "old",
+          "nodes": [
+            "b"
+          ]
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 1,
+          "expect_placement": 0,
+          "expect_incoming": 0
+        }
       ]
     },
     {
@@ -45,41 +107,609 @@
       "mutant": "omitted_final_marker_compare",
       "expect_violation": "PrematureOrStaleCompletion",
       "steps": [
-        { "action": "register", "node": "a" },
-        { "action": "mark", "node": "a" },
-        { "action": "check_start", "node": "a", "generation": 0 },
-        { "action": "header_scan" },
-        { "action": "chunk_scan", "node": "a" },
-        { "action": "unmark", "node": "a" },
-        { "action": "final_validation", "node": "a", "generation": 0 }
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "unmark",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0
+        }
       ]
     },
     {
       "name": "empty_scan_unmark_before_validation",
       "mutant": "none",
       "steps": [
-        { "action": "register", "node": "a" },
-        { "action": "mark", "node": "a" },
-        { "action": "check_start", "node": "a", "generation": 0 },
-        { "action": "header_scan" },
-        { "action": "chunk_scan", "node": "a" },
-        { "action": "unmark", "node": "a" },
-        { "action": "final_validation", "node": "a", "generation": 0 }
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "unmark",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0
+        }
       ]
     },
     {
       "name": "empty_scan_unmark_remark_before_validation",
       "mutant": "none",
       "steps": [
-        { "action": "register", "node": "a" },
-        { "action": "mark", "node": "a" },
-        { "action": "check_start", "node": "a", "generation": 0 },
-        { "action": "header_scan" },
-        { "action": "chunk_scan", "node": "a" },
-        { "action": "unmark", "node": "a" },
-        { "action": "mark", "node": "a" },
-        { "action": "final_validation", "node": "a", "generation": 0 }
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "unmark",
+          "node": "a"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0
+        }
       ]
+    },
+    {
+      "name": "claim_before_mark_partial_copy_and_restart",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "plan",
+          "volume": "phased",
+          "nodes": [
+            "a"
+          ],
+          "chunk_count": 40
+        },
+        {
+          "action": "stage",
+          "volume": "phased"
+        },
+        {
+          "action": "claim",
+          "volume": "phased"
+        },
+        {
+          "action": "clean",
+          "volume": "phased"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 1,
+          "expect_placement": 0,
+          "expect_incoming": 0
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "restart"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 1,
+          "expect_placement": 32,
+          "expect_incoming": 0
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "publish",
+          "volume": "phased"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 40,
+          "expect_incoming": 0
+        }
+      ]
+    },
+    {
+      "name": "publication_between_header_and_chunk_scan",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "plan",
+          "volume": "phased",
+          "nodes": [
+            "a"
+          ],
+          "chunk_count": 40
+        },
+        {
+          "action": "stage",
+          "volume": "phased"
+        },
+        {
+          "action": "claim",
+          "volume": "phased"
+        },
+        {
+          "action": "clean",
+          "volume": "phased"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "publish",
+          "volume": "phased"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 1,
+          "expect_placement": 40,
+          "expect_incoming": 0
+        }
+      ]
+    },
+    {
+      "name": "delete_fence_blocks_delayed_copy",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "plan",
+          "volume": "phased",
+          "nodes": [
+            "a"
+          ],
+          "chunk_count": 40
+        },
+        {
+          "action": "stage",
+          "volume": "phased"
+        },
+        {
+          "action": "claim",
+          "volume": "phased"
+        },
+        {
+          "action": "clean",
+          "volume": "phased"
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "delete_fence",
+          "volume": "phased"
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 32,
+          "expect_incoming": 0
+        },
+        {
+          "action": "delete_header",
+          "volume": "phased"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 32,
+          "expect_incoming": 0
+        },
+        {
+          "action": "delete_chunks",
+          "volume": "phased"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 0,
+          "expect_incoming": 0
+        }
+      ]
+    },
+    {
+      "name": "move_mark_before_commit",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "admit",
+          "volume": "move",
+          "nodes": [
+            "b"
+          ]
+        },
+        {
+          "action": "clean",
+          "volume": "move"
+        },
+        {
+          "action": "batch",
+          "volume": "move"
+        },
+        {
+          "action": "publish",
+          "volume": "move"
+        },
+        {
+          "action": "plan_move",
+          "volume": "move",
+          "chunk": 0,
+          "to": "a"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "commit_move",
+          "volume": "move",
+          "chunk": 0
+        }
+      ]
+    },
+    {
+      "name": "omitted_move_admission_compare_counterexample",
+      "mutant": "omitted_admission_compare",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "admit",
+          "volume": "move",
+          "nodes": [
+            "b"
+          ]
+        },
+        {
+          "action": "clean",
+          "volume": "move"
+        },
+        {
+          "action": "batch",
+          "volume": "move"
+        },
+        {
+          "action": "publish",
+          "volume": "move"
+        },
+        {
+          "action": "plan_move",
+          "volume": "move",
+          "chunk": 0,
+          "to": "a"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "commit_move",
+          "volume": "move",
+          "chunk": 0
+        }
+      ],
+      "expect_violation": "PostMarkAdmission"
+    },
+    {
+      "name": "empty_scan_unmark_admit_remark_before_validation",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "unmark",
+          "node": "a"
+        },
+        {
+          "action": "admit",
+          "volume": "new",
+          "nodes": [
+            "a"
+          ]
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0
+        }
+      ]
+    },
+    {
+      "name": "omitted_final_marker_compare_after_admit_remark_counterexample",
+      "mutant": "omitted_final_marker_compare",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "unmark",
+          "node": "a"
+        },
+        {
+          "action": "admit",
+          "volume": "new",
+          "nodes": [
+            "a"
+          ]
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0
+        }
+      ],
+      "expect_violation": "PrematureOrStaleCompletion"
     }
   ]
 }

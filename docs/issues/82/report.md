@@ -45,3 +45,30 @@ No comments from the requested review scopes, including Nits.
 Changes/resolution: Both fresh reviewers confirmed deployment-name Nit resolved against actual driver.yaml and reported zero comments including Nits. Earlier High production authority finding was confirmed resolved in R2; R2 mode Nit confirmed fixed in R3. No implementation/runtime/lab tests or approval inferred.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+### Code loop, round 1
+
+Code + security reviewers. Findings: High proof↔target bind; Medium ValidateShutdown re-bind, Owned incarnation, file-backed verify test, annotation race; Low S9 classify, cleanup ResolveIdentity, Clear bind. Fixed in following commit; ADR 0015 accepted.
+
+### Code loop, round 2 (reviewed be014eb)
+
+Code + security: **CLEAR**.
+
+## Tests
+
+S1–S9 covered by control/failover and main_test packages; see go test results.
+`make lint test race hygiene contracts` run before PR.
+
+## Conformance
+
+PASS (pending formal table): rules S1–S9 implemented; ADR 0015 accepted; lab csi-failover refuse pending on shared lab.
+
+## Lab
+
+- `make csi-failover` — pending (shared lab; design: refuse without supported authority)
+- Physical lockout qualification — pending / separate authorization
+
+## ADRs
+
+Accepted ADR 0015 (node-wide shutdown requires a held fence).
+

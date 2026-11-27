@@ -35,6 +35,10 @@ service MetadataService {
   // Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
   // administrator.
   rpc CreateVolume(CreateVolumeRequest) returns (CreateVolumeResponse);
+  // Read-only CSI create compatibility check against the current coherent volume and its
+  // canonical creation identity. Capacity range is the sole identity exception. Caller: an
+  // administrator.
+  rpc CheckCreateVolume(CheckCreateVolumeRequest) returns (CheckCreateVolumeResponse);
   // Caller: any authenticated identity.
   rpc GetVolume(GetVolumeRequest) returns (GetVolumeResponse);
   // Caller: any authenticated identity.
@@ -166,6 +170,18 @@ message CreateVolumeRequest {
 
 message CreateVolumeResponse {
   Volume volume = 1;
+}
+
+message CheckCreateVolumeRequest {
+  CreateVolumeRequest desired = 1;
+  int64 required_bytes = 2;
+  int64 limit_bytes = 3;
+}
+
+message CheckCreateVolumeResponse {
+  Volume volume = 1;
+  // Only genuinely legacy visible headers lack the full canonical creation identity.
+  bool legacy_identity = 2;
 }
 
 message GetVolumeRequest {

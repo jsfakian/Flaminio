@@ -1,6 +1,6 @@
 # Issue #78: Placement admitted after drain marking — specification
 
-[Intent](intent.md). How: [design](design.md). Approved 2026-11-13; not implemented.
+[Intent](intent.md). How: [design](design.md). Published clear snapshot approved 2026-11-20; integration and validation are recorded in [report.md](report.md).
 
 ## Terms
 

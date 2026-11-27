@@ -4,10 +4,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 dir=$(mktemp -d)
-trap 'kill "${pid:-}" 2>/dev/null || true; rm -rf "$dir"' EXIT
+trap 'kill "${pid:-}" "${geometry_pid:-}" 2>/dev/null || true; rm -rf "$dir"' EXIT
 
 go build -o "$dir/flaminio-meta" ./meta/cmd/flaminio-meta
 go build -o "$dir/flaminio-ca" ./control/cmd/flaminio-ca
+go build -o "$dir/geometry-interop" ./meta/testdata/geometry-interop
 "$dir/flaminio-ca" init "$dir/ca" "interop CA"
 "$dir/flaminio-ca" token-key "$dir/token.key"
 issue() { # name spiffe-id flags...
@@ -34,7 +35,19 @@ for n in fl-a fl-b; do
 done
 admin create v 2M 2 1 1M
 admin attach v fl-a
+admin create bounded-isr 129M 2 1 1M
+admin attach bounded-isr fl-a
+
+"$dir/geometry-interop" --dir "$dir" 2>"$dir/geometry.log" &
+geometry_pid=$!
+for _ in $(seq 100); do
+    [[ -s "$dir/geometry.addr" ]] && break
+    kill -0 "$geometry_pid" 2>/dev/null || { cat "$dir/geometry.log" >&2; exit 1; }
+    sleep 0.1
+done
+[[ -s "$dir/geometry.addr" ]] || { cat "$dir/geometry.log" >&2; exit 1; }
+geometry_addr=$(cat "$dir/geometry.addr")
 
 cd dataplane
-FLAMINIO_META_INTEROP="127.0.0.1:$port" FLAMINIO_META_INTEROP_DIR="$dir" \
+FLAMINIO_GEOMETRY_INTEROP="$geometry_addr" FLAMINIO_META_INTEROP="127.0.0.1:$port" FLAMINIO_META_INTEROP_DIR="$dir" \
     "${CARGO:-cargo}" test -q -p flaminio-metaclient --test interop -- --ignored --nocapture

@@ -1,13 +1,18 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 
@@ -635,9 +640,9 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 	}
 	var file struct {
 		Schedules []struct {
-			Name             string `json:"name"`
-			ExpectViolation  string `json:"expect_violation"`
-			Steps            []struct {
+			Name            string `json:"name"`
+			ExpectViolation string `json:"expect_violation"`
+			Steps           []struct {
 				Action     string   `json:"action"`
 				Node       string   `json:"node"`
 				Volume     string   `json:"volume"`
@@ -645,6 +650,11 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 				Chunk      uint32   `json:"chunk"`
 				To         string   `json:"to"`
 				Generation int64    `json:"generation"`
+				MarkNode   string   `json:"mark_node"`
+				ChunkCount uint32   `json:"chunk_count"`
+				Pending    *uint64  `json:"expect_pending"`
+				Placement  *uint64  `json:"expect_placement"`
+				Incoming   *uint64  `json:"expect_incoming"`
 			} `json:"steps"`
 		} `json:"schedules"`
 	}
@@ -652,17 +662,46 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sched := range file.Schedules {
-		if sched.ExpectViolation != "" {
-			continue // mutant counterexamples belong to the Rust model
-		}
 		sched := sched
 		t.Run(sched.Name, func(t *testing.T) {
 			backends(t, func(t *testing.T, store kv.KV) {
 				s := New(store, Options{})
 				ctx := context.Background()
 				drainGen := map[string]uint64{}
+				creators := map[string]*admissionScheduleActor{}
+				deletions := map[string]*admissionScheduleActor{}
+				moves := map[string]*admissionScheduleActor{}
+				requests := map[string]*metav1.CreateVolumeRequest{}
+				generations := map[string]int64{}
+				claims := map[string]uint64{}
+				var check *admissionScheduleActor
 				var checkGen uint64
-				for _, step := range sched.Steps {
+				var checkNode string
+				startCreate := func(volume string, nodes []string, count uint32) *admissionScheduleActor {
+					t.Helper()
+					if count == 0 {
+						count = 1
+					}
+					req := &metav1.CreateVolumeRequest{Id: volume, SizeBytes: uint64(count) * mib, ChunkBytes: mib, Replicas: uint32(len(nodes)), MinIsr: 1, PreferNode: nodes[0]}
+					requests[volume] = req
+					a := startAdmissionActor(t, store, volume, "create", func(ctx context.Context, svc *Service) (any, error) { return svc.CreateVolume(ctx, req) })
+					creators[volume] = a
+					return a
+				}
+				captureClaim := func(volume string) {
+					t.Helper()
+					h := header(t, store, volume)
+					if !h.Creating || h.AdmissionGeneration <= 0 || h.Epoch != 0 {
+						t.Fatalf("claim did not retain a hidden positive admission: %+v", h)
+					}
+					e, ok, err := store.Get(ctx, volumeKey(volume))
+					if err != nil || !ok {
+						t.Fatal(err)
+					}
+					generations[volume], claims[volume] = h.AdmissionGeneration, uint64(e.Rev)
+				}
+				for i, step := range sched.Steps {
+					t.Logf("step %d: %s %s %s", i, step.Action, step.Volume, step.Node)
 					switch step.Action {
 					case "register":
 						addNodes(t, s, step.Node)
@@ -676,54 +715,159 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 						if _, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: step.Node, Draining: false}); err != nil {
 							t.Fatal(err)
 						}
-					case "admit":
-						rf := uint32(len(step.Nodes))
-						if rf == 0 {
-							rf = 1
+					case "plan", "admit", "mark_then_admit":
+						a := startCreate(step.Volume, step.Nodes, step.ChunkCount)
+						a.requirePhase(t, "stage")
+						if step.Action == "plan" {
+							break
 						}
-						_, err := s.CreateVolume(ctx, &metav1.CreateVolumeRequest{
-							Id: step.Volume, SizeBytes: mib, ChunkBytes: mib, Replicas: rf, MinIsr: 1,
+						a.advancePhase(t, "stage")
+						a.requirePhase(t, "claim")
+						if step.Action == "mark_then_admit" {
+							if _, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: step.MarkNode, Draining: true}); err != nil {
+								t.Fatal(err)
+							}
+							a.advance(t)
+							if a.result == nil || code(a.result.err) != codes.FailedPrecondition && code(a.result.err) != codes.Aborted {
+								t.Fatalf("stale claim admitted after mark: %+v phase=%v", a.result, a.pause)
+							}
+							if _, ok, err := store.Get(ctx, volumeKey(step.Volume)); err != nil || ok {
+								t.Fatalf("forbidden post-mark header: exists=%v err=%v", ok, err)
+							}
+							break
+						}
+						a.advance(t)
+						captureClaim(step.Volume)
+					case "stage":
+						creators[step.Volume].advancePhase(t, "stage")
+						creators[step.Volume].requirePhase(t, "claim")
+					case "claim":
+						a := creators[step.Volume]
+						a.requirePhase(t, "claim")
+						a.advance(t)
+						captureClaim(step.Volume)
+					case "clean", "batch":
+						a := creators[step.Volume]
+						a.requirePhase(t, step.Action)
+						a.advance(t)
+						if a.result != nil && a.result.err != nil {
+							if _, deleting := deletions[step.Volume]; !deleting {
+								t.Fatalf("publication failed: %v", a.result.err)
+							}
+						}
+					case "publish":
+						a := creators[step.Volume]
+						a.requirePhase(t, "publish")
+						a.advance(t)
+						if a.result == nil || a.result.err != nil {
+							t.Fatalf("finalization failed: %+v", a.result)
+						}
+						h := header(t, store, step.Volume)
+						if h.Creating || h.AdmissionGeneration != generations[step.Volume] || h.FirstEpoch != claims[step.Volume] || h.Epoch != claims[step.Volume] {
+							t.Fatalf("finalization changed incarnation/admission: %+v", h)
+						}
+					case "restart":
+						s = New(store, Options{})
+						for id, a := range creators {
+							if a.result != nil {
+								continue
+							}
+							a.stop(t)
+							req := requests[id]
+							creators[id] = startAdmissionActor(t, store, id, "create", func(ctx context.Context, svc *Service) (any, error) { return svc.CreateVolume(ctx, req) })
+							if headerAdmissionGen(t, store, id) != generations[id] {
+								t.Fatal("restart relabeled original admission")
+							}
+						}
+					case "delete_fence":
+						volume := step.Volume
+						a := startAdmissionActor(t, store, volume, "delete", func(ctx context.Context, svc *Service) (any, error) {
+							return svc.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: volume})
 						})
-						if err != nil && code(err) != codes.FailedPrecondition && code(err) != codes.AlreadyExists {
-							t.Fatal(err)
+						// #76's never-published rollback fences by deleting the exact header;
+						// its chunks are deliberately left for the subsequent scheduled cleanup.
+						a.requirePhase(t, "delete_header")
+						a.advance(t)
+						deletions[volume] = a
+					case "delete_header":
+						if _, ok, err := store.Get(ctx, volumeKey(step.Volume)); err != nil || ok {
+							t.Fatalf("old header survived durable deletion fence: %v %v", ok, err)
 						}
-					case "publish", "restart":
+					case "delete_chunks":
+						a := deletions[step.Volume]
+						a.advancePhase(t, "delete_chunks")
+						if a.result == nil || a.result.err != nil {
+							t.Fatalf("delete cleanup: %+v", a.result)
+						}
 					case "delete":
 						if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: step.Volume}); err != nil && code(err) != codes.NotFound {
 							t.Fatal(err)
 						}
-					case "move":
-						from := step.Node
-						if len(step.Nodes) > 0 {
-							from = step.Nodes[0]
-						}
-						_, err := s.MoveReplica(ctx, &metav1.MoveReplicaRequest{
-							Volume: step.Volume, Chunk: step.Chunk, From: from, To: step.To,
-						})
-						if err != nil && code(err) != codes.FailedPrecondition {
+					case "move", "plan_move":
+						v, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: step.Volume})
+						if err != nil {
 							t.Fatal(err)
 						}
+						req := &metav1.MoveReplicaRequest{Volume: step.Volume, Chunk: step.Chunk, From: v.Volume.Chunks[step.Chunk].Replicas[0], To: step.To}
+						a := startAdmissionActor(t, store, step.Volume, "move", func(ctx context.Context, svc *Service) (any, error) { return svc.MoveReplica(ctx, req) })
+						moves[step.Volume] = a
+						a.requirePhase(t, "move")
+						if step.Action == "plan_move" {
+							break
+						}
+						fallthrough
+					case "commit_move":
+						a := moves[step.Volume]
+						a.requirePhase(t, "move")
+						a.advance(t)
+						if a.result == nil || code(a.result.err) != codes.FailedPrecondition {
+							t.Fatalf("move crossed a winning mark: %+v", a.result)
+						}
 					case "check_start":
+						checkNode = step.Node
 						checkGen = drainGen[step.Node]
 						if step.Generation > 0 {
 							checkGen = uint64(step.Generation)
 						}
-					case "header_scan", "chunk_scan":
+						req := &metav1.CheckDrainRequest{Node: checkNode, Generation: checkGen}
+						check = startAdmissionActor(t, store, "", "check", func(ctx context.Context, svc *Service) (any, error) { return svc.CheckDrain(ctx, req) })
+						check.requirePhase(t, "header_scan")
+					case "header_scan":
+						check.requirePhase(t, "header_scan")
+						check.advance(t)
+						check.requirePhase(t, "chunk_scan")
+					case "chunk_scan":
+						check.requirePhase(t, "chunk_scan")
+						check.advance(t)
+						check.requirePhase(t, "final_validation")
 					case "final_validation":
-						gen := checkGen
-						if gen == 0 {
-							gen = drainGen[step.Node]
-						}
-						if step.Generation > 0 {
-							gen = uint64(step.Generation)
-						}
-						_, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: step.Node, Generation: gen})
-						if sched.Name == "empty_scan_unmark_before_validation" || sched.Name == "empty_scan_unmark_remark_before_validation" {
-							if code(err) != codes.FailedPrecondition {
-								t.Fatalf("stale D must be refused: %v", err)
-							}
-						} else if err != nil && code(err) != codes.FailedPrecondition {
+						marker, present, err := store.Get(ctx, drainKey(checkNode))
+						if err != nil {
 							t.Fatal(err)
+						}
+						check.requirePhase(t, "final_validation")
+						if len(check.pause.cmps) != 1 || len(check.pause.ops) != 0 || check.pause.cmps[0] != (kv.Cmp{Key: drainKey(checkNode), Rev: int64(checkGen)}) {
+							t.Fatalf("completion did not compare original generation: %+v", check.pause)
+						}
+						check.advance(t)
+						if check.result == nil {
+							t.Fatal("completion did not finish")
+						}
+						if !present || marker.Rev != int64(checkGen) {
+							if code(check.result.err) != codes.FailedPrecondition {
+								t.Fatalf("stale D succeeded after scans: %+v", check.result)
+							}
+							break
+						}
+						if check.result.err != nil {
+							t.Fatal(check.result.err)
+						}
+						got := check.result.value.(*metav1.CheckDrainResponse)
+						if step.Pending == nil || step.Placement == nil || step.Incoming == nil {
+							t.Fatal("successful validation is missing independent fixture counts")
+						}
+						if got.PendingCreations != *step.Pending || got.PlacementChunks != *step.Placement || got.IncomingMoves != *step.Incoming || got.Complete != (*step.Pending+*step.Placement+*step.Incoming == 0) {
+							t.Fatalf("inventory disagrees with independent fixture counts: %+v want pending=%d placement=%d incoming=%d", got, *step.Pending, *step.Placement, *step.Incoming)
 						}
 					default:
 						t.Fatalf("unknown action %q", step.Action)
@@ -731,6 +875,225 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// admissionScheduleKV pauses real service calls before the named storage operations. A
+// schedule step releases one operation, then waits for the next boundary or RPC result.
+// Nothing emulates claim, publication, inventory or deletion in a second state machine.
+type admissionSchedulePause struct {
+	phase  string
+	cmps   []kv.Cmp
+	ops    []kv.Op
+	resume chan struct{}
+}
+
+type admissionScheduleResult struct {
+	value any
+	err   error
+}
+
+type admissionScheduleKV struct {
+	kv.KV
+	volume, mode string
+	events       chan *admissionSchedulePause
+}
+
+func (k *admissionScheduleKV) boundary(ctx context.Context, phase string, cmps []kv.Cmp, ops []kv.Op) error {
+	p := &admissionSchedulePause{phase: phase, cmps: cmps, ops: ops, resume: make(chan struct{})}
+	select {
+	case k.events <- p:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-p.resume:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (k *admissionScheduleKV) List(ctx context.Context, p string) ([]kv.Entry, error) {
+	if k.mode == "check" {
+		phase := ""
+		if p == prefix+"volumes/" {
+			phase = "header_scan"
+		} else if p == prefix+"chunks/" {
+			phase = "chunk_scan"
+		}
+		if phase != "" {
+			if err := k.boundary(ctx, phase, nil, nil); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return k.KV.List(ctx, p)
+}
+
+func (k *admissionScheduleKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := k.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (k *admissionScheduleKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	phase := ""
+	if k.mode == "check" {
+		phase = "final_validation"
+	}
+	for _, op := range ops {
+		if k.mode == "create" && strings.HasPrefix(op.Key, prefix+"create-plans/") && !op.Delete {
+			phase = "stage"
+		}
+		if op.Key == volumeKey(k.volume) {
+			if op.Delete {
+				phase = "delete_header"
+			} else {
+				var h domain.Header
+				if err := json.Unmarshal(op.Value, &h); err != nil {
+					return 0, false, err
+				}
+				switch {
+				case h.Deleting:
+					phase = "delete_fence"
+				case h.Creating:
+					phase = "claim"
+				default:
+					phase = "publish"
+				}
+			}
+			break
+		}
+		if strings.HasPrefix(op.Key, chunkPrefix(k.volume)) {
+			switch k.mode {
+			case "create":
+				phase = "batch"
+				if op.Delete {
+					phase = "clean"
+				}
+			case "move":
+				phase = "move"
+			case "delete":
+				phase = "delete_chunks"
+			}
+			break
+		}
+		if k.mode == "create" && strings.HasPrefix(op.Key, prefix+"create-roots/") && !op.Delete {
+			var root createRoot
+			if err := json.Unmarshal(op.Value, &root); err != nil {
+				return 0, false, err
+			}
+			if root.State == rootCopying && root.Next == 0 {
+				phase = "clean"
+			}
+		}
+	}
+	if phase != "" {
+		if err := k.boundary(ctx, phase, cmps, ops); err != nil {
+			return 0, false, err
+		}
+	}
+	return k.KV.TxnRev(ctx, cmps, ops)
+}
+
+type admissionScheduleActor struct {
+	kv     *admissionScheduleKV
+	cancel context.CancelFunc
+	done   chan admissionScheduleResult
+	pause  *admissionSchedulePause
+	result *admissionScheduleResult
+}
+
+func startAdmissionActor(t *testing.T, store kv.KV, volume, mode string, run func(context.Context, *Service) (any, error)) *admissionScheduleActor {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	a := &admissionScheduleActor{
+		kv:     &admissionScheduleKV{KV: store, volume: volume, mode: mode, events: make(chan *admissionSchedulePause)},
+		cancel: cancel, done: make(chan admissionScheduleResult, 1),
+	}
+	go func() {
+		value, err := run(ctx, New(a.kv, Options{}))
+		a.done <- admissionScheduleResult{value: value, err: err}
+	}()
+	t.Cleanup(func() { a.stop(t) })
+	a.wait(t)
+	return a
+}
+
+func (a *admissionScheduleActor) wait(t *testing.T) {
+	t.Helper()
+	a.pause = nil
+	select {
+	case a.pause = <-a.kv.events:
+	case r := <-a.done:
+		a.result = &r
+	case <-time.After(10 * time.Second):
+		t.Fatal("service did not reach the next scheduled KV boundary")
+	}
+}
+
+func (a *admissionScheduleActor) requirePhase(t *testing.T, want string) {
+	t.Helper()
+	if a == nil || a.pause == nil || a.pause.phase != want {
+		t.Fatalf("expected real %s storage operation, actor=%+v", want, a)
+	}
+	if want == "claim" {
+		if len(a.pause.cmps) != 4 || len(a.pause.ops) != 2 {
+			t.Fatalf("claim lost #76 root fence or constant bounds: %+v", a.pause)
+		}
+		var gate, root, header, tombstone bool
+		for _, c := range a.pause.cmps {
+			gate = gate || c.Key == placementGateKey && c.Rev > 0
+			root = root || strings.HasPrefix(c.Key, prefix+"create-roots/") && c.Rev > 0
+			header = header || c.Key == volumeKey(a.kv.volume) && c.Rev == 0
+			tombstone = tombstone || c.Key == tombstoneKey(a.kv.volume) && c.Rev == 0
+		}
+		if !gate || !root || !header || !tombstone {
+			t.Fatalf("claim omitted an admission/incarnation comparison: %+v", a.pause.cmps)
+		}
+	}
+	if want == "batch" || want == "publish" || want == "clean" {
+		if len(a.pause.cmps) != 2 || len(a.pause.ops) > createBatchSize+1 {
+			t.Fatalf("publication lost bounded root/claim comparisons: %+v", a.pause)
+		}
+		var root, header bool
+		for _, c := range a.pause.cmps {
+			root = root || strings.HasPrefix(c.Key, prefix+"create-roots/") && c.Rev > 0
+			header = header || c.Key == volumeKey(a.kv.volume) && c.Rev > 0
+		}
+		if !root || !header {
+			t.Fatalf("publication omitted root or original claim: %+v", a.pause.cmps)
+		}
+	}
+}
+
+func (a *admissionScheduleActor) advance(t *testing.T) {
+	t.Helper()
+	if a.pause == nil {
+		t.Fatalf("cannot release completed service call: %+v", a.result)
+	}
+	close(a.pause.resume)
+	a.wait(t)
+}
+
+func (a *admissionScheduleActor) advancePhase(t *testing.T, phase string) {
+	t.Helper()
+	a.requirePhase(t, phase)
+	for a.pause != nil && a.pause.phase == phase {
+		a.advance(t)
+	}
+}
+
+func (a *admissionScheduleActor) stop(t *testing.T) {
+	t.Helper()
+	a.cancel()
+	if a.result == nil {
+		select {
+		case r := <-a.done:
+			a.result = &r
+		case <-time.After(10 * time.Second):
+			t.Error("cancelled service actor did not stop")
+		}
 	}
 }
 
@@ -829,4 +1192,499 @@ func (f *failListKV) List(ctx context.Context, prefix string) ([]kv.Entry, error
 		return nil, context.DeadlineExceeded
 	}
 	return f.KV.List(ctx, prefix)
+}
+
+// S3: duplicate nested fields must not hide a recorded incoming destination from inventory.
+func TestCheckDrainRejectsAmbiguousNestedMove(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b", "c")
+		mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeTestOps(t, store, kv.Op{Key: chunkKey("orphan", 0), Value: []byte(`{"replicas":["b"],"isr":["b"],"isr_ver":0,"moving":{"from":"b","to":"a","to":"c"}}`)})
+		got, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+		if code(err) != codes.DataLoss {
+			t.Fatalf("ambiguous incoming destination must fail closed: got=%+v err=%v", got, err)
+		}
+	})
+}
+
+// S3/S6: all raw records participate, including hidden/deleting and orphan chunks.
+// A malformed record anywhere must prevent an otherwise empty completion.
+func TestCheckDrainRawInventorySchema(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b", "c")
+		mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		validHeader := domain.Header{ID: "raw", SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1, Epoch: 7}
+		hb, _ := json.Marshal(validHeader)
+		validChunk := []byte(`{"replicas":["b"],"isr":["b"],"isr_ver":0}`)
+		change := func(raw []byte, field string, value any, remove bool) []byte {
+			t.Helper()
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatal(err)
+			}
+			if remove {
+				delete(m, field)
+			} else {
+				m[field] = value
+			}
+			b, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}
+		cases := []struct {
+			name, key string
+			value     []byte
+		}{
+			{"header-json", volumeKey("raw"), []byte("{")},
+			{"header-null", volumeKey("raw"), []byte("null")},
+			{"header-array", volumeKey("raw"), []byte("[]")},
+			{"header-id-key", volumeKey("other"), hb},
+			{"header-negative-generation", volumeKey("raw"), change(hb, "admission_generation", -1, false)},
+			{"header-generation-type", volumeKey("raw"), change(hb, "admission_generation", "1", false)},
+			{"header-null-generation", volumeKey("raw"), change(hb, "admission_generation", nil, false)},
+			{"header-zero-isr", volumeKey("raw"), change(hb, "min_isr", 0, false)},
+			{"header-isr-exceeds-rf", volumeKey("raw"), change(hb, "min_isr", 2, false)},
+			{"header-target-id", volumeKey("raw"), change(hb, "target", "../bad", false)},
+			{"header-first-epoch", volumeKey("raw"), change(hb, "first_epoch", 8, false)},
+			{"header-creating-published", volumeKey("raw"), change(hb, "creating", true, false)},
+			{"header-missing-operation", volumeKey("raw"), change(hb, "create_spec", domain.CreateSpec{SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1}, false)},
+			{"header-missing-identity", volumeKey("raw"), change(hb, "create_operation", "op", false)},
+			{"header-duplicate-generation", volumeKey("raw"), append(bytes.TrimSuffix(hb, []byte("}")), []byte(`,"admission_generation":-1,"admission_generation":0}`)...)},
+			{"header-oversized", volumeKey("raw"), bytes.Repeat([]byte(" "), domain.MaxCreateRecordBytes+1)},
+			{"chunk-json", chunkKey("raw", 0), []byte("{")},
+			{"chunk-null", chunkKey("raw", 0), []byte("null")},
+			{"chunk-key", prefix + "chunks/raw/0", validChunk},
+			{"chunk-volume-id", prefix + "chunks/../00000000", validChunk},
+			{"chunk-replica-id", chunkKey("raw", 0), change(validChunk, "replicas", []string{"../bad"}, false)},
+			{"chunk-duplicate-replica", chunkKey("raw", 0), change(validChunk, "replicas", []string{"b", "b"}, false)},
+			{"chunk-empty-replica", chunkKey("raw", 0), change(validChunk, "replicas", []string{}, false)},
+			{"chunk-null-isr", chunkKey("raw", 0), change(validChunk, "isr", nil, false)},
+			{"chunk-isr-not-replica", chunkKey("raw", 0), change(validChunk, "isr", []string{"c"}, false)},
+			{"chunk-duplicate-isr", chunkKey("raw", 0), change(validChunk, "isr", []string{"b", "b"}, false)},
+			{"chunk-move-missing-to", chunkKey("raw", 0), change(validChunk, "moving", map[string]string{"from": "b"}, false)},
+			{"chunk-move-from-not-replica", chunkKey("raw", 0), change(validChunk, "moving", map[string]string{"from": "c", "to": "a"}, false)},
+			{"chunk-move-same-endpoint", chunkKey("raw", 0), change(validChunk, "moving", map[string]string{"from": "b", "to": "b"}, false)},
+			{"chunk-move-wrong-type", chunkKey("raw", 0), change(validChunk, "moving", map[string]any{"from": "b", "to": 1}, false)},
+			{"chunk-move-null", chunkKey("raw", 0), change(validChunk, "moving", map[string]any{"from": "b", "to": nil}, false)},
+			{"chunk-duplicate-nested", chunkKey("raw", 0), []byte(`{"replicas":["b"],"isr":["b"],"isr_ver":0,"moving":{"from":"b","to":"a","to":"c"}}`)},
+		}
+		for _, field := range []string{"id", "size_bytes", "chunk_bytes", "replicas", "min_isr", "epoch"} {
+			cases = append(cases, struct {
+				name, key string
+				value     []byte
+			}{"header-missing-" + field, volumeKey("raw"), change(hb, field, nil, true)})
+		}
+		for _, field := range []string{"replicas", "isr", "isr_ver"} {
+			cases = append(cases, struct {
+				name, key string
+				value     []byte
+			}{"chunk-missing-" + field, chunkKey("raw", 0), change(validChunk, field, nil, true)})
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				writeTestOps(t, store, kv.Op{Key: tc.key, Value: tc.value})
+				got, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+				writeTestOps(t, store, kv.Op{Key: tc.key, Delete: true})
+				if code(err) != codes.DataLoss || got != nil {
+					t.Fatalf("corrupt raw inventory: response=%+v err=%v", got, err)
+				}
+			})
+		}
+
+		// Valid old geometries are still inventory, even when current admission refuses them.
+		// One orphan chunk counts in both replica and incoming columns.
+		validHeader.SizeBytes, validHeader.ChunkBytes, validHeader.Deleting = 4096, 4096, true
+		hb, _ = json.Marshal(validHeader)
+		writeTestOps(t, store,
+			kv.Op{Key: volumeKey("raw"), Value: hb},
+			kv.Op{Key: chunkKey("orphan", 0), Value: []byte(`{"replicas":["a","b"],"isr":["b"],"isr_ver":0,"moving":{"from":"b","to":"a"}}`)},
+		)
+		got, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+		if err != nil || got.GetComplete() || got.GetPlacementChunks() != 1 || got.GetIncomingMoves() != 1 {
+			t.Fatalf("valid legacy/deleting/orphan inventory: got=%+v err=%v", got, err)
+		}
+		// A hidden deleting legacy claim remains a reservation until durably fenced.
+		validHeader.Creating, validHeader.Epoch = true, 0
+		hb, _ = json.Marshal(validHeader)
+		writeTestOps(t, store, kv.Op{Key: volumeKey("raw"), Value: hb}, kv.Op{Key: chunkKey("orphan", 0), Delete: true})
+		got, err = s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+		if err != nil || got.GetComplete() || got.GetPendingCreations() != 1 {
+			t.Fatalf("hidden deleting reservation: got=%+v err=%v", got, err)
+		}
+	})
+}
+
+func TestCheckDrainRejectsInvalidArgumentsWithoutMutation(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		s := New(store, Options{})
+		for _, r := range []*metav1.CheckDrainRequest{
+			{Node: "../a", Generation: 1}, {Node: "a"}, {Node: "a", Generation: math.MaxInt64 + 1},
+		} {
+			if _, err := s.CheckDrain(context.Background(), r); code(err) != codes.InvalidArgument {
+				t.Fatalf("%v: %v", r, err)
+			}
+		}
+		entries, err := store.List(context.Background(), prefix)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("invalid check mutated metadata: %v %v", entries, err)
+		}
+	})
+}
+
+type admissionReplyLossKV struct {
+	kv.KV
+	key       string
+	creating  bool
+	loseReply atomic.Bool
+}
+
+func (k *admissionReplyLossKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	_, ok, err := k.TxnRev(ctx, cmps, ops)
+	return ok, err
+}
+
+func (k *admissionReplyLossKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	rev, ok, err := k.KV.TxnRev(ctx, cmps, ops)
+	if err != nil || !ok {
+		return rev, ok, err
+	}
+	for _, op := range ops {
+		if op.Key != k.key || op.Delete {
+			continue
+		}
+		matches := k.key == placementGateKey
+		if !matches {
+			var h domain.Header
+			matches = json.Unmarshal(op.Value, &h) == nil && h.Creating == k.creating
+		}
+		if matches && k.loseReply.Swap(false) {
+			return 0, false, context.DeadlineExceeded
+		}
+	}
+	return rev, ok, nil
+}
+
+// S2/S6: an uncertain claim/finalization reply never forfeits the original admission.
+// A fresh service recovers the immutable #76 plan, even after its chosen node is marked.
+func TestAdmissionLostRepliesRecoverOriginalGeneration(t *testing.T) {
+	for _, phase := range []string{"claim", "finalize"} {
+		t.Run(phase, func(t *testing.T) {
+			backends(t, func(t *testing.T, store kv.KV) {
+				ctx := context.Background()
+				loss := &admissionReplyLossKV{KV: store, key: volumeKey("lost"), creating: phase == "claim"}
+				s := New(loss, Options{})
+				addNodes(t, s, "a", "b")
+				loss.loseReply.Store(true)
+				req := &metav1.CreateVolumeRequest{Id: "lost", SizeBytes: 40 * mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1}
+				if _, err := s.CreateVolume(ctx, req); err == nil {
+					t.Fatal("lost transaction reply was not injected")
+				}
+				if loss.loseReply.Load() {
+					t.Fatal("service did not reach the requested claim/finalization boundary")
+				}
+				h := header(t, store, "lost")
+				generation := h.AdmissionGeneration
+				if generation <= 0 || h.Creating != (phase == "claim") {
+					t.Fatalf("uncertain response changed durable admission: %+v", h)
+				}
+				mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+				if err != nil || before.GetComplete() || phase == "claim" && before.GetPendingCreations() != 1 || phase == "finalize" && before.GetPlacementChunks() != 40 {
+					t.Fatalf("uncertain admission disappeared: %+v %v", before, err)
+				}
+				restarted := New(store, Options{})
+				if err := restarted.RunCreateRecovery(ctx); err != nil {
+					t.Fatal(err)
+				}
+				got, err := restarted.CreateVolume(ctx, req)
+				if err != nil || len(got.GetVolume().GetChunks()) != 40 {
+					t.Fatalf("recovery failed: %+v %v", got, err)
+				}
+				h2 := header(t, store, "lost")
+				if h2.Creating || h2.AdmissionGeneration != generation || h2.CreateOperation != h.CreateOperation || !h2.CreateSpec.Equal(*h.CreateSpec) || h2.FirstEpoch == 0 {
+					t.Fatalf("recovery changed admitted identity/generation: before=%+v after=%+v", h, h2)
+				}
+				for _, ch := range got.GetVolume().GetChunks() {
+					if !slices.Equal(ch.GetReplicas(), []string{"a", "b"}) {
+						t.Fatalf("post-mark recovery replanned original replicas: %+v", ch)
+					}
+				}
+				after, err := restarted.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+				if err != nil || after.GetComplete() || after.GetPendingCreations() != 0 || after.GetPlacementChunks() != 40 {
+					t.Fatalf("reservation to chunks handoff lost work: %+v %v", after, err)
+				}
+			})
+		})
+	}
+}
+
+func TestAdmissionLegacyInitializationSurvivesLostReplyAndNoOps(t *testing.T) {
+	for _, entry := range []string{"register", "mark"} {
+		t.Run(entry, func(t *testing.T) {
+			backends(t, func(t *testing.T, store kv.KV) {
+				ctx := context.Background()
+				node, _ := json.Marshal(nodeRecord{Address: "a:7410"})
+				writeTestOps(t, store, kv.Op{Key: nodeKey("a"), Value: node}, kv.Op{Key: drainKey("a"), Value: []byte("1")})
+				d, _, _ := store.Get(ctx, drainKey("a"))
+				loss := &admissionReplyLossKV{KV: store, key: placementGateKey}
+				loss.loseReply.Store(true)
+				s := New(loss, Options{})
+				if entry == "register" {
+					if err := register(ctx, s, "a", "a:7410", nil); err != nil {
+						t.Fatal(err)
+					}
+				} else if mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true}); err != nil || mark.GetGeneration() != uint64(d.Rev) {
+					t.Fatalf("legacy mark changed: %+v %v", mark, err)
+				}
+				g, ok, err := store.Get(ctx, placementGateKey)
+				if err != nil || !ok || g.Rev <= d.Rev || loss.loseReply.Load() {
+					t.Fatalf("lost gate initialization: G=%+v D=%+v injected=%v err=%v", g, d, !loss.loseReply.Load(), err)
+				}
+				s = New(store, Options{})
+				if err := register(ctx, s, "a", "a:7410", nil); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.NodeHeartbeat(ctx, &metav1.NodeHeartbeatRequest{Node: "a"}); err != nil {
+					t.Fatal(err)
+				}
+				mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+				g2, _, _ := store.Get(ctx, placementGateKey)
+				if err != nil || mark.GetGeneration() != uint64(d.Rev) || g2.Rev != g.Rev {
+					t.Fatalf("unchanged registration/heartbeat/repeated mark changed generations: G=%d/%d D=%d mark=%v err=%v", g.Rev, g2.Rev, d.Rev, mark, err)
+				}
+			})
+		})
+	}
+}
+
+// Lifecycle eligibility precedes CheckMove's no-op for an already recorded destination.
+func TestAdmissionMoveNoOpStillRejectsDrainingDestination(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b", "c")
+		if _, err := create(s, "noop", 1, 2, 1); err != nil {
+			t.Fatal(err)
+		}
+		req := &metav1.MoveReplicaRequest{Volume: "noop", From: "a", To: "c"}
+		if got, err := s.MoveReplica(ctx, req); err != nil || !got.GetApplied() {
+			t.Fatalf("initial move: %+v %v", got, err)
+		}
+		mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "c", Draining: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, _, _ := store.Get(ctx, chunkKey("noop", 0))
+		if got, err := s.MoveReplica(ctx, req); code(err) != codes.FailedPrecondition || got != nil {
+			t.Fatalf("draining destination accepted as a no-op: %+v %v", got, err)
+		}
+		after, _, _ := store.Get(ctx, chunkKey("noop", 0))
+		if before.Rev != after.Rev || !bytes.Equal(before.Value, after.Value) {
+			t.Fatal("refused no-op changed the admitted move")
+		}
+		check, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "c", Generation: mark.GetGeneration()})
+		if err != nil || check.GetIncomingMoves() != 1 || check.GetComplete() {
+			t.Fatalf("earlier move reservation disappeared: %+v %v", check, err)
+		}
+	})
+}
+
+func TestAdmissionConcurrentReservationsRemainAccounted(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b", "c")
+		var actors []*admissionScheduleActor
+		var requests []*metav1.CreateVolumeRequest
+		for _, id := range []string{"first", "second"} {
+			req := &metav1.CreateVolumeRequest{Id: id, SizeBytes: 40 * mib, ChunkBytes: mib, Replicas: 1, MinIsr: 1, PreferNode: "b"}
+			a := startAdmissionActor(t, store, id, "create", func(ctx context.Context, svc *Service) (any, error) { return svc.CreateVolume(ctx, req) })
+			a.advancePhase(t, "stage")
+			a.requirePhase(t, "claim")
+			a.advance(t)
+			a.requirePhase(t, "clean")
+			a.advance(t)
+			a.requirePhase(t, "batch")
+			actors, requests = append(actors, a), append(requests, req)
+		}
+		mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		check := func(want uint64) {
+			t.Helper()
+			got, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+			if err != nil || got.GetPendingCreations() != want || got.GetComplete() != (want == 0) {
+				t.Fatalf("concurrent unrelated reservations: want=%d got=%+v err=%v", want, got, err)
+			}
+		}
+		check(2)
+		// An identical caller cooperates with the admitted plan; it cannot discard the other claim.
+		firstGen := headerAdmissionGen(t, store, "first")
+		if _, err := s.CreateVolume(ctx, requests[0]); err != nil {
+			t.Fatal(err)
+		}
+		if headerAdmissionGen(t, store, "first") != firstGen {
+			t.Fatal("identical helper replaced the original admission")
+		}
+		actors[0].advance(t)
+		if actors[0].result == nil {
+			t.Fatal("stale helper kept writing after another caller finalized")
+		}
+		check(1)
+		if _, err := s.DeleteVolume(ctx, &metav1.DeleteVolumeRequest{Id: "second"}); err != nil {
+			t.Fatal(err)
+		}
+		actors[1].advance(t)
+		if actors[1].result == nil || actors[1].result.err == nil {
+			t.Fatal("deleted creator resumed public writes")
+		}
+		check(0)
+	})
+}
+
+type admissionCheckErrorKV struct {
+	kv.KV
+	phase string
+}
+
+func (k *admissionCheckErrorKV) Get(ctx context.Context, key string) (kv.Entry, bool, error) {
+	if k.phase == "marker" && key == drainKey("a") {
+		return kv.Entry{}, false, context.DeadlineExceeded
+	}
+	return k.KV.Get(ctx, key)
+}
+
+func (k *admissionCheckErrorKV) List(ctx context.Context, p string) ([]kv.Entry, error) {
+	if k.phase == "headers" && p == prefix+"volumes/" || k.phase == "chunks" && p == prefix+"chunks/" {
+		return nil, context.DeadlineExceeded
+	}
+	return k.KV.List(ctx, p)
+}
+
+func (k *admissionCheckErrorKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	if k.phase == "validation" && len(ops) == 0 {
+		return false, context.DeadlineExceeded
+	}
+	return k.KV.Txn(ctx, cmps, ops)
+}
+
+func TestCheckDrainStorageErrorsNeverCertifyEmpty(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a")
+		mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, phase := range []string{"marker", "headers", "chunks", "validation"} {
+			t.Run(phase, func(t *testing.T) {
+				failing := New(&admissionCheckErrorKV{KV: store, phase: phase}, Options{})
+				got, err := failing.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+				if code(err) != codes.DeadlineExceeded || got != nil {
+					t.Fatalf("storage failure became successful empty completion: %+v %v", got, err)
+				}
+			})
+		}
+	})
+}
+
+func TestAdmissionWitnessChangeForcesFreshPlan(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b")
+		req := &metav1.CreateVolumeRequest{Id: "witness-race", SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinIsr: 1, PreferNode: "a"}
+		a := startAdmissionActor(t, store, req.Id, "create", func(ctx context.Context, svc *Service) (any, error) { return svc.CreateVolume(ctx, req) })
+		a.advancePhase(t, "stage")
+		a.requirePhase(t, "claim")
+		if err := register(ctx, s, "a", "a:7410", map[string]string{WitnessLabel: "true"}); err != nil {
+			t.Fatal(err)
+		}
+		gate, _, _ := store.Get(ctx, placementGateKey)
+		a.advance(t)
+		// The stale claim must lose and start an entirely new private plan, rather than reuse
+		// its previously selected node with a fresh gate revision.
+		a.requirePhase(t, "stage")
+		if _, ok, err := store.Get(ctx, volumeKey(req.Id)); err != nil || ok {
+			t.Fatalf("stale topology admitted before replanning: %v %v", ok, err)
+		}
+		a.advancePhase(t, "stage")
+		a.requirePhase(t, "claim")
+		a.advance(t)
+		a.requirePhase(t, "clean")
+		a.advance(t)
+		a.requirePhase(t, "batch")
+		a.advance(t)
+		a.requirePhase(t, "publish")
+		a.advance(t)
+		if a.result == nil || a.result.err != nil || !slices.Equal(volumeOnNodes(t, s, req.Id), []string{"b"}) || headerAdmissionGen(t, store, req.Id) != gate.Rev {
+			t.Fatalf("changed topology was not replanned under fresh admission: %+v", a.result)
+		}
+	})
+}
+
+func TestCheckCreateVolumeDoesNotInitializeAbsentPlacementGate(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		h := domain.Header{ID: "legacy", SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinISR: 1, Epoch: 7}
+		hb, _ := json.Marshal(h)
+		cb, _ := json.Marshal(domain.Chunk{Replicas: []string{"a"}, ISR: []string{"a"}})
+		writeTestOps(t, store, kv.Op{Key: volumeKey(h.ID), Value: hb}, kv.Op{Key: chunkKey(h.ID, 0), Value: cb})
+		before, err := store.List(ctx, prefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := New(store, Options{})
+		got, err := s.CheckCreateVolume(ctx, &metav1.CheckCreateVolumeRequest{Desired: &metav1.CreateVolumeRequest{Id: h.ID, SizeBytes: mib, ChunkBytes: mib, Replicas: 1, MinIsr: 1}, RequiredBytes: mib})
+		if err != nil || !got.GetLegacyIdentity() {
+			t.Fatalf("legacy compatibility without gate: %+v %v", got, err)
+		}
+		after, err := store.List(ctx, prefix)
+		if err != nil || !slices.EqualFunc(before, after, func(a, b kv.Entry) bool { return a.Key == b.Key && a.Rev == b.Rev && bytes.Equal(a.Value, b.Value) }) {
+			t.Fatalf("read-only compatibility initialized/mutated admission metadata: %v %v", after, err)
+		}
+	})
+}
+
+// The pure inventory decoding boundary receives arbitrary persisted bytes, including schemas
+// the current geometry admission refuses. Seed cases run in ordinary go test as well.
+func FuzzDrainInventory(f *testing.F) {
+	for _, b := range [][]byte{
+		[]byte(`{"id":"raw","size_bytes":4096,"chunk_bytes":4096,"replicas":1,"min_isr":1,"epoch":7}`),
+		[]byte(`{"replicas":["a"],"isr":["a"],"isr_ver":0}`),
+		[]byte(`{"replicas":["b"],"isr":["b"],"isr_ver":0,"moving":{"from":"b","to":"a","to":"c"}}`),
+		[]byte(`{"creating":true,"creating":false}`), []byte("null"), []byte("{"),
+		bytes.Repeat([]byte("x"), domain.MaxCreateRecordBytes+1),
+	} {
+		f.Add(b, true)
+		f.Add(b, false)
+	}
+	f.Fuzz(func(t *testing.T, b []byte, isHeader bool) {
+		var err error
+		if isHeader {
+			_, err = drainInventoryHeader(kv.Entry{Key: volumeKey("raw"), Value: b})
+		} else {
+			_, err = drainInventoryChunk(kv.Entry{Key: chunkKey("raw", 0), Value: b})
+		}
+		if err != nil && code(err) != codes.DataLoss {
+			t.Fatalf("persisted corruption classified %s: %v", fmt.Sprint(code(err)), err)
+		}
+	})
 }

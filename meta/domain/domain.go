@@ -5,12 +5,15 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
 	"slices"
 	"sort"
+
+	"github.com/flaminio/flaminio/pkg/geometry"
 )
 
 // MaxChangesPerRequest bounds one ChangeIsr request, so that it fits one etcd transaction.
@@ -71,8 +74,12 @@ type Header struct {
 }
 
 // ChunkCount is the number of chunks the volume is split into.
-func (h *Header) ChunkCount() int {
-	return int((h.SizeBytes + h.ChunkBytes - 1) / h.ChunkBytes)
+func (h *Header) ChunkCount() (int, error) {
+	n, err := geometry.Admit(h.SizeBytes, h.ChunkBytes, h.Replicas, h.MinISR)
+	if err != nil {
+		return 0, fmt.Errorf("unsupported volume geometry: %w", err)
+	}
+	return int(n), nil // Admission bounds n to at most 65,536 on every platform.
 }
 
 // Volume is a header with its chunks.
@@ -211,9 +218,7 @@ func CreateSpecFrom(s Spec) CreateSpec {
 
 // Equal reports whether two create identities match.
 func (a CreateSpec) Equal(b CreateSpec) bool {
-	return a.SizeBytes == b.SizeBytes && a.ChunkBytes == b.ChunkBytes &&
-		a.Replicas == b.Replicas && a.MinISR == b.MinISR &&
-		a.PreferNode == b.PreferNode && a.Domain == b.Domain && a.Policy == b.Policy
+	return a == b
 }
 
 // ScalarEqual is the legacy visible-header comparison (size/chunk/replicas/minISR only).
@@ -222,8 +227,17 @@ func (a CreateSpec) ScalarEqual(b CreateSpec) bool {
 		a.Replicas == b.Replicas && a.MinISR == b.MinISR
 }
 
-// Validate checks PreferNode and the encoded identity size. Other scalar checks belong on Spec.
+// Validate checks the persisted identity's grammar, including the pre-admission scalar rules.
+// Supported geometry is checked separately so an older, well-formed identity can be refused
+// without being mistaken for corruption.
 func (c CreateSpec) Validate() error {
+	if c.SizeBytes == 0 || c.SizeBytes%geometry.BlockBytes != 0 ||
+		c.ChunkBytes < geometry.MinChunkBytes || c.ChunkBytes&(c.ChunkBytes-1) != 0 ||
+		c.Replicas < 1 || c.Replicas > 5 || c.MinISR < 1 || c.MinISR > c.Replicas ||
+		c.Domain < DomainNode || c.Domain > DomainZone ||
+		(c.Policy != PolicyStrict && c.Policy != PolicyBestEffort) {
+		return fmt.Errorf("%w: create identity parameters", ErrInvalid)
+	}
 	if c.PreferNode != "" && !ValidID(c.PreferNode) {
 		return fmt.Errorf("%w: prefer node", ErrInvalid)
 	}
@@ -243,8 +257,19 @@ func DecodeCreateSpec(b []byte) (CreateSpec, error) {
 		return CreateSpec{}, fmt.Errorf("create identity: data loss: exceeds %d bytes", MaxCreateIdentityBytes)
 	}
 	var c CreateSpec
-	if err := json.Unmarshal(b, &c); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&c); err != nil {
 		return CreateSpec{}, fmt.Errorf("create identity: data loss: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return CreateSpec{}, fmt.Errorf("create identity: data loss: %w", err)
+	}
+	for _, name := range []string{"size_bytes", "chunk_bytes", "replicas", "min_isr", "failure_domain", "failure_domain_policy"} {
+		if value, ok := fields[name]; !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return CreateSpec{}, fmt.Errorf("create identity: data loss: missing %s", name)
+		}
 	}
 	if err := c.Validate(); err != nil {
 		return CreateSpec{}, fmt.Errorf("create identity: data loss: %w", err)
@@ -257,22 +282,15 @@ func (s *Spec) Validate() error {
 	switch {
 	case !ValidID(s.ID):
 		return fmt.Errorf("%w: volume id %q", ErrInvalid, s.ID)
-	case s.ChunkBytes < 1<<20 || s.ChunkBytes&(s.ChunkBytes-1) != 0:
-		return fmt.Errorf("%w: chunk size must be a power of two of at least 1 MiB", ErrInvalid)
-	case s.SizeBytes == 0 || s.SizeBytes%4096 != 0:
-		return fmt.Errorf("%w: size must be a positive multiple of 4 KiB", ErrInvalid)
-	case s.SizeBytes/s.ChunkBytes > 1<<20:
-		return fmt.Errorf("%w: more than 2^20 chunks", ErrInvalid)
-	case s.Replicas < 1 || s.Replicas > 5:
-		return fmt.Errorf("%w: replicas must be 1 to 5", ErrInvalid)
-	case s.MinISR < 1 || s.MinISR > s.Replicas:
-		return fmt.Errorf("%w: min ISR must be 1 to replicas", ErrInvalid)
 	case s.Domain < DomainNode || s.Domain > DomainZone:
 		return fmt.Errorf("%w: failure domain", ErrInvalid)
 	case s.Policy != PolicyStrict && s.Policy != PolicyBestEffort:
 		return fmt.Errorf("%w: failure domain policy", ErrInvalid)
 	case s.PreferNode != "" && !ValidID(s.PreferNode):
 		return fmt.Errorf("%w: prefer node", ErrInvalid)
+	}
+	if _, err := geometry.Admit(s.SizeBytes, s.ChunkBytes, s.Replicas, s.MinISR); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	if err := CreateSpecFrom(*s).Validate(); err != nil {
 		return err

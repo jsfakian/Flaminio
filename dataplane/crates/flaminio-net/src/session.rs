@@ -21,7 +21,7 @@ use futures_lite::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use futures_rustls::{TlsAcceptor, TlsConnector};
 use rustls_pki_types::ServerName;
 
-use crate::frame::{DecodeError, Frame};
+use crate::frame::{DecodeError, EncodeError, Frame};
 use crate::identity::{IdError, Identity};
 use crate::tls::peer_identity;
 use crate::token::{Claims, TokenKey};
@@ -32,6 +32,8 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
     #[error("decode: {0}")]
     Decode(#[from] DecodeError),
+    #[error("encode: {0}")]
+    Encode(#[from] EncodeError),
     #[error("peer identity: {0}")]
     Identity(#[from] IdError),
     #[error("refused: {0}")]
@@ -57,7 +59,8 @@ impl<S> Conn<S> {
 
 impl<S: AsyncWrite + Unpin> Conn<S> {
     pub async fn send(&mut self, f: &Frame) -> Result<(), SessionError> {
-        self.stream.write_all(&f.encode()).await?;
+        let bytes = f.encode_checked()?;
+        self.stream.write_all(&bytes).await?;
         self.stream.flush().await?;
         Ok(())
     }
@@ -78,7 +81,10 @@ impl<S: AsyncRead + Unpin> Conn<S> {
         let mut prefix = [0u8; 4];
         self.stream.read_exact(&mut prefix).await?;
         let n = Frame::body_len(prefix)?;
-        let mut body = vec![0u8; n];
+        let mut body = Vec::new();
+        body.try_reserve_exact(n)
+            .map_err(|_| DecodeError::Invalid("frame allocation failed"))?;
+        body.resize(n, 0);
         self.stream.read_exact(&mut body).await?;
         Ok(Frame::decode(&body)?)
     }

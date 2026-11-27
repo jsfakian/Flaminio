@@ -186,12 +186,42 @@ flowchart TB
 | **Disk** | A device that Flaminio has claimed and formatted. It is identified by the UUID in its superblock. It belongs to one **device class** (e.g. `fast`, `capacity`). |
 | **Failure domain** | A level in the topology tree: `disk < node < rack < zone < region`. It comes from node labels (`topology.kubernetes.io/zone`, plus custom labels). |
 | **Volume** | A logical block device of size *S*, split into fixed-size **chunks**. |
-| **Chunk** | A contiguous range of a volume (default **256 MiB**, set per StorageClass from 64 MiB to 1 GiB). Chunk is the unit of placement, replication, rebuild and migration. |
+| **Chunk** | A contiguous range of a volume (default **256 MiB**, a power of two from 1 MiB through 1 GiB). Chunk is the unit of placement, replication, rebuild and migration. |
 | **Chunk replica** | One copy of a chunk on one disk. Physical space is allocated lazily (thin provisioning). |
 | **Replica set** | All replicas of a chunk. The **ISR** (in-sync replicas) is the subset known to have every acknowledged write. |
 | **Volume target** | The per-volume I/O coordinator. It runs inside `flaminio-io` on the node that consumes the volume. |
 | **Epoch** | A monotonically increasing number issued by the metadata service each time a volume gets a new target. Replicas reject any request that carries an older epoch. |
 | **Layer** | A generation of a chunk replica's block map. Snapshots freeze a layer (redirect-on-write). |
+
+Volumes expose 4 KiB logical blocks and contain a positive whole number of chunks. Direct
+metadata creation rejects partial chunks; CSI rounds to whole chunks within the caller's
+signed capacity range. With 256 MiB chunks, a 300 MiB request selects 512 MiB and fails if
+the caller's limit is 400 MiB. A request with no required capacity prefers 1 GiB, or rounds
+a smaller positive limit down to a whole chunk.
+
+Metadata admits at most 65,536 chunks and reserves for every legal future move within its
+4 MiB protobuf response budget: `2048 + N * (288 + 264 * (R + 1)) <= 4,194,304`.
+This gives stricter effective per-volume limits:
+
+| Replication factor R | Maximum chunks N |
+|---|---|
+| 1 | 5137 |
+| 2 | 3881 |
+| 3 | 3119 |
+| 4 | 2607 |
+| 5 | 2239 |
+
+Maximum capacity is N times chunk size. These limits cover representation, including long
+IDs and temporary R+1 membership; physical slots/data capacity and operating scale remain
+separate. Store preflight checks the actual formatted layout and free chunk slots. Growth
+[#70](issues/70/spec.md), distributed reservations [#72](issues/72/spec.md), and measured
+aggregate limits [#75](issues/75/spec.md) must preserve this envelope.
+
+Upgrade metadata admission before CSI/nodes and pause new creates during mixed-admission
+upgrades. Existing unsupported geometry is refused before target or replica mutation, with
+no automatic resize, rewrite or deletion. Migration requires a separate design. See
+[ADR 0018](adr/0018-admit-only-representable-volume-geometries.md) and the
+[geometry contract](issues/80/spec.md).
 
 Why chunks rather than whole-volume replicas:
 
@@ -715,25 +745,34 @@ chunks are resynced.
 
 ### 11.2 Fast, safe pod failover
 
-**Audit finding #82:** the current controller taints an entire node from NotReady plus missing
-metadata liveness, without shutdown proof or the per-volume opt-in below. Those absence
-signals can also describe a live partition. Node-wide out-of-service taints require verified
-shutdown/power-fence evidence; otherwise recovery must be scoped to explicitly opted-in
-Flaminio workloads without detaching unrelated storage. Storage fencing does not fence a
-process's network/database side effects. See
-[Kubernetes node shutdown guidance](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#non-graceful-node-shutdown).
+Node-wide recovery (the `node.kubernetes.io/out-of-service` taint) requires verified shutdown
+evidence from an explicitly configured authority for the exact Node UID and machine
+incarnation. NotReady/Unknown, missing metadata heartbeat, elapsed Grace, a deleted Node, or
+another Ready node may select **candidates** only; none of them authorize the taint.
+Without an authority the failover controller is observe-only (`evidence-unavailable`). The
+first production profile is manual physical lockout (`manual-lockout-v1`): a trusted signed
+assertion held until terminal old-UID retirement; lab VMs and sampled power state are not
+supported. Cleanup of an owned mark needs a return permit; Ready plus heartbeat is not enough,
+and that profile refuses Clear in favour of fresh node name/PKI.
+
+**Scoped partition recovery** (force-delete only opted-in Flaminio pods / VolumeAttachments
+without asserting node shutdown) is **unavailable**. The controller has no pod or
+VolumeAttachment mutation permissions. Storage fencing still does not stop a partitioned
+process's network or other external side effects. See
+[Kubernetes node shutdown guidance](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/#non-graceful-node-shutdown)
+and [issue #82](issues/82/spec.md).
 
 Kubernetes by default waits about 5 minutes before evicting pods from a `NotReady` node, and a
-StatefulSet will not recreate a pod until the old one is gone. Because Flaminio fences the old
-writer itself, it can safely speed this up:
+StatefulSet will not recreate a pod until the old one is gone. After a verified shutdown mark,
+Kubernetes's existing recovery moves pods and attachments. Flaminio attach/failover still
+always fences, waits when needed, and reconciles under the replication protocol; orchestration
+marks never skip that gate:
 
-1. The node's liveness record expires and the safety margin passes (or out-of-service is
-   confirmed).
-2. The failover controller bumps the epoch of every RWO volume attached to that node.
-3. It force-deletes the affected pods (policy `nodeDownPodDeletion: fenced`, opt-in per
-   StorageClass) and removes the stale VolumeAttachment.
-4. The pod is rescheduled. A new target attaches, fences the replicas, reconciles in-flight
-   writes and serves I/O.
+1. A candidate is selected from readiness and metadata liveness; shutdown evidence is verified.
+2. The controller conditionally patches the out-of-service taint and an owned operation record.
+3. Kubernetes deletes pods and detaches volumes on that node; a new target attaches elsewhere.
+4. The new target fences the effective ISR, waits for leases when required, reconciles, then
+   serves I/O.
 
 ### 11.3 Gray-failure detection
 

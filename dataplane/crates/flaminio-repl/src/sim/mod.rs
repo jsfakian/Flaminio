@@ -27,13 +27,13 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::extent::Extent;
-use crate::meta::{MetaReply, MetaRequest, Metadata, VolumeMeta};
+use crate::meta::{MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, Metadata, VolumeMeta};
 use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, Response, ToReplica};
 use crate::replica::Replica;
 use crate::target::{Op, OpResult, Output, Target};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Value, VolumeId};
 
-use check::{CKind, COp, check_register};
+use check::{CKind, COp, Uncertainty, check_fenced_authority, check_register, valid_fenced};
 
 /// Payloads in the simulator: one value per block of the extent.
 pub type Data = Vec<Value>;
@@ -85,6 +85,8 @@ pub struct Config {
     pub rf: usize,
     pub min_isr: usize,
     pub chunks: u32,
+    /// Per-volume held-chunk and precise-record slots on each replica.
+    pub uncertainty_budget: u32,
     pub blocks_per_chunk: Block,
     /// Largest client operation, in blocks.
     pub max_op: Block,
@@ -123,6 +125,11 @@ pub struct Config {
     /// Percent of the target's client reads from its own replica that fail without a reply,
     /// during chaos: the data plane's failed local reads, which fail over (docs/issues/5).
     pub local_read_fail_pct: u64,
+    /// Outgoing Write prunes and Settle bounds forged to the next session epoch during
+    /// chaos only. Zero preserves the existing random stream.
+    pub forge_epoch_pct: u64,
+    /// Hello answers replaced with bounded malformed replies during chaos only.
+    pub invalid_fenced_pct: u64,
 }
 
 impl Config {
@@ -143,6 +150,7 @@ impl Config {
             max_bulk: r.range(1, 4) as usize,
             max_mapped: MAX_MAPPED_BLOCKS,
             max_digest: 0,
+            uncertainty_budget: crate::replica::UNCERTAINTY_BUDGET,
             timing: Timing {
                 lease: r.range(2, 6) * SEC,
                 drift_ppm: r.pick(&[0, 10_000, 100_000]),
@@ -165,6 +173,8 @@ impl Config {
             fast_reads: r.pct(50),
             // Drawn last, so every earlier field of every seed keeps its value.
             local_read_fail_pct: r.pick(&[0, 0, 5, 20]),
+            forge_epoch_pct: 0,
+            invalid_fenced_pct: 0,
         };
         c.max_digest = c.max_io;
         c
@@ -174,6 +184,8 @@ impl Config {
 /// Statistics of a run that passed.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
+    /// Largest emitted ISR proposal, including requests refused by the service boundary.
+    pub max_meta_batch: usize,
     pub ops: usize,
     pub completed: usize,
     pub failovers: u64,
@@ -189,6 +201,18 @@ pub struct Report {
     pub waited_pumps_with_resync: u64,
     /// Client operations submitted while their chunk was not `Ready`; 0 outside tests.
     pub waiting_submits: u64,
+    /// Live demand/allocation and independent exact uncertainty checks.
+    pub uncertainty_checks: u64,
+    /// Checks where exact retained attempts outnumber the core's precise records.
+    pub coarsened_checks: u64,
+    /// Reported chunk rows checked against an independent restart proof.
+    pub restart_covered_reports: u64,
+    pub accepted_write_attempts: u64,
+    pub repair_write_attempts: u64,
+    pub uncertainty_prunes: u64,
+    pub uncertainty_settles: u64,
+    pub forged_epoch_requests: u64,
+    pub invalid_fenced_replies: u64,
 }
 
 /// Deliberate bugs to inject into every replica and target of a run.
@@ -312,6 +336,8 @@ struct Node {
     inc: u64,
     clock: Clock,
     replica: Replica,
+    /// Exact simulator-only records; independent of the bounded production representation.
+    uncertainty: Uncertainty,
     target: Option<Target<Data>>,
     /// Client operations in flight: op id → extent.
     client: BTreeMap<u64, (ChunkIdx, Extent)>,
@@ -328,6 +354,14 @@ struct HistOp {
     write: Option<Value>,
     invoke: u64,
     result: Option<(u64, OpResult<Data>)>,
+}
+
+/// A selected Write's device completion may notify the target after later requests finish.
+/// Hold it before network send, so releasing it still uses the generated reply stream order.
+#[cfg(test)]
+struct DeferredWriteReply {
+    node: NodeId,
+    completed: Option<(NodeId, Conn, FromReplica<Data>)>,
 }
 
 /// One simulated run.
@@ -349,12 +383,16 @@ pub struct Sim {
     history: Vec<HistOp>,
     chaos: bool,
     report: Report,
+    /// An event may detect a violation before the enclosing run loop can return it.
+    check_failure: Option<String>,
     /// `FLAMINIO_SIM_TRACE=chunk,block` prints what happens to that block.
     trace: Option<(ChunkIdx, Block)>,
     /// Scripted run: no random faults, operations or delays.
     script: Option<Vec<(u64, Action)>>,
     #[cfg(test)]
     bugs: Bugs,
+    #[cfg(test)]
+    deferred_write_reply: Option<DeferredWriteReply>,
 }
 
 impl Sim {
@@ -386,15 +424,26 @@ impl Sim {
         placement: Vec<Vec<NodeId>>,
         script: Option<Vec<(u64, Action)>>,
     ) -> Self {
+        assert!(
+            cfg.chunks <= cfg.uncertainty_budget,
+            "chunks exceed uncertainty budget"
+        );
         let mut meta = Metadata::default();
         meta.create_volume(VOL, 0, cfg.min_isr, cfg.blocks_per_chunk, placement.clone());
         let drift = cfg.timing.drift_ppm;
         let nodes = (0..cfg.nodes)
             .map(|n| {
-                let mut replica = Replica::with_chunk_size(cfg.blocks_per_chunk);
+                let mut replica = Replica::with_chunk_size_and_budget(
+                    cfg.blocks_per_chunk,
+                    cfg.uncertainty_budget,
+                );
+                let mut uncertainty = Uncertainty::default();
                 for (c, r) in placement.iter().enumerate() {
                     if r.contains(&n) {
-                        replica.create_chunk(VOL, c as ChunkIdx, cfg.blocks_per_chunk);
+                        replica
+                            .create_chunk(VOL, c as ChunkIdx, cfg.blocks_per_chunk)
+                            .expect("placement fits the uncertainty budget");
+                        uncertainty.add_chunk(c as ChunkIdx, cfg.blocks_per_chunk);
                     }
                 }
                 Node {
@@ -405,6 +454,7 @@ impl Sim {
                         offset: rng.range(0, 1000 * SEC),
                     },
                     replica,
+                    uncertainty,
                     target: None,
                     client: BTreeMap::new(),
                     fast: BTreeMap::new(),
@@ -429,6 +479,7 @@ impl Sim {
             history: Vec::new(),
             chaos: true,
             report: Report::default(),
+            check_failure: None,
             trace: std::env::var("FLAMINIO_SIM_TRACE").ok().and_then(|v| {
                 let (c, b) = v.split_once(',')?;
                 Some((c.parse().ok()?, b.parse().ok()?))
@@ -436,6 +487,8 @@ impl Sim {
             script,
             #[cfg(test)]
             bugs: Bugs::default(),
+            #[cfg(test)]
+            deferred_write_reply: None,
         }
     }
 
@@ -505,7 +558,7 @@ impl Sim {
             if self.now > deadline {
                 return Err(self.fail("liveness: did not settle"));
             }
-            if !self.step() {
+            if !self.step_checked()? {
                 return Err(self.fail("liveness: no events left"));
             }
             if self.seq > MAX_EVENTS {
@@ -525,13 +578,13 @@ impl Sim {
             .iter()
             .any(|&op| self.history[op as usize].result.is_none())
         {
-            if self.now > read_deadline || !self.step() {
+            if self.now > read_deadline || !self.step_checked()? {
                 return Err(self.fail("liveness: final reads did not complete"));
             }
         }
         // Messages delayed during chaos may still fail a session: settle again.
         while self.settled().is_none() {
-            if self.now > read_deadline + self.cfg.settle_limit || !self.step() {
+            if self.now > read_deadline + self.cfg.settle_limit || !self.step_checked()? {
                 return Err(self.fail("liveness: did not settle after the final reads"));
             }
         }
@@ -540,6 +593,13 @@ impl Sim {
         self.report.ops = self.history.len();
         self.report.completed = self.history.iter().filter(|h| h.result.is_some()).count();
         self.report.final_epoch = self.meta.volume(VOL).expect("volume").epoch;
+        for n in &self.nodes {
+            let stats = &n.uncertainty.stats;
+            self.report.accepted_write_attempts += stats.writes;
+            self.report.repair_write_attempts += stats.repairs;
+            self.report.uncertainty_prunes += stats.prunes;
+            self.report.uncertainty_settles += stats.settles;
+        }
         #[cfg(test)]
         for node in 0..self.cfg.nodes {
             self.count_target(node);
@@ -627,6 +687,32 @@ impl Sim {
         true
     }
 
+    fn step_checked(&mut self) -> Result<bool, String> {
+        if let Some(error) = self.check_failure.take() {
+            return Err(self.fail(&error));
+        }
+        let stepped = self.step();
+        if let Some(error) = self.check_failure.take() {
+            return Err(self.fail(&error));
+        }
+        Ok(stepped)
+    }
+
+    fn check_uncertainty(&mut self, node: NodeId) {
+        let n = &self.nodes[node as usize];
+        match n.uncertainty.check_core(&n.replica.core, VOL) {
+            Ok(checked) => {
+                self.report.uncertainty_checks += 1;
+                self.report.coarsened_checks += u64::from(checked.coarsened);
+                self.report.restart_covered_reports += checked.restarted_chunks as u64;
+            }
+            Err(error) => {
+                self.check_failure
+                    .get_or_insert_with(|| format!("node {node}: {error}"));
+            }
+        }
+    }
+
     fn link_down(&self, a: NodeId, b: NodeId) -> bool {
         a != b && self.down_links.contains(&(a.min(b), a.max(b)))
     }
@@ -647,7 +733,55 @@ impl Sim {
         }
     }
 
-    fn send(&mut self, from: NodeId, to: NodeId, conn: Conn, body: Body) {
+    fn send(&mut self, from: NodeId, to: NodeId, conn: Conn, mut body: Body) {
+        // Draw only for eligible requests above a nonzero rate, so ordinary seeds and the
+        // fault-free settle phase keep their existing traffic and random stream. Local
+        // replicas pass through this same path.
+        if self.chaos {
+            if self.cfg.forge_epoch_pct > 0
+                && let Body::ToReplica(m) = &mut body
+            {
+                let bound = match &mut m.body {
+                    crate::msg::Request::Write {
+                        prune: Some(bound), ..
+                    }
+                    | crate::msg::Request::Settle { below: bound, .. } => Some(bound),
+                    _ => None,
+                };
+                if let Some(bound) = bound
+                    && let Some(epoch) = m.epoch.checked_add(1)
+                    && self.rng.pct(self.cfg.forge_epoch_pct)
+                {
+                    bound.epoch = epoch;
+                    self.report.forged_epoch_requests += 1;
+                }
+            }
+            if self.cfg.invalid_fenced_pct > 0
+                && let Body::FromReplica(m) = &mut body
+                && matches!(m.body, Response::Fenced { .. })
+                && self.rng.pct(self.cfg.invalid_fenced_pct)
+            {
+                // Each corruption has at most two rows and one extent. Avoid arithmetic
+                // overflow/empty extents here so a validation mutant reaches the authority
+                // checker rather than panicking inside unrelated extent operations.
+                m.body = match self.rng.range(0, 4) {
+                    0 => Response::Ok,
+                    1 => Response::Fenced {
+                        uncertain: vec![(self.cfg.chunks, vec![])],
+                    },
+                    2 => Response::Fenced {
+                        uncertain: vec![(0, vec![]), (0, vec![])],
+                    },
+                    3 => Response::Fenced {
+                        uncertain: vec![(0, vec![Extent::new(self.cfg.blocks_per_chunk, 1)])],
+                    },
+                    _ => Response::Fenced {
+                        uncertain: vec![(1, vec![]), (0, vec![])],
+                    },
+                };
+                self.report.invalid_fenced_replies += 1;
+            }
+        }
         let key = (from, to, conn);
         let random = self.chaos && self.script.is_none();
         let lost = !self.up(to)
@@ -717,7 +851,7 @@ impl Sim {
                         | R::Mapped { chunk, ext }
                         | R::Discard { chunk, ext } => chunk == tc && ext.contains(tb),
                         R::BeginResync { chunk } | R::Settle { chunk, .. } => chunk == tc,
-                        R::Hello => true,
+                        R::Hello { .. } => true,
                         R::Heartbeat => false,
                     };
                     if watched {
@@ -739,8 +873,33 @@ impl Sim {
                         );
                     }
                 }
-                let reply = self.nodes[p.to as usize].replica.handle(&m);
+                let n = &mut self.nodes[p.to as usize];
+                let blocks = self.cfg.blocks_per_chunk;
+                let reply = n.replica.handle_observed(&m, |action| {
+                    n.uncertainty.observe(&m, action, blocks);
+                });
+                if let Some(FromReplica {
+                    body: Response::Fenced { uncertain },
+                    ..
+                }) = &reply
+                    && let Err(error) = n.uncertainty.check_report(uncertain)
+                {
+                    self.check_failure.get_or_insert(error);
+                }
+                self.check_uncertainty(p.to);
+                if self.check_failure.is_some() {
+                    return;
+                }
                 if let Some(r) = reply {
+                    #[cfg(test)]
+                    if let Some(deferred) = self.deferred_write_reply.as_mut()
+                        && deferred.node == p.to
+                        && deferred.completed.is_none()
+                        && matches!(m.body, crate::msg::Request::Write { .. })
+                    {
+                        deferred.completed = Some((p.from, p.conn, r));
+                        return;
+                    }
                     self.send(p.to, p.from, p.conn, Body::FromReplica(r));
                 }
             }
@@ -760,16 +919,44 @@ impl Sim {
                 let n = &mut self.nodes[p.to as usize];
                 let local = n.clock.local(self.now);
                 if let Some(t) = n.target.as_mut() {
+                    // Only the target that still owns this exact pending Hello can gain
+                    // authority from the reply. Its query exposes the send-time chunk set;
+                    // old replies and dead/replaced targets must not be associated anew.
+                    let invalid_hello = m.vol == VOL
+                        && !matches!(m.body, Response::Stale { .. })
+                        && t.hello_chunks_for_reply(p.from, m.epoch, m.session, m.req)
+                            .is_some_and(|required| {
+                                !valid_fenced(
+                                    &m.body,
+                                    required,
+                                    self.cfg.chunks,
+                                    self.cfg.blocks_per_chunk,
+                                )
+                            });
+                    let before = invalid_hello.then(|| t.fenced_authority(p.from));
                     // A report the target ignores (a stale session) leaves the reply to it.
                     if fail && t.on_read_failed(local, p.from, m.epoch, m.session, m.req) {
                         self.report.failed_local_reads += 1;
                     } else {
                         t.on_reply(local, p.from, &m);
                     }
+                    if let Some(before) = before
+                        && let Err(error) =
+                            check_fenced_authority(&before, &t.fenced_authority(p.from))
+                    {
+                        self.check_failure.get_or_insert(error);
+                    }
                 }
                 self.after(p.to);
             }
             Body::MetaReq { req, body } => {
+                if let MetaRequest::ChangeIsr { changes, .. } = &body
+                    && changes.len() > MAX_CHANGES_PER_REQUEST
+                {
+                    // Production refuses before touching metadata. The adapter's failure
+                    // supplies no authoritative view, so the target must time out.
+                    return;
+                }
                 let before: Vec<Vec<NodeId>> = self
                     .meta
                     .volume(VOL)
@@ -792,7 +979,13 @@ impl Sim {
                         self.nodes[n as usize]
                             .replica
                             .remove_chunk(VOL, c as ChunkIdx);
+                        self.nodes[n as usize]
+                            .uncertainty
+                            .remove_chunk(c as ChunkIdx);
                     }
+                }
+                for n in 0..self.cfg.nodes {
+                    self.check_uncertainty(n);
                 }
                 if self.trace.is_some() {
                     eprintln!(
@@ -875,6 +1068,9 @@ impl Sim {
                     self.send(node, to, conn, Body::ToReplica(msg));
                 }
                 Output::Meta { req, body } => {
+                    if let MetaRequest::ChangeIsr { changes, .. } = &body {
+                        self.report.max_meta_batch = self.report.max_meta_batch.max(changes.len());
+                    }
                     self.send(node, META, None, Body::MetaReq { req, body })
                 }
                 Output::Done { op, result } => {
@@ -1120,6 +1316,8 @@ impl Sim {
         n.fast.clear();
         n.wake_at = None;
         n.replica.restart();
+        n.uncertainty.restart();
+        self.check_uncertainty(node);
         self.report.crashes += 1;
     }
 
@@ -1345,6 +1543,12 @@ impl Sim {
 
     /// Checks linearizability, convergence and full ISRs.
     fn check(&self) -> Result<(), String> {
+        if let Some(error) = &self.check_failure {
+            return Err(error.clone());
+        }
+        for n in &self.nodes {
+            n.uncertainty.check_core(&n.replica.core, VOL)?;
+        }
         let v = self.meta.volume(VOL).expect("volume");
         for (c, m) in v.chunks.iter().enumerate() {
             if m.isr.len() != m.replicas.len() {

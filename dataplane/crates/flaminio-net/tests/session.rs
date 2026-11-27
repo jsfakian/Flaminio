@@ -3,10 +3,11 @@
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 
-use flaminio_net::frame::Frame;
-use flaminio_net::session::{self, SessionError};
+use flaminio_net::frame::{EncodeError, Frame, MAX_CHUNKS, MAX_UNCERTAIN};
+use flaminio_net::session::{self, Conn, SessionError};
 use flaminio_net::tls::Files;
 use flaminio_net::token::TokenKey;
+use flaminio_repl::extent::Extent;
 use futures_rustls::{TlsAcceptor, TlsConnector};
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, SanType,
@@ -270,4 +271,166 @@ fn one_session_per_connection() {
     assert!(session::check_request(&hello(vec![], "v", 1)).is_err());
     assert!(session::check_request(&Frame::Ok { req: 1 }).is_err());
     assert!(session::check_request(&Frame::Heartbeat { req: 1 }).is_ok());
+}
+
+#[derive(Default)]
+struct WriteEvents {
+    bytes: Vec<u8>,
+    writes: usize,
+    flushes: usize,
+}
+
+#[derive(Default)]
+struct ObservedWriter(std::rc::Rc<std::cell::RefCell<WriteEvents>>);
+
+impl futures_lite::AsyncWrite for ObservedWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let mut events = self.0.borrow_mut();
+        events.writes += 1;
+        // Exercise write_all as well as framing: successful writes can be partial.
+        let written = bytes.len().min(7);
+        events.bytes.extend_from_slice(&bytes[..written]);
+        std::task::Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.0.borrow_mut().flushes += 1;
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+#[test]
+fn checked_fenced_refusal_writes_nothing_and_next_send_is_intact() {
+    let invalid = [
+        (
+            "too many uncertain chunks",
+            (0..=MAX_CHUNKS as u32)
+                .map(|chunk| (chunk, vec![]))
+                .collect(),
+        ),
+        (
+            "too many uncertain extents",
+            vec![(0, vec![Extent::new(0, 1); MAX_UNCERTAIN + 1])],
+        ),
+        (
+            "uncertain chunks are not ordered",
+            vec![(0, vec![]), (0, vec![])],
+        ),
+        (
+            "uncertain extent",
+            vec![(0, vec![Extent { start: 1, len: 0 }])],
+        ),
+        (
+            "uncertain extent",
+            vec![(
+                0,
+                vec![Extent {
+                    start: u32::MAX,
+                    len: 1,
+                }],
+            )],
+        ),
+        (
+            "uncertain extents overlap or are unordered",
+            vec![(0, vec![Extent::new(0, 2), Extent::new(1, 1)])],
+        ),
+    ];
+    for (reason, uncertain) in invalid {
+        let stream = ObservedWriter::default();
+        let events = std::rc::Rc::clone(&stream.0);
+        let mut conn = Conn::new(stream);
+        let error = smol::block_on(conn.send(&Frame::Fenced { req: 1, uncertain })).unwrap_err();
+        assert!(matches!(error, SessionError::Encode(EncodeError::Invalid(why)) if why == reason));
+        // No AsyncWrite method is called, so this also forbids a partial socket prefix or
+        // flush. The same Conn must remain usable for the next successful frame.
+        assert!(events.borrow().bytes.is_empty());
+        assert_eq!((events.borrow().writes, events.borrow().flushes), (0, 0));
+        let valid = Frame::Fenced {
+            req: 2,
+            uncertain: vec![(0, vec![]), (1, vec![Extent::new(0, 262_144)])],
+        };
+        smol::block_on(conn.send(&valid)).unwrap();
+        let stream = events.borrow();
+        assert_eq!(stream.bytes, valid.encode_checked().unwrap());
+        assert!(stream.writes > 1);
+        assert_eq!(stream.flushes, 1);
+        assert_eq!(Frame::decode(&stream.bytes[4..]), Ok(valid));
+    }
+}
+
+#[test]
+fn checked_hello_bounds_round_trip_and_refusal_preserves_connection() {
+    let legal = Frame::Hello {
+        req: 1,
+        epoch: u64::MAX,
+        session: u64::MAX,
+        volume: "v".repeat(u16::MAX as usize),
+        token: vec![0; flaminio_net::token::MAX_LEN],
+        size: (1u64 << 16) * (1 << 30),
+        chunk_size: 1 << 30,
+        chunks: (0..MAX_CHUNKS as u32).collect(),
+    };
+    let encoded = legal.encode_checked().unwrap();
+    assert_eq!(Frame::decode(&encoded[4..]), Ok(legal.clone()));
+    assert_eq!(
+        encoded.len(),
+        4 + 49 + u16::MAX as usize + flaminio_net::token::MAX_LEN + 4 * MAX_CHUNKS
+    );
+    assert!(encoded.len() - 4 <= flaminio_net::frame::MAX_BODY);
+
+    for case in 0..10 {
+        let mut invalid = legal.clone();
+        let Frame::Hello {
+            volume,
+            token,
+            size,
+            chunk_size,
+            chunks,
+            ..
+        } = &mut invalid
+        else {
+            unreachable!()
+        };
+        match case {
+            0 => chunks.push(MAX_CHUNKS as u32),
+            1 => volume.push('v'),
+            2 => *token = vec![0; u16::MAX as usize + 1],
+            3 => token.push(0),
+            4 => *size = 0,
+            5 => *chunk_size = 0,
+            6 => *size += 4096,
+            7 => *size += *chunk_size,
+            8 => chunks[0] = MAX_CHUNKS as u32,
+            _ => chunks[1] = chunks[0],
+        }
+        let stream = ObservedWriter::default();
+        let events = std::rc::Rc::clone(&stream.0);
+        let mut conn = Conn::new(stream);
+        assert!(
+            matches!(
+                smol::block_on(conn.send(&invalid)),
+                Err(SessionError::Encode(_))
+            ),
+            "case {case}"
+        );
+        assert!(events.borrow().bytes.is_empty(), "case {case}");
+        assert_eq!((events.borrow().writes, events.borrow().flushes), (0, 0));
+        smol::block_on(conn.send(&legal)).unwrap();
+        assert_eq!(events.borrow().bytes, encoded, "case {case}");
+        assert_eq!(events.borrow().flushes, 1);
+    }
 }

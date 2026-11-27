@@ -13,8 +13,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/proto"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"github.com/flaminio/flaminio/meta/domain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/pkg/captoken"
 	"github.com/flaminio/flaminio/pkg/pki"
@@ -121,6 +123,24 @@ func TestAuthorization(t *testing.T) {
 	created, err := admin.CreateVolume(ctx, req)
 	expect("admin creates a volume", err, codes.OK)
 	first := created.GetVolume().GetEpoch()
+	// CheckCreateVolume is explicitly admin-only, even for identities allowed scalar reads.
+	check := &metav1.CheckCreateVolumeRequest{Desired: req, RequiredBytes: mib}
+	if _, err := admin.CheckCreateVolume(ctx, check); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]metav1.MetadataServiceClient{"io": nodeA, "agent": agentA, "meta": metaA, "reader": as("reader", pki.NodeID(td, "fl-a", "reader"))} {
+		_, err := c.CheckCreateVolume(ctx, check)
+		expect(name+" compatibility", err, codes.PermissionDenied)
+	}
+	_, err = foreign.CheckCreateVolume(ctx, check)
+	expect("foreign compatibility", err, codes.Unauthenticated)
+	called := false
+	_, err = svc.Authorize(context.Background(), check, &grpc.UnaryServerInfo{FullMethod: metav1.MetadataService_CheckCreateVolume_FullMethodName}, func(context.Context, any) (any, error) { called = true; return nil, nil })
+	expect("anonymous compatibility", err, codes.Unauthenticated)
+	if called {
+		t.Fatal("anonymous compatibility reached handler")
+	}
+
 	_, err = nodeA.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
 	expect("node attaches itself", err, codes.PermissionDenied)
 	_, err = admin.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "fl-a"})
@@ -162,11 +182,20 @@ func TestAuthorization(t *testing.T) {
 	expect("io CheckDrain", err, codes.PermissionDenied)
 	_, err = agentB.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
 	expect("other-node agent CheckDrain", err, codes.PermissionDenied)
-	_, err = admin.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
-	// Node is not draining: FailedPrecondition is still an authorized call.
-	if code(err) != codes.OK && code(err) != codes.FailedPrecondition && code(err) != codes.InvalidArgument {
-		t.Fatalf("admin CheckDrain: %v", err)
+	_, err = foreign.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("foreign CheckDrain", err, codes.Unauthenticated)
+	calledCheck := false
+	_, err = svc.Authorize(context.Background(), &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1}, &grpc.UnaryServerInfo{FullMethod: metav1.MetadataService_CheckDrain_FullMethodName}, func(context.Context, any) (any, error) { calledCheck = true; return nil, nil })
+	expect("no identity CheckDrain", err, codes.Unauthenticated)
+	if calledCheck {
+		t.Fatal("unauthenticated completion reached handler")
 	}
+	mark, err := admin.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a", Draining: true})
+	expect("admin marks for completion", err, codes.OK)
+	_, err = admin.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: mark.GetGeneration()})
+	expect("admin CheckDrain", err, codes.OK)
+	_, err = admin.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a", Draining: false})
+	expect("admin undrains after completion check", err, codes.OK)
 	_, err = nodeB.ListVolumes(ctx, &metav1.ListVolumesRequest{})
 	expect("node lists volumes", err, codes.OK)
 
@@ -217,6 +246,71 @@ func TestAuthorization(t *testing.T) {
 	if err != nil || !r.Applied {
 		t.Fatalf("target could not change the ISR: %v %v", r, err)
 	}
+
+	t.Run("bounded ISR batches remain target-only", func(t *testing.T) {
+		expect := func(what string, err error, want codes.Code) {
+			t.Helper()
+			if code(err) != want {
+				t.Fatalf("%s: got %v, want %v", what, err, want)
+			}
+		}
+		const volume = "auth-batches"
+		limit := domain.MaxChangesPerRequest
+		_, err := admin.CreateVolume(ctx, &metav1.CreateVolumeRequest{
+			Id: volume, SizeBytes: uint64(2*limit+1) * mib, ChunkBytes: mib, Replicas: 2, MinIsr: 1,
+		})
+		expect("create multi-batch volume", err, codes.OK)
+		attached, err := admin.Attach(ctx, &metav1.AttachRequest{Volume: volume, Node: "fl-a"})
+		expect("attach multi-batch volume", err, codes.OK)
+		view := attached.Volume
+		for start := 0; start < len(view.Chunks); start += limit {
+			batch := &metav1.ChangeIsrRequest{Volume: volume, Epoch: view.Epoch}
+			for i := start; i < min(start+limit, len(view.Chunks)); i++ {
+				c := view.Chunks[i]
+				batch.Changes = append(batch.Changes, &metav1.IsrChange{
+					Chunk: uint32(i), ExpectedVer: c.IsrVer, NewIsr: c.Replicas[:1],
+				})
+			}
+			refused, err := nodeB.ChangeIsr(ctx, batch)
+			expect("non-target submits a bounded batch", err, codes.OK)
+			if refused.Applied || refused.Epoch != view.Epoch || len(refused.Chunks) != len(batch.Changes) {
+				t.Fatalf("non-target batch beginning at %d: %v", start, refused)
+			}
+			for i, change := range batch.Changes {
+				if !proto.Equal(refused.Chunks[i], view.Chunks[change.Chunk]) {
+					t.Fatalf("non-target reply changed chunk %d: %v", change.Chunk, refused.Chunks[i])
+				}
+			}
+			_, err = admin.ChangeIsr(ctx, batch)
+			expect("admin submits a bounded batch", err, codes.PermissionDenied)
+			_, err = agentA.ChangeIsr(ctx, batch)
+			expect("target's agent submits a bounded batch", err, codes.PermissionDenied)
+			unchanged, err := admin.GetVolume(ctx, &metav1.GetVolumeRequest{Id: volume})
+			expect("read after unauthorized batches", err, codes.OK)
+			if !proto.Equal(unchanged.Volume, view) {
+				t.Fatalf("unauthorized batch beginning at %d mutated metadata", start)
+			}
+			applied, err := nodeA.ChangeIsr(ctx, batch)
+			expect("target submits a bounded batch", err, codes.OK)
+			if !applied.Applied || applied.Epoch != view.Epoch || len(applied.Chunks) != len(batch.Changes) {
+				t.Fatalf("target batch beginning at %d: %v", start, applied)
+			}
+			want := proto.Clone(view).(*metav1.Volume)
+			for i, change := range batch.Changes {
+				want.Chunks[change.Chunk].Isr = []string{change.NewIsr[0]}
+				want.Chunks[change.Chunk].IsrVer++
+				if !proto.Equal(applied.Chunks[i], want.Chunks[change.Chunk]) {
+					t.Fatalf("target reply item %d does not describe requested chunk %d", i, change.Chunk)
+				}
+			}
+			current, err := admin.GetVolume(ctx, &metav1.GetVolumeRequest{Id: volume})
+			expect("read after target batch", err, codes.OK)
+			if !proto.Equal(current.Volume, want) {
+				t.Fatalf("target batch beginning at %d changed the wrong chunks", start)
+			}
+			view = current.Volume
+		}
+	})
 
 	// No client certificate at all: the handshake fails.
 	scfgNoCert, _ := server.ClientConfig()

@@ -30,16 +30,31 @@ in [milestones](https://github.com/jsfakian/Flaminio/milestones) ordered by what
 The [audit report](audits/2026-11-12/README.md) adds confirmed defects outside the original
 follow-ups: [#76](https://github.com/jsfakian/Flaminio/issues/76) interrupted creation
   (immutable plan + recovery; [ADR 0016](adr/0016-create-retains-immutable-admitted-plan.md)),
-[#77](https://github.com/jsfakian/Flaminio/issues/77) inconsistent volume reads,
+[#77](https://github.com/jsfakian/Flaminio/issues/77) inconsistent volume reads (fixed: validated
+header/prefix snapshots, commit-pinned Attach responses and atomic named ISR views;
+[implementation and validation report](issues/77/report.md)),
 [#78](https://github.com/jsfakian/Flaminio/issues/78) drain admission
-  (placement-gate + `CheckDrain`; shipping — mark resolved after verification),
+  (placement-gate + `CheckDrain`; integration and verification in progress),
 [#79](https://github.com/jsfakian/Flaminio/issues/79) CSI mount ownership,
-[#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation,
-[#81](https://github.com/jsfakian/Flaminio/issues/81) ISR RPC batching,
-[#82](https://github.com/jsfakian/Flaminio/issues/82) node-wide shutdown assertions and
-[#85](https://github.com/jsfakian/Flaminio/issues/85) io_uring buffer lifetime on error.
+[#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation (fixed: shared whole-chunk
+admission and future-view budget, checked CSI capacity/identity retries, and validation before
+engine/session/store mutation; [implementation and validation report](issues/80/report.md),
+[ADR 0018](adr/0018-admit-only-representable-volume-geometries.md)),
+[#81](https://github.com/jsfakian/Flaminio/issues/81) ISR RPC batching (fixed: fair batches of
+at most 64 changes, stale-reply guards, production-bound fixtures and 129-chunk recovery
+interoperation; `make lint test race hygiene contracts sim` pass, with the review correction
+validated by `make fmt lint test`; [implementation report](issues/81/report.md)),
+[#82](https://github.com/jsfakian/Flaminio/issues/82) node-wide shutdown assertions (fixed: evidence-gated marks, ADR 0015; lab refuse pending) and
+[#85](https://github.com/jsfakian/Flaminio/issues/85) io_uring buffer lifetime on error (fixed on `issue/85-io-uring-batch-validation-borrowed-buffers`: preparation before publication, ownership drain/fail-stop, `make lint test race hygiene contracts` pass; `make miri` covers aligned helpers only; `make sanitize QUICK=1` pass).
 The subsequent issue-plan review reproduced Fenced uncertainty framing overflow, tracked by
-[#86](https://github.com/jsfakian/Flaminio/issues/86); bounded geometry alone does not fix it.
+[#86](https://github.com/jsfakian/Flaminio/issues/86): bounded per-volume uncertainty arenas,
+per-chunk maximum-Version covers, checked Fenced reports and captured Hello rows address the
+overflow independently of geometry admission. Resync retains pending-write evidence and
+unresolved source retirement. Coarsening can increase takeover reconciliation traffic;
+unsupported legacy held sets are quarantined without deletion and strict consumers require
+coordinated producer rollout. See [ADR 0017](adr/0017-bound-uncertainty-with-per-chunk-covers.md)
+and the [implementation report](issues/86/report.md) for validation/review status. Complete
+geometry/transport admission is tracked by #80 above; aggregate scheduling/resource limits remain #75.
 The clock contract is tracked by [#83](https://github.com/jsfakian/Flaminio/issues/83), and
 block-interface conformance by [#84](https://github.com/jsfakian/Flaminio/issues/84).
 A green existing suite does not close these issues; their separate adversarial reproductions

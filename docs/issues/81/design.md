@@ -1,7 +1,8 @@
 # Issue #81: Bounded ISR updates — design
 
 How the [spec](spec.md)'s rules are built. Settled choices: [decisions](decisions.md).
-Approved 2026-11-13; not implemented.
+Published clear snapshot approved 2026-11-20; implementation and validation are recorded in
+[report.md](report.md).
 
 The facts it starts from:
 - `Target::send_meta` collects all pending chunks; `meta_inflight` permits one change request

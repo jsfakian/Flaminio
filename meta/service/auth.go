@@ -61,7 +61,7 @@ func (s *Service) Authorize(ctx context.Context, req any, info *grpc.UnaryServer
 	method := info.FullMethod[strings.LastIndex(info.FullMethod, "/")+1:]
 	var allowed bool
 	switch method {
-	case "CreateVolume", "DeleteVolume", "MoveReplica", "DrainNode", "CheckDrain":
+	case "CreateVolume", "CheckCreateVolume", "DeleteVolume", "MoveReplica", "DrainNode", "CheckDrain":
 		allowed = admin
 	case "Attach":
 		// A node's agent restarts its own target under a new epoch; the service checks that

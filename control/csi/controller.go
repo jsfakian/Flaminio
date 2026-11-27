@@ -3,6 +3,8 @@ package csi
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 
@@ -12,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"github.com/flaminio/flaminio/pkg/geometry"
 )
 
 // DriverName is the CSI driver's name, as StorageClasses and CSIDriver objects name it.
@@ -68,14 +71,13 @@ func preferredNode(t *csi.TopologyRequirement) string {
 const (
 	ParamReplicas            = "replicas"            // default 2
 	ParamMinISR              = "minIsr"              // default 1
-	ParamChunkSize           = "chunkSize"           // default 256Mi; a power of two of at least 1Mi
+	ParamChunkSize           = "chunkSize"           // default 256Mi; a power of two from 1Mi through 1Gi
 	ParamFailureDomain       = "failureDomain"       // default node
 	ParamFailureDomainPolicy = "failureDomainPolicy" // default strict
 )
 
 const (
 	defaultSize = 1 << 30
-	sizeAlign   = 1 << 20
 )
 
 // Controller is the CSI controller service: volumes are created, deleted and moved between
@@ -165,6 +167,9 @@ func parseParams(p map[string]string) (volumeParams, error) {
 			return out, status.Errorf(codes.InvalidArgument, "parameter %s=%q: %v", k, v, err)
 		}
 	}
+	if err := geometry.Parameters(out.chunk, out.replicas, out.minISR); err != nil {
+		return out, status.Errorf(codes.InvalidArgument, "parameters: %v", err)
+	}
 	return out, nil
 }
 
@@ -200,7 +205,13 @@ func parseQuantity(s string) (uint64, error) {
 	for _, u := range units {
 		if n, ok := strings.CutSuffix(s, u.suffix); ok {
 			v, err := strconv.ParseUint(n, 10, 64)
-			return v * u.mult, err
+			if err != nil {
+				return 0, err
+			}
+			if v > math.MaxUint64/u.mult {
+				return 0, fmt.Errorf("quantity overflows uint64")
+			}
+			return v * u.mult, nil
 		}
 	}
 	return strconv.ParseUint(s, 10, 64)
@@ -220,37 +231,75 @@ func (c *Controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	if err != nil {
 		return nil, err
 	}
-	size := uint64(req.GetCapacityRange().GetRequiredBytes())
-	if size == 0 {
+	required, limit := req.GetCapacityRange().GetRequiredBytes(), req.GetCapacityRange().GetLimitBytes()
+	if required < 0 || limit < 0 || limit > 0 && required > limit {
+		return nil, status.Error(codes.InvalidArgument, "invalid signed capacity range")
+	}
+	var size uint64
+	if required > 0 {
+		n := uint64(required) / p.chunk
+		if uint64(required)%p.chunk != 0 {
+			n++
+		}
+		if n > math.MaxInt64/p.chunk {
+			return nil, status.Error(codes.OutOfRange, "capacity rounded to chunks overflows int64")
+		}
+		size = n * p.chunk
+	} else {
 		size = defaultSize
+		if limit > 0 && uint64(limit) < size {
+			size = uint64(limit) / p.chunk * p.chunk
+		}
 	}
-	size = (size + sizeAlign - 1) / sizeAlign * sizeAlign
-	if limit := uint64(req.GetCapacityRange().GetLimitBytes()); limit != 0 && size > limit {
-		return nil, status.Errorf(codes.OutOfRange, "%d bytes, aligned to 1 MiB, exceed the limit of %d", size, limit)
+	if size < p.chunk || limit > 0 && size > uint64(limit) {
+		return nil, status.Error(codes.OutOfRange, "capacity range contains no whole-chunk volume")
 	}
-	_, err = c.Meta.CreateVolume(ctx, &metav1.CreateVolumeRequest{
+	if _, err := geometry.Admit(size, p.chunk, p.replicas, p.minISR); err != nil {
+		return nil, status.Errorf(codes.OutOfRange, "unsupported capacity: %v", err)
+	}
+	desired := &metav1.CreateVolumeRequest{
 		Id: req.GetName(), SizeBytes: size, ChunkBytes: p.chunk, Replicas: p.replicas, MinIsr: p.minISR,
 		PreferNode:          preferredNode(req.GetAccessibilityRequirements()),
 		FailureDomain:       p.domain,
 		FailureDomainPolicy: p.policy,
-	})
+	}
+	created, err := c.Meta.CreateVolume(ctx, desired)
+	v := created.GetVolume()
 	switch status.Code(err) {
 	case codes.OK:
 	case codes.AlreadyExists:
-		// Metadata returns OK for an identical create (new-format or legacy scalar). AlreadyExists
-		// is therefore a real conflict — including policy-only mismatches on visible new-format
-		// volumes. Preserve it; do not re-interpret via GetVolume scalar matching (docs/issues/76 S9).
-		return nil, err
+		checked, err := c.Meta.CheckCreateVolume(ctx, &metav1.CheckCreateVolumeRequest{
+			Desired: desired, RequiredBytes: required, LimitBytes: limit,
+		})
+		if status.Code(err) == codes.Unimplemented {
+			return nil, status.Error(codes.FailedPrecondition, "metadata service lacks CheckCreateVolume; coordinated service upgrade is required")
+		}
+		if err != nil {
+			return nil, err
+		}
+		v = checked.GetVolume()
+		if checked.GetLegacyIdentity() {
+			slog.WarnContext(ctx, "legacy volume retry has only scalar creation identity", "volume", req.GetName())
+		}
 	case codes.FailedPrecondition:
 		return nil, status.Error(codes.ResourceExhausted, status.Convert(err).Message())
 	default:
 		return nil, err
 	}
+	if v.GetId() != req.GetName() || v.GetChunkBytes() != p.chunk || v.GetReplicas() != p.replicas || v.GetMinIsr() != p.minISR {
+		return nil, status.Error(codes.Internal, "metadata returned incompatible volume geometry")
+	}
+	if _, err := geometry.Admit(v.GetSizeBytes(), v.GetChunkBytes(), v.GetReplicas(), v.GetMinIsr()); err != nil {
+		return nil, status.Errorf(codes.Internal, "metadata returned unsupported geometry: %v", err)
+	}
+	if v.GetSizeBytes() > math.MaxInt64 || v.GetSizeBytes() < uint64(required) || limit > 0 && v.GetSizeBytes() > uint64(limit) {
+		return nil, status.Error(codes.Internal, "metadata returned capacity outside the signed range")
+	}
 	// No accessible topology: the volume is reachable from every node, so its pods can move
 	// anywhere (CSI: unset means equally accessible from all nodes).
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
 		VolumeId:      req.GetName(),
-		CapacityBytes: int64(size),
+		CapacityBytes: int64(v.GetSizeBytes()),
 	}}, nil
 }
 

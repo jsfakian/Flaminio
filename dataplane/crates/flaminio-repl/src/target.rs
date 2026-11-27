@@ -11,8 +11,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Debug;
 
 use crate::extent::{Extent, ExtentSet};
-use crate::meta::{IsrChange, MetaReply, MetaRequest, VolumeMeta};
+use crate::meta::{IsrChange, MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, VolumeMeta};
 use crate::msg::{FromReplica, MAX_DIGEST_BLOCKS, MAX_MAPPED_BLOCKS, Request, Response, ToReplica};
+use crate::replica::UNCERTAINTY_BUDGET;
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Version, VolumeId};
 
 /// A client operation on one extent of one chunk.
@@ -59,6 +60,10 @@ pub enum Output<P> {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Bugs {
+    /// Grant authority before validating the complete reply to Hello.
+    pub accept_invalid_fenced: bool,
+    /// Propose every pending chunk together, ignoring the metadata service's batch limit.
+    pub unbounded_meta_batch: bool,
     /// Complete writes once a failed member's removal is proposed, not committed.
     pub ack_before_shrink: bool,
     /// Return reads without checking the lease.
@@ -91,12 +96,16 @@ pub struct Bugs {
     pub fast_read_no_fence_check: bool,
     /// Trust digests from a single ISR member and skip repair (must be caught by the checker).
     pub trust_single_digest: bool,
+    /// Omit writes already in flight when a resync member installs its new filter.
+    pub skip_pending_resync_replay: bool,
+    /// Omit pre-existing writes from the new snapshot round's forced-copy extent set.
+    pub skip_pending_resync_seed: bool,
     /// Not a bug: `pump` tries the queue in its order always, as before docs/issues/11, so that
     /// runs can be compared with it (S2). The order of the digests queued by one progress pass
     /// (S1) stays the new one.
     pub today_pump: bool,
-    /// A chunk's writes in flight keep the acknowledgements of a replica its list drops, so a
-    /// node added back counts as holding them (S11).
+    /// Keep a dropped replica's acknowledgement evidence, including requests from before its
+    /// new resync filter, so a node added back counts as holding those writes (S11).
     pub keep_dropped_acks: bool,
     /// Not a bug: each newly fenced chunk's digests go to the queue's front as it fences, as
     /// before docs/issues/11, so the last chunk fenced in a progress pass goes first (S1).
@@ -113,6 +122,37 @@ pub struct Stats {
     pub waited_pumps_with_resync: u64,
     /// Client operations submitted while their chunk was not `Ready`.
     pub waiting_submits: u64,
+}
+
+/// Fixed operation counts for complete Fenced validation and its sorted merge.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FencedWork {
+    pub rows: u64,
+    pub extents: u64,
+    pub required: u64,
+    pub merged_rows: u64,
+    pub chunks: u64,
+    pub replica_checks: u64,
+    /// Calls into the existing ordered run-map union, excluding its internal tree operations.
+    pub union_extents: u64,
+}
+
+/// Read-only authority facts, independent of the session's retry bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FencedAuthority {
+    pub(crate) session_open: bool,
+    pub(crate) confirmed_until: Time,
+    pub(crate) chunks: Vec<FencedChunkAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FencedChunkAuthority {
+    pub(crate) fenced: BTreeSet<NodeId>,
+    pub(crate) first_fence: Option<Time>,
+    pub(crate) uncertain: Vec<Extent>,
+    pub(crate) reconciling: Option<Vec<Extent>>,
+    pub(crate) ready: bool,
 }
 
 /// A read admitted by [`Target::try_fast_read`]: carried out by the caller on the local
@@ -155,6 +195,8 @@ enum Phase {
 #[derive(Debug)]
 struct Resync {
     member: NodeId,
+    /// Source whose mapped snapshot planned this round.
+    source: NodeId,
     round: u64,
     /// The member's session that carried `BeginResync`.
     session: u64,
@@ -165,8 +207,8 @@ struct Resync {
     started: bool,
     /// Blocks not yet copied and acknowledged.
     todo: ExtentSet,
-    /// Writes that landed on the ISR while Mapped was in flight: always copy these, even if
-    /// the stale Mapped reply omitted them.
+    /// Writes pending before Mapped or started before BeginResync Ack: always copy these,
+    /// even if the stale Mapped reply omitted them.
     force_copy: ExtentSet,
     /// Unmapped on the source: discard on the joiner so stale data does not survive.
     discard: ExtentSet,
@@ -204,6 +246,9 @@ struct Chunk {
     /// The move's next step, to be proposed: add the destination, or drop the source.
     add_replica: Option<NodeId>,
     drop_replica: Option<NodeId>,
+    /// Emitted move removals may already have deleted the source's copy. Only a metadata
+    /// version newer than the conditional update's expected version resolves that hazard.
+    read_blocked: BTreeMap<NodeId, u64>,
     /// Counts the local node's departures from the ISR. A fast read counts only if the local
     /// replica stayed in the ISR throughout: a replica dropped and added again in between holds
     /// different data (possibly a chunk recreated empty), though the lease may hold.
@@ -356,6 +401,8 @@ enum ReqKind {
 struct Session {
     id: u64,
     open: bool,
+    /// The required rows, captured when this session's Hello was sent.
+    hello_chunks: Vec<ChunkIdx>,
     inflight: BTreeMap<u64, (Time, ReqKind)>,
 }
 
@@ -384,6 +431,8 @@ pub struct Target<P> {
     timing: Timing,
     chunks: Vec<Chunk>,
     peers: BTreeMap<NodeId, Peer>,
+    #[cfg(test)]
+    fenced_work: FencedWork,
     next_session: u64,
     next_req: u64,
     next_seq: u64,
@@ -404,6 +453,8 @@ pub struct Target<P> {
     /// there (docs/issues/5).
     avoid: BTreeMap<u64, (NodeId, u32)>,
     meta_inflight: Option<(u64, Time)>,
+    /// First chunk considered for the next bounded metadata proposal.
+    next_meta_chunk: usize,
     next_heartbeat: Time,
     /// When to read the volume from the metadata service next, and the read in flight. It has
     /// its own slot: an ISR change must never wait behind it.
@@ -461,6 +512,7 @@ impl<P: Clone + Debug> Target<P> {
                 moving: m.moving,
                 add_replica: None,
                 drop_replica: None,
+                read_blocked: BTreeMap::new(),
                 local_gen: 0,
             })
             .collect();
@@ -481,6 +533,8 @@ impl<P: Clone + Debug> Target<P> {
             timing,
             chunks,
             peers,
+            #[cfg(test)]
+            fenced_work: FencedWork::default(),
             next_session: 1,
             next_req: 1,
             next_seq: 0,
@@ -495,6 +549,7 @@ impl<P: Clone + Debug> Target<P> {
             queue: VecDeque::new(),
             avoid: BTreeMap::new(),
             meta_inflight: None,
+            next_meta_chunk: 0,
             next_heartbeat: now,
             next_refresh: now + timing.refresh,
             refresh_inflight: None,
@@ -904,6 +959,25 @@ impl<P: Clone + Debug> Target<P> {
             return;
         }
         if matches!(kind, ReqKind::Hello) {
+            // Neither transport decoding nor the local path supplies volume geometry or the
+            // send-time required set. Validate all rows before installing any authority.
+            let valid = match &m.body {
+                Response::Fenced { uncertain } => Self::valid_fenced(
+                    uncertain,
+                    &session.hello_chunks,
+                    self.chunks.len(),
+                    self.blocks_per_chunk,
+                    #[cfg(test)]
+                    &mut self.fenced_work,
+                ),
+                _ => false,
+            };
+            #[cfg(test)]
+            let valid = valid || self.bugs.accept_invalid_fenced;
+            if !valid {
+                self.fail_reply(now, from, m.req, sent_at, kind, "an invalid Fenced reply");
+                return;
+            }
             session.open = true;
         }
         peer.confirmed_until = peer.confirmed_until.max(sent_at + self.timing.lease);
@@ -963,15 +1037,51 @@ impl<P: Clone + Debug> Target<P> {
                         r.discard.remove(&e);
                     }
                     r.started = true;
-                    let discards = r.discard.pieces(max_io);
-                    let digests = r.todo.pieces(max_digest);
-                    for ext in discards {
-                        self.queue.push_back(Work::Discard { chunk, round, ext });
+                    #[cfg(test)]
+                    let replay_pending = !self.bugs.skip_pending_resync_replay;
+                    #[cfg(not(test))]
+                    let replay_pending = true;
+                    if replay_pending {
+                        let pending: Vec<(u64, Extent)> = self
+                            .writes
+                            .iter()
+                            .filter(|(_, w)| w.chunk == chunk)
+                            .map(|(&seq, w)| (seq, w.ext))
+                            .collect();
+                        // A previous send's Ack cannot prove this replay reached the new
+                        // replica or its freshly installed filter. Retire its request first.
+                        #[cfg(test)]
+                        let retire_prior = !self.bugs.keep_dropped_acks;
+                        #[cfg(not(test))]
+                        let retire_prior = true;
+                        if retire_prior
+                            && let Some(s) =
+                                self.peers.get_mut(&from).and_then(|p| p.session.as_mut())
+                        {
+                            s.inflight.retain(|_, (_, kind)| {
+                                !matches!(kind, ReqKind::Write { chunk: old, .. } if *old == chunk)
+                            });
+                        }
+                        for (seq, ext) in pending {
+                            if let Some(r) = self.resync_mut(chunk, round) {
+                                r.live.insert(ext);
+                            }
+                            // Even a previous Ack leaves the new filter unprotected. Replay
+                            // every pending write before sending any snapshot work.
+                            self.send_write(now, seq, from);
+                        }
                     }
-                    // Digests first: copy only blocks that still disagree with the source.
-                    for ext in digests {
-                        self.queue
-                            .push_back(Work::ResyncDigest { chunk, round, ext });
+                    if let Some(r) = self.resync_mut(chunk, round) {
+                        let discards = r.discard.pieces(max_io);
+                        let digests = r.todo.pieces(max_digest);
+                        for ext in discards {
+                            self.queue.push_back(Work::Discard { chunk, round, ext });
+                        }
+                        // Digests first: copy only blocks that still disagree with the source.
+                        for ext in digests {
+                            self.queue
+                                .push_back(Work::ResyncDigest { chunk, round, ext });
+                        }
                     }
                 }
             }
@@ -988,15 +1098,14 @@ impl<P: Clone + Debug> Target<P> {
                 }
             }
             _ => {
-                // A reply that does not answer its request: treat the session as broken. The
-                // request goes back in flight first, so that the session's failure handles it
-                // with the others.
-                self.put_back(from, m.req, sent_at, kind);
-                self.events.push(Event::SessionFailed {
-                    node: from,
-                    reason: "a reply did not answer its request",
-                });
-                self.fail_peer(now, from);
+                self.fail_reply(
+                    now,
+                    from,
+                    m.req,
+                    sent_at,
+                    kind,
+                    "a reply did not answer its request",
+                );
             }
         }
         match scope {
@@ -1084,8 +1193,15 @@ impl<P: Clone + Debug> Target<P> {
         self.check_accounting();
     }
 
+    /// Whether `req` still names a live metadata request of this target instance.
+    pub fn accepts_meta_reply(&self, req: u64) -> bool {
+        !self.deposed
+            && (self.refresh_inflight.is_some_and(|(r, _)| r == req)
+                || self.meta_inflight.is_some_and(|(r, _)| r == req))
+    }
+
     fn on_meta_inner(&mut self, now: Time, req: u64, reply: &MetaReply) {
-        if self.deposed {
+        if !self.accepts_meta_reply(req) {
             return;
         }
         if self.refresh_inflight.is_some_and(|(r, _)| r == req) {
@@ -1165,16 +1281,40 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    fn fail_reply(
+        &mut self,
+        now: Time,
+        from: NodeId,
+        req: u64,
+        sent_at: Time,
+        kind: ReqKind,
+        reason: &'static str,
+    ) {
+        // Put the request back first, so the failed session handles it with the others.
+        self.put_back(from, req, sent_at, kind);
+        self.events
+            .push(Event::SessionFailed { node: from, reason });
+        self.fail_peer(now, from);
+    }
+
     fn open_session(&mut self, now: Time, to: NodeId) {
         let id = self.next_session;
         self.next_session += 1;
+        let chunks: Vec<ChunkIdx> = self
+            .chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.replicas.contains(&to))
+            .map(|(i, _)| i as ChunkIdx)
+            .collect();
         let peer = self.peers.get_mut(&to).expect("known peer");
         peer.session = Some(Session {
             id,
             open: false,
+            hello_chunks: chunks.clone(),
             inflight: BTreeMap::new(),
         });
-        self.send(now, to, Request::Hello, ReqKind::Hello);
+        self.send(now, to, Request::Hello { chunks }, ReqKind::Hello);
     }
 
     /// Sends a request on the peer's session. Only `Hello` may go on a session that is not
@@ -1250,25 +1390,8 @@ impl<P: Clone + Debug> Target<P> {
                 };
                 self.queue.push_front(work);
             }
-            if let ReqKind::Read { id } = kind
-                && let Some(r) = self.reads.remove(&id)
-            {
-                if !matches!(r.purpose, ReadFor::Client { .. }) {
-                    self.release_bulk();
-                }
-                if r.locked {
-                    self.chunks[r.chunk as usize].locks.remove(&r.ext);
-                }
-                let (chunk, ext) = (r.chunk, r.ext);
-                let work = match r.purpose {
-                    ReadFor::Client { op } => Work::Client {
-                        op,
-                        kind: Op::Read { chunk, ext },
-                    },
-                    ReadFor::Repair => Work::Repair { chunk, ext },
-                    ReadFor::Copy { round } => Work::Copy { chunk, round, ext },
-                };
-                self.queue.push_front(work);
+            if let ReqKind::Read { id } = kind {
+                self.retry_read(id);
             }
         }
         for i in 0..self.chunks.len() {
@@ -1285,6 +1408,68 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// Retires a read receipt and retries its work ahead of later queued operations.
+    fn retry_read(&mut self, id: u64) {
+        let Some(r) = self.reads.remove(&id) else {
+            return;
+        };
+        if !matches!(r.purpose, ReadFor::Client { .. }) {
+            self.release_bulk();
+        }
+        if r.locked {
+            self.chunks[r.chunk as usize].locks.remove(&r.ext);
+        }
+        let (chunk, ext) = (r.chunk, r.ext);
+        let work = match r.purpose {
+            ReadFor::Client { op } => Work::Client {
+                op,
+                kind: Op::Read { chunk, ext },
+            },
+            ReadFor::Repair => Work::Repair { chunk, ext },
+            ReadFor::Copy { round } => Work::Copy { chunk, round, ext },
+        };
+        self.queue.push_front(work);
+    }
+
+    /// A move removal was emitted: this source may already have lost its local copy, even
+    /// while the target still sees the old metadata. Retire its reads without failing the
+    /// session or other chunks. Unique request ids keep delayed replies retired after rejoin.
+    fn retire_source_reads(&mut self, i: usize, from: NodeId) {
+        let chunk = i as ChunkIdx;
+        let resync_source = self.chunks[i]
+            .resync
+            .as_ref()
+            .is_some_and(|r| r.source == from)
+            || self
+                .digests
+                .values()
+                .any(|d| d.chunk == chunk && d.resync.is_some() && d.need.contains(&from));
+        if resync_source {
+            // Old snapshot replies name the aborted round and cannot affect its successor.
+            // Copies already sent precede its next BeginResync on the member's stream.
+            self.abort_resync(i);
+        }
+        let pending: Vec<(u64, u64)> = self
+            .peers
+            .get(&from)
+            .and_then(|p| p.session.as_ref())
+            .into_iter()
+            .flat_map(|s| &s.inflight)
+            .filter_map(|(&req, &(_, kind))| match kind {
+                ReqKind::Read { id } if self.reads.get(&id).is_some_and(|r| r.chunk == chunk) => {
+                    Some((req, id))
+                }
+                _ => None,
+            })
+            .collect();
+        for (req, id) in pending.into_iter().rev() {
+            if let Some(s) = self.peers.get_mut(&from).and_then(|p| p.session.as_mut()) {
+                s.inflight.remove(&req);
+            }
+            self.retry_read(id);
+        }
+    }
+
     fn abort_resync(&mut self, i: usize) {
         let c = &mut self.chunks[i];
         if let Some(r) = c.resync.take()
@@ -1292,6 +1477,7 @@ impl<P: Clone + Debug> Target<P> {
         {
             d.extend(&r.live);
             d.extend(&r.todo);
+            d.extend(&r.force_copy);
         }
     }
 
@@ -1308,19 +1494,113 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// One pass over report rows/extents and the Hello's sorted required set. The transport
+    /// shares the row/extent budget; this also checks geometry on local, unencoded replies.
+    fn valid_fenced(
+        uncertain: &[(ChunkIdx, Vec<Extent>)],
+        required: &[ChunkIdx],
+        chunks: usize,
+        blocks_per_chunk: Block,
+        #[cfg(test)] work: &mut FencedWork,
+    ) -> bool {
+        if uncertain.len() > UNCERTAINTY_BUDGET as usize {
+            return false;
+        }
+        let mut total = 0usize;
+        let mut previous_chunk = None;
+        let mut needed = required.iter().peekable();
+        for (chunk, exts) in uncertain {
+            #[cfg(test)]
+            {
+                work.rows += 1;
+            }
+            if *chunk as usize >= chunks
+                || previous_chunk.is_some_and(|previous| previous >= *chunk)
+            {
+                return false;
+            }
+            previous_chunk = Some(*chunk);
+            if needed.peek().is_some_and(|&&next| next < *chunk) {
+                return false;
+            }
+            if needed.peek().is_some_and(|&&next| next == *chunk) {
+                needed.next();
+                #[cfg(test)]
+                {
+                    work.required += 1;
+                }
+            }
+            let Some(count) = total.checked_add(exts.len()) else {
+                return false;
+            };
+            total = count;
+            if total > UNCERTAINTY_BUDGET as usize {
+                return false;
+            }
+            let mut previous_end = None;
+            for ext in exts {
+                #[cfg(test)]
+                {
+                    work.extents += 1;
+                }
+                let Some(end) = ext.start.checked_add(ext.len) else {
+                    return false;
+                };
+                if ext.len == 0
+                    || end > blocks_per_chunk
+                    || previous_end.is_some_and(|previous| previous > ext.start)
+                {
+                    return false;
+                }
+                previous_end = Some(end);
+            }
+        }
+        // Existing Fenced v1 body: tag + request + row count, then 8 bytes per row/extent.
+        // Keep the check here as local replies do not pass through the transport preflight.
+        let body = uncertain
+            .len()
+            .checked_add(total)
+            .and_then(|entries| entries.checked_mul(8))
+            .and_then(|bytes| bytes.checked_add(13));
+        needed.next().is_none() && body.is_some_and(|bytes| bytes <= 1_048_704)
+    }
+
     fn on_fenced(&mut self, now: Time, from: NodeId, uncertain: &[(ChunkIdx, Vec<Extent>)]) {
+        let mut rows = uncertain.iter().peekable();
         for (i, c) in self.chunks.iter_mut().enumerate() {
-            if !c.replicas.contains(&from) {
+            #[cfg(test)]
+            {
+                self.fenced_work.chunks += 1;
+            }
+            let exts = if rows.peek().is_some_and(|(chunk, _)| *chunk as usize == i) {
+                #[cfg(test)]
+                {
+                    self.fenced_work.merged_rows += 1;
+                }
+                rows.next().map(|(_, exts)| exts)
+            } else {
+                None
+            };
+            let placed = c.replicas.iter().any(|node| {
+                #[cfg(test)]
+                {
+                    self.fenced_work.replica_checks += 1;
+                }
+                *node == from
+            });
+            if !placed {
                 continue;
             }
             c.fenced.insert(from);
             if c.phase == Phase::Fencing && c.isr.contains(&from) {
                 c.first_fence.get_or_insert(now);
-                if let Some((_, exts)) = uncertain.iter().find(|(ci, _)| *ci as usize == i) {
+                if let Some(exts) = exts {
                     for x in exts {
-                        if x.len > 0 && x.end() <= self.blocks_per_chunk {
-                            c.uncertain.insert(*x);
+                        #[cfg(test)]
+                        {
+                            self.fenced_work.union_extents += 1;
                         }
+                        c.uncertain.insert(*x);
                     }
                 }
             }
@@ -1668,7 +1948,8 @@ impl<P: Clone + Debug> Target<P> {
         if self.bugs.read_from_removing {
             return true;
         }
-        !self.chunks[i].removing.contains(&n)
+        let c = &self.chunks[i];
+        !c.removing.contains(&n) && c.drop_replica != Some(n) && !c.read_blocked.contains_key(&n)
     }
 
     fn start_read(
@@ -2355,15 +2636,29 @@ impl<P: Clone + Debug> Target<P> {
         // Ask the source what holds data; copy only that, discard the rest (follow-ups §3).
         // A chunk larger than one probe is asked in pieces.
         let probes = ExtentSet::of(Extent::new(0, self.blocks_per_chunk)).pieces(self.max_mapped);
+        // A pending Write may not have been admitted by the source yet. If it completes
+        // before BeginResync Ack, it disappears from replay but must still be copied even
+        // when the earlier Mapped snapshot saw a hole.
+        let mut force_copy = ExtentSet::new();
+        #[cfg(test)]
+        let seed_pending = !self.bugs.skip_pending_resync_seed;
+        #[cfg(not(test))]
+        let seed_pending = true;
+        if seed_pending {
+            for w in self.writes.values().filter(|w| w.chunk as usize == i) {
+                force_copy.insert(w.ext);
+            }
+        }
         self.chunks[i].resync = Some(Resync {
             member,
+            source: from,
             round,
             session,
             awaiting_mapped: probes.len(),
             mapped: ExtentSet::new(),
             started: false,
             todo,
-            force_copy: ExtentSet::new(),
+            force_copy,
             discard: ExtentSet::new(),
             live: ExtentSet::new(),
             unacked: BTreeSet::new(),
@@ -2380,9 +2675,8 @@ impl<P: Clone + Debug> Target<P> {
                 return;
             }
         }
-        // Writes already in flight are not sent to the member. Every copy of their blocks
-        // reads its source after them, over the same ordered session, so it carries them;
-        // and the member joins only once they have completed.
+        // The BeginResync Ack replays writes still in flight into the member's new filter.
+        // Ordered source requests alone do not prove that an earlier write was admitted.
     }
 
     /// Proposes the pending ISR changes, one request at a time.
@@ -2426,11 +2720,20 @@ impl<P: Clone + Debug> Target<P> {
         let skip_resync = self.bugs.move_without_resync;
         #[cfg(not(test))]
         let skip_resync = false;
-        let changes: Vec<IsrChange> = self
-            .chunks
-            .iter()
-            .enumerate()
+        #[cfg(test)]
+        let batch_limit = if self.bugs.unbounded_meta_batch {
+            usize::MAX
+        } else {
+            MAX_CHANGES_PER_REQUEST
+        };
+        #[cfg(not(test))]
+        let batch_limit = MAX_CHANGES_PER_REQUEST;
+        let count = self.chunks.len();
+        let changes: Vec<IsrChange> = (0..count)
+            .map(|offset| (self.next_meta_chunk + offset) % count)
+            .map(|i| (i, &self.chunks[i]))
             .filter(|(_, c)| c.change_pending())
+            .take(batch_limit)
             .map(|(i, c)| {
                 let mut new_isr: BTreeSet<NodeId> =
                     c.isr.difference(&c.removing).copied().collect();
@@ -2462,6 +2765,25 @@ impl<P: Clone + Debug> Target<P> {
         if changes.is_empty() {
             return;
         }
+        for change in &changes {
+            let i = change.chunk as usize;
+            let c = &mut self.chunks[i];
+            if let Some(from) = c.drop_replica
+                && change
+                    .new_replicas
+                    .as_ref()
+                    .is_some_and(|replicas| !replicas.contains(&from))
+                && c.read_blocked.insert(from, change.expected_ver).is_none()
+            {
+                if from == self.node {
+                    c.local_gen += 1;
+                }
+                self.retire_source_reads(i, from);
+            }
+        }
+        // Advance even if this batch is refused or its reply is lost, so retries of early
+        // chunks cannot keep eligible later chunks from getting a transaction slot.
+        self.next_meta_chunk = (changes.last().expect("nonempty batch").chunk as usize + 1) % count;
         let req = self.next_req;
         self.next_req += 1;
         self.meta_inflight = Some((req, now));
@@ -2517,6 +2839,9 @@ impl<P: Clone + Debug> Target<P> {
             if m.isr_ver <= c.isr_ver {
                 continue;
             }
+            // Even an equal-version snapshot can predate an emitted conditional removal.
+            // A strictly newer chunk version makes every older conditional update final.
+            c.read_blocked.retain(|_, expected| m.isr_ver <= *expected);
             let removed: Vec<NodeId> = c.isr.difference(&m.isr).copied().collect();
             let during_io = c.phase != Phase::Fencing;
             // Digest-first reconciliation may shrink the ISR before every member has been
@@ -2651,8 +2976,62 @@ impl<P: Clone + Debug> Target<P> {
     }
 }
 
+impl<P: Clone + Debug> Target<P> {
+    /// The set captured by a still-pending Hello, for an independent reply checker.
+    pub(crate) fn hello_chunks_for_reply(
+        &self,
+        from: NodeId,
+        epoch: Epoch,
+        session: u64,
+        req: u64,
+    ) -> Option<&[ChunkIdx]> {
+        if self.deposed || epoch != self.epoch {
+            return None;
+        }
+        let s = self.peers.get(&from)?.session.as_ref()?;
+        (s.id == session && matches!(s.inflight.get(&req)?.1, ReqKind::Hello))
+            .then_some(s.hello_chunks.as_slice())
+    }
+
+    pub(crate) fn fenced_authority(&self, from: NodeId) -> Option<FencedAuthority> {
+        let peer = self.peers.get(&from)?;
+        Some(FencedAuthority {
+            session_open: peer.session.as_ref().is_some_and(|s| s.open),
+            confirmed_until: peer.confirmed_until,
+            chunks: self
+                .chunks
+                .iter()
+                .map(|c| FencedChunkAuthority {
+                    fenced: c.fenced.clone(),
+                    first_fence: c.first_fence,
+                    uncertain: c.uncertain.iter().collect(),
+                    reconciling: match &c.phase {
+                        Phase::Reconciling { pending } => Some(pending.iter().collect()),
+                        _ => None,
+                    },
+                    ready: c.phase == Phase::Ready,
+                })
+                .collect(),
+        })
+    }
+}
+
 #[cfg(test)]
 impl<P: Clone + Debug> Target<P> {
+    pub fn fenced_work(&self) -> FencedWork {
+        self.fenced_work
+    }
+
+    /// Read-only scheduling observations for deterministic deferred-membership scenarios.
+    pub(crate) fn pending_membership(&self) -> Vec<(ChunkIdx, Option<NodeId>, BTreeSet<NodeId>)> {
+        self.chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.change_pending())
+            .map(|(i, c)| (i as ChunkIdx, c.joining, c.removing.clone()))
+            .collect()
+    }
+
     /// Deposes the target, then checks it, as the `pub` methods do.
     pub fn depose_checked(&mut self) {
         self.depose();
@@ -2759,7 +3138,7 @@ mod tests {
     //! unless a test holds them back: a failed local read (docs/issues/5), and the order of
     //! bulk work (docs/issues/11).
     use super::*;
-    use crate::meta::{MetaRequest, Metadata};
+    use crate::meta::{ChunkMeta, MetaRequest, Metadata};
     use crate::msg::Request;
     use crate::replica::Replica;
     use crate::sim::Rng;
@@ -2774,6 +3153,402 @@ mod tests {
     type Pred = fn(&ToReplica<Vec<Value>>) -> bool;
     /// A request to a node, and its reply, held back from the target.
     type Held = (NodeId, ToReplica<Vec<Value>>, FromReplica<Vec<Value>>);
+    type HelloRequests = BTreeMap<NodeId, ToReplica<Vec<Value>>>;
+
+    fn opening_target(
+        placement: &[&[NodeId]],
+        blocks: Block,
+    ) -> (Target<Vec<Value>>, HelloRequests) {
+        let view = VolumeMeta {
+            epoch: 3,
+            target: Some(TARGET),
+            min_isr: 1,
+            blocks_per_chunk: blocks,
+            chunks: placement
+                .iter()
+                .map(|nodes| ChunkMeta {
+                    replicas: nodes.to_vec(),
+                    isr: nodes.iter().copied().collect(),
+                    isr_ver: 0,
+                    moving: None,
+                })
+                .collect(),
+        };
+        let mut target = Target::new(TARGET, VOL, &view, Timing::default(), 1, 7);
+        let hellos = target
+            .take_output()
+            .into_iter()
+            .filter_map(|out| match out {
+                Output::Send { to, msg } if matches!(msg.body, Request::Hello { .. }) => {
+                    Some((to, msg))
+                }
+                _ => None,
+            })
+            .collect();
+        (target, hellos)
+    }
+
+    fn answer_opening(
+        target: &mut Target<Vec<Value>>,
+        from: NodeId,
+        hello: &ToReplica<Vec<Value>>,
+        body: Response<Vec<Value>>,
+    ) {
+        target.on_reply(
+            10,
+            from,
+            &FromReplica {
+                vol: hello.vol,
+                epoch: hello.epoch,
+                session: hello.session,
+                req: hello.req,
+                body,
+            },
+        );
+    }
+
+    #[test]
+    fn hello_answered_ok_grants_nothing() {
+        for body in [
+            Response::Ok,
+            Response::Data(vec![9]),
+            Response::Digests(vec![Some(9)]),
+            Response::Mapped(vec![Extent::new(0, 1)]),
+        ] {
+            let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2]], BLOCKS);
+            let before = target.fenced_authority(1).unwrap();
+            answer_opening(&mut target, 1, &hellos[&1], body);
+            assert_eq!(target.fenced_authority(1), Some(before));
+            assert!(!target.is_deposed());
+            assert_eq!(
+                target.take_events(),
+                vec![Event::SessionFailed {
+                    node: 1,
+                    reason: "an invalid Fenced reply"
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_fenced_rows_grant_no_session_lease_or_chunk_authority() {
+        let rows = [
+            ("empty", vec![]),
+            ("missing tail", vec![(0, vec![])]),
+            ("missing first", vec![(1, vec![])]),
+            ("duplicate", vec![(0, vec![]), (0, vec![]), (1, vec![])]),
+            ("decreasing", vec![(1, vec![]), (0, vec![])]),
+            ("out of range", vec![(0, vec![]), (1, vec![]), (2, vec![])]),
+            (
+                "maximum chunk id",
+                vec![(0, vec![]), (1, vec![]), (u32::MAX, vec![])],
+            ),
+            (
+                "zero extent",
+                vec![(0, vec![Extent { start: 0, len: 0 }]), (1, vec![])],
+            ),
+            (
+                "wrapping extent",
+                vec![
+                    (
+                        0,
+                        vec![Extent {
+                            start: u32::MAX,
+                            len: 2,
+                        }],
+                    ),
+                    (1, vec![]),
+                ],
+            ),
+            (
+                "beyond geometry",
+                vec![(0, vec![Extent::new(BLOCKS - 1, 2)]), (1, vec![])],
+            ),
+            (
+                "decreasing extents",
+                vec![(0, vec![Extent::new(2, 1), Extent::new(0, 1)]), (1, vec![])],
+            ),
+            (
+                "overlapping extents",
+                vec![(0, vec![Extent::new(0, 2), Extent::new(1, 1)]), (1, vec![])],
+            ),
+        ];
+        for (case, uncertain) in rows {
+            let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2]], BLOCKS);
+            let before = target.fenced_authority(1).unwrap();
+            answer_opening(&mut target, 1, &hellos[&1], Response::Fenced { uncertain });
+            assert_eq!(target.fenced_authority(1), Some(before), "{case}");
+            assert!(!target.is_deposed(), "{case}");
+            assert_eq!(
+                target.take_events(),
+                vec![Event::SessionFailed {
+                    node: 1,
+                    reason: "an invalid Fenced reply"
+                }],
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_extra_held_rows_are_checked_before_assigned_rows_grant_authority() {
+        let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2], &[2]], BLOCKS);
+        let before = target.fenced_authority(1).unwrap();
+        answer_opening(
+            &mut target,
+            1,
+            &hellos[&1],
+            Response::Fenced {
+                uncertain: vec![(0, vec![]), (1, vec![]), (2, vec![Extent::new(BLOCKS, 1)])],
+            },
+        );
+        assert_eq!(target.fenced_authority(1), Some(before));
+    }
+
+    #[test]
+    fn stale_reply_to_hello_still_deposes_the_target() {
+        let (mut target, hellos) = opening_target(&[&[1, 2]], BLOCKS);
+        answer_opening(&mut target, 1, &hellos[&1], Response::Stale { fenced: 4 });
+        assert!(target.is_deposed());
+        assert!(target.fenced_authority(1).is_none());
+    }
+
+    #[test]
+    fn valid_extra_held_rows_are_accepted_and_ignored_when_unplaced() {
+        let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2], &[2]], BLOCKS);
+        answer_opening(
+            &mut target,
+            1,
+            &hellos[&1],
+            Response::Fenced {
+                uncertain: vec![
+                    (0, vec![Extent::new(0, 1)]),
+                    (1, vec![]),
+                    (2, vec![Extent::new(0, BLOCKS)]),
+                ],
+            },
+        );
+        let authority = target.fenced_authority(1).unwrap();
+        assert!(authority.session_open && authority.confirmed_until > 0);
+        assert_eq!(authority.chunks[0].fenced, [1].into());
+        assert_eq!(authority.chunks[0].uncertain, vec![Extent::new(0, 1)]);
+        assert_eq!(authority.chunks[1].fenced, [1].into());
+        assert!(authority.chunks[2].fenced.is_empty());
+        assert!(authority.chunks[2].uncertain.is_empty());
+        assert!(authority.chunks[2].first_fence.is_none());
+    }
+
+    #[test]
+    fn hello_required_rows_are_captured_before_later_placement_changes() {
+        for complete in [false, true] {
+            let (mut target, hellos) = opening_target(&[&[1, 2], &[2], &[1, 2]], BLOCKS);
+            let hello = &hellos[&1];
+            assert_eq!(
+                target.hello_chunks_for_reply(1, hello.epoch, hello.session, hello.req),
+                Some([0, 2].as_slice())
+            );
+            target.chunks[2].replicas = vec![2];
+            target.chunks[2].isr = [2].into();
+            target.chunks[2].isr_ver += 1;
+            let before = target.fenced_authority(1).unwrap();
+            let mut uncertain = vec![(0, vec![])];
+            if complete {
+                uncertain.push((2, vec![]));
+            }
+            answer_opening(&mut target, 1, hello, Response::Fenced { uncertain });
+            if complete {
+                let after = target.fenced_authority(1).unwrap();
+                assert!(after.session_open && after.confirmed_until > before.confirmed_until);
+                assert!(after.chunks[0].fenced.contains(&1));
+                assert!(!after.chunks[2].fenced.contains(&1));
+            } else {
+                assert_eq!(target.fenced_authority(1), Some(before));
+            }
+        }
+    }
+
+    #[test]
+    fn fenced_count_boundaries_and_whole_gib_extents_validate_without_io_size_limits() {
+        let budget = UNCERTAINTY_BUDGET as usize;
+        let rows: Vec<_> = (0..=UNCERTAINTY_BUDGET)
+            .map(|chunk| (chunk, vec![]))
+            .collect();
+        let mut work = FencedWork::default();
+        assert!(!Target::<Vec<Value>>::valid_fenced(
+            &rows,
+            &[0],
+            budget + 1,
+            1,
+            &mut work
+        ));
+        assert_eq!(work.rows, 0, "row count is checked before iteration");
+        let too_many = vec![(
+            0,
+            (0..=UNCERTAINTY_BUDGET)
+                .map(|i| Extent::new(i * 2, 1))
+                .collect(),
+        )];
+        let mut work = FencedWork::default();
+        assert!(!Target::<Vec<Value>>::valid_fenced(
+            &too_many,
+            &[0],
+            1,
+            262_144,
+            &mut work
+        ));
+        assert_eq!(
+            work.extents, 0,
+            "aggregate count is checked before extent iteration"
+        );
+        let (mut target, hellos) = opening_target(&[&[1, 2]], 262_144);
+        answer_opening(
+            &mut target,
+            1,
+            &hellos[&1],
+            Response::Fenced {
+                uncertain: vec![(0, vec![Extent::new(0, 262_144)])],
+            },
+        );
+        assert!(target.fenced_authority(1).unwrap().session_open);
+        assert_eq!(
+            target.chunks[0].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, 262_144)]
+        );
+    }
+
+    #[test]
+    fn maximum_fenced_set_has_linear_scans_and_bounded_union_calls() {
+        let members = [2, 3, 4, 5, 1]; // Put the replying member last for worst-case membership scans.
+        let placement: Vec<&[NodeId]> = vec![members.as_slice(); UNCERTAINTY_BUDGET as usize];
+        let (mut target, hellos) = opening_target(&placement, 1);
+        let uncertain: Vec<_> = (0..UNCERTAINTY_BUDGET)
+            .map(|chunk| (chunk, vec![Extent::new(0, 1)]))
+            .collect();
+        answer_opening(&mut target, 1, &hellos[&1], Response::Fenced { uncertain });
+        let n = u64::from(UNCERTAINTY_BUDGET);
+        assert_eq!(
+            target.fenced_work(),
+            FencedWork {
+                rows: n,
+                extents: n,
+                required: n,
+                merged_rows: n,
+                chunks: n,
+                replica_checks: 5 * n,
+                union_extents: n
+            }
+        );
+        assert!(
+            target
+                .chunks
+                .iter()
+                .all(|c| c.fenced.contains(&1) && c.uncertain == ExtentSet::of(Extent::new(0, 1)))
+        );
+    }
+
+    #[test]
+    fn sorted_fenced_merge_preserves_precise_and_whole_chunk_unions() {
+        let (mut target, _) = opening_target(&[&[1, 2], &[1, 2], &[1, 2]], BLOCKS);
+        let first = vec![
+            (0, vec![Extent::new(0, 1), Extent::new(1, 1)]),
+            (1, vec![Extent::new(0, BLOCKS)]),
+            (2, vec![]),
+        ];
+        let second = vec![
+            (0, vec![Extent::new(1, 2)]),
+            (1, vec![]),
+            (2, vec![Extent::new(3, 1)]),
+        ];
+        for (node, rows) in [(1, &first), (2, &second)] {
+            let mut work = FencedWork::default();
+            assert!(Target::<Vec<Value>>::valid_fenced(
+                rows,
+                &[0, 1, 2],
+                3,
+                BLOCKS,
+                &mut work
+            ));
+            target.on_fenced(10, node, rows);
+        }
+        assert_eq!(
+            target.chunks[0].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, 3)]
+        );
+        assert_eq!(
+            target.chunks[1].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, BLOCKS)]
+        );
+        assert_eq!(
+            target.chunks[2].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(3, 1)]
+        );
+        assert_eq!(target.fenced_work().union_extents, 5);
+    }
+
+    #[test]
+    fn reconnect_reports_retain_only_the_active_geometry_union() {
+        let blocks = 262_144;
+        let (mut target, hellos) = opening_target(&[&[1, 2]], blocks);
+        let precise = UNCERTAINTY_BUDGET - 1;
+        let first: Vec<_> = (0..precise).map(|i| Extent::new(i * 2, 1)).collect();
+        let second: Vec<_> = (0..precise)
+            .map(|i| Extent::new(2 * UNCERTAINTY_BUDGET + i * 2, 1))
+            .collect();
+        let reports = [first, second.clone(), second, vec![Extent::new(0, blocks)]];
+        let expected_runs = [
+            precise as usize,
+            2 * precise as usize,
+            2 * precise as usize,
+            1,
+        ];
+        for (round, (extents, expected)) in reports.into_iter().zip(expected_runs).enumerate() {
+            let now = 10 + 3 * round as Time;
+            let hello = if round == 0 {
+                hellos[&1].clone()
+            } else {
+                target.fail_peer(now, 1);
+                target.open_session(now + 1, 1);
+                target
+                    .take_output()
+                    .into_iter()
+                    .find_map(|out| match out {
+                        Output::Send { to: 1, msg } if is_hello(&msg) => Some(msg),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let rows = vec![(0, extents)];
+            let mut checked = FencedWork::default();
+            assert!(Target::<Vec<Value>>::valid_fenced(
+                &rows,
+                &[0],
+                1,
+                blocks,
+                &mut checked
+            ));
+            target.on_reply(
+                now + 2,
+                1,
+                &FromReplica {
+                    vol: hello.vol,
+                    epoch: hello.epoch,
+                    session: hello.session,
+                    req: hello.req,
+                    body: Response::Fenced { uncertain: rows },
+                },
+            );
+            let retained = target.chunks[0].uncertain.iter().count();
+            assert_eq!(retained, expected);
+            assert!(retained <= blocks.div_ceil(2) as usize);
+            assert_eq!(target.chunks[0].phase, Phase::Fencing);
+        }
+        // The map contains active block uncertainty, not one entry per received report.
+        // It can exceed the producer's B-slot budget; its run bound is the chunk geometry.
+        assert_eq!(
+            target.chunks[0].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, blocks)]
+        );
+    }
 
     /// What the target started, read off the requests it sent: the chunk, and the first block
     /// of the extent.
@@ -2840,7 +3615,7 @@ mod tests {
     }
 
     fn is_hello(m: &ToReplica<Vec<Value>>) -> bool {
-        matches!(m.body, Request::Hello)
+        matches!(m.body, Request::Hello { .. })
     }
 
     fn is_read(m: &ToReplica<Vec<Value>>) -> bool {
@@ -2904,6 +3679,14 @@ mod tests {
         /// A volume of 4-block chunks, chunk `i` on `placement[i]`, attached on node 1,
         /// serving.
         fn with_chunks(placement: &[&[NodeId]], min_isr: usize) -> Self {
+            Self::with_chunks_and_budget(placement, min_isr, UNCERTAINTY_BUDGET)
+        }
+
+        fn with_chunks_and_budget(
+            placement: &[&[NodeId]],
+            min_isr: usize,
+            uncertainty_budget: u32,
+        ) -> Self {
             let mut meta = Metadata::default();
             let lists = placement.iter().map(|p| p.to_vec()).collect();
             meta.create_volume(VOL, 0, min_isr, BLOCKS, lists);
@@ -2918,8 +3701,11 @@ mod tests {
                 for &n in *nodes {
                     replicas
                         .entry(n)
-                        .or_insert_with(|| Replica::with_chunk_size(BLOCKS))
-                        .create_chunk(VOL, i as ChunkIdx, BLOCKS);
+                        .or_insert_with(|| {
+                            Replica::with_chunk_size_and_budget(BLOCKS, uncertainty_budget)
+                        })
+                        .create_chunk(VOL, i as ChunkIdx, BLOCKS)
+                        .unwrap();
                 }
             }
             let t = Target::new(TARGET, VOL, &view, Timing::default(), 4, 0);
@@ -3298,10 +4084,256 @@ mod tests {
         }
     }
 
+    #[test]
+    fn target_repair_writes_without_prune_are_cleared_only_by_its_completed_settle() {
+        let mut b = Bench::with_chunks_and_budget(&[&[1, 2]], 2, 4);
+        for node in [1, 2] {
+            let session = b.t.peers[&node].session.as_ref().unwrap().id;
+            for seq in 0..4 {
+                // An old target's unacknowledged attempts make a real coarse cover.
+                let reply = b.replicas.get_mut(&node).unwrap().handle(&ToReplica {
+                    vol: VOL,
+                    epoch: b.t.epoch,
+                    session,
+                    req: 1000 + seq,
+                    body: Request::Write {
+                        chunk: 0,
+                        ext: Extent::new(seq as Block, 1),
+                        data: vec![0],
+                        version: Version {
+                            epoch: b.t.epoch,
+                            seq: 100 + seq,
+                        },
+                        prune: None,
+                    },
+                });
+                assert!(matches!(
+                    reply,
+                    Some(FromReplica {
+                        body: Response::Ok,
+                        ..
+                    })
+                ));
+            }
+            assert_eq!(b.replicas[&node].core.uncertainty_stats(VOL).records, 0);
+            assert_eq!(
+                b.replicas[&node].core.report(VOL),
+                vec![(0, vec![Extent::new(0, BLOCKS)])]
+            );
+        }
+        for block in 0..BLOCKS {
+            b.diverge(1, 0, block, 7 + u64::from(block));
+        }
+        b.max_io = 1;
+        b.hold_all(is_write);
+        b.restart(2); // Node 1 retains coarse cover; node 2 additionally has restart evidence.
+        assert_eq!(b.held.len(), 8, "four real repair writes to each member");
+        let largest = b
+            .held
+            .iter()
+            .map(|(_, msg, _)| match msg.body {
+                Request::Write {
+                    version,
+                    prune: None,
+                    ..
+                } => version,
+                ref body => panic!("repair must not carry a prune bound: {body:?}"),
+            })
+            .max()
+            .unwrap();
+        for node in [1, 2] {
+            assert_eq!(b.replicas[&node].core.uncertainty_stats(VOL).records, 0);
+            assert_eq!(
+                b.replicas[&node].core.report(VOL),
+                vec![(0, vec![Extent::new(0, BLOCKS)])]
+            );
+        }
+        // Deliver durable repair acknowledgements but intercept the Target's actual Settle
+        // requests before either replica receives them.
+        for (node, _, reply) in std::mem::take(&mut b.held) {
+            b.t.on_reply(b.now, node, &reply);
+        }
+        let mut settles = BTreeMap::new();
+        loop {
+            let out = b.t.take_output();
+            if out.is_empty() {
+                break;
+            }
+            for output in out {
+                match output {
+                    Output::Send { to, msg } if matches!(msg.body, Request::Settle { .. }) => {
+                        assert!(settles.insert(to, msg).is_none());
+                    }
+                    Output::Send { to, msg } => b.send(to, msg),
+                    Output::Meta { req, body } => b.t.on_meta(b.now, req, &b.meta.handle(&body)),
+                    Output::Done { op, result } => {
+                        assert!(b.done.insert(op, result).is_none());
+                    }
+                }
+            }
+        }
+        assert_eq!(settles.len(), 2);
+        for (&node, msg) in &settles {
+            assert!(matches!(msg.body, Request::Settle { chunk: 0, below } if below > largest));
+            assert_eq!(
+                b.replicas[&node].core.report(VOL),
+                vec![(0, vec![Extent::new(0, BLOCKS)])]
+            );
+            for block in 0..BLOCKS {
+                assert_eq!(
+                    b.replicas[&node].block(VOL, 0, block),
+                    Some(7 + u64::from(block))
+                );
+            }
+        }
+        b.send(1, settles.remove(&1).unwrap());
+        assert_eq!(b.replicas[&1].core.report(VOL), vec![(0, vec![])]);
+        assert_eq!(
+            b.replicas[&2].core.report(VOL),
+            vec![(0, vec![Extent::new(0, BLOCKS)])]
+        );
+        b.send(2, settles.remove(&2).unwrap());
+        b.run();
+        assert_eq!(b.replicas[&2].core.report(VOL), vec![(0, vec![])]);
+        assert!(b.t.is_settled());
+    }
+
     /// A metadata request that drops node 2's replica.
     fn drops_node_2(m: &MetaRequest) -> bool {
         matches!(m, MetaRequest::ChangeIsr { changes, .. }
             if changes.iter().any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2))))
+    }
+
+    fn source_removal_bench() -> Bench {
+        let mut b = Bench::new(&[1, 2], 2);
+        b.write(0, 42);
+        b.replicas.insert(3, Replica::with_chunk_size(BLOCKS));
+        b.hold_meta_if = Some(|m| {
+            matches!(m, MetaRequest::ChangeIsr { changes, .. }
+                if changes.iter().any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&1))))
+        });
+        b
+    }
+
+    fn propose_source_removal(b: &mut Bench) -> u64 {
+        b.request_move(1, 3);
+        b.until("source removal emitted", |b| !b.held_meta.is_empty());
+        let (_, MetaRequest::ChangeIsr { changes, .. }) = &b.held_meta[0] else {
+            panic!("expected source removal");
+        };
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].new_replicas.as_ref().unwrap().contains(&1));
+        changes[0].expected_ver
+    }
+
+    fn cancel_source_removal(b: &mut Bench, expected: u64) {
+        // Move intent is refreshed even at the same chunk version. Losing that mutable
+        // intent cannot prove that the already emitted conditional removal did not commit.
+        b.hold_meta_if = Some(holds_isr_change);
+        b.t.next_refresh = Time::MAX;
+        let mut view = b.meta.volume(VOL).unwrap().clone();
+        view.chunks[0].moving = None;
+        b.t.apply_view(b.now, &view);
+        b.run();
+        b.advance(b.t.timing.meta_timeout);
+        assert_eq!(b.t.chunks[0].isr_ver, expected);
+        assert_eq!(b.t.chunks[0].drop_replica, None);
+        assert!(!b.t.chunks[0].removing.contains(&1));
+    }
+
+    fn advance_source_version(b: &mut Bench, expected: u64) {
+        let v = b.meta.volume(VOL).unwrap();
+        let reply = b.meta.handle(&MetaRequest::ChangeIsr {
+            vol: VOL,
+            epoch: v.epoch,
+            changes: vec![IsrChange {
+                chunk: 0,
+                expected_ver: expected,
+                new_isr: v.chunks[0].isr.clone(),
+                new_replicas: None,
+            }],
+        });
+        let MetaReply::Applied { view, .. } = reply else {
+            panic!("competing authoritative update refused");
+        };
+        b.t.apply_view(b.now, &view);
+        assert_eq!(b.t.chunks[0].isr_ver, expected + 1);
+        assert_eq!(b.t.source(0, None), Some(1));
+    }
+
+    #[test]
+    fn a_canceled_move_removal_keeps_its_source_retired_until_a_newer_version() {
+        let mut b = source_removal_bench();
+        let expected = propose_source_removal(&mut b);
+        cancel_source_removal(&mut b, expected);
+        let mut view = b.meta.volume(VOL).unwrap().clone();
+        for version in [expected - 1, expected, expected] {
+            view.chunks[0].isr_ver = version;
+            b.t.apply_view(b.now, &view);
+            assert_eq!(b.t.source(0, None), Some(2), "version {version}");
+            assert!(b.t.try_fast_read(b.now, 0, Extent::new(0, 1)).is_none());
+        }
+        let op = b.read(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to.last(), Some(&2));
+        advance_source_version(&mut b, expected);
+        let op = b.read(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to.last(), Some(&1));
+    }
+
+    #[test]
+    fn the_read_from_removing_control_exposes_a_canceled_move_source_read() {
+        let mut b = source_removal_bench();
+        let expected = propose_source_removal(&mut b);
+        cancel_source_removal(&mut b, expected);
+        // Metadata may already have committed the unanswered removal, and a delayed Hello
+        // can recreate the source empty. Stable retirement is the remaining read guard.
+        b.replicas.get_mut(&1).unwrap().remove_chunk(VOL, 0);
+        b.replicas
+            .get_mut(&1)
+            .unwrap()
+            .create_chunk(VOL, 0, BLOCKS)
+            .unwrap();
+        let clean = b.read(0);
+        assert_eq!(b.done.get(&clean), Some(&OpResult::Read(vec![42])));
+        b.t.bugs.read_from_removing = true;
+        let bad = b.read(0);
+        assert_eq!(b.done.get(&bad), Some(&OpResult::Read(vec![0])));
+        assert_eq!(b.reads_to, [2, 1]);
+        b.t.bugs.read_from_removing = false;
+    }
+
+    #[test]
+    fn a_retired_sources_delayed_read_cannot_revive_when_its_version_resolves() {
+        let mut b = source_removal_bench();
+        b.hold_all(|m| matches!(m.body, Request::Read { ext, .. } if ext.start == 3));
+        let op = b.read(3);
+        let old = b.held[b.held_from(1, is_read)].1.req;
+        assert_eq!(b.t.client_read_of(1, old), Some(op));
+        let expected = propose_source_removal(&mut b);
+        assert_eq!(b.t.client_read_of(1, old), None);
+        assert_eq!(b.reads_to, [1, 2]);
+        cancel_source_removal(&mut b, expected);
+        advance_source_version(&mut b, expected);
+        b.deliver_from(1);
+        assert_eq!(b.done.get(&op), None, "retired receipt completed the read");
+        b.hold.clear();
+        b.deliver_from(2);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![0])));
+    }
+
+    #[test]
+    fn a_retired_sources_fast_ticket_stays_invalid_after_a_newer_version() {
+        let mut b = source_removal_bench();
+        let old = b.t.try_fast_read(b.now, 0, Extent::new(3, 1)).unwrap();
+        let expected = propose_source_removal(&mut b);
+        cancel_source_removal(&mut b, expected);
+        advance_source_version(&mut b, expected);
+        assert!(!b.t.finish_fast_read(b.now, old, true));
+        let fresh = b.t.try_fast_read(b.now, 0, Extent::new(3, 1)).unwrap();
+        assert!(b.t.finish_fast_read(b.now, fresh, true));
+        b.run();
     }
 
     #[test]
@@ -3496,9 +4528,159 @@ mod tests {
         assert_eq!(b.done.get(&w), Some(&OpResult::Written));
     }
 
+    /// Leave a write pending on the target but dropped before the source admits it, as the
+    /// forged-epoch simulator fault does. The session remains open and the source stays old.
+    fn write_dropped_before_resync(previous: Option<Value>) -> (Bench, u64, u64) {
+        let mut b = Bench::new(&[1], 1);
+        if let Some(value) = previous {
+            b.write(0, value);
+        }
+        b.replicas.insert(2, Replica::with_chunk_size(4));
+        let op = b.next_op;
+        b.next_op += 1;
+        b.submitted.push(op);
+        b.t.submit(
+            b.now,
+            op,
+            Op::Write {
+                chunk: 0,
+                ext: Extent::new(0, 1),
+                data: vec![42],
+            },
+        );
+        let mut out = b.t.take_output();
+        assert_eq!(out.len(), 1);
+        let Output::Send { to: 1, mut msg } = out.pop().unwrap() else {
+            panic!("expected the pending write to the source");
+        };
+        let Request::Write { version, prune, .. } = &mut msg.body else {
+            panic!("expected a write");
+        };
+        let seq = version.seq;
+        prune.as_mut().unwrap().epoch += 1;
+        assert!(b.replicas.get_mut(&1).unwrap().handle(&msg).is_none());
+        assert!(b.t.session_of(1).is_some());
+        assert_eq!(b.replicas[&1].block(VOL, 0, 0), Some(previous.unwrap_or(0)));
+        assert_eq!(b.done.get(&op), None);
+        (b, op, seq)
+    }
+
+    #[test]
+    fn a_pending_write_is_replayed_before_resync_and_its_receipt_survives_completion() {
+        let (mut b, op, seq) = write_dropped_before_resync(Some(41));
+        b.hold.insert(2, is_write);
+        b.request_move(1, 2);
+        b.until("old snapshot copied with replay Ack held", |b| {
+            b.t.chunks[0].resync.as_ref().is_some_and(|r| {
+                r.member == 2 && r.started && r.todo.is_empty() && r.discard.is_empty()
+            })
+        });
+        assert!(b.log.contains(&Cp(0, 0)), "the old source copy was sent");
+        assert_eq!(b.replicas[&1].block(VOL, 0, 0), Some(41));
+        assert_eq!(
+            b.replicas[&2].block(VOL, 0, 0),
+            Some(42),
+            "the fresh replay protects the new filter from the old snapshot"
+        );
+        let r = b.t.chunks[0].resync.as_ref().unwrap();
+        assert!(r.live.contains_block(0));
+        assert_eq!(r.unacked, [seq].into_iter().collect());
+        assert!(b.t.writes.contains_key(&seq));
+        assert!(!b.isr().contains(&2));
+
+        // Retry on the ISR after its old snapshot was copied. Client completion removes the
+        // WriteOp, but cannot erase the separate receipt owed by the resync destination.
+        b.t.retransmit(b.now, 1);
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.t.writes.contains_key(&seq));
+        let r = b.t.chunks[0].resync.as_ref().unwrap();
+        assert_eq!(r.unacked, [seq].into_iter().collect());
+        assert!(
+            !b.isr().contains(&2),
+            "the fresh replay Ack still gates joining"
+        );
+        b.hold.remove(&2);
+        b.deliver_from(2);
+        b.until("the fresh destination joins", |b| b.isr().contains(&2));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+    }
+
+    #[test]
+    fn completing_a_write_before_begin_resync_ack_does_not_leave_an_orphan_receipt() {
+        for previous in [Some(41), None] {
+            let (mut b, op, seq) = write_dropped_before_resync(previous);
+            b.hold
+                .insert(2, |m| matches!(m.body, Request::BeginResync { .. }));
+            b.request_move(1, 2);
+            b.until("BeginResync Ack held", |b| {
+                b.held
+                    .iter()
+                    .any(|(n, m, _)| *n == 2 && matches!(m.body, Request::BeginResync { .. }))
+            });
+            let r = b.t.chunks[0].resync.as_ref().unwrap();
+            assert!(!r.started);
+            assert!(r.todo.contains_block(0), "pending write omitted by Mapped");
+            assert!(!r.discard.contains_block(0));
+            b.t.retransmit(b.now, 1);
+            b.run();
+            assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+            assert!(!b.t.writes.contains_key(&seq));
+            assert!(b.t.chunks[0].resync.as_ref().unwrap().unacked.is_empty());
+            b.hold.remove(&2);
+            b.deliver_from(2);
+            b.until("completed write copied and destination joined", |b| {
+                b.isr().contains(&2)
+            });
+            assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+            assert!(b.t.chunks[0].resync.is_none());
+        }
+    }
+
+    #[test]
+    fn aborting_before_mapped_preserves_pending_write_extents_for_retry() {
+        let (mut b, op, seq) = write_dropped_before_resync(None);
+        b.hold.insert(1, is_mapped);
+        b.request_move(1, 2);
+        b.until("Mapped reply held", |b| {
+            b.held.iter().any(|(n, m, _)| *n == 1 && is_mapped(m))
+        });
+        let r = b.t.chunks[0].resync.as_ref().unwrap();
+        let round = r.round;
+        assert!(r.force_copy.contains_block(0));
+        // A retained clean baseline must not hide what this unfinished round added.
+        b.t.chunks[0].dirty.insert(2, ExtentSet::new());
+        b.t.abort_resync(0);
+        assert!(b.t.chunks[0].dirty[&2].contains_block(0));
+        b.t.retransmit(b.now, 1);
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.t.writes.contains_key(&seq));
+        b.until("a new Mapped round", |b| {
+            b.t.chunks[0]
+                .resync
+                .as_ref()
+                .is_some_and(|r| r.round != round)
+        });
+        assert!(
+            b.t.chunks[0]
+                .resync
+                .as_ref()
+                .unwrap()
+                .todo
+                .contains_block(0)
+        );
+        b.hold.clear();
+        while !b.held.is_empty() {
+            b.deliver(0);
+        }
+        b.until("retry destination joined", |b| b.isr().contains(&2));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+    }
+
     /// S11: node 2's replica acknowledges a write that waits on node 1, a move drops it, and
-    /// node 2 comes back as a new replica. Its resync copies the block, but node 2 joins only
-    /// once the write has completed: its old acknowledgement does not count.
+    /// node 2 comes back as a new replica. Its old acknowledgement cannot replace the fresh
+    /// replay's acknowledgement, even once the write has completed on the ISR.
     #[test]
     fn a_dropped_replicas_ack_does_not_count_after_it_rejoins() {
         let mut b = Bench::new(&[1, 2], 1);
@@ -3524,7 +4706,9 @@ mod tests {
             .get_mut(&2)
             .expect("replica")
             .remove_chunk(VOL, 0);
-        // Node 2 comes back as a new replica, and its resync copies everything.
+        // Node 2 comes back as a new replica. Hold its new replay acknowledgement so the
+        // already received acknowledgement from its deleted replica is the only one counted.
+        b.hold.insert(2, is_write);
         b.request_move(3, 2);
         b.until("node 2 resynced or joined", |b| {
             let c = &b.t.chunks[0];
@@ -3546,12 +4730,14 @@ mod tests {
             "node 2 joined on its old replica's acknowledgement: {}",
             b.t.describe()
         );
-        // Node 1's acknowledgement completes the write; then node 2 joins.
+        // Node 1's acknowledgement completes the write; the fresh replay still gates the join.
         let (_, _, reply) = b.held.remove(0);
         b.hold.clear();
         b.t.on_reply(b.now, TARGET, &reply);
         b.run();
         assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.isr().contains(&2), "node 2 still owes the replay Ack");
+        b.deliver_from(2);
         b.until("node 2 in the ISR", |b| b.isr().contains(&2));
         assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
     }
@@ -3592,9 +4778,13 @@ mod tests {
             .expect("replica")
             .remove_chunk(VOL, 0);
         let late = b.held_from(2, is_write);
+        let late_req = b.held[late].1.req;
         if !after_rejoin {
             b.deliver(late);
         }
+        // Hold the fresh replay separately: only its Ack can prove the recreated replica
+        // admitted the write, even while the node keeps its session through chunk 1.
+        b.hold.insert(2, is_write);
         b.request_move(3, 2);
         b.until("node 2 a replica again", |b| {
             b.t.chunks[0].replicas.contains(&2)
@@ -3618,10 +4808,17 @@ mod tests {
             b.t.describe()
         );
         assert_eq!(b.done.get(&op), None, "the write still waits on node 1");
-        // Node 1's acknowledgement completes the write; then node 2 joins.
+        let replay = b.held_from(2, is_write);
+        assert_ne!(
+            b.held[replay].1.req, late_req,
+            "a new send must prove admission"
+        );
+        // Node 1's acknowledgement completes the write; the replay Ack still gates the join.
         b.hold.clear();
         b.deliver_from(TARGET);
         assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.isr().contains(&2), "node 2 still owes the replay Ack");
+        b.deliver_from(2);
         b.until("node 2 in the ISR", |b| b.isr().contains(&2));
         assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
     }
@@ -4502,6 +5699,69 @@ mod tests {
         b
     }
 
+    #[test]
+    fn retiring_a_snapshot_source_aborts_mapped_digest_and_copy_reads() {
+        for stage in [is_mapped as Pred, is_digest, is_read] {
+            let mut b = Bench::with_chunks(&[&[1, 3, 4]], 1);
+            b.out_of_isr(0, 4);
+            b.diverge(1, 0, 0, 7);
+            b.diverge(3, 0, 0, 7);
+            b.max_bulk = 1;
+            b.hold.insert(1, is_mapped);
+            b.restart(3);
+            b.until("source Mapped held", |b| {
+                b.held.iter().any(|(n, m, _)| *n == 1 && is_mapped(m))
+            });
+            let round = b.t.chunks[0].resync.as_ref().unwrap().round;
+            if !stage(&b.held[b.held_from(1, is_mapped)].1) {
+                b.hold.insert(1, stage);
+                b.deliver_from(1);
+            }
+            let old = b.held[b.held_from(1, stage)].1.req;
+            let read_receipt = is_read(&b.held[b.held_from(1, stage)].1);
+            // This is a move whose destination has already joined. Another replica's
+            // snapshot round still uses the source when its removal becomes sendable.
+            let mut view = b.meta.volume(VOL).unwrap().clone();
+            view.chunks[0].moving = Some((1, 3));
+            b.t.apply_view(b.now, &view);
+            b.hold_meta_if = Some(holds_isr_change);
+            b.t.tick(b.now);
+            b.run();
+            assert!(!b.held_meta.is_empty(), "source removal was not emitted");
+            assert!(
+                b.t.chunks[0]
+                    .resync
+                    .as_ref()
+                    .is_none_or(|r| r.round != round)
+            );
+            assert_eq!(b.t.source(0, None), Some(3));
+            if read_receipt {
+                assert!(
+                    !b.t.peers[&1]
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .inflight
+                        .contains_key(&old)
+                );
+            }
+            b.hold.clear();
+            while !b.held.is_empty() {
+                b.deliver(0);
+                assert!(
+                    b.t.chunks[0]
+                        .resync
+                        .as_ref()
+                        .is_none_or(|r| r.round != round)
+                );
+            }
+            b.hold_meta_if = None;
+            b.release_meta();
+            b.until("replacement snapshot joined", |b| b.isr().contains(&4));
+            assert_eq!(b.replicas[&4].block(VOL, 0, 0), Some(7));
+        }
+    }
+
     /// A reply of the wrong type to a copy, or to a discard: the slot is freed once, nothing
     /// goes back to the queue, and the round is aborted.
     #[test]
@@ -4737,5 +5997,451 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn holds_isr_change(body: &MetaRequest) -> bool {
+        matches!(body, MetaRequest::ChangeIsr { .. })
+    }
+
+    fn next_isr_batch(b: &mut Bench) -> (u64, MetaRequest) {
+        let (req, body) = b.held_meta.remove(0);
+        assert!(b.t.accepts_meta_reply(req));
+        let MetaRequest::ChangeIsr { changes, .. } = &body else {
+            panic!("not an ISR request");
+        };
+        assert!(!changes.is_empty());
+        assert!(changes.len() <= crate::meta::MAX_CHANGES_PER_REQUEST);
+        let unique: BTreeSet<_> = changes.iter().map(|c| c.chunk).collect();
+        assert_eq!(unique.len(), changes.len(), "duplicate chunk in a batch");
+        (req, body)
+    }
+
+    fn apply_isr_batch(b: &mut Bench, req: u64, body: &MetaRequest) -> MetaReply {
+        let reply = b.meta.handle(body);
+        b.t.on_meta(b.now, req, &reply);
+        b.run();
+        reply
+    }
+
+    fn shrinking_many_chunks(chunks: usize, takeover: bool) -> Bench {
+        let placement: Vec<&[NodeId]> = vec![&[1, 2]; chunks];
+        let mut b = Bench::with_chunks(&placement, 1);
+        b.hold_meta_if = Some(holds_isr_change);
+        b.down.insert(2);
+        if takeover {
+            b.restart(1);
+        } else {
+            b.t.fail_peer(b.now, 2);
+            b.t.tick(b.now);
+            b.run();
+        }
+        b.until("a shrink proposal", |b| !b.held_meta.is_empty());
+        b
+    }
+
+    /// The audit's 65-chunk peer-loss takeover, plus both sides of every batch boundary.
+    /// Committing one batch must leave the other chunks' pending membership untouched.
+    #[test]
+    fn shrink_after_losing_peer_fits_metadata_rpc_limit() {
+        for takeover in [false, true] {
+            for chunks in [1, 64, 65, 128, 129] {
+                let mut b = shrinking_many_chunks(chunks, takeover);
+                let mut committed = BTreeSet::new();
+                let mut batches = 0;
+                while committed.len() != chunks {
+                    let (req, body) = next_isr_batch(&mut b);
+                    let MetaRequest::ChangeIsr { changes, .. } = &body else {
+                        unreachable!();
+                    };
+                    assert_eq!(changes.len(), (chunks - committed.len()).min(64));
+                    let named: BTreeSet<_> = changes.iter().map(|c| c.chunk).collect();
+                    let deferred: Vec<_> =
+                        b.t.chunks
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| {
+                                !committed.contains(&(*i as u32)) && !named.contains(&(*i as u32))
+                            })
+                            .map(|(i, c)| (i, c.uncertain.clone(), c.dirty.clone()))
+                            .collect();
+                    for c in changes {
+                        assert!(committed.insert(c.chunk), "chunk committed twice");
+                        assert_eq!(c.expected_ver, 0);
+                        assert_eq!(c.new_isr, BTreeSet::from([1]));
+                    }
+                    assert!(matches!(
+                        apply_isr_batch(&mut b, req, &body),
+                        MetaReply::Applied { .. }
+                    ));
+                    batches += 1;
+                    for (i, uncertain, dirty) in deferred {
+                        let c = &b.t.chunks[i];
+                        assert_eq!(c.isr_ver, 0, "another batch changed chunk {i}");
+                        assert_eq!(c.required(), BTreeSet::from([1, 2]));
+                        assert!(c.removing.contains(&2));
+                        assert_eq!(c.uncertain, uncertain);
+                        assert_eq!(c.dirty, dirty);
+                    }
+                }
+                assert_eq!(batches, chunks.div_ceil(64));
+                assert!(b.t.chunks.iter().all(|c| c.isr == BTreeSet::from([1])));
+                assert!(
+                    b.meta
+                        .volume(VOL)
+                        .unwrap()
+                        .chunks
+                        .iter()
+                        .all(|c| c.isr_ver == 1)
+                );
+            }
+        }
+    }
+
+    /// Disabling the fix reproduces the original counterexample, rather than passing only
+    /// because the fixture silently accepts the same oversized request as the old engine.
+    #[test]
+    fn the_batch_boundary_check_catches_the_unbounded_producer() {
+        let mut b = shrinking_many_chunks(65, true);
+        let (req, _) = next_isr_batch(&mut b);
+        b.t.bugs.unbounded_meta_batch = true;
+        b.now += b.t.timing.meta_timeout;
+        b.t.tick(b.now);
+        b.run();
+        assert!(!b.t.accepts_meta_reply(req));
+        let (_, MetaRequest::ChangeIsr { changes, .. }) = b.held_meta.remove(0) else {
+            panic!("missing retry");
+        };
+        assert_eq!(changes.len(), 65, "the audit mutation was not exposed");
+        assert!(changes.len() > crate::meta::MAX_CHANGES_PER_REQUEST);
+        b.deposed_ok = true;
+    }
+
+    fn deferred_shrink(early_ack: bool) -> (Bench, u64) {
+        let mut b = shrinking_many_chunks(129, false);
+        b.t.bugs.ack_before_shrink = early_ack;
+        let op = b.write_at(128, 0, 42);
+        (b, op)
+    }
+
+    #[test]
+    fn deferred_shrink_keeps_write_waiting() {
+        let (mut b, op) = deferred_shrink(false);
+        assert!(!b.done.contains_key(&op));
+        for _ in 0..2 {
+            let (req, body) = next_isr_batch(&mut b);
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Applied { .. }
+            ));
+            assert!(
+                !b.done.contains_key(&op),
+                "another chunk's batch released the write"
+            );
+            assert!(b.t.chunks[128].required().contains(&2));
+        }
+        let (req, body) = next_isr_batch(&mut b);
+        assert!(matches!(
+            apply_isr_batch(&mut b, req, &body),
+            MetaReply::Applied { .. }
+        ));
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert_eq!(b.replicas[&1].block(VOL, 128, 0), Some(42));
+        assert!(b.t.chunks[128].dirty[&2].contains_block(0));
+    }
+
+    #[test]
+    fn deferred_shrink_exposes_ack_before_shrink() {
+        let (mut b, op) = deferred_shrink(true);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(b.meta.volume(VOL).unwrap().chunks[128].isr.contains(&2));
+        assert_ne!(b.replicas[&2].block(VOL, 128, 0), Some(42));
+        b.deposed_ok = true;
+    }
+
+    fn joining_many_chunks() -> Bench {
+        let placement: Vec<&[NodeId]> = vec![&[1, 2]; 65];
+        let mut b = Bench::with_chunks(&placement, 1);
+        for chunk in 0..65 {
+            b.out_of_isr(chunk, 2);
+        }
+        b.hold_meta_if = Some(holds_isr_change);
+        b.restart(1);
+        b.until("every joiner waiting for metadata", |b| {
+            b.t.chunks.iter().all(|c| c.joining == Some(2))
+        });
+        assert!(!b.held_meta.is_empty());
+        b
+    }
+
+    #[test]
+    fn deferred_joiner_counts_for_write_and_lease() {
+        let mut b = joining_many_chunks();
+        b.hold.insert(2, is_write);
+        let op = b.write_at(64, 0, 42);
+        assert!(!b.done.contains_key(&op));
+        assert_eq!(b.t.chunks[64].required(), BTreeSet::from([1, 2]));
+        let confirmed = b.t.peers[&2].confirmed_until;
+        b.t.peers.get_mut(&2).unwrap().confirmed_until = b.now;
+        assert!(
+            !b.t.lease_ok(64, b.now),
+            "an unconfirmed joiner was omitted from the lease"
+        );
+        b.t.peers.get_mut(&2).unwrap().confirmed_until = confirmed;
+        let (req, body) = next_isr_batch(&mut b);
+        assert!(
+            matches!(&body, MetaRequest::ChangeIsr { changes, .. } if changes.iter().all(|c| c.chunk != 64))
+        );
+        apply_isr_batch(&mut b, req, &body);
+        assert_eq!(b.t.chunks[64].joining, Some(2));
+        assert!(!b.done.contains_key(&op));
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            apply_isr_batch(&mut b, req, &body);
+        }
+        assert_eq!(b.t.chunks[64].joining, None);
+        assert!(
+            !b.done.contains_key(&op),
+            "committing the join is not a write acknowledgement"
+        );
+        b.hold.clear();
+        b.deliver_from(2);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+    }
+
+    #[test]
+    fn deferred_joiner_exposes_late_join() {
+        let mut b = joining_many_chunks();
+        b.t.bugs.late_join = true;
+        b.hold.insert(2, is_write);
+        let op = b.write_at(64, 0, 42);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert_eq!(b.t.chunks[64].joining, Some(2));
+        b.t.peers.get_mut(&2).unwrap().confirmed_until = b.now;
+        assert!(
+            b.t.lease_ok(64, b.now),
+            "late-join mutation was not exposed"
+        );
+        b.deposed_ok = true;
+    }
+
+    #[test]
+    fn lost_batch_reply_is_learned_by_refresh() {
+        let mut b = shrinking_many_chunks(129, false);
+        let (old_req, old_body) = next_isr_batch(&mut b);
+        let old_reply = b.meta.handle(&old_body);
+        assert!(matches!(old_reply, MetaReply::Applied { .. }));
+        b.t.next_refresh = Time::MAX;
+        b.advance(b.t.timing.meta_timeout);
+        assert!(!b.t.accepts_meta_reply(old_req));
+        let (next_req, next_body) = next_isr_batch(&mut b);
+        assert!(
+            matches!(&next_body, MetaRequest::ChangeIsr { changes, .. } if changes[0].chunk == 64)
+        );
+        b.t.on_meta(b.now, old_req, &old_reply);
+        assert!(
+            b.t.accepts_meta_reply(next_req),
+            "late reply cleared the next batch"
+        );
+        assert_eq!(b.t.chunks[0].isr_ver, 0, "late reply was installed");
+        b.t.next_refresh = b.now;
+        b.t.tick(b.now);
+        b.run();
+        assert_eq!(
+            b.t.chunks[0].isr_ver, 1,
+            "refresh did not recover the hidden commit"
+        );
+        assert!(
+            b.t.accepts_meta_reply(next_req),
+            "refresh answered a different batch's slot"
+        );
+        apply_isr_batch(&mut b, next_req, &next_body);
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            apply_isr_batch(&mut b, req, &body);
+        }
+        b.t.next_refresh = b.now;
+        b.t.tick(b.now);
+        b.run();
+        assert!(b.t.chunks.iter().all(|c| c.isr_ver == 1));
+        assert!(
+            b.meta
+                .volume(VOL)
+                .unwrap()
+                .chunks
+                .iter()
+                .all(|c| c.isr_ver == 1)
+        );
+    }
+
+    #[test]
+    fn takeover_between_batches_fences_old_owner() {
+        let mut b = shrinking_many_chunks(129, false);
+        let (req, body) = next_isr_batch(&mut b);
+        apply_isr_batch(&mut b, req, &body);
+        let (req, body) = next_isr_batch(&mut b);
+        let op = b.write_at(128, 0, 42);
+        let new_owner = b.meta.handle(&MetaRequest::Attach { vol: VOL, node: 3 });
+        assert!(matches!(new_owner, MetaReply::Applied { .. }));
+        assert!(matches!(
+            apply_isr_batch(&mut b, req, &body),
+            MetaReply::Rejected { .. }
+        ));
+        assert!(b.t.is_deposed());
+        assert_eq!(b.done.get(&op), Some(&OpResult::Failed));
+        assert!(
+            b.meta.volume(VOL).unwrap().chunks[64..]
+                .iter()
+                .all(|c| c.isr_ver == 0)
+        );
+        assert!(!b.t.accepts_meta_reply(req));
+        b.deposed_ok = true;
+    }
+
+    #[test]
+    fn round_robin_batches_do_not_starve_tail() {
+        let mut b = shrinking_many_chunks(129, false);
+        for first in [0, 64] {
+            let (req, body) = next_isr_batch(&mut b);
+            let MetaRequest::ChangeIsr { changes, epoch, .. } = &body else {
+                unreachable!()
+            };
+            assert_eq!(changes[0].chunk, first);
+            // A real competing transaction changes a version but retains the same ISR.
+            // Thus every removal remains pending after this whole batch is refused.
+            let c = &b.meta.volume(VOL).unwrap().chunks[first as usize];
+            let conflict = MetaRequest::ChangeIsr {
+                vol: VOL,
+                epoch: *epoch,
+                changes: vec![IsrChange {
+                    chunk: first,
+                    expected_ver: c.isr_ver,
+                    new_isr: c.isr.clone(),
+                    new_replicas: None,
+                }],
+            };
+            assert!(matches!(
+                b.meta.handle(&conflict),
+                MetaReply::Applied { .. }
+            ));
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Rejected { .. }
+            ));
+            assert!(b.t.chunks.iter().all(|c| c.removing.contains(&2)));
+        }
+        let (req, body) = next_isr_batch(&mut b);
+        assert!(matches!(&body, MetaRequest::ChangeIsr { changes, .. } if changes[0].chunk == 128));
+        apply_isr_batch(&mut b, req, &body);
+        assert_eq!(b.t.chunks[128].isr, BTreeSet::from([1]));
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Applied { .. }
+            ));
+        }
+        assert!(b.t.chunks.iter().all(|c| c.isr == BTreeSet::from([1])));
+    }
+
+    fn moving_many_chunks(early_drop: bool) -> Bench {
+        let placement: Vec<&[NodeId]> = vec![&[1, 2]; 65];
+        let mut b = Bench::with_chunks(&placement, 2);
+        b.replicas.insert(3, Replica::with_chunk_size(BLOCKS));
+        b.hold_meta_if = Some(holds_isr_change);
+        b.hold.insert(3, is_resync);
+        b.t.bugs.drop_before_join = early_drop;
+        for chunk in 0..65 {
+            assert!(matches!(
+                b.meta.handle(&MetaRequest::MoveReplica {
+                    vol: VOL,
+                    chunk,
+                    from: 2,
+                    to: 3,
+                }),
+                MetaReply::Applied { .. }
+            ));
+        }
+        b.t.next_refresh = b.now;
+        b.t.tick(b.now);
+        b.run();
+        b.until("move additions proposed", |b| !b.held_meta.is_empty());
+        b
+    }
+
+    #[test]
+    fn deferred_move_drop_waits_for_join() {
+        let mut b = moving_many_chunks(false);
+        // Commit additions, holding every destination resync acknowledgement.
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            assert!(
+                matches!(&body, MetaRequest::ChangeIsr { changes, .. } if changes.iter().all(|c| c.new_isr == BTreeSet::from([1, 2]) && c.new_replicas.as_ref().is_some_and(|r| r.contains(&2) && r.contains(&3))))
+            );
+            apply_isr_batch(&mut b, req, &body);
+        }
+        assert!(
+            b.t.chunks
+                .iter()
+                .all(|c| c.replicas.contains(&2) && !c.isr.contains(&3))
+        );
+        b.hold.clear();
+        while !b.held.is_empty() {
+            b.deliver(0);
+        }
+        b.until("all move destinations waiting to join", |b| {
+            b.t.chunks.iter().all(|c| c.joining == Some(3))
+        });
+        assert!(b.t.chunks.iter().all(|c| c.drop_replica.is_none()));
+        let mut batches = 0;
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            let MetaRequest::ChangeIsr { changes, .. } = &body else {
+                unreachable!()
+            };
+            for c in changes {
+                if c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2)) {
+                    assert!(
+                        b.t.chunks[c.chunk as usize].isr.contains(&3),
+                        "source dropped before join committed"
+                    );
+                }
+                assert!(c.new_isr.len() >= 2);
+            }
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Applied { .. }
+            ));
+            batches += 1;
+        }
+        assert!(batches > 1);
+        assert!(
+            b.t.chunks
+                .iter()
+                .all(|c| c.replicas == [1, 3] && c.isr == BTreeSet::from([1, 3]))
+        );
+    }
+
+    #[test]
+    fn deferred_move_exposes_drop_before_join() {
+        let mut b = moving_many_chunks(true);
+        let (req, body) = next_isr_batch(&mut b);
+        apply_isr_batch(&mut b, req, &body);
+        while let Some((_, MetaRequest::ChangeIsr { changes, .. })) = b.held_meta.first() {
+            if changes
+                .iter()
+                .any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2)))
+            {
+                assert!(
+                    changes
+                        .iter()
+                        .any(|c| !b.t.chunks[c.chunk as usize].isr.contains(&3))
+                );
+                b.deposed_ok = true;
+                return;
+            }
+            let (req, body) = next_isr_batch(&mut b);
+            apply_isr_batch(&mut b, req, &body);
+        }
+        panic!("early source-removal mutation was not exposed");
     }
 }

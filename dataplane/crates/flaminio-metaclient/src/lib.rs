@@ -173,7 +173,9 @@ where
     Req: prost::Message + Send + Sync + 'static,
     Resp: prost::Message + Default + Send + Sync + 'static,
 {
-    let mut grpc = tonic::client::Grpc::new(ch);
+    let mut grpc = tonic::client::Grpc::new(ch)
+        .max_decoding_message_size(4 << 20)
+        .max_encoding_message_size(4 << 20);
     grpc.ready()
         .await
         .map_err(|e| tonic::Status::unavailable(e.to_string()))?;

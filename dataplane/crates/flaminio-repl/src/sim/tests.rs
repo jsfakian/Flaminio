@@ -4,7 +4,666 @@
 //! `FLAMINIO_SIM_FIRST` the first one. A failing seed reproduces with `run_seed(seed)`.
 
 use super::*;
+use crate::meta::{IsrChange, MAX_CHANGES_PER_REQUEST};
 use crate::msg::MAX_DIGEST_BLOCKS;
+
+fn advance_scenario(sim: &mut Sim, until: u64) {
+    while sim
+        .events
+        .peek()
+        .is_some_and(|Reverse((at, _, _))| *at <= until)
+    {
+        assert!(sim.step());
+    }
+    sim.now = until;
+}
+
+fn wait_scenario(sim: &mut Sim, what: &str, done: impl Fn(&Sim) -> bool) {
+    let deadline = sim.now + 10 * SEC;
+    while !done(sim) {
+        assert!(
+            sim.now < deadline,
+            "{what}: {}",
+            sim.fail("scenario deadline")
+        );
+        assert!(sim.step(), "no event while waiting for {what}");
+    }
+}
+
+fn scheduled_isr_changes(sim: &Sim) -> Vec<&[IsrChange]> {
+    sim.payloads
+        .iter()
+        .filter_map(|event| match event {
+            Some(Ev::Deliver(Packet {
+                body:
+                    Body::MetaReq {
+                        body: MetaRequest::ChangeIsr { changes, .. },
+                        ..
+                    },
+                ..
+            })) => Some(changes.as_slice()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn start_scenario(sim: &mut Sim, node: NodeId) {
+    let MetaReply::Applied { view, .. } = sim.meta.handle(&MetaRequest::Attach { vol: VOL, node })
+    else {
+        panic!("scenario attach refused");
+    };
+    sim.start_target(node, view);
+}
+
+fn take_scenario_packet(sim: &mut Sim, matches: impl Fn(&Packet) -> bool) -> Packet {
+    let index = sim
+        .payloads
+        .iter()
+        .position(|event| matches!(event, Some(Ev::Deliver(packet)) if matches(packet)))
+        .expect("scheduled scenario packet");
+    sim.events.retain(|Reverse((_, _, i))| *i != index);
+    let Some(Ev::Deliver(packet)) = sim.payloads[index].take() else {
+        unreachable!()
+    };
+    packet
+}
+
+fn pending_write_hole_scenario(bugs: Bugs) -> Result<Report, String> {
+    let mut cfg = scenario_config(2, 1);
+    cfg.blocks_per_chunk = 1;
+    cfg.timing.refresh = 100 * MS;
+    cfg.timing.reconnect = 10 * MS;
+    let mut sim = Sim::scripted(cfg, vec![vec![0]], Vec::new()).with_bugs(bugs);
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initial target settled", |s| {
+        s.settled() == Some(0)
+    });
+    let write = sim.submit(0, 0, Extent::new(0, 1), Some(42));
+    let mut dropped = take_scenario_packet(
+        &mut sim,
+        |p| matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::Write { .. })),
+    );
+    let Body::ToReplica(m) = &mut dropped.body else {
+        unreachable!()
+    };
+    let crate::msg::Request::Write {
+        prune: Some(bound), ..
+    } = &mut m.body
+    else {
+        unreachable!()
+    };
+    bound.epoch += 1;
+    sim.deliver(dropped);
+    assert!(sim.history[write as usize].result.is_none());
+    assert_eq!(sim.nodes[0].replica.block(VOL, 0, 0), Some(0));
+    assert!(matches!(
+        sim.meta.handle(&MetaRequest::MoveReplica {
+            vol: VOL,
+            chunk: 0,
+            from: 0,
+            to: 1
+        }),
+        MetaReply::Applied { .. }
+    ));
+    wait_scenario(&mut sim, "BeginResync request scheduled", |s| {
+        s.payloads.iter().any(|event| {
+            matches!(event, Some(Ev::Deliver(Packet { to: 1, body: Body::ToReplica(m), .. }))
+                if matches!(m.body, crate::msg::Request::BeginResync { .. }))
+        })
+    });
+    let begin = take_scenario_packet(&mut sim, |p| {
+        p.to == 1
+            && matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::BeginResync { .. }))
+    });
+    let Body::ToReplica(m) = &begin.body else {
+        unreachable!()
+    };
+    let begin_req = m.req;
+    sim.deliver(begin);
+    let ack = take_scenario_packet(&mut sim, |p| {
+        p.from == 1 && matches!(&p.body, Body::FromReplica(m) if m.req == begin_req)
+    });
+    // The source retry completes while the destination's BeginResync Ack is delayed.
+    // No request is sent to the destination until that Ack opens the replay/copy phase.
+    // Delay later replies on this same generated stream too. The source times out first
+    // and reconnects before the later BeginResync request's timeout.
+    sim.last_delivery.insert((1, 0, ack.conn), sim.now + SEC);
+    wait_scenario(&mut sim, "pending source write completed", |s| {
+        s.history[write as usize].result.is_some()
+    });
+    assert!(matches!(
+        sim.history[write as usize].result,
+        Some((_, OpResult::Written))
+    ));
+    sim.at(sim.now + 500, Ev::Deliver(ack));
+    sim.run_mut()
+}
+
+#[test]
+fn catches_skipped_pending_resync_seed() {
+    pending_write_hole_scenario(Bugs::default()).expect("clean hole scenario");
+    let error = pending_write_hole_scenario(target(|b| b.skip_pending_resync_seed = true))
+        .expect_err("missing seed was not caught");
+    assert!(error.contains("not linearizable"), "{error}");
+    eprintln!("snapshot seed omission: {}", error.lines().next().unwrap());
+}
+
+fn old_write_completion_scenario(bugs: Bugs) -> Result<Report, String> {
+    let mut cfg = scenario_config(3, 1);
+    cfg.chunks = 2;
+    cfg.blocks_per_chunk = 1;
+    cfg.timing.refresh = 10 * MS;
+    cfg.timing.reconnect = 10 * MS;
+    // The second chunk keeps node 1's session open while chunk 0 moves off and back.
+    let mut sim = Sim::scripted(cfg, vec![vec![0, 1], vec![1]], Vec::new()).with_bugs(bugs);
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initial target settled", |s| {
+        s.settled() == Some(0)
+    });
+    sim.deferred_write_reply = Some(DeferredWriteReply {
+        node: 1,
+        completed: None,
+    });
+    let write = sim.submit(0, 0, Extent::new(0, 1), Some(42));
+    let mut dropped = take_scenario_packet(&mut sim, |p| {
+        p.to == 0
+            && matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::Write { .. }))
+    });
+    let Body::ToReplica(m) = &mut dropped.body else {
+        unreachable!()
+    };
+    let crate::msg::Request::Write {
+        prune: Some(bound), ..
+    } = &mut m.body
+    else {
+        unreachable!()
+    };
+    bound.epoch += 1;
+    sim.deliver(dropped);
+    wait_scenario(&mut sim, "old Write completion deferred", |s| {
+        s.deferred_write_reply.as_ref().unwrap().completed.is_some()
+    });
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), Some(42));
+    assert!(matches!(
+        sim.meta.handle(&MetaRequest::MoveReplica {
+            vol: VOL,
+            chunk: 0,
+            from: 1,
+            to: 2
+        }),
+        MetaReply::Applied { .. }
+    ));
+    wait_scenario(&mut sim, "old replica removed", |s| {
+        !s.meta.volume(VOL).unwrap().chunks[0].replicas.contains(&1)
+    });
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), None);
+    assert!(matches!(
+        sim.meta.handle(&MetaRequest::MoveReplica {
+            vol: VOL,
+            chunk: 0,
+            from: 2,
+            to: 1
+        }),
+        MetaReply::Applied { .. }
+    ));
+    wait_scenario(&mut sim, "new filter Write replay scheduled", |s| {
+        s.payloads.iter().any(|event| {
+            matches!(event, Some(Ev::Deliver(Packet { to: 1, body: Body::ToReplica(m), .. }))
+                if matches!(m.body, crate::msg::Request::Write { .. }))
+        })
+    });
+    let mut replay = take_scenario_packet(&mut sim, |p| {
+        p.to == 1
+            && matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::Write { .. }))
+    });
+    let Body::ToReplica(m) = &mut replay.body else {
+        unreachable!()
+    };
+    let crate::msg::Request::Write {
+        prune: Some(bound), ..
+    } = &mut m.body
+    else {
+        unreachable!()
+    };
+    bound.epoch += 1;
+    sim.deliver(replay);
+    let until = sim.now + 10 * MS;
+    advance_scenario(&mut sim, until);
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), Some(0));
+    assert!(sim.history[write as usize].result.is_none());
+    let deferred = sim.deferred_write_reply.take().unwrap();
+    let (to, conn, reply) = deferred.completed.unwrap();
+    sim.send(deferred.node, to, conn, Body::FromReplica(reply));
+    wait_scenario(&mut sim, "source write retried and completed", |s| {
+        s.history[write as usize].result.is_some()
+    });
+    assert!(matches!(
+        sim.history[write as usize].result,
+        Some((_, OpResult::Written))
+    ));
+    let read = sim.submit(0, 0, Extent::new(0, 1), None);
+    wait_scenario(&mut sim, "read after acknowledged write", |s| {
+        s.history[read as usize].result.is_some()
+    });
+    sim.run_mut()
+}
+
+fn large_scenario_config(chunks: u32, min_isr: usize) -> Config {
+    let mut cfg = scenario_config(3, min_isr);
+    cfg.chunks = chunks;
+    cfg.blocks_per_chunk = 1;
+    cfg.max_ops = 4_000;
+    cfg.chaos = 20 * SEC;
+    cfg.timing.meta_timeout = 60 * SEC;
+    cfg
+}
+
+fn large_recovery(chunks: u32, moves: bool) -> Sim {
+    use Action::*;
+    let mut script = vec![
+        (0, Attach(0)),
+        (200 * MS, Write(0, 0, 0)),
+        (300 * MS, Write(0, chunks - 1, 0)),
+        (SEC, Cut(0, 1)),
+        // Interrupt metadata while the failed peer's many chunk removals are pending.
+        (1100 * MS, Cut(0, META)),
+        (1500 * MS, Write(0, chunks - 1, 0)),
+        (4 * SEC, Heal(0, META)),
+        (6 * SEC, Heal(0, 1)),
+        (8 * SEC, Attach(2)),
+        (9 * SEC, Write(2, chunks / 2, 0)),
+        (10 * SEC, Read(0, chunks - 1, 0)),
+        (12 * SEC, Read(2, chunks - 1, 0)),
+    ];
+    if moves {
+        script.push((7 * SEC, Write(0, chunks / 2, 0)));
+    }
+    let mut cfg = large_scenario_config(chunks, 1);
+    cfg.timing.meta_timeout = SEC;
+    let mut sim = Sim::scripted(cfg, vec![vec![0, 1]; chunks as usize], script);
+    if moves {
+        for chunk in (0..chunks).step_by(2) {
+            assert!(matches!(
+                sim.meta.handle(&MetaRequest::MoveReplica {
+                    vol: VOL,
+                    chunk,
+                    from: 1,
+                    to: 2,
+                }),
+                MetaReply::Applied { .. }
+            ));
+        }
+    }
+    sim
+}
+
+#[test]
+fn large_chunk_recovery_uses_production_metadata_batches() {
+    for chunks in [65, 129] {
+        for moves in [false, true] {
+            let report = large_recovery(chunks, moves).run().unwrap();
+            assert!(report.max_meta_batch > 0);
+            assert!(report.max_meta_batch <= MAX_CHANGES_PER_REQUEST);
+            assert!(report.completed >= chunks as usize);
+            assert_eq!(report.final_epoch, 2);
+        }
+    }
+}
+
+#[test]
+fn large_chunk_recovery_catches_unbounded_meta_batch() {
+    let report = large_recovery(65, false)
+        .with_bugs(target(|b| b.unbounded_meta_batch = true))
+        .run()
+        .unwrap();
+    assert!(
+        report.max_meta_batch > MAX_CHANGES_PER_REQUEST,
+        "the emitted-size checker did not expose the original 65-chunk mutation"
+    );
+}
+
+#[test]
+fn simulator_refuses_oversized_isr_without_metadata_mutation() {
+    let mut sim = Sim::scripted(
+        large_scenario_config(65, 1),
+        vec![vec![0, 1]; 65],
+        Vec::new(),
+    );
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initially settled target", |s| {
+        s.settled().is_some()
+    });
+    let before = sim.meta.volume(VOL).unwrap().clone();
+    let changes = (0..65)
+        .map(|chunk| IsrChange {
+            chunk,
+            expected_ver: before.chunks[chunk as usize].isr_ver,
+            new_isr: BTreeSet::from([0]),
+            new_replicas: None,
+        })
+        .collect();
+    sim.deliver(Packet {
+        from: 0,
+        to: META,
+        to_inc: 0,
+        conn: None,
+        body: Body::MetaReq {
+            req: u64::MAX,
+            body: MetaRequest::ChangeIsr {
+                vol: VOL,
+                epoch: before.epoch,
+                changes,
+            },
+        },
+    });
+    assert_eq!(sim.meta.volume(VOL), Some(&before));
+    assert!(
+        !sim.payloads.iter().any(|event| matches!(
+            event,
+            Some(Ev::Deliver(Packet {
+                body: Body::MetaRep { req: u64::MAX, .. },
+                ..
+            }))
+        )),
+        "oversized refusal fabricated an authoritative success reply"
+    );
+}
+
+#[test]
+fn simulator_counts_an_oversized_emission_even_when_network_drops_it() {
+    let mut sim = Sim::scripted(
+        large_scenario_config(65, 1),
+        vec![vec![0, 1]; 65],
+        Vec::new(),
+    )
+    .with_bugs(target(|b| b.unbounded_meta_batch = true));
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initially settled target", |s| {
+        s.settled().is_some()
+    });
+    let before = sim.meta.volume(VOL).unwrap().clone();
+    sim.script_step(Action::Cut(0, META));
+    sim.script_step(Action::Cut(0, 1));
+    let at = sim.now + 2 * SEC;
+    advance_scenario(&mut sim, at);
+    assert_eq!(
+        sim.report.max_meta_batch, 65,
+        "a dropped oversized emission escaped the size checker"
+    );
+    assert!(
+        scheduled_isr_changes(&sim).is_empty(),
+        "proposal reached the service boundary"
+    );
+    assert_eq!(sim.meta.volume(VOL), Some(&before));
+}
+
+#[test]
+fn large_recovery_learns_a_hidden_commit_after_reply_loss() {
+    let mut cfg = large_scenario_config(129, 1);
+    cfg.timing.meta_timeout = SEC;
+    let mut sim = Sim::scripted(cfg, vec![vec![0, 1]; 129], Vec::new());
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initially settled target", |s| {
+        s.settled().is_some()
+    });
+    sim.script_step(Action::Cut(0, 1));
+    wait_scenario(&mut sim, "first batch committed before its reply", |s| {
+        s.meta.volume(VOL).unwrap().chunks[0].isr == BTreeSet::from([0])
+    });
+    assert_eq!(
+        sim.meta
+            .volume(VOL)
+            .unwrap()
+            .chunks
+            .iter()
+            .filter(|c| c.isr_ver == 1)
+            .count(),
+        64
+    );
+    assert!(
+        sim.payloads.iter().any(|event| matches!(
+            event,
+            Some(Ev::Deliver(Packet {
+                body: Body::MetaRep {
+                    reply: MetaReply::Applied { .. },
+                    ..
+                },
+                ..
+            }))
+        )),
+        "no committed reply available to lose"
+    );
+    sim.script_step(Action::Cut(0, META));
+    let at = sim.now + 500 * MS;
+    advance_scenario(&mut sim, at);
+    sim.script_step(Action::Heal(0, META));
+    wait_scenario(
+        &mut sim,
+        "all batches recovered after the hidden commit",
+        |s| {
+            s.meta
+                .volume(VOL)
+                .unwrap()
+                .chunks
+                .iter()
+                .all(|c| c.isr == BTreeSet::from([0]))
+        },
+    );
+    assert!(
+        sim.meta
+            .volume(VOL)
+            .unwrap()
+            .chunks
+            .iter()
+            .all(|c| c.isr_ver == 1),
+        "a hidden committed transition was applied twice"
+    );
+    sim.script_step(Action::Heal(0, 1));
+    let report = sim.run_mut().unwrap();
+    assert_eq!(report.max_meta_batch, MAX_CHANGES_PER_REQUEST);
+}
+
+/// A completion check stronger than final-value checking: the effective-quorum member has
+/// not acknowledged this write, and its metadata removal/join is still deferred.
+fn deferred_write_check(sim: &Sim, op: u64, member: NodeId) -> Result<(), &'static str> {
+    let h = &sim.history[op as usize];
+    if matches!(h.result, Some((_, OpResult::Written)))
+        && sim.nodes[member as usize]
+            .replica
+            .block(VOL, h.chunk, h.ext.start)
+            != h.write
+    {
+        return Err("deferred effective-quorum member lacks an acknowledged write");
+    }
+    Ok(())
+}
+
+fn deferred_shrink_scenario(early_ack: bool) -> (Sim, u64) {
+    let mut sim = Sim::scripted(
+        large_scenario_config(65, 1),
+        vec![vec![0, 1]; 65],
+        Vec::new(),
+    )
+    .with_bugs(target(|b| b.ack_before_shrink = early_ack));
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initially settled target", |s| {
+        s.settled().is_some()
+    });
+    sim.script_step(Action::Slow(0, META, 30 * SEC));
+    sim.script_step(Action::Cut(0, 1));
+    let at = sim.now + 2 * SEC;
+    advance_scenario(&mut sim, at);
+    assert!(
+        scheduled_isr_changes(&sim)
+            .iter()
+            .any(|changes| changes.len() == 64 && changes.iter().all(|c| c.chunk != 64))
+    );
+    assert_eq!(
+        sim.nodes[0]
+            .target
+            .as_ref()
+            .unwrap()
+            .pending_membership()
+            .len(),
+        65
+    );
+    let op = sim.submit(0, 64, Extent::new(0, 1), Some(42));
+    let at = sim.now + 10 * MS;
+    advance_scenario(&mut sim, at);
+    assert!(sim.meta.volume(VOL).unwrap().chunks[64].isr.contains(&1));
+    (sim, op)
+}
+
+#[test]
+fn deferred_chunk_simulation_catches_ack_before_shrink() {
+    let (mut fixed, op) = deferred_shrink_scenario(false);
+    assert_eq!(deferred_write_check(&fixed, op, 1), Ok(()));
+    assert!(fixed.history[op as usize].result.is_none());
+    fixed.script_step(Action::Heal(0, 1));
+    fixed.script_step(Action::Slow(0, META, 500));
+    fixed.run_mut().unwrap();
+    let (broken, op) = deferred_shrink_scenario(true);
+    assert_eq!(
+        deferred_write_check(&broken, op, 1),
+        Err("deferred effective-quorum member lacks an acknowledged write")
+    );
+}
+
+fn deferred_join_scenario(late_join: bool) -> (Sim, u64) {
+    let mut sim = Sim::scripted(
+        large_scenario_config(65, 1),
+        vec![vec![0, 1]; 65],
+        Vec::new(),
+    )
+    .with_bugs(target(|b| b.late_join = late_join));
+    for chunk in 0..65 {
+        assert!(matches!(
+            sim.meta.handle(&MetaRequest::ChangeIsr {
+                vol: VOL,
+                epoch: 0,
+                changes: vec![IsrChange {
+                    chunk,
+                    expected_ver: 0,
+                    new_isr: BTreeSet::from([0]),
+                    new_replicas: None,
+                }],
+            }),
+            MetaReply::Applied { .. }
+        ));
+    }
+    sim.script_step(Action::Slow(0, META, 30 * SEC));
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "65 completed resyncs waiting for metadata", |s| {
+        let pending = s.nodes[0].target.as_ref().unwrap().pending_membership();
+        pending.len() == 65 && pending.iter().all(|(_, joining, _)| *joining == Some(1))
+    });
+    assert!(
+        scheduled_isr_changes(&sim)
+            .iter()
+            .any(|changes| changes.iter().all(|c| c.chunk != 64))
+    );
+    sim.script_step(Action::Cut(0, 1));
+    let op = sim.submit(0, 64, Extent::new(0, 1), Some(42));
+    let at = sim.now + 10 * MS;
+    advance_scenario(&mut sim, at);
+    assert_eq!(
+        sim.meta.volume(VOL).unwrap().chunks[64].isr,
+        BTreeSet::from([0])
+    );
+    (sim, op)
+}
+
+#[test]
+fn deferred_chunk_simulation_catches_late_join() {
+    let (mut fixed, op) = deferred_join_scenario(false);
+    assert_eq!(deferred_write_check(&fixed, op, 1), Ok(()));
+    assert!(fixed.history[op as usize].result.is_none());
+    fixed.script_step(Action::Heal(0, 1));
+    fixed.script_step(Action::Slow(0, META, 500));
+    fixed.run_mut().unwrap();
+    let (broken, op) = deferred_join_scenario(true);
+    assert_eq!(
+        deferred_write_check(&broken, op, 1),
+        Err("deferred effective-quorum member lacks an acknowledged write")
+    );
+}
+
+fn deferred_move_scenario(early_drop: bool) -> Sim {
+    let mut sim = Sim::scripted(
+        large_scenario_config(65, 2),
+        vec![vec![0, 1]; 65],
+        Vec::new(),
+    )
+    .with_bugs(target(|b| b.drop_before_join = early_drop));
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initially settled target", |s| {
+        s.settled().is_some()
+    });
+    let op = sim.submit(0, 64, Extent::new(0, 1), Some(42));
+    wait_scenario(&mut sim, "write durable on original ISR", |s| {
+        s.history[op as usize].result.is_some()
+    });
+    sim.script_step(Action::Cut(0, 2));
+    for chunk in 0..65 {
+        assert!(matches!(
+            sim.meta.handle(&MetaRequest::MoveReplica {
+                vol: VOL,
+                chunk,
+                from: 1,
+                to: 2,
+            }),
+            MetaReply::Applied { .. }
+        ));
+    }
+    start_scenario(&mut sim, 0);
+    wait_scenario(
+        &mut sim,
+        "first 64 move additions leave chunk 64 deferred",
+        |s| {
+            scheduled_isr_changes(s)
+                .iter()
+                .any(|changes| changes.len() == 64 && changes.iter().all(|c| c.chunk != 64))
+        },
+    );
+    let at = sim.now + 100 * MS;
+    advance_scenario(&mut sim, at);
+    sim
+}
+
+fn deferred_move_check(sim: &Sim) -> Result<(), &'static str> {
+    let ch = &sim.meta.volume(VOL).unwrap().chunks[64];
+    if !ch.replicas.contains(&1) && sim.nodes[2].replica.block(VOL, 64, 0) != Some(42) {
+        return Err("move source removed before the deferred destination synchronized");
+    }
+    Ok(())
+}
+
+#[test]
+fn deferred_chunk_simulation_catches_drop_before_join() {
+    let mut fixed = deferred_move_scenario(false);
+    assert_eq!(deferred_move_check(&fixed), Ok(()));
+    assert!(
+        fixed.meta.volume(VOL).unwrap().chunks[64]
+            .replicas
+            .contains(&1)
+    );
+    fixed.script_step(Action::Heal(0, 2));
+    fixed.run_mut().unwrap();
+    assert!(
+        fixed
+            .meta
+            .volume(VOL)
+            .unwrap()
+            .chunks
+            .iter()
+            .all(|c| c.replicas == [0, 2] && c.isr.len() >= 2)
+    );
+    let broken = deferred_move_scenario(true);
+    assert_eq!(
+        deferred_move_check(&broken),
+        Err("move source removed before the deferred destination synchronized")
+    );
+}
 
 fn seeds() -> std::ops::Range<u64> {
     let var = |name, default| {
@@ -70,12 +729,199 @@ fn campaign() {
     );
 }
 
+fn bounded(seed: u64, budget: u32) -> Config {
+    Config {
+        uncertainty_budget: budget,
+        ..more_chunks(seed)
+    }
+}
+
+fn bounded_eight(seed: u64) -> Config {
+    bounded(seed, 8)
+}
+
+fn bounded_sixteen(seed: u64) -> Config {
+    bounded(seed, 16)
+}
+
+fn forged(seed: u64) -> Config {
+    Config {
+        forge_epoch_pct: 20,
+        ..Config::random(seed)
+    }
+}
+
+fn invalid_fenced(seed: u64) -> Config {
+    Config {
+        invalid_fenced_pct: 20,
+        ..Config::random(seed)
+    }
+}
+
+#[test]
+fn small_uncertainty_budgets_cover_faults_and_repair() {
+    for budget in [8, 16] {
+        let mut total = Report::default();
+        for seed in 0..200 {
+            let r = Sim::new(seed, bounded(seed, budget))
+                .run()
+                .unwrap_or_else(|e| panic!("budget {budget}, seed {seed}: {e}"));
+            total.uncertainty_checks += r.uncertainty_checks;
+            total.coarsened_checks += r.coarsened_checks;
+            total.restart_covered_reports += r.restart_covered_reports;
+            total.accepted_write_attempts += r.accepted_write_attempts;
+            total.repair_write_attempts += r.repair_write_attempts;
+            total.uncertainty_prunes += r.uncertainty_prunes;
+            total.uncertainty_settles += r.uncertainty_settles;
+            total.crashes += r.crashes;
+            total.partitions += r.partitions;
+        }
+        assert!(total.uncertainty_checks > total.accepted_write_attempts);
+        assert!(total.coarsened_checks > 0, "budget {budget}: {total:?}");
+        assert!(total.restart_covered_reports > 0, "{total:?}");
+        assert!(total.repair_write_attempts > 0, "{total:?}");
+        assert!(total.uncertainty_prunes > 0, "{total:?}");
+        assert!(total.uncertainty_settles > 0, "{total:?}");
+        assert!(total.crashes > 0 && total.partitions > 0, "{total:?}");
+        eprintln!("200 bounded fault runs at B={budget}: {total:?}");
+    }
+}
+
+#[test]
+fn forged_epochs_leave_runs_clean() {
+    let first = env_u64("FLAMINIO_SIM_FIRST").unwrap_or(0);
+    let seeds = env_u64("FLAMINIO_SIM_SEEDS").unwrap_or(200);
+    let mut injected = 0;
+    for seed in first..first + seeds {
+        let r = Sim::new(seed, forged(seed))
+            .run()
+            .unwrap_or_else(|e| panic!("forged seed {seed}: {e}"));
+        injected += r.forged_epoch_requests;
+    }
+    assert!(injected > 0);
+    eprintln!("{seeds} clean runs from seed {first} with {injected} forged-epoch requests at 20%");
+}
+
+#[test]
+fn forged_epoch_resync_regressions_leave_runs_clean() {
+    // Found while searching the old-acknowledgement mutation with pending replay enabled.
+    // These are clean failures, not mutation catches; preserve them without excluding seeds.
+    for seed in [1_833, 9_803, 14_081] {
+        Sim::new(seed, forged(seed))
+            .run()
+            .unwrap_or_else(|e| panic!("forged resync seed {seed}: {e}"));
+    }
+}
+
+#[test]
+fn invalid_fenced_replies_leave_runs_clean() {
+    let mut injected = 0;
+    for seed in 0..200 {
+        let r = Sim::new(seed, invalid_fenced(seed))
+            .run()
+            .unwrap_or_else(|e| panic!("invalid Fenced seed {seed}: {e}"));
+        injected += r.invalid_fenced_replies;
+    }
+    assert!(injected > 0);
+    eprintln!("200 clean runs with {injected} invalid Hello replies at 20%");
+}
+
+#[test]
+fn invalid_fenced_grants_no_authority_before_retry() {
+    let mut cfg = scenario_config(3, 1);
+    cfg.uncertainty_budget = 8;
+    cfg.invalid_fenced_pct = 100;
+    let mut sim = Sim::scripted(cfg, vec![vec![0, 1]], Vec::new());
+    start_scenario(&mut sim, 0);
+    let authority = |s: &Sim| {
+        let target = s.nodes[0].target.as_ref().unwrap();
+        [target.fenced_authority(0), target.fenced_authority(1)]
+    };
+    let before = authority(&sim);
+    advance_scenario(&mut sim, 2 * MS);
+    assert!(sim.report.invalid_fenced_replies >= 2);
+    assert_eq!(sim.check_failure, None);
+    assert_eq!(authority(&sim), before);
+    assert!(sim.settled().is_none());
+    sim.cfg.invalid_fenced_pct = 0;
+    sim.run_mut().unwrap();
+}
+
+#[test]
+fn pending_writes_coarsen_then_restart_and_repair_settle() {
+    for budget in [8, 16] {
+        let mut cfg = scenario_config(3, 1);
+        cfg.uncertainty_budget = budget;
+        cfg.blocks_per_chunk = budget + 4;
+        cfg.client_every = (MS, 30 * MS);
+        let mut sim = Sim::scripted(cfg, vec![vec![0, 1]], Vec::new());
+        start_scenario(&mut sim, 0);
+        wait_scenario(&mut sim, "initially settled target", |s| {
+            s.settled().is_some()
+        });
+        // The local ISR member accepts every attempt while the remote member cannot yet
+        // acknowledge any. No completion proof can advance past this pending window.
+        sim.script_step(Action::Slow(0, 1, 30 * SEC));
+        let pending: Vec<_> = (0..budget + 2)
+            .map(|block| sim.submit(0, 0, Extent::new(block, 1), Some(block as Value + 1)))
+            .collect();
+        let at = sim.now + 10 * MS;
+        advance_scenario(&mut sim, at);
+        assert_eq!(sim.check_failure, None);
+        for &op in &pending {
+            let h = &sim.history[op as usize];
+            assert!(
+                h.result.is_none(),
+                "write completed before remote durability"
+            );
+            assert_eq!(sim.nodes[0].replica.block(VOL, 0, h.ext.start), h.write);
+            assert_eq!(sim.nodes[1].replica.block(VOL, 0, h.ext.start), Some(0));
+        }
+        assert!(sim.report.coarsened_checks > 0, "B={budget}");
+        assert_eq!(
+            sim.nodes[0].replica.core.report(VOL),
+            vec![(0, vec![Extent::new(0, budget + 4)])]
+        );
+        let settled_before: u64 = sim.nodes.iter().map(|n| n.uncertainty.stats.settles).sum();
+        sim.crash(0);
+        sim.restart(0);
+        start_scenario(&mut sim, 2);
+        let r = sim.run_mut().unwrap();
+        assert!(r.restart_covered_reports > 0, "{r:?}");
+        assert!(r.repair_write_attempts > 0, "{r:?}");
+        assert!(r.uncertainty_settles > settled_before, "{r:?}");
+        assert!(
+            pending
+                .iter()
+                .all(|&op| sim.history[op as usize].result.is_none())
+        );
+        eprintln!("pending/restart/repair at B={budget}: {r:?}");
+    }
+}
+
+#[test]
+fn bounded_faults_repeat_the_same_history_and_checks() {
+    for budget in [8, 16] {
+        for seed in 0..20 {
+            let mut cfg = bounded(seed, budget);
+            cfg.forge_epoch_pct = 20;
+            cfg.invalid_fenced_pct = 20;
+            let (first, first_history) = Sim::new(seed, cfg.clone()).run_with_history();
+            let (again, again_history) = Sim::new(seed, cfg).run_with_history();
+            assert!(first.is_ok(), "B={budget}, seed {seed}: {first:?}");
+            assert_eq!(format!("{first:?}"), format!("{again:?}"));
+            assert_eq!(first_history, again_history, "B={budget}, seed {seed}");
+        }
+    }
+}
+
 fn scenario_config(nodes: u32, min_isr: usize) -> Config {
     Config {
         nodes,
         rf: 0,
         min_isr,
         chunks: 1,
+        uncertainty_budget: crate::replica::UNCERTAINTY_BUDGET,
         blocks_per_chunk: 2,
         max_op: 1,
         max_io: 1,
@@ -103,6 +949,8 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         move_pct: 0,
         fast_reads: false,
         local_read_fail_pct: 0,
+        forge_epoch_pct: 0,
+        invalid_fenced_pct: 0,
     }
 }
 
@@ -222,10 +1070,10 @@ fn searching() -> bool {
     env_u64("FLAMINIO_MUTATION_FIRST").is_some()
 }
 
-/// Runs `seed` with `bugs`. A failure that is a catch (`not linearizable`, `replicas
-/// diverge`) is returned; one of another class (`liveness:`, `event storm`) is counted in
-/// `skipped` and passed over. Every failing seed must pass with no bug on: one that does not is
-/// a bug in the protocol or the simulator, not a catch, and panics.
+/// Runs `seed` with `bugs`. Independent coverage, budget and authority failures are catches,
+/// alongside linearizability/agreement. Other classes (`liveness:`, `event storm`) are counted
+/// in `skipped` and passed over. Every failing seed must pass with no bug on: one that does not
+/// is a bug in the protocol or the simulator, not a catch, and panics.
 fn try_seed(bugs: Bugs, config: Configure, seed: u64, skipped: &mut Vec<u64>) -> Option<String> {
     let err = Sim::new(seed, config(seed)).with_bugs(bugs).run().err()?;
     if let Err(clean) = Sim::new(seed, config(seed)).run() {
@@ -234,7 +1082,16 @@ fn try_seed(bugs: Bugs, config: Configure, seed: u64, skipped: &mut Vec<u64>) ->
             err.lines().next().unwrap_or("")
         );
     }
-    if err.contains("not linearizable") || err.contains("replicas diverge") {
+    if [
+        "not linearizable",
+        "replicas diverge",
+        "uncertainty not covered",
+        "uncertainty budget exceeded",
+        "invalid Fenced accepted",
+    ]
+    .iter()
+    .any(|class| err.contains(class))
+    {
         Some(err)
     } else {
         skipped.push(seed);
@@ -247,12 +1104,28 @@ fn try_seed(bugs: Bugs, config: Configure, seed: u64, skipped: &mut Vec<u64>) ->
 /// it), and a bug not caught fails the test. With it, from that seed over
 /// `FLAMINIO_MUTATION_SEEDS` (default `budget`), and the test passes either way: a search.
 fn find_failure(name: &str, bugs: Bugs, config: Configure, budget: u64) {
+    find_failure_class(name, bugs, config, budget, None);
+}
+
+fn find_failure_class(
+    name: &str,
+    bugs: Bugs,
+    config: Configure,
+    budget: u64,
+    expected: Option<&str>,
+) {
     let first = env_u64("FLAMINIO_MUTATION_FIRST").unwrap_or(0);
     let seeds = first..first + env_u64("FLAMINIO_MUTATION_SEEDS").unwrap_or(budget);
     let mut skipped = Vec::new();
-    let found = seeds
-        .clone()
-        .find_map(|seed| try_seed(bugs, config, seed, &mut skipped).map(|e| (seed, e)));
+    let found = seeds.clone().find_map(|seed| {
+        let error = try_seed(bugs, config, seed, &mut skipped)?;
+        if expected.is_none_or(|class| error.contains(class)) {
+            Some((seed, error))
+        } else {
+            skipped.push(seed);
+            None
+        }
+    });
     let skipped = match skipped.first() {
         Some(s) => format!(
             " ({} other failures passed over, the first at seed {s})",
@@ -390,7 +1263,70 @@ macro_rules! mutation {
             find_failure(stringify!($name), $bugs, $config, $budget);
         }
     };
+    ($name:ident, $bugs:expr, $budget:expr, $config:expr, $class:expr) => {
+        #[test]
+        #[ignore = "slow in debug builds: run with `make sim`"]
+        fn $name() {
+            find_failure_class(stringify!($name), $bugs, $config, $budget, Some($class));
+        }
+    };
 }
+
+// Searched from seed 0 on 2026-11-27 with scripts/dev/mutation-search.sh (200 seeds,
+// two ranges). The independent class and clean same-seed rerun are required by the harness:
+// drop/coarse-prune/foreign-epoch/invalid-Fenced first catch at 0; budget bypass at 1.
+mutation!(
+    catches_drop_on_coarsen,
+    replica(|b| b.drop_on_coarsen = true),
+    200,
+    bounded_eight,
+    "uncertainty not covered"
+);
+mutation!(
+    catches_coarse_prune_early,
+    replica(|b| b.coarse_prune_early = true),
+    200,
+    bounded_eight,
+    "uncertainty not covered"
+);
+mutation!(
+    catches_bypass_uncertainty_budget,
+    replica(|b| b.bypass_uncertainty_budget = true),
+    200,
+    bounded_sixteen,
+    "uncertainty budget exceeded"
+);
+mutation!(
+    catches_accept_foreign_epoch,
+    replica(|b| b.accept_foreign_epoch = true),
+    200,
+    forged,
+    "uncertainty not covered"
+);
+mutation!(
+    catches_accept_invalid_fenced,
+    target(|b| b.accept_invalid_fenced = true),
+    200,
+    invalid_fenced,
+    "invalid Fenced accepted"
+);
+// Searched [0, 200), in two ranges on 2026-11-27. First catch: seed 4, with a clean
+// same-seed rerun required by try_seed; omitting replay admits an older snapshot value.
+mutation!(
+    catches_skipped_pending_resync_replay,
+    target(|b| b.skip_pending_resync_replay = true),
+    200,
+    forged,
+    "not linearizable"
+);
+
+mutation!(
+    catches_retired_move_source_reads,
+    target(|b| b.read_from_removing = true),
+    2_000,
+    forged,
+    "not linearizable"
+);
 
 mutation!(
     catches_ack_before_shrink,
@@ -451,9 +1387,11 @@ mutation!(
     target(|b| b.fast_read_ignores_membership = true),
     60_000
 );
-// The rarest: a slow device read must straddle a complete takeover. Searched from seed 0 on
-// 2026-11-04 (docs/issues/11): first caught at seed 103223, a two-chunk run that the order of
-// reconciliation (§6 step 3) made catch; the one-chunk seeds 1001529 and 3626767 catch as before.
+// The rarest: a slow device read must straddle a complete takeover. The historical two-chunk
+// hint 103223 stopped catching after #86's safety fixes. A 2026-11-27 search found no catch
+// in [0, 200000); the previously documented one-chunk candidates 1001529 and 3626767 were
+// then checked directly. Both catch with a clean same-seed rerun. This is a verified hint,
+// not a claim that the interval above 200000 was searched for its first catch.
 // `make sim` tries the hint only; a search (`FLAMINIO_MUTATION_FIRST`, with
 // `FLAMINIO_MUTATION_NO_HINT=1` to skip the hint) covers a range, as for the other checks.
 #[test]
@@ -462,22 +1400,22 @@ fn catches_fast_reads_across_a_fence() {
     hinted(
         "catches_fast_reads_across_a_fence",
         target(|b| b.fast_read_no_fence_check = true),
-        103_223,
+        1_001_529,
         4_000_000,
     );
 }
 
-// A move must drop a replica that acknowledged a write still waiting on another member, and add
-// it back before the write completes (S11). Searched from seed 0 on 2026-11-04 (docs/issues/11):
-// first caught at seed 1183196, a two-chunk run, the seed that found the bug with no switch on.
+// S11: defer device completion before generating its reply. Normal pending replay stays on;
+// only its new send is rejected, so the old request cannot satisfy the new filter's receipt.
 #[test]
-#[ignore = "slow in debug builds: run with `make sim`"]
 fn catches_keep_dropped_acks() {
-    hinted(
-        "catches_keep_dropped_acks",
-        target(|b| b.keep_dropped_acks = true),
-        1_183_196,
-        20_000,
+    old_write_completion_scenario(Bugs::default()).expect("clean old completion scenario");
+    let error = old_write_completion_scenario(target(|b| b.keep_dropped_acks = true))
+        .expect_err("old acknowledgement evidence was not caught");
+    assert!(error.contains("not linearizable"), "{error}");
+    eprintln!(
+        "old Write completion evidence: {}",
+        error.lines().next().unwrap()
     );
 }
 

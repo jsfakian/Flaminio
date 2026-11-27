@@ -53,7 +53,7 @@ of a Kubernetes-native app** and **security turned on by default**.
 | **Security by default** | mTLS on every control and replication link. Per-volume encryption at rest, done on the node that runs the workload, so **replica nodes only ever see ciphertext**. KMS integration, signed releases, a minimal-privilege runtime. |
 | **Effortless device lifecycle** | Disks are discovered automatically and claimed by policy. Removing a disk safely drains it first. A disk that fails suddenly is handled the same way as a planned removal, only faster. |
 | **Configurable replication** | Replication factor 1–5 per StorageClass, with failure-domain-aware placement (disk, node, rack, zone). Erasure coding is on the roadmap. |
-| **Fast, safe failover** | Epoch-based fencing and replica-confirmed leases, so split-brain is impossible by construction. Volumes fail over in seconds once the old node is confirmed fenced (otherwise after a bounded lease timeout), without STONITH hardware. |
+| **Fast, safe failover** | Epoch-based fencing and replica-confirmed leases, so split-brain is impossible by construction. Node-wide out-of-service marks require verified shutdown evidence (default observe-only; see issue #82). Volumes fail over once the old target is fenced (otherwise after a bounded lease timeout). |
 | **Fast rebuilds** | Volumes are split into chunks that are spread across the cluster. Rebuilds run many-to-many, and a replica that comes back after a short outage only resyncs the regions it missed. |
 | **Disaster recovery** | Crash- and application-consistent snapshots, incremental deduplicated backups to S3-compatible storage (client-side encrypted and optionally immutable), and asynchronous replication to a second cluster. |
 | **Data integrity** | End-to-end checksums, background scrubbing, and automatic repair from a healthy replica. |
@@ -77,6 +77,8 @@ of a Kubernetes-native app** and **security turned on by default**.
 
 - A **volume** is split into **chunks** (256 MiB by default). Each chunk has *N* replicas placed in
   different failure domains.
+  Volumes contain whole chunks, with power-of-two chunk sizes from 1 MiB through 1 GiB;
+  [geometry and per-RF admission limits](docs/ARCHITECTURE.md#4-core-concepts) also apply.
 - A **Volume Target** runs on the node that uses the volume. It exposes a block device to the pod
   and sends every write to all in-sync replicas of the affected chunk in parallel.
 - A small **replicated metadata service**, backed by a dedicated etcd cluster (not the Kubernetes

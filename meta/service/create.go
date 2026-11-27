@@ -105,9 +105,17 @@ func decodeHeaderBounded(b []byte) (domain.Header, error) {
 		return domain.Header{}, status.Errorf(codes.DataLoss, "volume header: %v", err)
 	}
 	if h.CreateSpec != nil {
-		if err := h.CreateSpec.Validate(); err != nil {
+		var raw struct {
+			CreateSpec json.RawMessage `json:"create_spec"`
+		}
+		if err := json.Unmarshal(b, &raw); err != nil {
+			return domain.Header{}, status.Errorf(codes.DataLoss, "volume header: %v", err)
+		}
+		identity, err := domain.DecodeCreateSpec(raw.CreateSpec)
+		if err != nil {
 			return domain.Header{}, status.Errorf(codes.DataLoss, "create_spec: %v", err)
 		}
+		h.CreateSpec = &identity
 	}
 	return h, nil
 }
@@ -132,6 +140,9 @@ func (s *Service) createVolume(ctx context.Context, spec domain.Spec) (*domain.V
 		return nil, err
 	}
 	if err := cs.Validate(); err != nil {
+		return nil, err
+	}
+	if _, err := s.ensurePlacementGate(ctx); err != nil {
 		return nil, err
 	}
 
@@ -290,6 +301,9 @@ func (s *Service) resumeOrRefuse(ctx context.Context, id string, want domain.Cre
 		// Published Deleting: conservative public path owns it.
 		return nil, status.Errorf(codes.Aborted, "volume %q is being deleted", id)
 	}
+	if (h.CreateOperation == "") != (h.CreateSpec == nil) {
+		return nil, status.Errorf(codes.DataLoss, "volume %q has an incomplete create identity", id)
+	}
 	if h.Creating {
 		if h.CreateOperation == "" || h.CreateSpec == nil {
 			// Legacy creating claim: incompatible with adoption; may finish via rollback then fresh admit.
@@ -344,8 +358,12 @@ func (s *Service) planPlacement(ctx context.Context, spec domain.Spec) ([][]stri
 			candidates = append(candidates, domain.LoadFromLabels(n.GetId(), load[n.GetId()], n.GetLabels()))
 		}
 	}
-	h := domain.Header{ID: spec.ID, SizeBytes: spec.SizeBytes, ChunkBytes: spec.ChunkBytes}
-	placement, err := domain.Place(candidates, h.ChunkCount(), int(spec.Replicas), spec.PreferNode, spec.Domain, spec.Policy)
+	h := domain.Header{ID: spec.ID, SizeBytes: spec.SizeBytes, ChunkBytes: spec.ChunkBytes, Replicas: spec.Replicas, MinISR: spec.MinISR}
+	count, err := h.ChunkCount()
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w: %v", domain.ErrInvalid, err)
+	}
+	placement, err := domain.Place(candidates, count, int(spec.Replicas), spec.PreferNode, spec.Domain, spec.Policy)
 	return placement, gateRev, err
 }
 
@@ -805,7 +823,7 @@ func (s *Service) rereadRoot(ctx context.Context, op string) (createRoot, int64,
 }
 
 func (s *Service) readCompletedCreate(ctx context.Context, id, op string, want domain.CreateSpec) (*domain.Volume, error) {
-	// #77 coherent ReadSet is not landed yet; verify operation/identity on a fresh ordinary read.
+	// The coherent full read verifies operation/identity on the same view returned to the caller.
 	v, err := s.readVolume(ctx, id)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {

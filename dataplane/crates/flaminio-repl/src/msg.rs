@@ -29,7 +29,10 @@ pub struct ToReplica<P> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request<P> {
     /// Opens a session and fences the volume at `epoch`. Reply: [`Response::Fenced`].
-    Hello,
+    Hello {
+        /// The ascending chunk set advertised when this session was opened.
+        chunks: Vec<ChunkIdx>,
+    },
     /// Confirms the epoch for the lease. Reply: [`Response::Ok`].
     Heartbeat,
     /// A write of one extent. `prune` lets the replica drop uncertain-set entries older than

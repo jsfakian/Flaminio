@@ -118,7 +118,10 @@ metadata:
   name: flaminio-failover
   namespace: flaminio-system
 ---
-# The failover controller reads nodes and sets or clears the out-of-service taint.
+# The failover controller reads nodes and conditionally patches out-of-service taints
+# after verified shutdown evidence. It never deletes nodes, pods or VolumeAttachments
+# (scoped partition recovery is unavailable). Namespace get on kube-system is only for
+# binding manual-lockout-v1's cluster_uid.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -127,6 +130,10 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, patch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    resourceNames: [kube-system]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

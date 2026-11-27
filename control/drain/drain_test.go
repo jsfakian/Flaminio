@@ -3,6 +3,7 @@ package drain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"slices"
 	"sync/atomic"
@@ -276,12 +277,13 @@ func TestRunRequiresCheckDrainComplete(t *testing.T) {
 
 	ctxRun, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 	defer cancel()
-	err = Run(ctxRun, c, "b", 50*time.Millisecond, func(Progress) {})
-	if err == nil {
-		t.Fatal("Run completed while a hidden creating reservation remained")
-	}
-	if ctxRun.Err() == nil && status.Code(err) == codes.OK {
-		t.Fatalf("unexpected success: %v", err)
+	var reported []Progress
+	err = Run(ctxRun, c, "b", 50*time.Millisecond, func(p Progress) {
+		reported = append(reported, p)
+		cancel()
+	})
+	if !errors.Is(err, context.Canceled) || len(reported) != 1 || reported[0].PendingCreations != 1 || reported[0].Remaining != 0 {
+		t.Fatalf("hidden reservation must be reported before cancellation: progress=%+v err=%v", reported, err)
 	}
 }
 
@@ -296,20 +298,107 @@ func TestRunCancelledLeavesMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctxRun, cancel := context.WithCancel(ctx)
-	cancel()
-	err := Run(ctxRun, c, "b", time.Millisecond, func(Progress) {})
-	if err == nil {
-		t.Fatal("cancelled Run succeeded")
+	defer cancel()
+	var reports int
+	err := Run(ctxRun, c, "b", time.Millisecond, func(Progress) {
+		reports++
+		cancel()
+	})
+	if !errors.Is(err, context.Canceled) || reports != 1 {
+		t.Fatalf("cancel after marking/reporting: reports=%d err=%v", reports, err)
 	}
 	nodes, err := c.ListNodes(ctx, &metav1.ListNodesRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, n := range nodes.GetNodes() {
-		if n.GetId() == "b" && !n.GetDraining() {
-			// DrainNode may not have run if ctx was already cancelled before mark.
+		if n.GetId() == "b" {
+			if !n.GetDraining() {
+				t.Fatal("cancelled controller reopened admission")
+			}
 			return
 		}
+	}
+	t.Fatal("cancelled drain node disappeared")
+}
+
+func TestRunReportsIncomingBeforeWaiting(t *testing.T) {
+	c, _ := client(t)
+	ctx := context.Background()
+	for _, node := range []string{"a", "b", "c"} {
+		addNode(t, c, node, nil)
+	}
+	if _, err := c.CreateVolume(ctx, &metav1.CreateVolumeRequest{Id: "v", SizeBytes: 1 << 20, ChunkBytes: 1 << 20, Replicas: 2, MinIsr: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.MoveReplica(ctx, &metav1.MoveReplicaRequest{Volume: "v", From: "a", To: "c"}); err != nil {
+		t.Fatal(err)
+	}
+	ctxRun, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	var reported []Progress
+	err := Run(ctxRun, c, "c", time.Millisecond, func(p Progress) {
+		reported = append(reported, p)
+		cancel()
+	})
+	if !errors.Is(err, context.Canceled) || len(reported) != 1 || reported[0].Incoming != 1 {
+		t.Fatalf("incoming reservation must be reported: progress=%+v err=%v", reported, err)
+	}
+}
+
+func TestRunRefusesOldServerCompletion(t *testing.T) {
+	for _, missing := range []string{"generation", "check-rpc"} {
+		t.Run(missing, func(t *testing.T) {
+			var checks atomic.Int32
+			intercept := grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
+				if _, ok := req.(*metav1.CheckDrainRequest); ok {
+					checks.Add(1)
+					return nil, status.Error(codes.Unimplemented, "old server")
+				}
+				out, err := next(ctx, req)
+				if _, ok := req.(*metav1.DrainNodeRequest); ok && err == nil && missing == "generation" {
+					return &metav1.DrainNodeResponse{}, nil
+				}
+				return out, err
+			})
+			c, _ := client(t, intercept)
+			addNode(t, c, "a", nil)
+			err := Run(context.Background(), c, "a", time.Millisecond, func(Progress) { t.Error("old server supplied valid completion") })
+			want := codes.Unimplemented
+			wantChecks := int32(1)
+			if missing == "generation" {
+				want, wantChecks = codes.FailedPrecondition, 0
+			}
+			if status.Code(err) != want || checks.Load() != wantChecks {
+				t.Fatalf("old server: checks=%d err=%v", checks.Load(), err)
+			}
+		})
+	}
+}
+
+func TestRunRedrainInvalidatesOriginalGeneration(t *testing.T) {
+	var svc *service.Service
+	var first, second uint64
+	intercept := grpc.UnaryInterceptor(func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
+		if r, ok := req.(*metav1.CheckDrainRequest); ok {
+			first = r.GetGeneration()
+			if _, err := svc.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: false}); err != nil {
+				return nil, err
+			}
+			mark, err := svc.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+			if err != nil {
+				return nil, err
+			}
+			second = mark.GetGeneration()
+		}
+		return next(ctx, req)
+	})
+	c, s := client(t, intercept)
+	svc = s
+	addNode(t, c, "a", nil)
+	err := Run(context.Background(), c, "a", time.Millisecond, func(Progress) { t.Error("stale generation reported completion") })
+	if status.Code(err) != codes.FailedPrecondition || first == 0 || second <= first {
+		t.Fatalf("controller silently crossed drain generations: D=%d D2=%d err=%v", first, second, err)
 	}
 }
 
