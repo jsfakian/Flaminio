@@ -55,6 +55,199 @@ fn start_scenario(sim: &mut Sim, node: NodeId) {
     sim.start_target(node, view);
 }
 
+fn take_scenario_packet(sim: &mut Sim, matches: impl Fn(&Packet) -> bool) -> Packet {
+    let index = sim
+        .payloads
+        .iter()
+        .position(|event| matches!(event, Some(Ev::Deliver(packet)) if matches(packet)))
+        .expect("scheduled scenario packet");
+    sim.events.retain(|Reverse((_, _, i))| *i != index);
+    let Some(Ev::Deliver(packet)) = sim.payloads[index].take() else {
+        unreachable!()
+    };
+    packet
+}
+
+fn pending_write_hole_scenario(bugs: Bugs) -> Result<Report, String> {
+    let mut cfg = scenario_config(2, 1);
+    cfg.blocks_per_chunk = 1;
+    cfg.timing.refresh = 100 * MS;
+    cfg.timing.reconnect = 10 * MS;
+    let mut sim = Sim::scripted(cfg, vec![vec![0]], Vec::new()).with_bugs(bugs);
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initial target settled", |s| {
+        s.settled() == Some(0)
+    });
+    let write = sim.submit(0, 0, Extent::new(0, 1), Some(42));
+    let mut dropped = take_scenario_packet(
+        &mut sim,
+        |p| matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::Write { .. })),
+    );
+    let Body::ToReplica(m) = &mut dropped.body else {
+        unreachable!()
+    };
+    let crate::msg::Request::Write {
+        prune: Some(bound), ..
+    } = &mut m.body
+    else {
+        unreachable!()
+    };
+    bound.epoch += 1;
+    sim.deliver(dropped);
+    assert!(sim.history[write as usize].result.is_none());
+    assert_eq!(sim.nodes[0].replica.block(VOL, 0, 0), Some(0));
+    assert!(matches!(
+        sim.meta.handle(&MetaRequest::MoveReplica {
+            vol: VOL,
+            chunk: 0,
+            from: 0,
+            to: 1
+        }),
+        MetaReply::Applied { .. }
+    ));
+    wait_scenario(&mut sim, "BeginResync request scheduled", |s| {
+        s.payloads.iter().any(|event| {
+            matches!(event, Some(Ev::Deliver(Packet { to: 1, body: Body::ToReplica(m), .. }))
+                if matches!(m.body, crate::msg::Request::BeginResync { .. }))
+        })
+    });
+    let begin = take_scenario_packet(&mut sim, |p| {
+        p.to == 1
+            && matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::BeginResync { .. }))
+    });
+    let Body::ToReplica(m) = &begin.body else {
+        unreachable!()
+    };
+    let begin_req = m.req;
+    sim.deliver(begin);
+    let ack = take_scenario_packet(&mut sim, |p| {
+        p.from == 1 && matches!(&p.body, Body::FromReplica(m) if m.req == begin_req)
+    });
+    // The source retry completes while the destination's BeginResync Ack is delayed.
+    // No request is sent to the destination until that Ack opens the replay/copy phase.
+    // Delay later replies on this same generated stream too. The source times out first
+    // and reconnects before the later BeginResync request's timeout.
+    sim.last_delivery.insert((1, 0, ack.conn), sim.now + SEC);
+    wait_scenario(&mut sim, "pending source write completed", |s| {
+        s.history[write as usize].result.is_some()
+    });
+    assert!(matches!(
+        sim.history[write as usize].result,
+        Some((_, OpResult::Written))
+    ));
+    sim.at(sim.now + 500, Ev::Deliver(ack));
+    sim.run_mut()
+}
+
+#[test]
+fn catches_skipped_pending_resync_seed() {
+    pending_write_hole_scenario(Bugs::default()).expect("clean hole scenario");
+    let error = pending_write_hole_scenario(target(|b| b.skip_pending_resync_seed = true))
+        .expect_err("missing seed was not caught");
+    assert!(error.contains("not linearizable"), "{error}");
+    eprintln!("snapshot seed omission: {}", error.lines().next().unwrap());
+}
+
+fn old_write_completion_scenario(bugs: Bugs) -> Result<Report, String> {
+    let mut cfg = scenario_config(3, 1);
+    cfg.chunks = 2;
+    cfg.blocks_per_chunk = 1;
+    cfg.timing.refresh = 10 * MS;
+    cfg.timing.reconnect = 10 * MS;
+    // The second chunk keeps node 1's session open while chunk 0 moves off and back.
+    let mut sim = Sim::scripted(cfg, vec![vec![0, 1], vec![1]], Vec::new()).with_bugs(bugs);
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initial target settled", |s| {
+        s.settled() == Some(0)
+    });
+    sim.deferred_write_reply = Some(DeferredWriteReply {
+        node: 1,
+        completed: None,
+    });
+    let write = sim.submit(0, 0, Extent::new(0, 1), Some(42));
+    let mut dropped = take_scenario_packet(&mut sim, |p| {
+        p.to == 0
+            && matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::Write { .. }))
+    });
+    let Body::ToReplica(m) = &mut dropped.body else {
+        unreachable!()
+    };
+    let crate::msg::Request::Write {
+        prune: Some(bound), ..
+    } = &mut m.body
+    else {
+        unreachable!()
+    };
+    bound.epoch += 1;
+    sim.deliver(dropped);
+    wait_scenario(&mut sim, "old Write completion deferred", |s| {
+        s.deferred_write_reply.as_ref().unwrap().completed.is_some()
+    });
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), Some(42));
+    assert!(matches!(
+        sim.meta.handle(&MetaRequest::MoveReplica {
+            vol: VOL,
+            chunk: 0,
+            from: 1,
+            to: 2
+        }),
+        MetaReply::Applied { .. }
+    ));
+    wait_scenario(&mut sim, "old replica removed", |s| {
+        !s.meta.volume(VOL).unwrap().chunks[0].replicas.contains(&1)
+    });
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), None);
+    assert!(matches!(
+        sim.meta.handle(&MetaRequest::MoveReplica {
+            vol: VOL,
+            chunk: 0,
+            from: 2,
+            to: 1
+        }),
+        MetaReply::Applied { .. }
+    ));
+    wait_scenario(&mut sim, "new filter Write replay scheduled", |s| {
+        s.payloads.iter().any(|event| {
+            matches!(event, Some(Ev::Deliver(Packet { to: 1, body: Body::ToReplica(m), .. }))
+                if matches!(m.body, crate::msg::Request::Write { .. }))
+        })
+    });
+    let mut replay = take_scenario_packet(&mut sim, |p| {
+        p.to == 1
+            && matches!(&p.body, Body::ToReplica(m) if matches!(m.body, crate::msg::Request::Write { .. }))
+    });
+    let Body::ToReplica(m) = &mut replay.body else {
+        unreachable!()
+    };
+    let crate::msg::Request::Write {
+        prune: Some(bound), ..
+    } = &mut m.body
+    else {
+        unreachable!()
+    };
+    bound.epoch += 1;
+    sim.deliver(replay);
+    let until = sim.now + 10 * MS;
+    advance_scenario(&mut sim, until);
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), Some(0));
+    assert!(sim.history[write as usize].result.is_none());
+    let deferred = sim.deferred_write_reply.take().unwrap();
+    let (to, conn, reply) = deferred.completed.unwrap();
+    sim.send(deferred.node, to, conn, Body::FromReplica(reply));
+    wait_scenario(&mut sim, "source write retried and completed", |s| {
+        s.history[write as usize].result.is_some()
+    });
+    assert!(matches!(
+        sim.history[write as usize].result,
+        Some((_, OpResult::Written))
+    ));
+    let read = sim.submit(0, 0, Extent::new(0, 1), None);
+    wait_scenario(&mut sim, "read after acknowledged write", |s| {
+        s.history[read as usize].result.is_some()
+    });
+    sim.run_mut()
+}
+
 fn large_scenario_config(chunks: u32, min_isr: usize) -> Config {
     let mut cfg = scenario_config(3, min_isr);
     cfg.chunks = chunks;
@@ -596,15 +789,17 @@ fn small_uncertainty_budgets_cover_faults_and_repair() {
 
 #[test]
 fn forged_epochs_leave_runs_clean() {
+    let first = env_u64("FLAMINIO_SIM_FIRST").unwrap_or(0);
+    let seeds = env_u64("FLAMINIO_SIM_SEEDS").unwrap_or(200);
     let mut injected = 0;
-    for seed in 0..200 {
+    for seed in first..first + seeds {
         let r = Sim::new(seed, forged(seed))
             .run()
             .unwrap_or_else(|e| panic!("forged seed {seed}: {e}"));
         injected += r.forged_epoch_requests;
     }
     assert!(injected > 0);
-    eprintln!("200 clean runs with {injected} forged-epoch requests at 20%");
+    eprintln!("{seeds} clean runs from seed {first} with {injected} forged-epoch requests at 20%");
 }
 
 #[test]
@@ -1126,6 +1321,14 @@ mutation!(
 );
 
 mutation!(
+    catches_retired_move_source_reads,
+    target(|b| b.read_from_removing = true),
+    2_000,
+    forged,
+    "not linearizable"
+);
+
+mutation!(
     catches_ack_before_shrink,
     target(|b| b.ack_before_shrink = true)
 );
@@ -1184,9 +1387,11 @@ mutation!(
     target(|b| b.fast_read_ignores_membership = true),
     60_000
 );
-// The rarest: a slow device read must straddle a complete takeover. Searched from seed 0 on
-// 2026-11-04 (docs/issues/11): first caught at seed 103223, a two-chunk run that the order of
-// reconciliation (§6 step 3) made catch; the one-chunk seeds 1001529 and 3626767 catch as before.
+// The rarest: a slow device read must straddle a complete takeover. The historical two-chunk
+// hint 103223 stopped catching after #86's safety fixes. A 2026-11-27 search found no catch
+// in [0, 200000); the previously documented one-chunk candidates 1001529 and 3626767 were
+// then checked directly. Both catch with a clean same-seed rerun. This is a verified hint,
+// not a claim that the interval above 200000 was searched for its first catch.
 // `make sim` tries the hint only; a search (`FLAMINIO_MUTATION_FIRST`, with
 // `FLAMINIO_MUTATION_NO_HINT=1` to skip the hint) covers a range, as for the other checks.
 #[test]
@@ -1195,20 +1400,24 @@ fn catches_fast_reads_across_a_fence() {
     hinted(
         "catches_fast_reads_across_a_fence",
         target(|b| b.fast_read_no_fence_check = true),
-        103_223,
+        1_001_529,
         4_000_000,
     );
 }
 
-// S11: a move drops and recreates a replica while an old Write Ack is delayed. Pending
-// replay stays enabled; forged epochs can drop its new send, making the old evidence unsafe.
-mutation!(
-    catches_keep_dropped_acks,
-    target(|b| b.keep_dropped_acks = true),
-    20_000,
-    forged,
-    "not linearizable"
-);
+// S11: defer device completion before generating its reply. Normal pending replay stays on;
+// only its new send is rejected, so the old request cannot satisfy the new filter's receipt.
+#[test]
+fn catches_keep_dropped_acks() {
+    old_write_completion_scenario(Bugs::default()).expect("clean old completion scenario");
+    let error = old_write_completion_scenario(target(|b| b.keep_dropped_acks = true))
+        .expect_err("old acknowledgement evidence was not caught");
+    assert!(error.contains("not linearizable"), "{error}");
+    eprintln!(
+        "old Write completion evidence: {}",
+        error.lines().next().unwrap()
+    );
+}
 
 /// A check whose first catch is too far for `make sim` to search: it tries `hint` only, and
 /// fails if that no longer catches. A search (`FLAMINIO_MUTATION_FIRST`) tries the hint first,

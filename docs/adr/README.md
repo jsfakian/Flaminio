@@ -30,3 +30,4 @@ of a superseding decision.
 | [0012](0012-privileged-data-plane-pod.md) | A privileged data-plane pod, until privilege separation | Proposed |
 | [0013](0013-certificates-rotate-by-file-replacement.md) | A certificate is rotated by replacing its files; every process watches its own | Proposed |
 | [0014](0014-maintenance-attach-only-while-not-held.md) | A target that no client asked for is admitted only while no client holds the volume | Proposed |
+| [0017](0017-bound-uncertainty-with-per-chunk-covers.md) | Bound uncertainty with per-chunk maximum-Version covers | Proposed |

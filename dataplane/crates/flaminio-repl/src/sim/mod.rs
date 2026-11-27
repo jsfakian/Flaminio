@@ -355,6 +355,14 @@ struct HistOp {
     result: Option<(u64, OpResult<Data>)>,
 }
 
+/// A selected Write's device completion may notify the target after later requests finish.
+/// Hold it before network send, so releasing it still uses the generated reply stream order.
+#[cfg(test)]
+struct DeferredWriteReply {
+    node: NodeId,
+    completed: Option<(NodeId, Conn, FromReplica<Data>)>,
+}
+
 /// One simulated run.
 pub struct Sim {
     cfg: Config,
@@ -382,6 +390,8 @@ pub struct Sim {
     script: Option<Vec<(u64, Action)>>,
     #[cfg(test)]
     bugs: Bugs,
+    #[cfg(test)]
+    deferred_write_reply: Option<DeferredWriteReply>,
 }
 
 impl Sim {
@@ -476,6 +486,8 @@ impl Sim {
             script,
             #[cfg(test)]
             bugs: Bugs::default(),
+            #[cfg(test)]
+            deferred_write_reply: None,
         }
     }
 
@@ -878,6 +890,15 @@ impl Sim {
                     return;
                 }
                 if let Some(r) = reply {
+                    #[cfg(test)]
+                    if let Some(deferred) = self.deferred_write_reply.as_mut()
+                        && deferred.node == p.to
+                        && deferred.completed.is_none()
+                        && matches!(m.body, crate::msg::Request::Write { .. })
+                    {
+                        deferred.completed = Some((p.from, p.conn, r));
+                        return;
+                    }
                     self.send(p.to, p.from, p.conn, Body::FromReplica(r));
                 }
             }

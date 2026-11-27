@@ -99,86 +99,72 @@ Status: clear. Approval remains separate; no approval is inferred.
 Branch: `issue/86-bounded-uncertainty`, based on
 `610f367cfc90d1e6f19e20d2848b8020d8ecb84e` (main after the user's merge of #81 / PR #102).
 The published clear spec/design were approved on 2026-11-20. This issue precedes #80 because
-the approved plans require its bounded Fenced representation before #80's complete transport
-guarantee. Ordered implementation units are tracked in [units.md](units.md).
+its bounded Fenced representation is a dependency of #80's complete transport guarantee.
+[Units](units.md) records the completed implementation and acceptance work.
 
-Implementation, tests, independent code/security review and final conformance are in progress.
-No completed runtime validation or issue closure is claimed by this entry.
+[PR #103](https://github.com/jsfakian/Flaminio/pull/103) was published as a draft at the user's
+request while validation was in progress. It remains draft pending full checks, independent
+code/security review and conformance. No lab checks are required by the approved design.
 
-### Blocking acceptance counterexamples
+### Consistency regressions found by acceptance
 
-The required clean forged-epoch campaign initially failed at seed 4 with `forge_epoch_pct=20`
-and otherwise `Config::random(4)` (default budget 65,536, no mutation enabled): acknowledged
-write 294 at time 60,435,658 is followed by a final read at 60,438,805 returning older value
-292 (`not linearizable`). A mixed-fault repeat at budget 8 also fails clean seed 4 (acknowledged
-967, final read 917). Both assertions and seeds are preserved; fresh independent runtime and
-model diagnosis confirmed a target resync bug: a dropped in-flight write can be admitted only
-after its older value was copied to a joiner. The tracked pending-write replay and fresh
-receipt-correlation fix now passes all 67 Target tests, all 200 forged-epoch clean seeds and
-the budget-8/16 mixed-fault campaign, with the original regression assertions unchanged.
+The clean forged-epoch campaign initially failed at seed 4 (`forge_epoch_pct=20`,
+`Config::random(4)`, budget 65,536, no mutation): write 294 was acknowledged, then a final
+read returned 292. A mixed-fault repeat at budget 8 also failed. Independent runtime/model
+analysis confirmed that a dropped in-flight write could be admitted after an older value
+was copied to a joiner. BeginResync Ack now retires prior request receipts and replays all
+pending chunk Writes before snapshot work. The resync tracks fresh receipts independently
+of client completion. The original regression assertions remain and pass.
 
-The user requested draft PR publication while this work is in progress. The draft is not
-ready for merge: fresh replay and old-generation mutation assurance, full checks, independent
-code/security review and conformance remain pending. The original regression assertions remain.
+Broader runs found clean cases 1833, 9803 and 14081: a conditional source removal could commit
+while its response was unresolved, mutable proposal state cleared, and a delayed Hello
+recreated the removed chunk empty before a read. Source retirement now survives uncertain
+CAS outcomes until a strictly newer authoritative version. It rejects pending source
+receipts, invalidates fast-read generations and aborts affected snapshot provenance.
+A separate unmapped-source proof showed that pending extents must seed `force_copy` before
+Mapped, including Writes that finish before BeginResync Ack; abort preserves this evidence.
+All three permanent cases and the new edge-case proofs pass.
 
-Other acceptance evidence passes: 200-seed normal budget-8/16 campaigns, 200 malformed-reply
-clean runs, all 35 old/new mutation tests, seven #81 large-volume simulator regressions, and
-the pending-write/coarsen/restart/real-repair/Settle scenarios at budgets 8/16. These passes do
-not complete final assurance. The replay fix invalidates the old `keep_dropped_acks` pinned
-witness; its assertion remains unchanged while a fresh semantic witness is established.
-
-### Broader consistency cases
-
-The wider same-seed checks found additional clean cases 1833, 9803 and 14081. Permanent
-regressions preserve all three. Traces show a move source can be removed in metadata while
-its target still has an unresolved response; mutable proposal state then clears and a delayed
-Hello recreates the removed chunk empty before a read. A separate unmapped-source regression
-also proves that pending extents must enter `force_copy` before snapshot planning, even when
-their WriteOp finishes before BeginResync Ack. Both corrections now pass all 69 existing
-Target tests, all three permanent consistency cases, library compilation and `make fmt lint`.
-Independent edge-case proofs and wider validation/review remain pending; no assertion is
-excluded.
+The replay defense invalidated two old random mutation hints. A test-only deferred Write
+completion provides an honest old-generation receipt history with replay still enabled;
+normal simulation scheduling and RNG are unchanged. The old fast-fence hint 103223 no longer
+catches; an actual search found no witness in [0,200000). Direct checks of previously
+recorded candidates verified seed 1,001,529 (and 3,626,767), each with a passing clean twin.
+The lower verified witness is pinned without claiming it is the first catch beyond the
+searched range. No mutation assertion was skipped or weakened.
 
 ## Tests
 
-Unit 1: targeted Rust `cargo check --all-targets --offline`, `git diff --check` and
-`make fmt lint` pass. Its new core/reference and node lifecycle acceptance tests are next;
-later codec/target/simulator units remain incomplete.
+Focused acceptance results before formal review:
 
-Unit 2: formatting and targeted Clippy (net/node, all targets, warnings denied) pass. Its
-checked Fenced codec acceptance tests are next. Node lifecycle acceptance passes all 39
-focused replica tests and the full node package (50 library + 19 integration tests).
+| Area | Result |
+|---|---|
+| Replica core | 17 tests pass; 28,800 independent exact-oracle operations, partial-page reuse and default 512×128 fill (four covers) |
+| Node lifecycle | 39 focused tests and full node package (50 library + 19 integration) pass; real-store failed-write/reconnect/restart proof passes |
+| Codec/session/fuzz | 14 net unit + 7 session and 4 fuzz-regression tests pass; real F09 workloads, maximum body, zero-byte refused sends and 17 hostile seeds |
+| Target/engine | All 75 Target tests and local/remote captured-Hello adapter tests pass |
+| Small-budget simulation | 200-seed normal/mixed campaigns at budgets 8/16, malformed-report campaign and pending/coarsen/restart/repair/Settle histories pass |
+| Production-bound simulation | Seven #81 large-volume recovery cases and permanent clean cases 1833/9803/14081 pass |
+| Independent controls | All 38 mutation catches pass, including new coverage/prune/budget/epoch/authority, replay omission, pending-seed omission and source-retirement controls |
+| Broad forged-field simulation | Fresh [0,20000) clean campaign passes with 504,912 forged requests; 60.15 s test runtime |
+| Control-plane/contracts | `make race hygiene contracts` passes after the source-retirement fix; generated outputs unchanged and both mutual-TLS interop tests pass |
 
-Core acceptance: all 17 replica tests pass, including 28,800 exact-oracle mixed operations,
-partial-page arena reuse and the 512×128 fill with exactly four whole-chunk covers.
-Codec acceptance: all 14 net unit + 7 session tests and 4 fuzz-regression tests pass,
-including exact F09 workloads, maximum body size and zero-byte refused sends.
-
-Unit 3: formatting, targeted all-target Rust type checking and diff hygiene pass. The
-read-only authority queries are available to normal simulator builds; their temporary unused
-warnings will end when Unit 4 consumes them. Target/engine acceptance tests and independent
-simulator assurance are next.
-
-Unit 4 source is complete: independent exact-version/restart/session shadow, admitted-action
-observation before simulated I/O, budget/report/authority checks and opt-in chaos-only fault
-injection. All-target type checking and ten baseline clean seeds pass. New acceptance and
-mutation campaigns remain pending; first integrated lint also identified two test-helper
-issues in Unit 3 acceptance, being corrected before final checks.
-
-Pending the mapped core/reference, node, frame/session, target/engine, simulator/mutation and
-fuzz regressions; `make lint test race hygiene contracts sim`; and `make sanitize QUICK=1` for
-the arena/lifecycle changes.
+The broad campaign is reproducible from `dataplane/` with
+`FLAMINIO_SIM_SEEDS=20000 cargo test --release --offline -p flaminio-repl sim::tests::forged_epochs_leave_runs_clean -- --exact --nocapture`.
+The default test count remains 200. Final project checks and review findings will be recorded
+below; current focused passes alone do not constitute readiness.
 
 ## Conformance
 
-Pending final implementation, review clearance and acceptance results.
+Pending full checks and independent review clearance.
 
 ## Lab
 
-None required by the approved design. No shared-lab actions are authorized for this run.
+None required by the approved design. No shared-lab actions were run.
 
 ## ADRs
 
-The issue-local bounded-uncertainty ADR was accepted with the approved plan. It will receive
-the next unused number and be recorded under `docs/adr/` after review/conformance clear.
-Existing accepted fencing/ISR decisions remain unchanged; clock ADR 0007 remains Proposed.
+The policy was accepted with the approved plan. The numbered
+[ADR 0017](../../adr/0017-bound-uncertainty-with-per-chunk-covers.md) is prepared for review,
+with status Proposed until the implementation gates clear. Existing accepted fencing/ISR
+decisions remain unchanged; clock ADR 0007 remains Proposed.

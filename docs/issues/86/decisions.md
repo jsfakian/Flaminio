@@ -7,7 +7,7 @@
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`c9083313e6389cfc9076e1bd1c1c6903d7725bd166ae449bec313cf62a05af1a`).
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
 
-Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
+Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Implementation status is recorded in [report.md](report.md).
 
 ## Settled at approval
 
@@ -138,3 +138,10 @@ No finding was judged not to apply.
   before Mapped is sent, including writes that finish before BeginResync Ack. Restore that
   evidence to dirty state on abort. An unmapped-source proof fails without the seed and passes
   with it; the correction changes neither client quorum nor on-disk/wire format.
+
+- **Completion-history assurance:** the fresh replay defense made the old random receipt
+  witness obsolete. A small `cfg(test)` deferred Write completion hook provides a real
+  old-generation history, with normal replay enabled and clean matching execution passing.
+  It neither alters normal scheduling nor introduces RNG draws. The fast-fence mutation
+  has a directly verified witness at 1,001,529 after an honest no-catch [0,200000) search;
+  no unsearched first-catch claim is made.

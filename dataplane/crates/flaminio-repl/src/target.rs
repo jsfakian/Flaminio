@@ -98,6 +98,8 @@ pub struct Bugs {
     pub trust_single_digest: bool,
     /// Omit writes already in flight when a resync member installs its new filter.
     pub skip_pending_resync_replay: bool,
+    /// Omit pre-existing writes from the new snapshot round's forced-copy extent set.
+    pub skip_pending_resync_seed: bool,
     /// Not a bug: `pump` tries the queue in its order always, as before docs/issues/11, so that
     /// runs can be compared with it (S2). The order of the digests queued by one progress pass
     /// (S1) stays the new one.
@@ -2638,8 +2640,14 @@ impl<P: Clone + Debug> Target<P> {
         // before BeginResync Ack, it disappears from replay but must still be copied even
         // when the earlier Mapped snapshot saw a hole.
         let mut force_copy = ExtentSet::new();
-        for w in self.writes.values().filter(|w| w.chunk as usize == i) {
-            force_copy.insert(w.ext);
+        #[cfg(test)]
+        let seed_pending = !self.bugs.skip_pending_resync_seed;
+        #[cfg(not(test))]
+        let seed_pending = true;
+        if seed_pending {
+            for w in self.writes.values().filter(|w| w.chunk as usize == i) {
+                force_copy.insert(w.ext);
+            }
         }
         self.chunks[i].resync = Some(Resync {
             member,
@@ -4196,6 +4204,138 @@ mod tests {
             if changes.iter().any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2))))
     }
 
+    fn source_removal_bench() -> Bench {
+        let mut b = Bench::new(&[1, 2], 2);
+        b.write(0, 42);
+        b.replicas.insert(3, Replica::with_chunk_size(BLOCKS));
+        b.hold_meta_if = Some(|m| {
+            matches!(m, MetaRequest::ChangeIsr { changes, .. }
+                if changes.iter().any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&1))))
+        });
+        b
+    }
+
+    fn propose_source_removal(b: &mut Bench) -> u64 {
+        b.request_move(1, 3);
+        b.until("source removal emitted", |b| !b.held_meta.is_empty());
+        let (_, MetaRequest::ChangeIsr { changes, .. }) = &b.held_meta[0] else {
+            panic!("expected source removal");
+        };
+        assert_eq!(changes.len(), 1);
+        assert!(!changes[0].new_replicas.as_ref().unwrap().contains(&1));
+        changes[0].expected_ver
+    }
+
+    fn cancel_source_removal(b: &mut Bench, expected: u64) {
+        // Move intent is refreshed even at the same chunk version. Losing that mutable
+        // intent cannot prove that the already emitted conditional removal did not commit.
+        b.hold_meta_if = Some(holds_isr_change);
+        b.t.next_refresh = Time::MAX;
+        let mut view = b.meta.volume(VOL).unwrap().clone();
+        view.chunks[0].moving = None;
+        b.t.apply_view(b.now, &view);
+        b.run();
+        b.advance(b.t.timing.meta_timeout);
+        assert_eq!(b.t.chunks[0].isr_ver, expected);
+        assert_eq!(b.t.chunks[0].drop_replica, None);
+        assert!(!b.t.chunks[0].removing.contains(&1));
+    }
+
+    fn advance_source_version(b: &mut Bench, expected: u64) {
+        let v = b.meta.volume(VOL).unwrap();
+        let reply = b.meta.handle(&MetaRequest::ChangeIsr {
+            vol: VOL,
+            epoch: v.epoch,
+            changes: vec![IsrChange {
+                chunk: 0,
+                expected_ver: expected,
+                new_isr: v.chunks[0].isr.clone(),
+                new_replicas: None,
+            }],
+        });
+        let MetaReply::Applied { view, .. } = reply else {
+            panic!("competing authoritative update refused");
+        };
+        b.t.apply_view(b.now, &view);
+        assert_eq!(b.t.chunks[0].isr_ver, expected + 1);
+        assert_eq!(b.t.source(0, None), Some(1));
+    }
+
+    #[test]
+    fn a_canceled_move_removal_keeps_its_source_retired_until_a_newer_version() {
+        let mut b = source_removal_bench();
+        let expected = propose_source_removal(&mut b);
+        cancel_source_removal(&mut b, expected);
+        let mut view = b.meta.volume(VOL).unwrap().clone();
+        for version in [expected - 1, expected, expected] {
+            view.chunks[0].isr_ver = version;
+            b.t.apply_view(b.now, &view);
+            assert_eq!(b.t.source(0, None), Some(2), "version {version}");
+            assert!(b.t.try_fast_read(b.now, 0, Extent::new(0, 1)).is_none());
+        }
+        let op = b.read(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to.last(), Some(&2));
+        advance_source_version(&mut b, expected);
+        let op = b.read(0);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![42])));
+        assert_eq!(b.reads_to.last(), Some(&1));
+    }
+
+    #[test]
+    fn the_read_from_removing_control_exposes_a_canceled_move_source_read() {
+        let mut b = source_removal_bench();
+        let expected = propose_source_removal(&mut b);
+        cancel_source_removal(&mut b, expected);
+        // Metadata may already have committed the unanswered removal, and a delayed Hello
+        // can recreate the source empty. Stable retirement is the remaining read guard.
+        b.replicas.get_mut(&1).unwrap().remove_chunk(VOL, 0);
+        b.replicas
+            .get_mut(&1)
+            .unwrap()
+            .create_chunk(VOL, 0, BLOCKS)
+            .unwrap();
+        let clean = b.read(0);
+        assert_eq!(b.done.get(&clean), Some(&OpResult::Read(vec![42])));
+        b.t.bugs.read_from_removing = true;
+        let bad = b.read(0);
+        assert_eq!(b.done.get(&bad), Some(&OpResult::Read(vec![0])));
+        assert_eq!(b.reads_to, [2, 1]);
+        b.t.bugs.read_from_removing = false;
+    }
+
+    #[test]
+    fn a_retired_sources_delayed_read_cannot_revive_when_its_version_resolves() {
+        let mut b = source_removal_bench();
+        b.hold_all(|m| matches!(m.body, Request::Read { ext, .. } if ext.start == 3));
+        let op = b.read(3);
+        let old = b.held[b.held_from(1, is_read)].1.req;
+        assert_eq!(b.t.client_read_of(1, old), Some(op));
+        let expected = propose_source_removal(&mut b);
+        assert_eq!(b.t.client_read_of(1, old), None);
+        assert_eq!(b.reads_to, [1, 2]);
+        cancel_source_removal(&mut b, expected);
+        advance_source_version(&mut b, expected);
+        b.deliver_from(1);
+        assert_eq!(b.done.get(&op), None, "retired receipt completed the read");
+        b.hold.clear();
+        b.deliver_from(2);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Read(vec![0])));
+    }
+
+    #[test]
+    fn a_retired_sources_fast_ticket_stays_invalid_after_a_newer_version() {
+        let mut b = source_removal_bench();
+        let old = b.t.try_fast_read(b.now, 0, Extent::new(3, 1)).unwrap();
+        let expected = propose_source_removal(&mut b);
+        cancel_source_removal(&mut b, expected);
+        advance_source_version(&mut b, expected);
+        assert!(!b.t.finish_fast_read(b.now, old, true));
+        let fresh = b.t.try_fast_read(b.now, 0, Extent::new(3, 1)).unwrap();
+        assert!(b.t.finish_fast_read(b.now, fresh, true));
+        b.run();
+    }
+
     #[test]
     fn a_failed_local_read_is_answered_by_another_member() {
         let mut b = Bench::new(&[1, 2], 1);
@@ -4390,9 +4530,11 @@ mod tests {
 
     /// Leave a write pending on the target but dropped before the source admits it, as the
     /// forged-epoch simulator fault does. The session remains open and the source stays old.
-    fn write_dropped_before_resync() -> (Bench, u64, u64) {
+    fn write_dropped_before_resync(previous: Option<Value>) -> (Bench, u64, u64) {
         let mut b = Bench::new(&[1], 1);
-        b.write(0, 41);
+        if let Some(value) = previous {
+            b.write(0, value);
+        }
         b.replicas.insert(2, Replica::with_chunk_size(4));
         let op = b.next_op;
         b.next_op += 1;
@@ -4418,14 +4560,14 @@ mod tests {
         prune.as_mut().unwrap().epoch += 1;
         assert!(b.replicas.get_mut(&1).unwrap().handle(&msg).is_none());
         assert!(b.t.session_of(1).is_some());
-        assert_eq!(b.replicas[&1].block(VOL, 0, 0), Some(41));
+        assert_eq!(b.replicas[&1].block(VOL, 0, 0), Some(previous.unwrap_or(0)));
         assert_eq!(b.done.get(&op), None);
         (b, op, seq)
     }
 
     #[test]
     fn a_pending_write_is_replayed_before_resync_and_its_receipt_survives_completion() {
-        let (mut b, op, seq) = write_dropped_before_resync();
+        let (mut b, op, seq) = write_dropped_before_resync(Some(41));
         b.hold.insert(2, is_write);
         b.request_move(1, 2);
         b.until("old snapshot copied with replay Ack held", |b| {
@@ -4466,28 +4608,74 @@ mod tests {
 
     #[test]
     fn completing_a_write_before_begin_resync_ack_does_not_leave_an_orphan_receipt() {
-        let (mut b, op, seq) = write_dropped_before_resync();
-        b.hold
-            .insert(2, |m| matches!(m.body, Request::BeginResync { .. }));
+        for previous in [Some(41), None] {
+            let (mut b, op, seq) = write_dropped_before_resync(previous);
+            b.hold
+                .insert(2, |m| matches!(m.body, Request::BeginResync { .. }));
+            b.request_move(1, 2);
+            b.until("BeginResync Ack held", |b| {
+                b.held
+                    .iter()
+                    .any(|(n, m, _)| *n == 2 && matches!(m.body, Request::BeginResync { .. }))
+            });
+            let r = b.t.chunks[0].resync.as_ref().unwrap();
+            assert!(!r.started);
+            assert!(r.todo.contains_block(0), "pending write omitted by Mapped");
+            assert!(!r.discard.contains_block(0));
+            b.t.retransmit(b.now, 1);
+            b.run();
+            assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+            assert!(!b.t.writes.contains_key(&seq));
+            assert!(b.t.chunks[0].resync.as_ref().unwrap().unacked.is_empty());
+            b.hold.remove(&2);
+            b.deliver_from(2);
+            b.until("completed write copied and destination joined", |b| {
+                b.isr().contains(&2)
+            });
+            assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+            assert!(b.t.chunks[0].resync.is_none());
+        }
+    }
+
+    #[test]
+    fn aborting_before_mapped_preserves_pending_write_extents_for_retry() {
+        let (mut b, op, seq) = write_dropped_before_resync(None);
+        b.hold.insert(1, is_mapped);
         b.request_move(1, 2);
-        b.until("BeginResync Ack held", |b| {
-            b.held
-                .iter()
-                .any(|(n, m, _)| *n == 2 && matches!(m.body, Request::BeginResync { .. }))
+        b.until("Mapped reply held", |b| {
+            b.held.iter().any(|(n, m, _)| *n == 1 && is_mapped(m))
         });
-        assert!(!b.t.chunks[0].resync.as_ref().unwrap().started);
+        let r = b.t.chunks[0].resync.as_ref().unwrap();
+        let round = r.round;
+        assert!(r.force_copy.contains_block(0));
+        // A retained clean baseline must not hide what this unfinished round added.
+        b.t.chunks[0].dirty.insert(2, ExtentSet::new());
+        b.t.abort_resync(0);
+        assert!(b.t.chunks[0].dirty[&2].contains_block(0));
         b.t.retransmit(b.now, 1);
         b.run();
         assert_eq!(b.done.get(&op), Some(&OpResult::Written));
         assert!(!b.t.writes.contains_key(&seq));
-        assert!(b.t.chunks[0].resync.as_ref().unwrap().unacked.is_empty());
-        b.hold.remove(&2);
-        b.deliver_from(2);
-        b.until("completed write copied and destination joined", |b| {
-            b.isr().contains(&2)
+        b.until("a new Mapped round", |b| {
+            b.t.chunks[0]
+                .resync
+                .as_ref()
+                .is_some_and(|r| r.round != round)
         });
+        assert!(
+            b.t.chunks[0]
+                .resync
+                .as_ref()
+                .unwrap()
+                .todo
+                .contains_block(0)
+        );
+        b.hold.clear();
+        while !b.held.is_empty() {
+            b.deliver(0);
+        }
+        b.until("retry destination joined", |b| b.isr().contains(&2));
         assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
-        assert!(b.t.chunks[0].resync.is_none());
     }
 
     /// S11: node 2's replica acknowledges a write that waits on node 1, a move drops it, and
@@ -5509,6 +5697,69 @@ mod tests {
         b.hold.insert(4, hold);
         b.restart(3);
         b
+    }
+
+    #[test]
+    fn retiring_a_snapshot_source_aborts_mapped_digest_and_copy_reads() {
+        for stage in [is_mapped as Pred, is_digest, is_read] {
+            let mut b = Bench::with_chunks(&[&[1, 3, 4]], 1);
+            b.out_of_isr(0, 4);
+            b.diverge(1, 0, 0, 7);
+            b.diverge(3, 0, 0, 7);
+            b.max_bulk = 1;
+            b.hold.insert(1, is_mapped);
+            b.restart(3);
+            b.until("source Mapped held", |b| {
+                b.held.iter().any(|(n, m, _)| *n == 1 && is_mapped(m))
+            });
+            let round = b.t.chunks[0].resync.as_ref().unwrap().round;
+            if !stage(&b.held[b.held_from(1, is_mapped)].1) {
+                b.hold.insert(1, stage);
+                b.deliver_from(1);
+            }
+            let old = b.held[b.held_from(1, stage)].1.req;
+            let read_receipt = is_read(&b.held[b.held_from(1, stage)].1);
+            // This is a move whose destination has already joined. Another replica's
+            // snapshot round still uses the source when its removal becomes sendable.
+            let mut view = b.meta.volume(VOL).unwrap().clone();
+            view.chunks[0].moving = Some((1, 3));
+            b.t.apply_view(b.now, &view);
+            b.hold_meta_if = Some(holds_isr_change);
+            b.t.tick(b.now);
+            b.run();
+            assert!(!b.held_meta.is_empty(), "source removal was not emitted");
+            assert!(
+                b.t.chunks[0]
+                    .resync
+                    .as_ref()
+                    .is_none_or(|r| r.round != round)
+            );
+            assert_eq!(b.t.source(0, None), Some(3));
+            if read_receipt {
+                assert!(
+                    !b.t.peers[&1]
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .inflight
+                        .contains_key(&old)
+                );
+            }
+            b.hold.clear();
+            while !b.held.is_empty() {
+                b.deliver(0);
+                assert!(
+                    b.t.chunks[0]
+                        .resync
+                        .as_ref()
+                        .is_none_or(|r| r.round != round)
+                );
+            }
+            b.hold_meta_if = None;
+            b.release_meta();
+            b.until("replacement snapshot joined", |b| b.isr().contains(&4));
+            assert_eq!(b.replicas[&4].block(VOL, 0, 0), Some(7));
+        }
     }
 
     /// A reply of the wrong type to a copy, or to a discard: the slot is freed once, nothing
