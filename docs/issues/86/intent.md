@@ -2,7 +2,8 @@
 
 [Issue #86](https://github.com/jsfakian/Flaminio/issues/86), audit follow-up F09 from the
 independent correctness/security review of #80. This is a separate runtime defect, not a
-larger geometry-admission example. Approved 2026-11-13; not implemented.
+larger geometry-admission example. Published clear snapshot approved 2026-11-20;
+implementation and validation are recorded in [report](report.md).
 
 ## Why
 

@@ -127,6 +127,16 @@ the pending-write/coarsen/restart/real-repair/Settle scenarios at budgets 8/16. 
 not complete final assurance. The replay fix invalidates the old `keep_dropped_acks` pinned
 witness; its assertion remains unchanged while a fresh semantic witness is established.
 
+### Broader consistency cases
+
+The wider same-seed checks found additional clean cases 1833, 9803 and 14081. Permanent
+regressions preserve all three. Traces show a move source can be removed in metadata while
+its target still has an unresolved response; mutable proposal state then clears and a delayed
+Hello recreates the removed chunk empty before a read. A separate unmapped-source regression
+also proves that pending extents must enter `force_copy` before snapshot planning, even when
+their WriteOp finishes before BeginResync Ack. Both corrections are being implemented before
+final validation/review; no failing assertion is excluded.
+
 ## Tests
 
 Unit 1: targeted Rust `cargo check --all-targets --offline`, `git diff --check` and

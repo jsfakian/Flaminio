@@ -1,7 +1,8 @@
 # Issue #86: Bounded uncertainty with conservative version covers — design
 
 [Spec](spec.md), [intent](intent.md), [proposed ADR](adr-proposal.md),
-[decisions](decisions.md). Approved 2026-11-13; not implemented.
+[decisions](decisions.md). Published clear snapshot approved 2026-11-20;
+implementation and validation are recorded in [report](report.md).
 
 The facts it starts from:
 - CoreChunk.uncertain is Vec<(Extent,Version)>; report builds an ExtentSet without a cap

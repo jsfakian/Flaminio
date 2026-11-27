@@ -608,6 +608,17 @@ fn forged_epochs_leave_runs_clean() {
 }
 
 #[test]
+fn forged_epoch_resync_regressions_leave_runs_clean() {
+    // Found while searching the old-acknowledgement mutation with pending replay enabled.
+    // These are clean failures, not mutation catches; preserve them without excluding seeds.
+    for seed in [1_833, 9_803, 14_081] {
+        Sim::new(seed, forged(seed))
+            .run()
+            .unwrap_or_else(|e| panic!("forged resync seed {seed}: {e}"));
+    }
+}
+
+#[test]
 fn invalid_fenced_replies_leave_runs_clean() {
     let mut injected = 0;
     for seed in 0..200 {
@@ -1104,6 +1115,15 @@ mutation!(
     invalid_fenced,
     "invalid Fenced accepted"
 );
+// Searched [0, 200), in two ranges on 2026-11-27. First catch: seed 4, with a clean
+// same-seed rerun required by try_seed; omitting replay admits an older snapshot value.
+mutation!(
+    catches_skipped_pending_resync_replay,
+    target(|b| b.skip_pending_resync_replay = true),
+    200,
+    forged,
+    "not linearizable"
+);
 
 mutation!(
     catches_ack_before_shrink,
@@ -1180,19 +1200,15 @@ fn catches_fast_reads_across_a_fence() {
     );
 }
 
-// A move must drop a replica that acknowledged a write still waiting on another member, and add
-// it back before the write completes (S11). Searched from seed 0 on 2026-11-04 (docs/issues/11):
-// first caught at seed 1183196, a two-chunk run, the seed that found the bug with no switch on.
-#[test]
-#[ignore = "slow in debug builds: run with `make sim`"]
-fn catches_keep_dropped_acks() {
-    hinted(
-        "catches_keep_dropped_acks",
-        target(|b| b.keep_dropped_acks = true),
-        1_183_196,
-        20_000,
-    );
-}
+// S11: a move drops and recreates a replica while an old Write Ack is delayed. Pending
+// replay stays enabled; forged epochs can drop its new send, making the old evidence unsafe.
+mutation!(
+    catches_keep_dropped_acks,
+    target(|b| b.keep_dropped_acks = true),
+    20_000,
+    forged,
+    "not linearizable"
+);
 
 /// A check whose first catch is too far for `make sim` to search: it tries `hint` only, and
 /// fails if that no longer catches. A search (`FLAMINIO_MUTATION_FIRST`) tries the hint first,

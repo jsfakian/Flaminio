@@ -115,3 +115,16 @@ No finding was judged not to apply.
   `flaminio-node/src/net.rs` lets the regression inspect the real remote `Connect` command
   alongside local `Accepted`. It spawns no worker and changes no runtime behavior; the test
   verifies captured Hello chunks rather than adding a second TLS fixture.
+- **Rejected-write/resync integration:** clean forged seed 4 exposed a real admission gap,
+  independently confirmed against `Action::Drop` → `Reply::Nothing` while the stream stays
+  open. BeginResync Ack now replays all pending chunk Writes before snapshot work, retires
+  old same-chunk request receipts, and tracks live extents/fresh acknowledgements independently
+  of client completion. Existing S11 fixtures hold the new replay Ack to preserve their stale
+  receipt witness. This repairs the existing durable-write/join invariant without changing
+  client quorum, metadata, wire or disk contracts. A fresh deterministic proof and a real
+  replay-omission mutation are required before readiness.
+- **Receipt-mutation scope:** the new replay defense invalidates the old pinned
+  `keep_dropped_acks` witness. Its semantic old-generation evidence includes logical
+  acknowledgement bookkeeping and request-ID retirement; test-only mutation wiring may retain
+  both while leaving normal replay enabled. Establish an actual clean-passing same-seed
+  witness; never skip its assertion or compound it with the separate replay-omission bug.

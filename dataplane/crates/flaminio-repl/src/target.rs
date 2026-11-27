@@ -102,8 +102,8 @@ pub struct Bugs {
     /// runs can be compared with it (S2). The order of the digests queued by one progress pass
     /// (S1) stays the new one.
     pub today_pump: bool,
-    /// A chunk's writes in flight keep the acknowledgements of a replica its list drops, so a
-    /// node added back counts as holding them (S11).
+    /// Keep a dropped replica's acknowledgement evidence, including requests from before its
+    /// new resync filter, so a node added back counts as holding those writes (S11).
     pub keep_dropped_acks: bool,
     /// Not a bug: each newly fenced chunk's digests go to the queue's front as it fences, as
     /// before docs/issues/11, so the last chunk fenced in a progress pass goes first (S1).
@@ -1042,7 +1042,13 @@ impl<P: Clone + Debug> Target<P> {
                             .collect();
                         // A previous send's Ack cannot prove this replay reached the new
                         // replica or its freshly installed filter. Retire its request first.
-                        if let Some(s) = self.peers.get_mut(&from).and_then(|p| p.session.as_mut())
+                        #[cfg(test)]
+                        let retire_prior = !self.bugs.keep_dropped_acks;
+                        #[cfg(not(test))]
+                        let retire_prior = true;
+                        if retire_prior
+                            && let Some(s) =
+                                self.peers.get_mut(&from).and_then(|p| p.session.as_mut())
                         {
                             s.inflight.retain(|_, (_, kind)| {
                                 !matches!(kind, ReqKind::Write { chunk: old, .. } if *old == chunk)
@@ -4300,6 +4306,108 @@ mod tests {
         b.t.on_reply(b.now, TARGET, &reply);
         b.run();
         assert_eq!(b.done.get(&w), Some(&OpResult::Written));
+    }
+
+    /// Leave a write pending on the target but dropped before the source admits it, as the
+    /// forged-epoch simulator fault does. The session remains open and the source stays old.
+    fn write_dropped_before_resync() -> (Bench, u64, u64) {
+        let mut b = Bench::new(&[1], 1);
+        b.write(0, 41);
+        b.replicas.insert(2, Replica::with_chunk_size(4));
+        let op = b.next_op;
+        b.next_op += 1;
+        b.submitted.push(op);
+        b.t.submit(
+            b.now,
+            op,
+            Op::Write {
+                chunk: 0,
+                ext: Extent::new(0, 1),
+                data: vec![42],
+            },
+        );
+        let mut out = b.t.take_output();
+        assert_eq!(out.len(), 1);
+        let Output::Send { to: 1, mut msg } = out.pop().unwrap() else {
+            panic!("expected the pending write to the source");
+        };
+        let Request::Write { version, prune, .. } = &mut msg.body else {
+            panic!("expected a write");
+        };
+        let seq = version.seq;
+        prune.as_mut().unwrap().epoch += 1;
+        assert!(b.replicas.get_mut(&1).unwrap().handle(&msg).is_none());
+        assert!(b.t.session_of(1).is_some());
+        assert_eq!(b.replicas[&1].block(VOL, 0, 0), Some(41));
+        assert_eq!(b.done.get(&op), None);
+        (b, op, seq)
+    }
+
+    #[test]
+    fn a_pending_write_is_replayed_before_resync_and_its_receipt_survives_completion() {
+        let (mut b, op, seq) = write_dropped_before_resync();
+        b.hold.insert(2, is_write);
+        b.request_move(1, 2);
+        b.until("old snapshot copied with replay Ack held", |b| {
+            b.t.chunks[0].resync.as_ref().is_some_and(|r| {
+                r.member == 2 && r.started && r.todo.is_empty() && r.discard.is_empty()
+            })
+        });
+        assert!(b.log.contains(&Cp(0, 0)), "the old source copy was sent");
+        assert_eq!(b.replicas[&1].block(VOL, 0, 0), Some(41));
+        assert_eq!(
+            b.replicas[&2].block(VOL, 0, 0),
+            Some(42),
+            "the fresh replay protects the new filter from the old snapshot"
+        );
+        let r = b.t.chunks[0].resync.as_ref().unwrap();
+        assert!(r.live.contains_block(0));
+        assert_eq!(r.unacked, [seq].into_iter().collect());
+        assert!(b.t.writes.contains_key(&seq));
+        assert!(!b.isr().contains(&2));
+
+        // Retry on the ISR after its old snapshot was copied. Client completion removes the
+        // WriteOp, but cannot erase the separate receipt owed by the resync destination.
+        b.t.retransmit(b.now, 1);
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.t.writes.contains_key(&seq));
+        let r = b.t.chunks[0].resync.as_ref().unwrap();
+        assert_eq!(r.unacked, [seq].into_iter().collect());
+        assert!(
+            !b.isr().contains(&2),
+            "the fresh replay Ack still gates joining"
+        );
+        b.hold.remove(&2);
+        b.deliver_from(2);
+        b.until("the fresh destination joins", |b| b.isr().contains(&2));
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+    }
+
+    #[test]
+    fn completing_a_write_before_begin_resync_ack_does_not_leave_an_orphan_receipt() {
+        let (mut b, op, seq) = write_dropped_before_resync();
+        b.hold
+            .insert(2, |m| matches!(m.body, Request::BeginResync { .. }));
+        b.request_move(1, 2);
+        b.until("BeginResync Ack held", |b| {
+            b.held.iter().any(|(n, m, _)| {
+                *n == 2 && matches!(m.body, Request::BeginResync { .. })
+            })
+        });
+        assert!(!b.t.chunks[0].resync.as_ref().unwrap().started);
+        b.t.retransmit(b.now, 1);
+        b.run();
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.t.writes.contains_key(&seq));
+        assert!(b.t.chunks[0].resync.as_ref().unwrap().unacked.is_empty());
+        b.hold.remove(&2);
+        b.deliver_from(2);
+        b.until("completed write copied and destination joined", |b| {
+            b.isr().contains(&2)
+        });
+        assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
+        assert!(b.t.chunks[0].resync.is_none());
     }
 
     /// S11: node 2's replica acknowledges a write that waits on node 1, a move drops it, and
