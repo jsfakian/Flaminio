@@ -542,6 +542,7 @@ fn scenario_config(nodes: u32, min_isr: usize) -> Config {
         rf: 0,
         min_isr,
         chunks: 1,
+        uncertainty_budget: crate::replica::UNCERTAINTY_BUDGET,
         blocks_per_chunk: 2,
         max_op: 1,
         max_io: 1,

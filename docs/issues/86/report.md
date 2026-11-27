@@ -107,6 +107,10 @@ No completed runtime validation or issue closure is claimed by this entry.
 
 ## Tests
 
+Unit 1: targeted Rust `cargo check --all-targets --offline`, `git diff --check` and
+`make fmt lint` pass. Its new core/reference and node lifecycle acceptance tests are next;
+later codec/target/simulator units remain incomplete.
+
 Pending the mapped core/reference, node, frame/session, target/engine, simulator/mutation and
 fuzz regressions; `make lint test race hygiene contracts sim`; and `make sanitize QUICK=1` for
 the arena/lifecycle changes.

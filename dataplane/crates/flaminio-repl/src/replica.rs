@@ -10,7 +10,7 @@
 //! reports every block of its chunks as uncertain. That lasts until a target of a newer epoch
 //! than any it had seen prunes the set: such a target has reconciled the chunk.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::extent::{Extent, ExtentSet};
 use crate::msg::{FromReplica, Request, Response, ToReplica};
@@ -57,26 +57,113 @@ pub enum Action<P> {
     },
 }
 
+/// Per-volume slots for held chunks and precise uncertainty records together.
+pub const UNCERTAINTY_BUDGET: u32 = 65_536;
+
+const ARENA_PAGE_SLOTS: usize = 256;
+
+/// Refusing an add never changes an existing chunk or its uncertainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkError {
+    Exists,
+    TooManyChunks,
+}
+
+/// Read-only accounting for the bounded uncertainty representation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UncertaintyStats {
+    pub chunks: usize,
+    pub records: usize,
+    pub allocated_slots: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreciseRecord {
+    ext: Extent,
+    version: Version,
+    next: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+enum RecordSlot {
+    Record(PreciseRecord),
+    Free(Option<usize>),
+}
+
+/// One arena per volume. Free-list links share slots with records, so pruning cannot leave
+/// a growing allocation behind in every chunk that once held uncertainty.
+#[derive(Debug, Clone, Default)]
+struct RecordArena {
+    pages: Vec<Box<[RecordSlot]>>,
+    allocated: usize,
+    free: Option<usize>,
+}
+
+impl RecordArena {
+    fn slot(&self, index: usize) -> &RecordSlot {
+        &self.pages[index / ARENA_PAGE_SLOTS][index % ARENA_PAGE_SLOTS]
+    }
+
+    fn slot_mut(&mut self, index: usize) -> &mut RecordSlot {
+        &mut self.pages[index / ARENA_PAGE_SLOTS][index % ARENA_PAGE_SLOTS]
+    }
+
+    fn record(&self, index: usize) -> &PreciseRecord {
+        match self.slot(index) {
+            RecordSlot::Record(record) => record,
+            RecordSlot::Free(_) => unreachable!("a chunk links only live records"),
+        }
+    }
+
+    fn record_mut(&mut self, index: usize) -> &mut PreciseRecord {
+        match self.slot_mut(index) {
+            RecordSlot::Record(record) => record,
+            RecordSlot::Free(_) => unreachable!("a chunk links only live records"),
+        }
+    }
+
+    fn insert(&mut self, record: PreciseRecord, limit: usize) -> usize {
+        if self.free.is_none() {
+            let count = ARENA_PAGE_SLOTS.min(limit - self.allocated);
+            assert!(count > 0, "precise record demand is within the budget");
+            let start = self.pages.len() * ARENA_PAGE_SLOTS;
+            let page = (0..count)
+                .map(|offset| RecordSlot::Free((offset + 1 < count).then_some(start + offset + 1)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice();
+            self.pages.push(page);
+            self.allocated += count;
+            self.free = Some(start);
+        }
+        let index = self.free.expect("allocated a free slot");
+        self.free = match self.slot(index) {
+            RecordSlot::Free(next) => *next,
+            RecordSlot::Record(_) => unreachable!("the free list contains only free slots"),
+        };
+        *self.slot_mut(index) = RecordSlot::Record(record);
+        index
+    }
+
+    fn remove(&mut self, index: usize) -> PreciseRecord {
+        let free = self.free;
+        let old = std::mem::replace(self.slot_mut(index), RecordSlot::Free(free));
+        self.free = Some(index);
+        match old {
+            RecordSlot::Record(record) => record,
+            RecordSlot::Free(_) => unreachable!("a record is freed only once"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CoreChunk {
     blocks: Block,
-    /// Extents written by writes that may not have completed, with their versions.
-    uncertain: Vec<(Extent, Version)>,
+    /// Head of this chunk's precise records in its volume's arena.
+    head: Option<usize>,
+    /// Whole-chunk uncertainty, retaining the greatest version it represents.
+    cover: Option<Version>,
     /// After a restart: every block may hold an unfinished write of an epoch up to this one.
     restarted_at: Option<Epoch>,
-}
-
-impl CoreChunk {
-    fn report(&self) -> Vec<Extent> {
-        if self.restarted_at.is_some() {
-            return vec![Extent::new(0, self.blocks)];
-        }
-        let mut s = ExtentSet::new();
-        for (x, _) in &self.uncertain {
-            s.insert(*x);
-        }
-        s.iter().collect()
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,6 +172,132 @@ struct CoreVol {
     chunks: BTreeMap<ChunkIdx, CoreChunk>,
     session: Option<(Epoch, u64)>,
     filters: BTreeMap<ChunkIdx, ExtentSet>,
+    arena: RecordArena,
+    records: usize,
+    record_chunks: BTreeSet<ChunkIdx>,
+}
+
+impl CoreVol {
+    fn clear_records(&mut self, chunk: ChunkIdx) -> Option<Version> {
+        let mut next = self.chunks.get_mut(&chunk).expect("held chunk").head.take();
+        let had_records = next.is_some();
+        let mut maximum = None;
+        while let Some(index) = next {
+            let record = self.arena.remove(index);
+            next = record.next;
+            maximum = Some(maximum.map_or(record.version, |m: Version| m.max(record.version)));
+            self.records -= 1;
+        }
+        if had_records {
+            self.record_chunks.remove(&chunk);
+        }
+        maximum
+    }
+
+    fn coarsen(&mut self, chunk: ChunkIdx, incoming: Option<Version>, drop_cover: bool) {
+        let retained = self.clear_records(chunk);
+        let maximum = match (retained, incoming) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        self.chunks.get_mut(&chunk).expect("held chunk").cover =
+            if drop_cover { None } else { maximum };
+    }
+
+    fn prune(&mut self, chunk: ChunkIdx, below: Version, coarse_prune_early: bool) {
+        let c = self.chunks.get_mut(&chunk).expect("held chunk");
+        if c.cover
+            .is_some_and(|maximum| coarse_prune_early || maximum < below)
+        {
+            c.cover = None;
+        }
+        if c.restarted_at.is_some_and(|epoch| epoch < below.epoch) {
+            c.restarted_at = None;
+        }
+        let mut next = c.head.take();
+        let had_records = next.is_some();
+        let mut head = None;
+        let mut tail = None;
+        while let Some(index) = next {
+            let record = *self.arena.record(index);
+            next = record.next;
+            if record.version < below {
+                self.arena.remove(index);
+                self.records -= 1;
+            } else {
+                if let Some(previous) = tail {
+                    self.arena.record_mut(previous).next = Some(index);
+                } else {
+                    head = Some(index);
+                }
+                tail = Some(index);
+            }
+        }
+        if let Some(last) = tail {
+            self.arena.record_mut(last).next = None;
+        }
+        c.head = head;
+        if had_records && head.is_none() {
+            self.record_chunks.remove(&chunk);
+        }
+    }
+
+    fn retain_write(
+        &mut self,
+        chunk: ChunkIdx,
+        ext: Extent,
+        version: Version,
+        budget: usize,
+        drop_cover: bool,
+        bypass_budget: bool,
+    ) {
+        let c = self.chunks.get_mut(&chunk).expect("held chunk");
+        if let Some(maximum) = &mut c.cover {
+            *maximum = (*maximum).max(version);
+            return;
+        }
+        if !bypass_budget && self.chunks.len() + self.records >= budget {
+            self.coarsen(chunk, Some(version), drop_cover);
+            return;
+        }
+        let next = self.chunks[&chunk].head;
+        // The mutation may exceed demand; keep the allocation well-defined so the simulator's
+        // independent checker, rather than an allocation assertion, catches the violation.
+        let limit = if bypass_budget {
+            budget.max(self.arena.allocated.saturating_add(1))
+        } else {
+            budget
+        };
+        let index = self
+            .arena
+            .insert(PreciseRecord { ext, version, next }, limit);
+        self.chunks.get_mut(&chunk).expect("held chunk").head = Some(index);
+        self.records += 1;
+        if next.is_none() {
+            self.record_chunks.insert(chunk);
+        }
+    }
+
+    fn report(&self) -> Vec<(ChunkIdx, Vec<Extent>)> {
+        self.chunks
+            .iter()
+            .map(|(&chunk, c)| {
+                let extents = if c.restarted_at.is_some() || c.cover.is_some() {
+                    vec![Extent::new(0, c.blocks)]
+                } else {
+                    let mut set = ExtentSet::new();
+                    let mut next = c.head;
+                    while let Some(index) = next {
+                        let record = self.arena.record(index);
+                        next = record.next;
+                        set.insert(record.ext);
+                    }
+                    set.iter().collect()
+                };
+                (chunk, extents)
+            })
+            .collect()
+    }
 }
 
 /// Deliberate protocol violations, for checking that the simulator catches them.
@@ -95,41 +308,125 @@ pub struct Bugs {
     pub any_session: bool,
     /// Apply resync copies even over newer live writes.
     pub no_resync_filter: bool,
+    /// Lose uncertainty when precise records become a whole-chunk cover.
+    pub drop_on_coarsen: bool,
+    /// Clear a cover even when the prune bound does not exceed its maximum version.
+    pub coarse_prune_early: bool,
+    /// Retain precise records beyond the volume's uncertainty budget.
+    pub bypass_uncertainty_budget: bool,
+    /// Trust write/prune/Settle versions from a different epoch than their session.
+    pub accept_foreign_epoch: bool,
 }
 
 /// The protocol rules of a replica node.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ReplicaCore {
     vols: BTreeMap<VolumeId, CoreVol>,
+    budget: u32,
     #[cfg(test)]
     pub bugs: Bugs,
 }
 
+impl Default for ReplicaCore {
+    fn default() -> Self {
+        Self::with_budget(UNCERTAINTY_BUDGET)
+    }
+}
+
 impl ReplicaCore {
-    /// Adds a new, empty chunk replica.
-    pub fn add_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx, blocks: Block) {
-        self.vols.entry(vol).or_default().chunks.insert(
-            chunk,
-            CoreChunk {
-                blocks,
-                uncertain: Vec::new(),
-                restarted_at: None,
-            },
-        );
+    pub fn with_budget(budget: u32) -> Self {
+        Self {
+            vols: BTreeMap::new(),
+            budget,
+            #[cfg(test)]
+            bugs: Bugs::default(),
+        }
     }
 
-    /// Adds a chunk replica found on disk at startup, with its volume's fenced epoch.
-    pub fn recover_chunk(&mut self, vol: VolumeId, fenced: Epoch, chunk: ChunkIdx, blocks: Block) {
+    pub fn budget(&self) -> u32 {
+        self.budget
+    }
+
+    pub fn uncertainty_stats(&self, vol: VolumeId) -> UncertaintyStats {
+        self.vols
+            .get(&vol)
+            .map_or_else(UncertaintyStats::default, |v| UncertaintyStats {
+                chunks: v.chunks.len(),
+                records: v.records,
+                allocated_slots: v.arena.allocated,
+            })
+    }
+
+    /// A complete report, including explicit empty rows for every held chunk.
+    pub fn report(&self, vol: VolumeId) -> Vec<(ChunkIdx, Vec<Extent>)> {
+        self.vols.get(&vol).map_or_else(Vec::new, CoreVol::report)
+    }
+
+    pub fn can_add_chunk(&self, vol: VolumeId, chunk: ChunkIdx) -> Result<(), ChunkError> {
+        let held = self.vols.get(&vol);
+        if held.is_some_and(|v| v.chunks.contains_key(&chunk)) {
+            return Err(ChunkError::Exists);
+        }
+        if held.map_or(0, |v| v.chunks.len()) >= self.budget as usize {
+            return Err(ChunkError::TooManyChunks);
+        }
+        Ok(())
+    }
+
+    /// Adds a new, empty chunk replica.
+    pub fn add_chunk(
+        &mut self,
+        vol: VolumeId,
+        chunk: ChunkIdx,
+        blocks: Block,
+    ) -> Result<(), ChunkError> {
+        self.insert_chunk(vol, chunk, blocks, None)
+    }
+
+    fn insert_chunk(
+        &mut self,
+        vol: VolumeId,
+        chunk: ChunkIdx,
+        blocks: Block,
+        restarted_at: Option<Epoch>,
+    ) -> Result<(), ChunkError> {
+        self.can_add_chunk(vol, chunk)?;
+        #[cfg(not(test))]
+        let drop_cover = false;
+        #[cfg(test)]
+        let drop_cover = self.bugs.drop_on_coarsen;
         let v = self.vols.entry(vol).or_default();
-        v.fenced = v.fenced.max(fenced);
+        if v.chunks.len() + v.records >= self.budget as usize {
+            let oldest_chunk = *v
+                .record_chunks
+                .first()
+                .expect("records consume the remaining budget");
+            v.coarsen(oldest_chunk, None, drop_cover);
+        }
         v.chunks.insert(
             chunk,
             CoreChunk {
                 blocks,
-                uncertain: Vec::new(),
-                restarted_at: Some(fenced),
+                head: None,
+                cover: None,
+                restarted_at,
             },
         );
+        Ok(())
+    }
+
+    /// Adds a chunk replica found on disk at startup, with its volume's fenced epoch.
+    pub fn recover_chunk(
+        &mut self,
+        vol: VolumeId,
+        fenced: Epoch,
+        chunk: ChunkIdx,
+        blocks: Block,
+    ) -> Result<(), ChunkError> {
+        self.insert_chunk(vol, chunk, blocks, Some(fenced))?;
+        let v = self.vols.get_mut(&vol).expect("inserted chunk");
+        v.fenced = v.fenced.max(fenced);
+        Ok(())
     }
 
     /// Loses the volatile state, as after a process or node crash.
@@ -137,8 +434,11 @@ impl ReplicaCore {
         for v in self.vols.values_mut() {
             v.session = None;
             v.filters.clear();
+            while let Some(&chunk) = v.record_chunks.first() {
+                v.clear_records(chunk);
+            }
             for c in v.chunks.values_mut() {
-                c.uncertain.clear();
+                c.cover = None;
                 c.restarted_at = Some(v.fenced);
             }
         }
@@ -147,6 +447,9 @@ impl ReplicaCore {
     /// Forgets a chunk replica that moved away. The volume's fenced epoch stays.
     pub fn remove_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx) {
         if let Some(v) = self.vols.get_mut(&vol) {
+            if v.chunks.contains_key(&chunk) {
+                v.clear_records(chunk);
+            }
             v.chunks.remove(&chunk);
             v.filters.remove(&chunk);
         }
@@ -166,6 +469,16 @@ impl ReplicaCore {
     /// Decides what to do with one request. Requests must be handled in the order they arrive
     /// on their connection, and their actions carried out in that order.
     pub fn handle<P: Clone>(&mut self, m: &ToReplica<P>) -> Action<P> {
+        #[cfg(not(test))]
+        let (drop_cover, coarse_prune_early, bypass_budget, accept_foreign_epoch) =
+            (false, false, false, false);
+        #[cfg(test)]
+        let (drop_cover, coarse_prune_early, bypass_budget, accept_foreign_epoch) = (
+            self.bugs.drop_on_coarsen,
+            self.bugs.coarse_prune_early,
+            self.bugs.bypass_uncertainty_budget,
+            self.bugs.accept_foreign_epoch,
+        );
         let v = self.vols.entry(m.vol).or_default();
         if m.epoch < v.fenced {
             return Action::Reply(Response::Stale { fenced: v.fenced });
@@ -176,7 +489,7 @@ impl ReplicaCore {
                 v.session = Some((m.epoch, m.session));
                 v.filters.clear();
             }
-            let uncertain = v.chunks.iter().map(|(&c, s)| (c, s.report())).collect();
+            let uncertain = v.report();
             return Action::Fence {
                 epoch: m.epoch,
                 reply: Response::Fenced { uncertain },
@@ -228,13 +541,24 @@ impl ReplicaCore {
                 version,
                 prune,
             } if in_range(chunk, ext) => {
-                let c = v.chunks.get_mut(chunk).expect("in range");
-                c.uncertain.push((*ext, *version));
+                if !accept_foreign_epoch
+                    && (version.epoch != m.epoch
+                        || prune.is_some_and(|bound| bound.epoch != m.epoch))
+                {
+                    return Action::Drop;
+                }
                 if let Some(p) = prune {
-                    c.uncertain.retain(|(_, w)| w >= p);
-                    if c.restarted_at.is_some_and(|e| e < p.epoch) {
-                        c.restarted_at = None;
-                    }
+                    v.prune(*chunk, *p, coarse_prune_early);
+                }
+                if prune.is_none_or(|bound| *version >= bound) {
+                    v.retain_write(
+                        *chunk,
+                        *ext,
+                        *version,
+                        self.budget as usize,
+                        drop_cover,
+                        bypass_budget,
+                    );
                 }
                 if let Some(f) = v.filters.get_mut(chunk) {
                     f.insert(*ext);
@@ -246,11 +570,10 @@ impl ReplicaCore {
                 }
             }
             Request::Settle { chunk, below } if v.chunks.contains_key(chunk) => {
-                let c = v.chunks.get_mut(chunk).expect("chunk");
-                c.uncertain.retain(|(_, w)| w >= below);
-                if c.restarted_at.is_some_and(|e| e < below.epoch) {
-                    c.restarted_at = None;
+                if !accept_foreign_epoch && below.epoch != m.epoch {
+                    return Action::Drop;
                 }
+                v.prune(*chunk, *below, coarse_prune_early);
                 Action::Reply(Response::Ok)
             }
             Request::BeginResync { chunk } if v.chunks.contains_key(chunk) => {
@@ -297,15 +620,26 @@ pub struct Replica {
 impl Replica {
     /// A node whose chunks have `blocks` blocks each.
     pub fn with_chunk_size(blocks: Block) -> Self {
+        Self::with_chunk_size_and_budget(blocks, UNCERTAINTY_BUDGET)
+    }
+
+    pub fn with_chunk_size_and_budget(blocks: Block, budget: u32) -> Self {
         Self {
+            core: ReplicaCore::with_budget(budget),
             blocks_per_chunk: blocks,
             ..Self::default()
         }
     }
 
-    pub fn create_chunk(&mut self, vol: VolumeId, chunk: ChunkIdx, blocks: Block) {
-        self.core.add_chunk(vol, chunk, blocks);
+    pub fn create_chunk(
+        &mut self,
+        vol: VolumeId,
+        chunk: ChunkIdx,
+        blocks: Block,
+    ) -> Result<(), ChunkError> {
+        self.core.add_chunk(vol, chunk, blocks)?;
         self.data.entry((vol, chunk)).or_default();
+        Ok(())
     }
 
     pub fn restart(&mut self) {
@@ -339,7 +673,8 @@ impl Replica {
         let mut action = self.core.handle(m);
         if let Action::CreateChunk { chunk } = action {
             let blocks = self.blocks_per_chunk;
-            self.create_chunk(m.vol, chunk, blocks);
+            self.core.can_add_chunk(m.vol, chunk).ok()?;
+            self.create_chunk(m.vol, chunk, blocks).ok()?;
             action = self.core.handle(m);
         }
         let body = match action {
@@ -450,7 +785,7 @@ mod tests {
 
     fn replica() -> Replica {
         let mut r = Replica::default();
-        r.create_chunk(1, 0, 8);
+        r.create_chunk(1, 0, 8).unwrap();
         r
     }
 

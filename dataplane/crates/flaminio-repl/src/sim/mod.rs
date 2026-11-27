@@ -84,6 +84,8 @@ pub struct Config {
     pub rf: usize,
     pub min_isr: usize,
     pub chunks: u32,
+    /// Per-volume held-chunk and precise-record slots on each replica.
+    pub uncertainty_budget: u32,
     pub blocks_per_chunk: Block,
     /// Largest client operation, in blocks.
     pub max_op: Block,
@@ -142,6 +144,7 @@ impl Config {
             max_bulk: r.range(1, 4) as usize,
             max_mapped: MAX_MAPPED_BLOCKS,
             max_digest: 0,
+            uncertainty_budget: crate::replica::UNCERTAINTY_BUDGET,
             timing: Timing {
                 lease: r.range(2, 6) * SEC,
                 drift_ppm: r.pick(&[0, 10_000, 100_000]),
@@ -387,15 +390,24 @@ impl Sim {
         placement: Vec<Vec<NodeId>>,
         script: Option<Vec<(u64, Action)>>,
     ) -> Self {
+        assert!(
+            cfg.chunks <= cfg.uncertainty_budget,
+            "chunks exceed uncertainty budget"
+        );
         let mut meta = Metadata::default();
         meta.create_volume(VOL, 0, cfg.min_isr, cfg.blocks_per_chunk, placement.clone());
         let drift = cfg.timing.drift_ppm;
         let nodes = (0..cfg.nodes)
             .map(|n| {
-                let mut replica = Replica::with_chunk_size(cfg.blocks_per_chunk);
+                let mut replica = Replica::with_chunk_size_and_budget(
+                    cfg.blocks_per_chunk,
+                    cfg.uncertainty_budget,
+                );
                 for (c, r) in placement.iter().enumerate() {
                     if r.contains(&n) {
-                        replica.create_chunk(VOL, c as ChunkIdx, cfg.blocks_per_chunk);
+                        replica
+                            .create_chunk(VOL, c as ChunkIdx, cfg.blocks_per_chunk)
+                            .expect("placement fits the uncertainty budget");
                     }
                 }
                 Node {

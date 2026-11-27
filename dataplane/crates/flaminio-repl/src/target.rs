@@ -2953,7 +2953,8 @@ mod tests {
                     replicas
                         .entry(n)
                         .or_insert_with(|| Replica::with_chunk_size(BLOCKS))
-                        .create_chunk(VOL, i as ChunkIdx, BLOCKS);
+                        .create_chunk(VOL, i as ChunkIdx, BLOCKS)
+                        .unwrap();
                 }
             }
             let t = Target::new(TARGET, VOL, &view, Timing::default(), 4, 0);
