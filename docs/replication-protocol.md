@@ -51,12 +51,23 @@ an expired request or an earlier target instance cannot answer a later batch.
 ## 3. Sessions and fencing
 
 A target talks to each replica node over a **session**: one ordered connection, opened by
-`Hello{volume, epoch, session}`. Session numbers increase within an epoch.
+`Hello{volume, epoch, session, chunks}`. Session numbers increase within an epoch. The chunk
+set is captured by the target when it sends Hello and travels with that request; later
+placement changes cannot alter the rows its reply must contain.
 
 - **On `Hello`**, the replica refuses with `Stale` if `epoch < fenced_epoch`. Otherwise it
   durably sets `fenced_epoch := epoch`, makes `(epoch, session)` the volume's current session,
   clears its resync filters, and replies with its uncertain set for every chunk of the volume it
-  holds.
+  holds. Newly created advertised chunks have explicit empty rows; retained moved/released
+  chunks may appear as extra rows. An empty row carries the same trust as the earlier
+  create-on-Hello behavior: distinguishing a fresh allocation from lost media remains the
+  store-incarnation work, not a property of this report.
+- **Before accepting a Hello reply**, the target validates the complete Fenced report:
+  sorted unique in-range chunk IDs, every captured required chunk present, bounded counts and
+  checked ordered nonoverlapping extents within chunk geometry. A non-Fenced or malformed
+  reply grants no session, lease, first-fence or ready facts. `Stale` still deposes first.
+  Both local and remote reply paths use this validation. The Fenced codec checks counts,
+  shape and body size before allocation/send; an encoding refusal writes no bytes.
 - **A volume created again** (docs/issues/30): its token carries its first epoch, above every
   epoch an earlier volume of the name reached. Before the fence check, a replica deletes every
   chunk of the name fenced below the first epoch, durably, in one commit per journal batch (one
@@ -70,6 +81,9 @@ A target talks to each replica node over a **session**: one ordered connection, 
   - any other session that is not the current one is **dropped** without effect.
 
   So a message delayed on an old connection can never act after a new session has started.
+  A Write's version and optional prune, and a Settle's bound, must also carry that session's
+  epoch; a foreign-epoch field drops the request before uncertainty changes. A same-epoch
+  bound remains the target's existing claim about completed writes.
 - **On timeout**, the target treats a request as failed, closes that session, and opens a new
   one with a new number later. Replies on a closed session are ignored.
 - **One target per epoch, for its whole life.** Session numbers are the target's own
@@ -215,8 +229,9 @@ reconciled. An older target can then neither read nor write:
 - it cannot complete writes, because every write needs the whole ISR to acknowledge.
 
 **The uncertain set on a replica:**
-- **Membership:** a write's extent enters the set, with the write's version `(e, s)`, when the
-  write is applied.
+- **Membership:** a write's extent enters the set, with the write's version `(e, s)`, before
+  its store action. Failed or unanswered attempts stay covered until completion proof prunes
+  them.
 - **Pruning:** entries are pruned using the `acked_below` carried by writes. A write with
   `prune = (e, a)` removes entries older than `(e, a)`.
 - **Reconciliation writes** carry no `prune`, so a target that dies mid-reconciliation leaves
@@ -228,6 +243,23 @@ reconciled. An older target can then neither read nor write:
   - The repairs themselves are entries too.
   - Without settling, the next target would reconcile everything again, until client writes
     happened to prune it.
+- **Bounded retention.** Each volume has a 65,536-slot budget: one reserved slot per held
+  chunk plus its retained precise write records. A shared arena reuses freed records across
+  chunks; historical per-chunk allocation cannot accumulate. At full demand, a retained
+  write coarsens only its chunk to a whole-chunk cover carrying the maximum full
+  `(epoch, seq)` version it represents. Adding a chunk coarsens the lowest-numbered chunk
+  holding records if needed; the added chunk starts empty. Other chunks remain unchanged.
+- **Pruning a coarse cover** requires a current-session bound strictly greater than its
+  maximum version. Later writes update that maximum, including repair writes without prune.
+  Partial pruning keeps the whole cover. Once cleared, the chunk retains precise records
+  again; the independent restart cover below can still require a whole-chunk report.
+- **Representable reports.** Every held chunk has a row, even if empty. At most 65,536 rows
+  and 65,536 aggregate extents give a Fenced body of `13 + 8*N + 8*T` bytes, at most
+  1,048,589 within the unchanged 1,048,704-byte body limit. A held set above the budget, or an
+  unsupported chunk index found at startup, quarantines that volume without deleting its
+  data or changing durable fences. Other volumes can still serve. Runtime additions above
+  the budget are refused before creating or fencing the named volume's chunks, after the
+  existing earlier-incarnation cleanup.
 - **The set is volatile.** After a restart, a replica fenced at epoch `f` reports **every block
   of its chunks** as uncertain:
   - it cannot tell which of its recent writes completed;
@@ -236,6 +268,27 @@ reconciled. An older target can then neither read nor write:
   That lasts until a write prunes, or a `Settle` arrives, with an epoch above `f`. Such a target
   has reconciled the chunk, so everything older is settled. The cost: a failover soon after a replica restart
   reconciles whole chunks. The data plane makes that cheaper by comparing digests first.
+
+Coarsening also occurs during ordinary workloads. Writes prune only their own chunk, so idle
+chunks retain their last in-flight window. At 256 MiB chunks and depth 128, a sequential fill
+of a 128 GiB volume reaches the precise-record budget after 508 of its 512 chunks. A stalled
+write can likewise hold the prune bound while writes elsewhere fill it. Each chunk written
+while full is reconciled whole at the next takeover unless a later prune/Settle clears its
+cover; other chunks retain precision. This changes recovery cost, never acknowledgement or
+readiness rules. The budget is per volume, not an aggregate node memory or scheduling limit.
+
+The target's existing reconciliation union retains spatial runs bounded by active volume
+geometry: at most the sum of `ceil(blocks_per_chunk / 2)` nonadjacent runs. Repeated identical
+reports add no history; a whole-chunk cover absorbs older runs. New report/required/chunk scans
+are linear in their inputs, while insertion into the existing run map costs O(T log U + A),
+with U retained runs and A absorbed runs. The replica report budget does not add a target-map
+admission policy; aggregate resource work remains #75.
+
+Upgrade producers and consumers together before new attach/provisioning: old producers can
+omit just-created empty rows, which strict consumers refuse. Mixed-version rolling support
+is not certified and has no missing-row fallback. A quarantined volume stays untouched until
+the existing replica deletion for a metadata-deleted volume, or explicit operator cleanup and
+restart. Geometry admission is the separate #80 contract; no automatic migration is implied.
 
 ## 7. Resync and rejoin
 
@@ -363,6 +416,18 @@ order, from a seed. A seed reproduces a run exactly. Each run has two phases:
    completes. So an old, unacknowledged write can never resurface over newer data.
 2. **Convergence:** every replica of every chunk holds identical blocks.
 3. **Liveness:** every ISR is full, and every operation of the final target has completed.
+4. **Conservative uncertainty:** an independent shadow retains exact accepted write
+   extents/versions and the original prune/restart proof. Every report must cover all of its
+   remaining records. It does not use the arena/coarse-marker algorithm as its oracle.
+5. **Representation and authority:** retained state and allocation stay within the configured
+   budget, and an injected invalid Fenced reply cannot change session, lease, first-fence or
+   chunk-ready facts.
+
+Small-budget campaigns use 8 or 16 slots so normal writes, repairs, partitions and restarts
+exercise coarsening. Forged-epoch campaigns alter Write prunes and Settle bounds only during
+chaos; a configured zero percentage consumes no random draws. The same principle applies to
+invalid Fenced injection. After faults stop, ordinary liveness and final-history checks still
+apply. Operation/allocation counters check actual bounds instead of wall-clock performance.
 
 **Scripted scenarios** reproduce the two split-brain cases exactly, instead of waiting for a
 seed to stumble on them:
@@ -370,9 +435,13 @@ seed to stumble on them:
 - a failover while an ISR removal is committed but its reply has not reached the old target.
 
 **Mutation checks:** each rule has a test-only switch that breaks it, and a test asserts that
-the simulator then fails. Only a failure that breaks linearizability or convergence counts, and
-only on a seed that passes with no switch on: a seed that fails clean is a bug, and fails the
-check at once. Other failures (liveness) are passed over and counted. First catches, searched
+the simulator then fails. A failure must break linearizability, convergence, conservative
+uncertainty, the uncertainty budget or invalid-reply authority, and only on a seed that passes
+with no switch on: a seed that fails clean is a bug, and fails the check at once. Other failures
+(liveness) are passed over and counted. Bounded-uncertainty mutations deliberately drop a
+coarse cover, prune it too early, exceed retention, accept a foreign epoch or accept an invalid
+Fenced reply; their actual search results are recorded in the #86 implementation report.
+Historical first catches, searched
 on 2026-11-04 (docs/issues/11):
 
 | Broken rule | Caught by (first failing seed) | With 3–8 chunks |

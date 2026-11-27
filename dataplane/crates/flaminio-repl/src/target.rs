@@ -3013,7 +3013,7 @@ mod tests {
     //! unless a test holds them back: a failed local read (docs/issues/5), and the order of
     //! bulk work (docs/issues/11).
     use super::*;
-    use crate::meta::{MetaRequest, Metadata};
+    use crate::meta::{ChunkMeta, MetaRequest, Metadata};
     use crate::msg::Request;
     use crate::replica::Replica;
     use crate::sim::Rng;
@@ -3028,6 +3028,380 @@ mod tests {
     type Pred = fn(&ToReplica<Vec<Value>>) -> bool;
     /// A request to a node, and its reply, held back from the target.
     type Held = (NodeId, ToReplica<Vec<Value>>, FromReplica<Vec<Value>>);
+    type HelloRequests = BTreeMap<NodeId, ToReplica<Vec<Value>>>;
+
+    fn opening_target(
+        placement: &[&[NodeId]],
+        blocks: Block,
+    ) -> (Target<Vec<Value>>, HelloRequests) {
+        let view = VolumeMeta {
+            epoch: 3,
+            target: Some(TARGET),
+            min_isr: 1,
+            blocks_per_chunk: blocks,
+            chunks: placement
+                .iter()
+                .map(|nodes| ChunkMeta {
+                    replicas: nodes.to_vec(),
+                    isr: nodes.iter().copied().collect(),
+                    isr_ver: 0,
+                    moving: None,
+                })
+                .collect(),
+        };
+        let mut target = Target::new(TARGET, VOL, &view, Timing::default(), 1, 7);
+        let hellos = target
+            .take_output()
+            .into_iter()
+            .filter_map(|out| match out {
+                Output::Send { to, msg } if matches!(msg.body, Request::Hello { .. }) => {
+                    Some((to, msg))
+                }
+                _ => None,
+            })
+            .collect();
+        (target, hellos)
+    }
+
+    fn answer_opening(
+        target: &mut Target<Vec<Value>>,
+        from: NodeId,
+        hello: &ToReplica<Vec<Value>>,
+        body: Response<Vec<Value>>,
+    ) {
+        target.on_reply(
+            10,
+            from,
+            &FromReplica {
+                vol: hello.vol,
+                epoch: hello.epoch,
+                session: hello.session,
+                req: hello.req,
+                body,
+            },
+        );
+    }
+
+    #[test]
+    fn hello_answered_ok_grants_nothing() {
+        for body in [
+            Response::Ok,
+            Response::Data(vec![9]),
+            Response::Digests(vec![Some(9)]),
+            Response::Mapped(vec![Extent::new(0, 1)]),
+        ] {
+            let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2]], BLOCKS);
+            let before = target.fenced_authority(1).unwrap();
+            answer_opening(&mut target, 1, &hellos[&1], body);
+            assert_eq!(target.fenced_authority(1), Some(before));
+            assert!(!target.is_deposed());
+            assert_eq!(
+                target.take_events(),
+                vec![Event::SessionFailed {
+                    node: 1,
+                    reason: "an invalid Fenced reply"
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_fenced_rows_grant_no_session_lease_or_chunk_authority() {
+        let rows = [
+            ("empty", vec![]),
+            ("missing tail", vec![(0, vec![])]),
+            ("missing first", vec![(1, vec![])]),
+            ("duplicate", vec![(0, vec![]), (0, vec![]), (1, vec![])]),
+            ("decreasing", vec![(1, vec![]), (0, vec![])]),
+            ("out of range", vec![(0, vec![]), (1, vec![]), (2, vec![])]),
+            (
+                "maximum chunk id",
+                vec![(0, vec![]), (1, vec![]), (u32::MAX, vec![])],
+            ),
+            (
+                "zero extent",
+                vec![(0, vec![Extent { start: 0, len: 0 }]), (1, vec![])],
+            ),
+            (
+                "wrapping extent",
+                vec![
+                    (
+                        0,
+                        vec![Extent {
+                            start: u32::MAX,
+                            len: 2,
+                        }],
+                    ),
+                    (1, vec![]),
+                ],
+            ),
+            (
+                "beyond geometry",
+                vec![(0, vec![Extent::new(BLOCKS - 1, 2)]), (1, vec![])],
+            ),
+            (
+                "decreasing extents",
+                vec![(0, vec![Extent::new(2, 1), Extent::new(0, 1)]), (1, vec![])],
+            ),
+            (
+                "overlapping extents",
+                vec![(0, vec![Extent::new(0, 2), Extent::new(1, 1)]), (1, vec![])],
+            ),
+        ];
+        for (case, uncertain) in rows {
+            let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2]], BLOCKS);
+            let before = target.fenced_authority(1).unwrap();
+            answer_opening(&mut target, 1, &hellos[&1], Response::Fenced { uncertain });
+            assert_eq!(target.fenced_authority(1), Some(before), "{case}");
+            assert!(!target.is_deposed(), "{case}");
+            assert_eq!(
+                target.take_events(),
+                vec![Event::SessionFailed {
+                    node: 1,
+                    reason: "an invalid Fenced reply"
+                }],
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_extra_held_rows_are_checked_before_assigned_rows_grant_authority() {
+        let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2], &[2]], BLOCKS);
+        let before = target.fenced_authority(1).unwrap();
+        answer_opening(
+            &mut target,
+            1,
+            &hellos[&1],
+            Response::Fenced {
+                uncertain: vec![(0, vec![]), (1, vec![]), (2, vec![Extent::new(BLOCKS, 1)])],
+            },
+        );
+        assert_eq!(target.fenced_authority(1), Some(before));
+    }
+
+    #[test]
+    fn stale_reply_to_hello_still_deposes_the_target() {
+        let (mut target, hellos) = opening_target(&[&[1, 2]], BLOCKS);
+        answer_opening(&mut target, 1, &hellos[&1], Response::Stale { fenced: 4 });
+        assert!(target.is_deposed());
+        assert!(target.fenced_authority(1).is_none());
+    }
+
+    #[test]
+    fn valid_extra_held_rows_are_accepted_and_ignored_when_unplaced() {
+        let (mut target, hellos) = opening_target(&[&[1, 2], &[1, 2], &[2]], BLOCKS);
+        answer_opening(
+            &mut target,
+            1,
+            &hellos[&1],
+            Response::Fenced {
+                uncertain: vec![
+                    (0, vec![Extent::new(0, 1)]),
+                    (1, vec![]),
+                    (2, vec![Extent::new(0, BLOCKS)]),
+                ],
+            },
+        );
+        let authority = target.fenced_authority(1).unwrap();
+        assert!(authority.session_open && authority.confirmed_until > 0);
+        assert_eq!(authority.chunks[0].fenced, [1].into());
+        assert_eq!(authority.chunks[0].uncertain, vec![Extent::new(0, 1)]);
+        assert_eq!(authority.chunks[1].fenced, [1].into());
+        assert!(authority.chunks[2].fenced.is_empty());
+        assert!(authority.chunks[2].uncertain.is_empty());
+        assert!(authority.chunks[2].first_fence.is_none());
+    }
+
+    #[test]
+    fn hello_required_rows_are_captured_before_later_placement_changes() {
+        for complete in [false, true] {
+            let (mut target, hellos) = opening_target(&[&[1, 2], &[2], &[1, 2]], BLOCKS);
+            let hello = &hellos[&1];
+            assert_eq!(
+                target.hello_chunks_for_reply(1, hello.epoch, hello.session, hello.req),
+                Some([0, 2].as_slice())
+            );
+            target.chunks[2].replicas = vec![2];
+            target.chunks[2].isr = [2].into();
+            target.chunks[2].isr_ver += 1;
+            let before = target.fenced_authority(1).unwrap();
+            let mut uncertain = vec![(0, vec![])];
+            if complete {
+                uncertain.push((2, vec![]));
+            }
+            answer_opening(&mut target, 1, hello, Response::Fenced { uncertain });
+            if complete {
+                let after = target.fenced_authority(1).unwrap();
+                assert!(after.session_open && after.confirmed_until > before.confirmed_until);
+                assert!(after.chunks[0].fenced.contains(&1));
+                assert!(!after.chunks[2].fenced.contains(&1));
+            } else {
+                assert_eq!(target.fenced_authority(1), Some(before));
+            }
+        }
+    }
+
+    #[test]
+    fn fenced_count_boundaries_and_whole_gib_extents_validate_without_io_size_limits() {
+        let budget = UNCERTAINTY_BUDGET as usize;
+        let rows: Vec<_> = (0..=UNCERTAINTY_BUDGET)
+            .map(|chunk| (chunk, vec![]))
+            .collect();
+        let mut work = FencedWork::default();
+        assert!(!Target::<Vec<Value>>::valid_fenced(
+            &rows,
+            &[0],
+            budget + 1,
+            1,
+            &mut work
+        ));
+        assert_eq!(work.rows, 0, "row count is checked before iteration");
+        let too_many = vec![(
+            0,
+            (0..=UNCERTAINTY_BUDGET)
+                .map(|i| Extent::new(i * 2, 1))
+                .collect(),
+        )];
+        let mut work = FencedWork::default();
+        assert!(!Target::<Vec<Value>>::valid_fenced(
+            &too_many,
+            &[0],
+            1,
+            262_144,
+            &mut work
+        ));
+        assert_eq!(
+            work.extents, 0,
+            "aggregate count is checked before extent iteration"
+        );
+        let (mut target, hellos) = opening_target(&[&[1, 2]], 262_144);
+        answer_opening(
+            &mut target,
+            1,
+            &hellos[&1],
+            Response::Fenced {
+                uncertain: vec![(0, vec![Extent::new(0, 262_144)])],
+            },
+        );
+        assert!(target.fenced_authority(1).unwrap().session_open);
+        assert_eq!(
+            target.chunks[0].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, 262_144)]
+        );
+    }
+
+    #[test]
+    fn maximum_fenced_set_has_linear_scans_and_bounded_union_calls() {
+        let members = [2, 3, 4, 5, 1]; // Put the replying member last for worst-case membership scans.
+        let placement: Vec<&[NodeId]> = vec![members.as_slice(); UNCERTAINTY_BUDGET as usize];
+        let (mut target, hellos) = opening_target(&placement, 1);
+        let uncertain: Vec<_> = (0..UNCERTAINTY_BUDGET)
+            .map(|chunk| (chunk, vec![Extent::new(0, 1)]))
+            .collect();
+        answer_opening(&mut target, 1, &hellos[&1], Response::Fenced { uncertain });
+        let n = u64::from(UNCERTAINTY_BUDGET);
+        assert_eq!(
+            target.fenced_work(),
+            FencedWork {
+                rows: n,
+                extents: n,
+                required: n,
+                merged_rows: n,
+                chunks: n,
+                replica_checks: 5 * n,
+                union_extents: n
+            }
+        );
+        assert!(
+            target
+                .chunks
+                .iter()
+                .all(|c| c.fenced.contains(&1) && c.uncertain == ExtentSet::of(Extent::new(0, 1)))
+        );
+    }
+
+    #[test]
+    fn sorted_fenced_merge_preserves_precise_and_whole_chunk_unions() {
+        let (mut target, _) = opening_target(&[&[1, 2], &[1, 2], &[1, 2]], BLOCKS);
+        let first = vec![
+            (0, vec![Extent::new(0, 1), Extent::new(1, 1)]),
+            (1, vec![Extent::new(0, BLOCKS)]),
+            (2, vec![]),
+        ];
+        let second = vec![
+            (0, vec![Extent::new(1, 2)]),
+            (1, vec![]),
+            (2, vec![Extent::new(3, 1)]),
+        ];
+        for (node, rows) in [(1, &first), (2, &second)] {
+            let mut work = FencedWork::default();
+            assert!(Target::<Vec<Value>>::valid_fenced(
+                rows,
+                &[0, 1, 2],
+                3,
+                BLOCKS,
+                &mut work
+            ));
+            target.on_fenced(10, node, rows);
+        }
+        assert_eq!(
+            target.chunks[0].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, 3)]
+        );
+        assert_eq!(
+            target.chunks[1].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, BLOCKS)]
+        );
+        assert_eq!(
+            target.chunks[2].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(3, 1)]
+        );
+        assert_eq!(target.fenced_work().union_extents, 5);
+    }
+
+    #[test]
+    fn reconnect_reports_retain_only_the_active_geometry_union() {
+        let blocks = 262_144;
+        let (mut target, hellos) = opening_target(&[&[1, 2]], blocks);
+        let precise = UNCERTAINTY_BUDGET - 1;
+        let first: Vec<_> = (0..precise).map(|i| Extent::new(i * 2, 1)).collect();
+        let second: Vec<_> = (0..precise)
+            .map(|i| Extent::new(2 * UNCERTAINTY_BUDGET + i * 2, 1))
+            .collect();
+        let reports = [first, second.clone(), second, vec![Extent::new(0, blocks)]];
+        let expected_runs = [precise as usize, 2 * precise as usize, 2 * precise as usize, 1];
+        for (round, (extents, expected)) in reports.into_iter().zip(expected_runs).enumerate() {
+            let now = 10 + 3 * round as Time;
+            let hello = if round == 0 {
+                hellos[&1].clone()
+            } else {
+                target.fail_peer(now, 1);
+                target.open_session(now + 1, 1);
+                target.take_output().into_iter().find_map(|out| match out {
+                    Output::Send { to: 1, msg } if is_hello(&msg) => Some(msg),
+                    _ => None,
+                }).unwrap()
+            };
+            let rows = vec![(0, extents)];
+            let mut checked = FencedWork::default();
+            assert!(Target::<Vec<Value>>::valid_fenced(&rows, &[0], 1, blocks, &mut checked));
+            target.on_reply(now + 2, 1, &FromReplica {
+                vol: hello.vol,
+                epoch: hello.epoch,
+                session: hello.session,
+                req: hello.req,
+                body: Response::Fenced { uncertain: rows },
+            });
+            let retained = target.chunks[0].uncertain.iter().count();
+            assert_eq!(retained, expected);
+            assert!(retained <= blocks.div_ceil(2) as usize);
+            assert_eq!(target.chunks[0].phase, Phase::Fencing);
+        }
+        // The map contains active block uncertainty, not one entry per received report.
+        // It can exceed the producer's B-slot budget; its run bound is the chunk geometry.
+        assert_eq!(target.chunks[0].uncertain.iter().collect::<Vec<_>>(), vec![Extent::new(0, blocks)]);
+    }
 
     /// What the target started, read off the requests it sent: the chunk, and the first block
     /// of the extent.
@@ -3158,6 +3532,14 @@ mod tests {
         /// A volume of 4-block chunks, chunk `i` on `placement[i]`, attached on node 1,
         /// serving.
         fn with_chunks(placement: &[&[NodeId]], min_isr: usize) -> Self {
+            Self::with_chunks_and_budget(placement, min_isr, UNCERTAINTY_BUDGET)
+        }
+
+        fn with_chunks_and_budget(
+            placement: &[&[NodeId]],
+            min_isr: usize,
+            uncertainty_budget: u32,
+        ) -> Self {
             let mut meta = Metadata::default();
             let lists = placement.iter().map(|p| p.to_vec()).collect();
             meta.create_volume(VOL, 0, min_isr, BLOCKS, lists);
@@ -3172,7 +3554,9 @@ mod tests {
                 for &n in *nodes {
                     replicas
                         .entry(n)
-                        .or_insert_with(|| Replica::with_chunk_size(BLOCKS))
+                        .or_insert_with(|| {
+                            Replica::with_chunk_size_and_budget(BLOCKS, uncertainty_budget)
+                        })
                         .create_chunk(VOL, i as ChunkIdx, BLOCKS)
                         .unwrap();
                 }
@@ -3551,6 +3935,120 @@ mod tests {
                 self.drain();
             }
         }
+    }
+
+    #[test]
+    fn target_repair_writes_without_prune_are_cleared_only_by_its_completed_settle() {
+        let mut b = Bench::with_chunks_and_budget(&[&[1, 2]], 2, 4);
+        for node in [1, 2] {
+            let session = b.t.peers[&node].session.as_ref().unwrap().id;
+            for seq in 0..4 {
+                // An old target's unacknowledged attempts make a real coarse cover.
+                let reply = b.replicas.get_mut(&node).unwrap().handle(&ToReplica {
+                    vol: VOL,
+                    epoch: b.t.epoch,
+                    session,
+                    req: 1000 + seq,
+                    body: Request::Write {
+                        chunk: 0,
+                        ext: Extent::new(seq as Block, 1),
+                        data: vec![0],
+                        version: Version {
+                            epoch: b.t.epoch,
+                            seq: 100 + seq,
+                        },
+                        prune: None,
+                    },
+                });
+                assert!(matches!(
+                    reply,
+                    Some(FromReplica {
+                        body: Response::Ok,
+                        ..
+                    })
+                ));
+            }
+            assert_eq!(b.replicas[&node].core.uncertainty_stats(VOL).records, 0);
+            assert_eq!(
+                b.replicas[&node].core.report(VOL),
+                vec![(0, vec![Extent::new(0, BLOCKS)])]
+            );
+        }
+        for block in 0..BLOCKS {
+            b.diverge(1, 0, block, 7 + u64::from(block));
+        }
+        b.max_io = 1;
+        b.hold_all(is_write);
+        b.restart(2); // Node 1 retains coarse cover; node 2 additionally has restart evidence.
+        assert_eq!(b.held.len(), 8, "four real repair writes to each member");
+        let largest = b
+            .held
+            .iter()
+            .map(|(_, msg, _)| match msg.body {
+                Request::Write {
+                    version,
+                    prune: None,
+                    ..
+                } => version,
+                ref body => panic!("repair must not carry a prune bound: {body:?}"),
+            })
+            .max()
+            .unwrap();
+        for node in [1, 2] {
+            assert_eq!(b.replicas[&node].core.uncertainty_stats(VOL).records, 0);
+            assert_eq!(
+                b.replicas[&node].core.report(VOL),
+                vec![(0, vec![Extent::new(0, BLOCKS)])]
+            );
+        }
+        // Deliver durable repair acknowledgements but intercept the Target's actual Settle
+        // requests before either replica receives them.
+        for (node, _, reply) in std::mem::take(&mut b.held) {
+            b.t.on_reply(b.now, node, &reply);
+        }
+        let mut settles = BTreeMap::new();
+        loop {
+            let out = b.t.take_output();
+            if out.is_empty() {
+                break;
+            }
+            for output in out {
+                match output {
+                    Output::Send { to, msg } if matches!(msg.body, Request::Settle { .. }) => {
+                        assert!(settles.insert(to, msg).is_none());
+                    }
+                    Output::Send { to, msg } => b.send(to, msg),
+                    Output::Meta { req, body } => b.t.on_meta(b.now, req, &b.meta.handle(&body)),
+                    Output::Done { op, result } => {
+                        assert!(b.done.insert(op, result).is_none());
+                    }
+                }
+            }
+        }
+        assert_eq!(settles.len(), 2);
+        for (&node, msg) in &settles {
+            assert!(matches!(msg.body, Request::Settle { chunk: 0, below } if below > largest));
+            assert_eq!(
+                b.replicas[&node].core.report(VOL),
+                vec![(0, vec![Extent::new(0, BLOCKS)])]
+            );
+            for block in 0..BLOCKS {
+                assert_eq!(
+                    b.replicas[&node].block(VOL, 0, block),
+                    Some(7 + u64::from(block))
+                );
+            }
+        }
+        b.send(1, settles.remove(&1).unwrap());
+        assert_eq!(b.replicas[&1].core.report(VOL), vec![(0, vec![])]);
+        assert_eq!(
+            b.replicas[&2].core.report(VOL),
+            vec![(0, vec![Extent::new(0, BLOCKS)])]
+        );
+        b.send(2, settles.remove(&2).unwrap());
+        b.run();
+        assert_eq!(b.replicas[&2].core.report(VOL), vec![(0, vec![])]);
+        assert!(b.t.is_settled());
     }
 
     /// A metadata request that drops node 2's replica.

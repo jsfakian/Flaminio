@@ -105,3 +105,13 @@ No finding was judged not to apply.
   test the actual bounded scans/union calls rather than rewrite extent storage or claim
   linear B-tree operations. This corrects the work description while preserving S1–S9,
   uncertainty budgets, conservative coverage and all authority/durability rules.
+- **Target spatial retention:** the replica arena/report budget in S1 does not introduce a
+  new target-map admission policy. The existing target reconciliation union remains bounded
+  by active geometry: at most the sum of `ceil(blocks_per_chunk / 2)` disjoint runs. A
+  permanent reconnect regression retains 131,070 runs from two separately valid reports,
+  verifies replay adds no history and a whole-chunk row absorbs them into one run. This
+  evidence is included in the work bound above; aggregate resource policy remains #75.
+- **Engine adapter observation:** a minimal `cfg(test)` command-channel constructor in
+  `flaminio-node/src/net.rs` lets the regression inspect the real remote `Connect` command
+  alongside local `Accepted`. It spawns no worker and changes no runtime behavior; the test
+  verifies captured Hello chunks rather than adding a second TLS fixture.

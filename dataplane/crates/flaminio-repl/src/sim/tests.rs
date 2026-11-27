@@ -536,6 +536,179 @@ fn campaign() {
     );
 }
 
+fn bounded(seed: u64, budget: u32) -> Config {
+    Config {
+        uncertainty_budget: budget,
+        ..more_chunks(seed)
+    }
+}
+
+fn bounded_eight(seed: u64) -> Config {
+    bounded(seed, 8)
+}
+
+fn bounded_sixteen(seed: u64) -> Config {
+    bounded(seed, 16)
+}
+
+fn forged(seed: u64) -> Config {
+    Config {
+        forge_epoch_pct: 20,
+        ..Config::random(seed)
+    }
+}
+
+fn invalid_fenced(seed: u64) -> Config {
+    Config {
+        invalid_fenced_pct: 20,
+        ..Config::random(seed)
+    }
+}
+
+#[test]
+fn small_uncertainty_budgets_cover_faults_and_repair() {
+    for budget in [8, 16] {
+        let mut total = Report::default();
+        for seed in 0..200 {
+            let r = Sim::new(seed, bounded(seed, budget))
+                .run()
+                .unwrap_or_else(|e| panic!("budget {budget}, seed {seed}: {e}"));
+            total.uncertainty_checks += r.uncertainty_checks;
+            total.coarsened_checks += r.coarsened_checks;
+            total.restart_covered_reports += r.restart_covered_reports;
+            total.accepted_write_attempts += r.accepted_write_attempts;
+            total.repair_write_attempts += r.repair_write_attempts;
+            total.uncertainty_prunes += r.uncertainty_prunes;
+            total.uncertainty_settles += r.uncertainty_settles;
+            total.crashes += r.crashes;
+            total.partitions += r.partitions;
+        }
+        assert!(total.uncertainty_checks > total.accepted_write_attempts);
+        assert!(total.coarsened_checks > 0, "budget {budget}: {total:?}");
+        assert!(total.restart_covered_reports > 0, "{total:?}");
+        assert!(total.repair_write_attempts > 0, "{total:?}");
+        assert!(total.uncertainty_prunes > 0, "{total:?}");
+        assert!(total.uncertainty_settles > 0, "{total:?}");
+        assert!(total.crashes > 0 && total.partitions > 0, "{total:?}");
+        eprintln!("200 bounded fault runs at B={budget}: {total:?}");
+    }
+}
+
+#[test]
+fn forged_epochs_leave_runs_clean() {
+    let mut injected = 0;
+    for seed in 0..200 {
+        let r = Sim::new(seed, forged(seed))
+            .run()
+            .unwrap_or_else(|e| panic!("forged seed {seed}: {e}"));
+        injected += r.forged_epoch_requests;
+    }
+    assert!(injected > 0);
+    eprintln!("200 clean runs with {injected} forged-epoch requests at 20%");
+}
+
+#[test]
+fn invalid_fenced_replies_leave_runs_clean() {
+    let mut injected = 0;
+    for seed in 0..200 {
+        let r = Sim::new(seed, invalid_fenced(seed))
+            .run()
+            .unwrap_or_else(|e| panic!("invalid Fenced seed {seed}: {e}"));
+        injected += r.invalid_fenced_replies;
+    }
+    assert!(injected > 0);
+    eprintln!("200 clean runs with {injected} invalid Hello replies at 20%");
+}
+
+#[test]
+fn invalid_fenced_grants_no_authority_before_retry() {
+    let mut cfg = scenario_config(3, 1);
+    cfg.uncertainty_budget = 8;
+    cfg.invalid_fenced_pct = 100;
+    let mut sim = Sim::scripted(cfg, vec![vec![0, 1]], Vec::new());
+    start_scenario(&mut sim, 0);
+    let authority = |s: &Sim| {
+        let target = s.nodes[0].target.as_ref().unwrap();
+        [target.fenced_authority(0), target.fenced_authority(1)]
+    };
+    let before = authority(&sim);
+    advance_scenario(&mut sim, 2 * MS);
+    assert!(sim.report.invalid_fenced_replies >= 2);
+    assert_eq!(sim.check_failure, None);
+    assert_eq!(authority(&sim), before);
+    assert!(sim.settled().is_none());
+    sim.cfg.invalid_fenced_pct = 0;
+    sim.run_mut().unwrap();
+}
+
+#[test]
+fn pending_writes_coarsen_then_restart_and_repair_settle() {
+    for budget in [8, 16] {
+        let mut cfg = scenario_config(3, 1);
+        cfg.uncertainty_budget = budget;
+        cfg.blocks_per_chunk = budget + 4;
+        cfg.client_every = (MS, 30 * MS);
+        let mut sim = Sim::scripted(cfg, vec![vec![0, 1]], Vec::new());
+        start_scenario(&mut sim, 0);
+        wait_scenario(&mut sim, "initially settled target", |s| {
+            s.settled().is_some()
+        });
+        // The local ISR member accepts every attempt while the remote member cannot yet
+        // acknowledge any. No completion proof can advance past this pending window.
+        sim.script_step(Action::Slow(0, 1, 30 * SEC));
+        let pending: Vec<_> = (0..budget + 2)
+            .map(|block| sim.submit(0, 0, Extent::new(block, 1), Some(block as Value + 1)))
+            .collect();
+        let at = sim.now + 10 * MS;
+        advance_scenario(&mut sim, at);
+        assert_eq!(sim.check_failure, None);
+        for &op in &pending {
+            let h = &sim.history[op as usize];
+            assert!(
+                h.result.is_none(),
+                "write completed before remote durability"
+            );
+            assert_eq!(sim.nodes[0].replica.block(VOL, 0, h.ext.start), h.write);
+            assert_eq!(sim.nodes[1].replica.block(VOL, 0, h.ext.start), Some(0));
+        }
+        assert!(sim.report.coarsened_checks > 0, "B={budget}");
+        assert_eq!(
+            sim.nodes[0].replica.core.report(VOL),
+            vec![(0, vec![Extent::new(0, budget + 4)])]
+        );
+        let settled_before: u64 = sim.nodes.iter().map(|n| n.uncertainty.stats.settles).sum();
+        sim.crash(0);
+        sim.restart(0);
+        start_scenario(&mut sim, 2);
+        let r = sim.run_mut().unwrap();
+        assert!(r.restart_covered_reports > 0, "{r:?}");
+        assert!(r.repair_write_attempts > 0, "{r:?}");
+        assert!(r.uncertainty_settles > settled_before, "{r:?}");
+        assert!(
+            pending
+                .iter()
+                .all(|&op| sim.history[op as usize].result.is_none())
+        );
+        eprintln!("pending/restart/repair at B={budget}: {r:?}");
+    }
+}
+
+#[test]
+fn bounded_faults_repeat_the_same_history_and_checks() {
+    for budget in [8, 16] {
+        for seed in 0..20 {
+            let mut cfg = bounded(seed, budget);
+            cfg.forge_epoch_pct = 20;
+            cfg.invalid_fenced_pct = 20;
+            let (first, first_history) = Sim::new(seed, cfg.clone()).run_with_history();
+            let (again, again_history) = Sim::new(seed, cfg).run_with_history();
+            assert!(first.is_ok(), "B={budget}, seed {seed}: {first:?}");
+            assert_eq!(format!("{first:?}"), format!("{again:?}"));
+            assert_eq!(first_history, again_history, "B={budget}, seed {seed}");
+        }
+    }
+}
+
 fn scenario_config(nodes: u32, min_isr: usize) -> Config {
     Config {
         nodes,
@@ -691,10 +864,10 @@ fn searching() -> bool {
     env_u64("FLAMINIO_MUTATION_FIRST").is_some()
 }
 
-/// Runs `seed` with `bugs`. A failure that is a catch (`not linearizable`, `replicas
-/// diverge`) is returned; one of another class (`liveness:`, `event storm`) is counted in
-/// `skipped` and passed over. Every failing seed must pass with no bug on: one that does not is
-/// a bug in the protocol or the simulator, not a catch, and panics.
+/// Runs `seed` with `bugs`. Independent coverage, budget and authority failures are catches,
+/// alongside linearizability/agreement. Other classes (`liveness:`, `event storm`) are counted
+/// in `skipped` and passed over. Every failing seed must pass with no bug on: one that does not
+/// is a bug in the protocol or the simulator, not a catch, and panics.
 fn try_seed(bugs: Bugs, config: Configure, seed: u64, skipped: &mut Vec<u64>) -> Option<String> {
     let err = Sim::new(seed, config(seed)).with_bugs(bugs).run().err()?;
     if let Err(clean) = Sim::new(seed, config(seed)).run() {
@@ -703,7 +876,16 @@ fn try_seed(bugs: Bugs, config: Configure, seed: u64, skipped: &mut Vec<u64>) ->
             err.lines().next().unwrap_or("")
         );
     }
-    if err.contains("not linearizable") || err.contains("replicas diverge") {
+    if [
+        "not linearizable",
+        "replicas diverge",
+        "uncertainty not covered",
+        "uncertainty budget exceeded",
+        "invalid Fenced accepted",
+    ]
+    .iter()
+    .any(|class| err.contains(class))
+    {
         Some(err)
     } else {
         skipped.push(seed);
@@ -716,12 +898,28 @@ fn try_seed(bugs: Bugs, config: Configure, seed: u64, skipped: &mut Vec<u64>) ->
 /// it), and a bug not caught fails the test. With it, from that seed over
 /// `FLAMINIO_MUTATION_SEEDS` (default `budget`), and the test passes either way: a search.
 fn find_failure(name: &str, bugs: Bugs, config: Configure, budget: u64) {
+    find_failure_class(name, bugs, config, budget, None);
+}
+
+fn find_failure_class(
+    name: &str,
+    bugs: Bugs,
+    config: Configure,
+    budget: u64,
+    expected: Option<&str>,
+) {
     let first = env_u64("FLAMINIO_MUTATION_FIRST").unwrap_or(0);
     let seeds = first..first + env_u64("FLAMINIO_MUTATION_SEEDS").unwrap_or(budget);
     let mut skipped = Vec::new();
-    let found = seeds
-        .clone()
-        .find_map(|seed| try_seed(bugs, config, seed, &mut skipped).map(|e| (seed, e)));
+    let found = seeds.clone().find_map(|seed| {
+        let error = try_seed(bugs, config, seed, &mut skipped)?;
+        if expected.is_none_or(|class| error.contains(class)) {
+            Some((seed, error))
+        } else {
+            skipped.push(seed);
+            None
+        }
+    });
     let skipped = match skipped.first() {
         Some(s) => format!(
             " ({} other failures passed over, the first at seed {s})",
@@ -859,7 +1057,53 @@ macro_rules! mutation {
             find_failure(stringify!($name), $bugs, $config, $budget);
         }
     };
+    ($name:ident, $bugs:expr, $budget:expr, $config:expr, $class:expr) => {
+        #[test]
+        #[ignore = "slow in debug builds: run with `make sim`"]
+        fn $name() {
+            find_failure_class(stringify!($name), $bugs, $config, $budget, Some($class));
+        }
+    };
 }
+
+// Searched from seed 0 on 2026-11-27 with scripts/dev/mutation-search.sh (200 seeds,
+// two ranges). The independent class and clean same-seed rerun are required by the harness:
+// drop/coarse-prune/foreign-epoch/invalid-Fenced first catch at 0; budget bypass at 1.
+mutation!(
+    catches_drop_on_coarsen,
+    replica(|b| b.drop_on_coarsen = true),
+    200,
+    bounded_eight,
+    "uncertainty not covered"
+);
+mutation!(
+    catches_coarse_prune_early,
+    replica(|b| b.coarse_prune_early = true),
+    200,
+    bounded_eight,
+    "uncertainty not covered"
+);
+mutation!(
+    catches_bypass_uncertainty_budget,
+    replica(|b| b.bypass_uncertainty_budget = true),
+    200,
+    bounded_sixteen,
+    "uncertainty budget exceeded"
+);
+mutation!(
+    catches_accept_foreign_epoch,
+    replica(|b| b.accept_foreign_epoch = true),
+    200,
+    forged,
+    "uncertainty not covered"
+);
+mutation!(
+    catches_accept_invalid_fenced,
+    target(|b| b.accept_invalid_fenced = true),
+    200,
+    invalid_fenced,
+    "invalid Fenced accepted"
+);
 
 mutation!(
     catches_ack_before_shrink,

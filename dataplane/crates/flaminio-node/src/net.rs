@@ -111,6 +111,21 @@ impl Net {
     pub fn send(&self, c: NetCommand) {
         let _ = self.cmds.try_send(c);
     }
+
+    /// Inspect engine adapter commands without starting a network worker in unit tests.
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, channel::Receiver<NetCommand>) {
+        let (cmds, receiver) = channel::unbounded();
+        (
+            Self {
+                cmds,
+                worker: Arc::new(NetWorker {
+                    join: Mutex::new(None),
+                }),
+            },
+            receiver,
+        )
+    }
 }
 
 /// Starts the network thread.
