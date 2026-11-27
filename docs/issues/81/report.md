@@ -43,7 +43,17 @@ distinctness now participates in the atomic acceptance predicate, and the regres
 ordered duplicate entries, unchanged metadata and both current/stale epochs. Out-of-range
 IDs still return `InvalidArgument`. The strengthened focused test failed before the fixture
 fix and passed afterward; `make fmt lint test` also passes on the corrected fixture. Fresh
-incremental reviews are pending.
+incremental reviews are recorded below.
+
+### Code review round 2 — 7424968c09ed34f8c840e24deb600e63e50cea3a
+
+Scope: `220f0caab2434dc97d39943ec71b14749de5c181..7424968c09ed34f8c840e24deb600e63e50cea3a`.
+Fresh independent code and security reviewers each confirmed **Code81-R1-C1** and
+**Sec81-R1-S1** fixed, checked the incremental change against the real service contract, and
+reported no new findings or Nits. The workflow's Sonnet model is unavailable here; the fresh
+available default-model reviewers used medium effort for this incremental round.
+
+Final code/security loop state: **clear after two rounds**, with no accepted open findings.
 
 ## Implementation — 2026-11-27
 
@@ -57,22 +67,34 @@ by attach generation, live request, complete payload and monotonic version check
 higher authenticated epoch deposing before payload conversion. Production models enforce the
 same service bound. Wire/API/disk formats and replication policy are unchanged.
 
-Targeted acceptance tests pass. Independent code/security review, final required checks and
-conformance remain pending. No issue closure is claimed by this entry.
+Targeted acceptance tests and required local checks pass. Independent code/security review
+is clear after two rounds. Final spec conformance remains pending; issue closure occurs on
+merge.
 
 ## Tests
 
-- Initial `make fmt lint`: pass (the Go tooling needed access to its existing module cache).
-- Go service boundary/authorization regressions on memory and embedded etcd: pass.
-  `go test ./meta/service -count=1`: pass.
-- Replication library: 91 pass, 24 intentionally ignored release-only campaigns, no failures.
-  New target and simulator regressions cover boundaries, deferred membership, retries,
-  fairness and all four relevant mutations, including proposals dropped before delivery.
-- Node package: 43 library and 19 integration tests pass. After adding one further unit case,
-  all 11 metadata unit regressions pass. Large integration cases verify 129-chunk
-  shrink/rejoin with a deferred tail write and mixed moves with data verification.
-- `make meta-interop`: both tests pass, including real target recovery across 129 chunks.
-- Pending final checks: `make lint test race hygiene contracts sim`.
+| Check | Result |
+|---|---|
+| `make lint` | Pass: Rust/Go/protobuf/shell/actions and script checks. |
+| `make test` | Pass: all Rust/Go tests and committed fuzz regressions. |
+| `make race` | Pass: all Go tests under the race detector, shuffled, `COUNT=1`. |
+| `make hygiene` | Pass: advisory/license/dependency/docs/static analysis and Go module checks. |
+| `make contracts` | Pass: generated contracts/vectors, fuzz lockfile and both real mTLS interoperation tests. |
+| `make sim` | Pass: 20,000/20,000 seeds (0–19,999), then all 115 release replication tests including ignored mutation campaigns. |
+| Review fix: `make fmt lint test` | Pass after the fixture-parity correction; the focused regression also fails before the fix and passes afterward. |
+
+The complete required command was `make lint test race hygiene contracts sim`; the review
+fix subsequently reran formatting, lint and all tests. Only the engine test fixture and its
+assertions changed in that fix; replication/runtime, Go, contracts and simulator sources
+were unchanged from their passing checks.
+
+New target and simulator regressions cover 1/64/65/128/129-chunk boundaries, deferred
+membership, retries, fairness and all four relevant mutations, including proposals dropped
+before delivery. Eleven engine metadata unit regressions cover expired requests, replaced
+attach generations, crossed versions, malformed replies and higher-epoch deposing. Large
+engine integration cases verify 129-chunk shrink/rejoin with a deferred tail write and mixed
+moves with data verification. Real Rust-client/Go-service interoperation verifies all final
+chunk versions after bounded recovery, hidden commits and epoch takeover.
 
 Pre-review correction: `max_meta_batch` records proposals at emission, before network loss,
 with a regression proving dropped oversized proposals remain visible. The receiver's atomic
