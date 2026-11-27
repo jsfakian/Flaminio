@@ -36,3 +36,45 @@ No comments from the requested review scopes, including Nits.
 Changes/resolution: Both fresh reviewers confirmed the table-row Nit resolved and found no revision fallout, including Nits. Earlier R1 technical findings were confirmed resolved in R2. No implementation/runtime/lab tests or approval inferred.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+## Implementation — 2026-11-28
+
+PR #106 / #78 is merged at `f952596f1b32c719efd2c65ab7347c052fc54f56`.
+Proceed with #83 as the ready Phase-1 clock prerequisite for #79. No existing #83 branch/work
+was found. The approved work is divided into [ordered units](units.md); preserve all landed
+#76–#78/#80/#81/#86 fencing, snapshots, geometry and transport bounds.
+
+### U1 Clock foundations
+
+Implemented pure ClockGuard interval/conversion primitives, checked takeover arithmetic with
+E=3 us (default 5,500,007 us), Target clock invalidation, injected node clock interfaces and
+atomic domain/observer/sample/single-use permit foundations. Node engine's existing timing
+fixture was updated for the new margin. Healthy generation 0 transitions permanently to
+quarantined generation 1; reason/generation share the atomic word, and checked per-domain
+identity prevents cross-domain sample reuse.
+
+Focused Clippy, workspace compilation, formatting/whitespace and repl/node tests pass:
+62 node unit tests, 20 integration tests, 143 normal replication tests (30 existing ignored).
+The existing localhost integration fixtures needed escalation; no lab or clock hardware was
+accessed. Acceptance, runtime wiring and executable clock/handoff models remain later units.
+
+## Tests
+
+Pending implementation and independent S1–S8 acceptance. Required final checks:
+`make lint test race hygiene contracts sim` and `make sanitize QUICK=1` for changed asynchronous
+completion/lifetime handling. No hardware qualification is claimed by local or model tests.
+
+## Conformance
+
+Pending implementation, tests and clear code/security review.
+
+## Lab
+
+None authorized or required by this plan. Do not suspend hosts, pause VMs or roll back disks.
+Current unqualified lab VMs must be documented as refused by the accepted physical profile.
+
+## ADRs
+
+The physical-boottime-v1 and fresh-process handoff policy is accepted with the plan. Prepare
+numbered ADR 0020 for review; accept after clear reviews and conformance. Audit ADR 0007
+remains Proposed and accepted ADR 0005 is not rewritten or used to restore the early-read rule.

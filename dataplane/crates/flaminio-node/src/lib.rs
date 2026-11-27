@@ -11,6 +11,7 @@
 //! The engine is single-threaded by design, like the core it runs: one thread owns the store
 //! and every protocol state machine, and network threads hand it decoded frames.
 
+pub mod clock;
 pub mod engine;
 pub mod net;
 pub mod replica;

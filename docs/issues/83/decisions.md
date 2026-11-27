@@ -7,7 +7,7 @@
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`4f18a1e256d6aec5ac17f1eb497bd7fb12bed18ededeb1b3f038a64a1d4f9997`).
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
 
-Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
+Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Implementation progress and evidence are recorded in [report.md](report.md).
 
 ## Settled at approval
 
@@ -45,3 +45,15 @@ Approved with the recommended answer to each open question (see Settled at appro
 - **Review83-R1-N1:** supply this unapproved choices record for the existing links.
 
 - **Review83-R2-N1:** retain the complete clock-error test description on its Markdown table row.
+
+## Implementation integration — 2026-11-28
+
+Start from main after merged #78 / PR #106. Keep #76 immutable creation, #77 coherent
+Attach views, #78 placement gates, #80 admitted geometry/normal gRPC budgets and #86 uncertainty
+bounds. New nonce validation precedes storage effects and handoff issuance follows an actual
+new-epoch commit. Never enlarge metadata/wire limits to accommodate the envelope.
+
+The approved physical-only profile, fixed timing, old-token refusal, sticky quarantine and
+operator attestation are binding. #15/#79 unimplemented additions remain separate; implement
+current target-entry and authorized-caller paths strictly and report any true prerequisite
+before introducing a bypass or silently weakening an accepted contract.

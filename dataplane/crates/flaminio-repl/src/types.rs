@@ -44,10 +44,23 @@ pub struct Timing {
 }
 
 impl Timing {
+    /// Two qualified absolute read errors and microsecond conversion quantization.
+    pub const ELAPSED_ERROR_US: Time = 3;
+
     /// How long a new target waits after fencing one ISR member before it may act without
-    /// the others: `L × (1 + ρ)`, rounded up. By then any older target's lease has expired.
-    pub fn takeover_wait(&self) -> Time {
-        self.lease + (self.lease * self.drift_ppm).div_ceil(1_000_000)
+    /// the others: `ceil((L + E) × (1 + ρ)) + E`, with E = 3 us. By then any older
+    /// target's lease has expired, even under opposing elapsed-observation errors.
+    pub fn takeover_wait(&self) -> Result<Time, crate::clock::ClockFault> {
+        let lease = u128::from(self.lease).checked_add(u128::from(Self::ELAPSED_ERROR_US));
+        let rate = u128::from(self.drift_ppm).checked_add(1_000_000);
+        let wait = lease
+            .zip(rate)
+            .and_then(|(lease, rate)| lease.checked_mul(rate))
+            .and_then(|product| product.checked_add(999_999))
+            .map(|product| product / 1_000_000)
+            .and_then(|wait| wait.checked_add(u128::from(Self::ELAPSED_ERROR_US)))
+            .ok_or(crate::clock::ClockFault::Overflow)?;
+        Time::try_from(wait).map_err(|_| crate::clock::ClockFault::Overflow)
     }
 }
 
@@ -76,7 +89,7 @@ mod tests {
             drift_ppm: 1,
             ..Timing::default()
         };
-        assert_eq!(t.takeover_wait(), 1_000_003);
-        assert_eq!(Timing::default().takeover_wait(), 5_500_000);
+        assert_eq!(t.takeover_wait(), Ok(1_000_009));
+        assert_eq!(Timing::default().takeover_wait(), Ok(5_500_007));
     }
 }

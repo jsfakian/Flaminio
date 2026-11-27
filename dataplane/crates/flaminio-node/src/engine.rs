@@ -2649,7 +2649,7 @@ mod metadata_tests {
                     },
                 },
             );
-            sm.tick(12);
+            sm.tick(1 + timing.takeover_wait().unwrap());
             let isr_req = sm
                 .take_output()
                 .into_iter()

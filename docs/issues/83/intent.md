@@ -2,7 +2,7 @@
 
 [Issue #83](https://github.com/jsfakian/Flaminio/issues/83), [follow-ups](../../followups.md).
 From audit finding D02, an unverified safety assumption, not a reproduced stale-read bug.
-Approved 2026-11-13; not implemented.
+Published clear snapshot approved 2026-11-20; implementation and validation: [report.md](report.md).
 
 ## Why
 

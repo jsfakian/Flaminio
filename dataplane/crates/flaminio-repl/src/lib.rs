@@ -16,6 +16,7 @@
 //! payload is one [`types::Value`] per block, standing in for 4 KiB of data; the data plane
 //! uses buffer handles, and maps the same decisions onto real I/O.
 
+pub mod clock;
 pub mod extent;
 pub mod geometry;
 pub mod meta;
