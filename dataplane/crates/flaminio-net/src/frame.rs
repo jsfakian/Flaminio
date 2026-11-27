@@ -6,6 +6,7 @@
 use bytes::Bytes;
 use flaminio_repl::extent::Extent;
 use flaminio_repl::msg::{MAX_DIGEST_BLOCKS, MAX_MAPPED_BLOCKS};
+use flaminio_repl::replica::UNCERTAINTY_BUDGET;
 use flaminio_repl::types::Version;
 
 use crate::BLOCK;
@@ -16,8 +17,11 @@ pub const MAX_BLOCKS: u32 = 256;
 pub const MAX_BODY: usize = MAX_BLOCKS as usize * BLOCK + 128;
 /// Most extents in one `Fenced` reply.
 pub const MAX_UNCERTAIN: usize = 1 << 16;
-/// Most chunks of one volume on one node, as listed in `Hello`.
+/// Most chunks of one volume on one node, as listed in `Hello` or `Fenced`.
 pub const MAX_CHUNKS: usize = 1 << 16;
+
+const _: () = assert!(MAX_UNCERTAIN == UNCERTAINTY_BUDGET as usize);
+const _: () = assert!(MAX_CHUNKS == UNCERTAINTY_BUDGET as usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
@@ -127,6 +131,31 @@ pub enum DecodeError {
     Invalid(&'static str),
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum EncodeError {
+    #[error("invalid frame: {0}")]
+    Invalid(&'static str),
+    #[error("frame of {0} bytes exceeds the limit")]
+    TooLarge(usize),
+}
+
+/// The Fenced body length, excluding its prefix. Count limits are checked by the caller.
+fn fenced_body_len(chunks: usize, extents: usize) -> Result<usize, EncodeError> {
+    let body = chunks
+        .checked_mul(8)
+        .and_then(|rows| {
+            extents
+                .checked_mul(8)
+                .and_then(|exts| rows.checked_add(exts))
+        })
+        .and_then(|bytes| bytes.checked_add(13))
+        .ok_or(EncodeError::Invalid("Fenced body length overflow"))?;
+    if body > MAX_BODY {
+        return Err(EncodeError::TooLarge(body));
+    }
+    Ok(body)
+}
+
 mod tag {
     pub const HELLO: u8 = 1;
     pub const HEARTBEAT: u8 = 2;
@@ -177,6 +206,66 @@ impl W {
 }
 
 impl Frame {
+    /// Encodes the frame, checking Fenced reports before allocation or sending any bytes.
+    /// Other frame types use the existing trusted encoder until their preflight is added.
+    pub fn encode_checked(&self) -> Result<Vec<u8>, EncodeError> {
+        let Frame::Fenced { req, uncertain } = self else {
+            return Ok(self.encode());
+        };
+        if uncertain.len() > MAX_CHUNKS {
+            return Err(EncodeError::Invalid("too many uncertain chunks"));
+        }
+        let mut total = 0usize;
+        let mut previous_chunk = None;
+        for (chunk, exts) in uncertain {
+            if previous_chunk.is_some_and(|previous| previous >= *chunk) {
+                return Err(EncodeError::Invalid("uncertain chunks are not ordered"));
+            }
+            previous_chunk = Some(*chunk);
+            total = total
+                .checked_add(exts.len())
+                .ok_or(EncodeError::Invalid("uncertain extent count overflow"))?;
+            if total > MAX_UNCERTAIN {
+                return Err(EncodeError::Invalid("too many uncertain extents"));
+            }
+            let mut previous_end = None;
+            for ext in exts {
+                let end = ext
+                    .start
+                    .checked_add(ext.len)
+                    .filter(|_| ext.len != 0)
+                    .ok_or(EncodeError::Invalid("uncertain extent"))?;
+                if previous_end.is_some_and(|previous| previous > ext.start) {
+                    return Err(EncodeError::Invalid(
+                        "uncertain extents overlap or are unordered",
+                    ));
+                }
+                previous_end = Some(end);
+            }
+        }
+        let body = fenced_body_len(uncertain.len(), total)?;
+        let len = body
+            .checked_add(4)
+            .ok_or(EncodeError::Invalid("Fenced frame length overflow"))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(|_| EncodeError::Invalid("Fenced allocation failed"))?;
+        bytes.extend_from_slice(&(body as u32).to_le_bytes());
+        let mut w = W(bytes);
+        w.u8(tag::FENCED);
+        w.u64(*req);
+        w.u32(uncertain.len() as u32);
+        for (chunk, exts) in uncertain {
+            w.u32(*chunk);
+            w.u32(exts.len() as u32);
+            for ext in exts {
+                w.ext(ext);
+            }
+        }
+        Ok(w.0)
+    }
+
     /// Encodes the frame, with its length prefix.
     ///
     /// Panics if the frame breaks a limit that `decode` enforces, which is a bug in the caller.
@@ -465,18 +554,48 @@ impl Frame {
             tag::FENCED => {
                 let req = r.u64()?;
                 let n = r.u32()? as usize;
+                if n > MAX_CHUNKS {
+                    return Err(DecodeError::Invalid("too many uncertain chunks"));
+                }
+                // Every row needs its chunk id and extent count, even if it is empty.
+                if n > r.0.len() / 8 {
+                    return Err(DecodeError::Truncated);
+                }
                 let mut uncertain = Vec::new();
+                uncertain
+                    .try_reserve_exact(n)
+                    .map_err(|_| DecodeError::Invalid("Fenced allocation failed"))?;
                 let mut total = 0usize;
+                let mut previous_chunk = None;
                 for _ in 0..n {
                     let chunk = r.u32()?;
+                    if previous_chunk.is_some_and(|previous| previous >= chunk) {
+                        return Err(DecodeError::Invalid("uncertain chunks are not ordered"));
+                    }
+                    previous_chunk = Some(chunk);
                     let m = r.u32()? as usize;
-                    total += m;
+                    total = total
+                        .checked_add(m)
+                        .ok_or(DecodeError::Invalid("uncertain extent count overflow"))?;
                     if total > MAX_UNCERTAIN {
                         return Err(DecodeError::Invalid("too many uncertain extents"));
                     }
-                    let mut exts = Vec::with_capacity(m.min(r.0.len() / 8));
+                    if m > r.0.len() / 8 {
+                        return Err(DecodeError::Truncated);
+                    }
+                    let mut exts = Vec::new();
+                    exts.try_reserve_exact(m)
+                        .map_err(|_| DecodeError::Invalid("Fenced allocation failed"))?;
+                    let mut previous_end = None;
                     for _ in 0..m {
-                        exts.push(r.any_ext()?);
+                        let ext = r.any_ext()?;
+                        if previous_end.is_some_and(|previous| previous > ext.start) {
+                            return Err(DecodeError::Invalid(
+                                "uncertain extents overlap or are unordered",
+                            ));
+                        }
+                        previous_end = Some(ext.start + ext.len);
+                        exts.push(ext);
                     }
                     uncertain.push((chunk, exts));
                 }

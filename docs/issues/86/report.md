@@ -111,6 +111,10 @@ Unit 1: targeted Rust `cargo check --all-targets --offline`, `git diff --check` 
 `make fmt lint` pass. Its new core/reference and node lifecycle acceptance tests are next;
 later codec/target/simulator units remain incomplete.
 
+Unit 2: formatting and targeted Clippy (net/node, all targets, warnings denied) pass. Its
+checked Fenced codec acceptance tests are next. Node lifecycle acceptance passes all 39
+focused replica tests and the full node package (50 library + 19 integration tests).
+
 Pending the mapped core/reference, node, frame/session, target/engine, simulator/mutation and
 fuzz regressions; `make lint test race hygiene contracts sim`; and `make sanitize QUICK=1` for
 the arena/lifecycle changes.
