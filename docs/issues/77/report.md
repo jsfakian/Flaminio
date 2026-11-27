@@ -36,3 +36,124 @@ No comments from the requested review scopes, including Nits.
 Changes/resolution: Both fresh reviewers confirmed duplicate-input compatibility resolved, checked the changed ReadSet/policy/test contract against Go and Rust duplicate refusal, and reported no new comments including Nits. Previous round-one findings had already been confirmed resolved. This clears the draft plan, not implementation or human approval.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+### Code/security review round 1 — 4a5dcb05c82b82b1d7b2b58a2943ec8c9f18b3f2
+
+Full range: `880066e..4a5dcb0`, all 13 source/test/documentation files. Fresh code and
+security reviewers used direct high-effort review because built-in review skills are not
+available. The security review is clear with no nits; code review found one Medium and no
+production correctness findings or additional comments.
+
+**R1-C1 — Medium:** `TestConcurrentTargets` observes successful returns from outer
+backend.TxnRev, above its internal retry boundary. A CAS can apply epoch E+1, lose its reply,
+retry to a failed compare, then a later Attach attempt applies E+2. Two writes applied but
+only one revision is counted. The separate ambiguous-response test uses another recorder,
+so it does not prove this observer. An isolated read-only reproducer confirms applied=2,
+counted=1 and final epoch delta=2. Required fix: observe actual applied header revisions below
+retries, deduplicate them and force this history through the same concurrency-test observer.
+A fresh implementer replaces the observer with one shared header-history harness across
+concurrent, superseded and ambiguous tests. It records direct Mem applications below retries
+and replays native etcd header PUT revisions through the final revision under a bounded
+context. Only service_test.go changes; exact epoch and ISR assertions remain. Restoring the
+old observer in an isolated overlay fails on both backends with count=1 versus epoch delta=2.
+The corrected observer, focused race checks and full service suite pass. Renewed
+`make fmt lint test race hygiene contracts` also passes, including both mutual-TLS interop
+cases. The prior `make sim` pass (20,000 normal seeds and 163 release tests) remains valid:
+no Rust/model source changed. Round 2 independently clears the correction; no exception
+is accepted.
+
+### Code/security review round 2 — 72871f3492a126d05ca60fd11dbf97bd8e87a892
+
+Incremental range: `4a5dcb0..72871f3`, four changed test/documentation files. Fresh code and
+security reviewers independently confirm R1-C1 fixed. Both report no new Low-or-higher
+findings or nits; shared observer use, native revision collection, cancellation, synchronization
+and exact epoch/ISR assertions are sound. The loop is **clear after two rounds**, with no
+open or accepted review findings. The requested Sonnet model is unavailable; the code reviewer
+uses the inherited default model at medium effort. Direct incremental review follows the workflow.
+
+## Implementation — 2026-11-27
+
+Branch: `issue/77-coherent-volume-reads`, based on
+`880066e928369f26ff901b851e01b4312620a15a` after the user's merge of #86 / PR #103.
+The published clear spec/design were approved on 2026-11-20. Dependency inspection for #80
+confirmed that its authoritative compatibility RPC requires #77's coherent read, which was
+absent on main at that point. #77 therefore ships first as its own PR; #80 groundwork is
+preserved separately and will resume only after the user's merge of this prerequisite.
+
+One implementer completed the shared KV/service response contract in four production files.
+`readVolumeView` validates header revisions around the atomic prefix, Attach pins responses
+and token claims to TxnRev, and ChangeIsr assembles coherent header/named snapshots through
+ReadSet. No proto, Rust, geometry or #80 runtime work is included. Independent acceptance
+and full project checks pass; code/security review is clear after two rounds. Final
+conformance passes S1–S7. No lab or new ADR is required.
+
+## Tests
+
+`make fmt lint` passes with installed cache access. Independent acceptance passes on both
+memory and embedded etcd: `go test ./meta/kv ./meta/service -count=1 -v` (KV 6.032 s,
+service 47.564 s). No production bug was found during acceptance.
+
+| Rules | Passing acceptance evidence |
+|---|---|
+| S1–S2 | `TestGetVolumeSameCountReplacementIsCoherent`, `TestGetVolumeHeaderChurnIsBounded`: equal-count RF/geometry/incarnation replacements, revision-only churn, bounded retries and caller context |
+| S3 | `TestGetVolumeClassifiesChunksOnlyAfterHeaderValidation`: changing-header JSON/missing/noncanonical chunks retry, stable corrupt chunks return Internal without partial success |
+| S4, S7 | `TestAttachResponsePinnedToCommitRevision`, `TestAttachKnownCommitThenReadFailureKeepsEpoch`: phase hooks, token authority, missing/hidden/superseded pins, exact committed context and backend/cancellation statuses |
+| S4, S7 | `TestAttachLostCommitReplyDoesNotRollBack`, `TestAttachSupersededCommitAccounting`, `TestAttachAmbiguousBackendRetryCountsEveryAppliedEpoch`: lost/ambiguous responses, two commits with one success, exact backend revision counting |
+| S5 | `TestReadSet`: order/missing/repeated positions/cloning/context/65-key cap and concurrent atomic snapshots on both backends |
+| S5 | `TestChangeIsrRejectedViewIsCoherent`, `TestChangeIsrDuplicatePositionsAndRawCap`, `TestChangeIsrCASReadRetriesAndCommitPoint`, `TestChangeIsrSnapshotErrors`: replacement/multi-key snapshots, duplicate refusal, raw 65 cap, CAS retries/commit point, backend/context errors |
+| S6 | Existing lifecycle, legacy-header and authorization cases pass in the full scoped packages; metadata vectors and both mutual-TLS Rust interoperability checks also pass |
+
+`TestConcurrentTargets` now deduplicates actual backend-applied Attach header modification
+revisions and retains its exact final epoch and per-chunk ISR-version assertions. Both backend
+variants pass. Baseline verification confirms raw header JSON errors keep the existing
+Unavailable mapping; stable malformed chunk records are Internal.
+
+Controlled-omission proof: an isolated temporary copy disables only the final header-revision
+comparison. Both-backend replacement tests then return old RF 2 / 2 MiB authority with RF 3
+replacement chunks, and changing-header corruption tests prematurely return Internal. Stable
+corruption controls still pass. The unmodified counterparts all pass; production bytes on
+the branch were untouched by the experiment.
+
+Full required gates pass at `4a5dcb0`: `make fmt lint` and
+`make test race hygiene contracts sim`. This includes both mutual-TLS interoperability cases,
+20,000 normal simulation seeds and all 163 release tests with ignored mutation controls.
+After the test-observer correction, `make fmt lint test race hygiene contracts` passes again.
+Rust/model source is unchanged, so the same simulation result applies. Incremental review
+cleared the test fix in round 2. No shared-lab or unsafe-code change is involved.
+
+## Conformance
+
+Independent read-only checker on source `72871f3` and the final report. The workflow's
+requested Sonnet model is unavailable, so the checker uses the inherited default model at
+medium effort. Its output follows:
+
+PASS
+
+| Rule | Implemented | Tested | Evidence |
+|---|---|---|---|
+| S1 Coherent volume view | yes | yes | `service.go:331` validates header revisions around atomic List; `TestGetVolumeSameCountReplacementIsCoherent` passes on both backends. |
+| S2 Read validation | yes | yes | `readVolumeView` rejects unpublished headers and bounds revision retries; `TestGetVolumeHeaderChurnIsBounded` covers equal-value revision churn. |
+| S3 Error classification | yes | yes | Chunk decoding follows final header validation; `TestGetVolumeClassifiesChunksOnlyAfterHeaderValidation` covers stable corruption and replacement on both backends; omission controls fail as expected. |
+| S4 Attach response | yes | yes | Attach uses TxnRev, pins view/token authority and preserves exact committed context; pinned-response and known-commit-failure tests cover supersession, publication changes and error statuses. |
+| S5 Concurrent chunk changes | yes | yes | Atomic ReadSet supplies ChangeIsr refusals; existing revision CAS protects applied replies. `TestReadSet`, `TestReadSnapshotsAreAtomic`, rejected-view and CAS tests pass on both backends. |
+| S6 Compatibility | yes | yes | Wire/auth contracts remain unchanged; legacy-header, lifecycle, authorization, duplicate-position, raw-cap, metadata-vector and both mutual-TLS interop checks pass. |
+| S7 Recovery and cancellation | yes | yes | Reads retain bounded context-aware retries without replaying known commits; churn, cancellation, lost-reply, superseded and ambiguous-commit tests pass, including shared actual-header-history accounting and race checks. |
+
+Contract drift: none
+
+ADR conformance: consistent
+
+Scope drift: none; 13 paths match the design, optional interop source changes were unnecessary, and no #80 runtime changes are included.
+
+Docs: done; audit, followups, protocol and issue records cover the required changes.
+
+Open review findings: none
+
+## Lab
+
+None required by the approved design. No shared-lab actions were run.
+
+## ADRs
+
+Existing Go/etcd and fencing decisions remain unchanged. No new architectural decision or
+numbered ADR is proposed by this design.

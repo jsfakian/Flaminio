@@ -294,6 +294,10 @@ func (s *Service) readHeader(ctx context.Context, id string) (domain.Header, int
 	if err != nil {
 		return domain.Header{}, 0, err
 	}
+	return decodeHeader(id, e, ok)
+}
+
+func decodeHeader(id string, e kv.Entry, ok bool) (domain.Header, int64, error) {
 	var h domain.Header
 	if ok {
 		if err := json.Unmarshal(e.Value, &h); err != nil {
@@ -318,29 +322,64 @@ func (s *Service) chunkMissing(ctx context.Context, id string, chunk uint32) err
 }
 
 func (s *Service) readVolume(ctx context.Context, id string) (*domain.Volume, error) {
-	h, _, err := s.readHeader(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := s.kv.List(ctx, chunkPrefix(id))
-	if err != nil {
-		return nil, err
-	}
-	if len(entries) != h.ChunkCount() {
-		// A deletion since the header was read (docs/issues/8) is NotFound, as for any operation on a
-		// deleted volume; only a volume still there has damaged records.
-		if _, _, err := s.readHeader(ctx, id); err != nil {
-			return nil, err
+	v, _, err := s.readVolumeView(ctx, id, 0)
+	return v, err
+}
+
+// readVolumeView validates the header around one atomic prefix snapshot. A positive
+// expectedRevision pins the view to an already committed Attach; it never retries a write.
+func (s *Service) readVolumeView(ctx context.Context, id string, expectedRevision int64) (*domain.Volume, int64, error) {
+	read := func() (domain.Header, int64, error) {
+		if err := ctx.Err(); err != nil {
+			return domain.Header{}, 0, err
 		}
-		return nil, fmt.Errorf("volume %q: %d chunk records, want %d", id, len(entries), h.ChunkCount())
-	}
-	v := &domain.Volume{Header: h, Chunks: make([]domain.Chunk, len(entries))}
-	for i, e := range entries {
-		if err := json.Unmarshal(e.Value, &v.Chunks[i]); err != nil {
-			return nil, err
+		h, rev, err := s.readHeader(ctx, id)
+		if expectedRevision > 0 && (errors.Is(err, domain.ErrNotFound) || err == nil && rev != expectedRevision) {
+			return domain.Header{}, 0, status.Errorf(codes.Aborted, "volume %q: committed attach revision %d superseded", id, expectedRevision)
 		}
+		return h, rev, err
 	}
-	return v, nil
+	for attempt := range retries {
+		if attempt > 0 {
+			if err := backoff(ctx, attempt); err != nil {
+				return nil, 0, err
+			}
+		}
+		h, rev, err := read()
+		if err != nil {
+			return nil, 0, err
+		}
+		entries, err := s.kv.List(ctx, chunkPrefix(id))
+		if err != nil {
+			return nil, 0, err
+		}
+		_, finalRev, err := read()
+		if err != nil {
+			return nil, 0, err
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
+		if finalRev != rev {
+			continue
+		}
+		// Only classify chunk state after the unchanged header proves that it coexisted
+		// with this prefix snapshot. A concurrent replacement discards the whole candidate.
+		if len(entries) != h.ChunkCount() {
+			return nil, 0, status.Errorf(codes.Internal, "volume %q: %d chunk records, want %d", id, len(entries), h.ChunkCount())
+		}
+		v := &domain.Volume{Header: h, Chunks: make([]domain.Chunk, len(entries))}
+		for i, e := range entries {
+			if e.Key != chunkKey(id, uint32(i)) {
+				return nil, 0, status.Errorf(codes.Internal, "volume %q: chunk key %q, want %q", id, e.Key, chunkKey(id, uint32(i)))
+			}
+			if err := json.Unmarshal(e.Value, &v.Chunks[i]); err != nil {
+				return nil, 0, status.Errorf(codes.Internal, "volume %q: chunk %d: %v", id, i, err)
+			}
+		}
+		return v, rev, nil
+	}
+	return nil, 0, status.Error(codes.Aborted, "too much contention")
 }
 
 func chunkPB(c domain.Chunk) *metav1.ChunkMeta {
@@ -646,30 +685,41 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 		}
 		h.Attach(r.GetNode())
 		b, _ := json.Marshal(h)
-		ok, err := s.kv.Txn(ctx, []kv.Cmp{{Key: volumeKey(h.ID), Rev: rev}}, []kv.Op{{Key: volumeKey(h.ID), Value: b}})
+		attachRev, ok, err := s.kv.TxnRev(ctx, []kv.Cmp{{Key: volumeKey(h.ID), Rev: rev}}, []kv.Op{{Key: volumeKey(h.ID), Value: b}})
 		if err != nil {
 			return nil, errStatus(err)
 		}
 		if !ok {
 			continue
 		}
-		// Chunks change only under the new epoch, by the new target: reading them after the
-		// commit gives the state the new target starts from. The attach has committed, so it
-		// must not be retried. If another attach followed meanwhile, the chunks may already
-		// reflect it; this target is then deposed at its first fence or ISR change.
-		v, err := s.readVolume(ctx, h.ID)
-		if err != nil {
-			return nil, errStatus(err)
+		// This write is known to have committed. Every response error retains its epoch and
+		// revision; a superseding header prevents a pinned response, without undoing the write.
+		committedError := func(err error) error {
+			mapped := status.Convert(errStatus(err))
+			return status.Errorf(mapped.Code(), "attach committed volume=%s epoch=%d revision=%d; response unavailable: %s",
+				h.ID, h.Epoch, attachRev, mapped.Message())
 		}
-		v.Header = h
+		v, _, err := s.readVolumeView(ctx, h.ID, attachRev)
+		if err != nil {
+			return nil, committedError(err)
+		}
+		if v.ID != h.ID || v.Epoch != h.Epoch || v.FirstEpoch != h.FirstEpoch || v.Target != h.Target {
+			return nil, committedError(status.Error(codes.Internal, "pinned header does not match committed attach"))
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, committedError(err)
+		}
 		out := &metav1.AttachResponse{Volume: volumePB(v)}
 		if s.opts.TokenKey != nil {
 			out.Token, err = captoken.Sign(s.opts.TokenKey, captoken.Claims{
-				Volume: h.ID, Epoch: h.Epoch, FirstEpoch: h.FirstEpoch, Node: h.Target, IssuedAt: time.Now().Unix(),
+				Volume: v.ID, Epoch: v.Epoch, FirstEpoch: v.FirstEpoch, Node: v.Target, IssuedAt: time.Now().Unix(),
 			})
 			if err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
+				return nil, committedError(status.Error(codes.Internal, err.Error()))
 			}
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, committedError(err)
 		}
 		return out, nil
 	}
@@ -681,9 +731,12 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 		return nil, errStatus(fmt.Errorf("%w: more than %d changes", domain.ErrInvalid, domain.MaxChangesPerRequest))
 	}
 	changes := make([]domain.IsrChange, len(r.GetChanges()))
+	keys := make([]string, len(changes)+1)
+	keys[0] = volumeKey(r.GetVolume())
 	for i, c := range r.GetChanges() {
 		changes[i] = domain.IsrChange{Chunk: c.GetChunk(), ExpectedVer: c.GetExpectedVer(), NewISR: c.GetNewIsr(),
 			ChangeReplicas: c.GetChangeReplicas(), NewReplicas: c.GetNewReplicas()}
+		keys[i+1] = chunkKey(r.GetVolume(), c.GetChunk())
 	}
 	for attempt := range retries {
 		if attempt > 0 {
@@ -691,7 +744,14 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 				return nil, errStatus(err)
 			}
 		}
-		h, rev, err := s.readHeader(ctx, r.GetVolume())
+		if err := ctx.Err(); err != nil {
+			return nil, errStatus(err)
+		}
+		snapshot, err := s.kv.ReadSet(ctx, keys)
+		if err != nil {
+			return nil, errStatus(err)
+		}
+		h, rev, err := decodeHeader(r.GetVolume(), snapshot[0].Entry, snapshot[0].Found)
 		if err != nil {
 			return nil, errStatus(err)
 		}
@@ -701,15 +761,12 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 			if int(c.Chunk) >= h.ChunkCount() {
 				return nil, errStatus(fmt.Errorf("%w: chunk %d out of range", domain.ErrInvalid, c.Chunk))
 			}
-			e, ok, err := s.kv.Get(ctx, chunkKey(h.ID, c.Chunk))
-			if err != nil {
-				return nil, errStatus(err)
-			}
-			if !ok {
-				return nil, errStatus(s.chunkMissing(ctx, h.ID, c.Chunk))
+			e := snapshot[i+1].Entry
+			if !snapshot[i+1].Found {
+				return nil, status.Errorf(codes.Internal, "volume %q: chunk %d missing", h.ID, c.Chunk)
 			}
 			if err := json.Unmarshal(e.Value, &named[i]); err != nil {
-				return nil, errStatus(err)
+				return nil, status.Errorf(codes.Internal, "volume %q: chunk %d: %v", h.ID, c.Chunk, err)
 			}
 			cmps = append(cmps, kv.Cmp{Key: e.Key, Rev: e.Rev})
 		}

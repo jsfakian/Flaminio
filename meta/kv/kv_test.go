@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +189,116 @@ func TestGetBounded(t *testing.T) {
 		}
 		if _, _, err := s.GetBounded(budget, "/b/ok", 16); !errors.Is(err, kv.ErrWorkBudget) {
 			t.Fatalf("budget: %v", err)
+		}
+	})
+}
+
+// ReadSet preserves positions, owns each value, and never returns a partial failed read (#77 S5).
+func TestReadSet(t *testing.T) {
+	backends(t, func(t *testing.T, s kv.KV) {
+		ctx := context.Background()
+		rev, ok, err := s.TxnRev(ctx, nil, []kv.Op{{Key: "/read/a", Value: []byte("alpha")}, {Key: "/read/b", Value: []byte("beta")}})
+		if err != nil || !ok {
+			t.Fatalf("seed: %v %v", ok, err)
+		}
+		keys := []string{"/read/b", "/read/missing", "/read/a", "/read/b"}
+		got, err := s.ReadSet(ctx, keys)
+		if err != nil || len(got) != len(keys) {
+			t.Fatalf("read: %+v %v", got, err)
+		}
+		for i, value := range []string{"beta", "", "alpha", "beta"} {
+			if got[i].Found != (i != 1) || string(got[i].Entry.Value) != value {
+				t.Fatalf("position %d: %+v", i, got[i])
+			}
+			if i != 1 && (got[i].Entry.Key != keys[i] || got[i].Entry.Rev != rev) {
+				t.Fatalf("position %d: %+v, want key %q revision %d", i, got[i], keys[i], rev)
+			}
+		}
+		got[0].Entry.Value[0] = 'X'
+		if string(got[3].Entry.Value) != "beta" {
+			t.Fatal("repeated positions share mutable values")
+		}
+		fresh, err := s.ReadSet(ctx, []string{"/read/b"})
+		if err != nil || string(fresh[0].Entry.Value) != "beta" {
+			t.Fatalf("caller changed stored value: %+v %v", fresh, err)
+		}
+		if empty, err := s.ReadSet(ctx, nil); err != nil || len(empty) != 0 {
+			t.Fatalf("empty read: %+v %v", empty, err)
+		}
+		limit := make([]string, kv.MaxReadSetKeys)
+		for i := range limit {
+			limit[i] = "/read/a"
+		}
+		if got, err := s.ReadSet(ctx, limit); err != nil || len(got) != 65 {
+			t.Fatalf("65 positions: %d %v", len(got), err)
+		}
+		if got, err := s.ReadSet(ctx, append(limit, "/read/a")); err == nil || len(got) != 0 {
+			t.Fatalf("66 positions returned partial/success: %+v %v", got, err)
+		}
+		budget := kv.WithWorkBudget(ctx, 1)
+		if _, err := s.ReadSet(budget, keys); err != nil || kv.RemainingWork(budget) != 0 {
+			t.Fatalf("one snapshot should use one attempt: remaining=%d err=%v", kv.RemainingWork(budget), err)
+		}
+		if got, err := s.ReadSet(budget, keys); !errors.Is(err, kv.ErrWorkBudget) || len(got) != 0 {
+			t.Fatalf("exhausted budget: %+v %v", got, err)
+		}
+		canceled, cancel := context.WithCancel(ctx)
+		cancel()
+		deadline, stop := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+		defer stop()
+		for _, stopped := range []context.Context{canceled, deadline} {
+			if got, err := s.ReadSet(stopped, keys); err == nil || len(got) != 0 {
+				t.Fatalf("stopped context returned partial/success: %+v %v", got, err)
+			}
+		}
+	})
+}
+
+// Concurrent atomic multi-key writes cannot tear either named or prefix snapshots (#77 S1/S5).
+func TestReadSnapshotsAreAtomic(t *testing.T) {
+	backends(t, func(t *testing.T, s kv.KV) {
+		ctx := context.Background()
+		write := func(value string) error {
+			ok, err := s.Txn(ctx, nil, []kv.Op{{Key: "/atomic/a", Value: []byte(value)}, {Key: "/atomic/b", Value: []byte(value)}})
+			if err == nil && !ok {
+				return errors.New("unconditional write did not apply")
+			}
+			return err
+		}
+		if err := write("0"); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			for i := 1; i <= 80; i++ {
+				if err := write(fmt.Sprint(i)); err != nil {
+					done <- err
+					return
+				}
+				runtime.Gosched()
+			}
+			done <- nil
+		}()
+		for range 80 {
+			named, err := s.ReadSet(ctx, []string{"/atomic/b", "/atomic/a", "/atomic/b"})
+			if err != nil || len(named) != 3 {
+				t.Fatalf("named snapshot: %+v %v", named, err)
+			}
+			for _, row := range named {
+				if !row.Found || row.Entry.Rev != named[0].Entry.Rev || string(row.Entry.Value) != string(named[0].Entry.Value) {
+					t.Errorf("torn named snapshot: %+v", named)
+				}
+			}
+			prefix, err := s.List(ctx, "/atomic/")
+			if err != nil || len(prefix) != 2 {
+				t.Fatalf("prefix snapshot: %+v %v", prefix, err)
+			}
+			if prefix[0].Key != "/atomic/a" || prefix[1].Key != "/atomic/b" || prefix[0].Rev != prefix[1].Rev || string(prefix[0].Value) != string(prefix[1].Value) {
+				t.Errorf("torn/unordered prefix snapshot: %+v", prefix)
+			}
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
 		}
 	})
 }

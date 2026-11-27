@@ -3,8 +3,9 @@
 The rules that keep a replicated volume consistent through replica failures, target failover,
 partitions and metadata outages. This refines ARCHITECTURE §8 into something precise enough to
 implement and to check by simulation. The reference implementation is the crate
-`dataplane/crates/flaminio-repl`. It has no I/O, and its simulator checks every rule below
-([§9](#9-how-it-is-checked)).
+`dataplane/crates/flaminio-repl`. It has no I/O, and its simulator checks the replication rules
+below ([§9](#9-how-it-is-checked)). Metadata response acquisition is also checked against
+both KV backends ([§2](#2-metadata-transitions)).
 
 ## 1. Actors and state
 
@@ -40,6 +41,23 @@ the chunks it names, not the whole volume.
 
 A retried `ChangeIsr` whose earlier attempt was applied gets a version mismatch. The target
 then compares the ISR in the reply with the one it proposed.
+
+Metadata responses preserve a coherent read point for their header and chunk records:
+
+- `GetVolume` validates the header's modification revision before and after one atomic
+  chunk-prefix snapshot. A changed revision retries within the request's bounded context;
+  chunk corruption is classified only after the header is validated.
+- `Attach` pins response construction and token claims to the exact revision returned by its
+  successful conditional commit. A superseded or unpublished pin returns `Aborted`. Every
+  error after a known commit reports the committed volume, epoch and revision while preserving
+  backend or context status. A failed response can therefore leave an already committed epoch.
+- `ChangeIsr` reads its header and named chunks in one atomic read set, including refusal
+  replies. Successful conditional-write replies describe the commit point. Duplicate indices
+  retain their existing policy refusal and repeated response positions in request order.
+
+Later operations can supersede any returned view; ordinary epoch/session fencing still
+applies. Both KV backends' deterministic service tests check these response-snapshot rules.
+They introduce no metadata-service round trip on the steady-state I/O path.
 
 The target sends at most one change request at a time and selects pending chunks cyclically,
 so recovery of a volume with more than 64 chunks progresses through several transactions.

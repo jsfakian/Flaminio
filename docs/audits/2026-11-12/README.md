@@ -174,3 +174,15 @@ reproduced and caught. The expected encoder panic is caught in-process. After im
 replace those expectations with normal round-trip/coverage assertions in the regression suite.
 It uses cached Cargo dependencies offline and temporary files; an optional CARGO_TARGET_DIR
 can reuse a build cache. No new full-suite pass or fixed runtime is claimed by this follow-up.
+
+## F02 implementation follow-up — 2026-11-27
+
+[#77](https://github.com/jsfakian/Flaminio/issues/77) promotes the same-count replacement
+reproduction into deterministic memory/etcd regressions. Validated prefix reads, Attach
+commit-revision pins and atomic named ISR snapshots preserve one coherent response authority.
+A superseded known Attach commit can return an unavailable response while its epoch remains
+committed; tests count backend-applied revisions and require exact error context.
+
+The original audited revision and reproduction above remain historical evidence. The
+[implementation report](../../issues/77/report.md) records current acceptance, review and
+project-check results; it does not infer hardware or deployment certification from those tests.

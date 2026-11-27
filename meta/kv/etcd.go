@@ -84,6 +84,46 @@ func (e *Etcd) List(ctx context.Context, prefix string) ([]Entry, error) {
 	return out, nil
 }
 
+func (e *Etcd) ReadSet(ctx context.Context, keys []string) ([]ReadResult, error) {
+	if len(keys) > MaxReadSetKeys {
+		return nil, fmt.Errorf("read set too large: %d keys, max %d", len(keys), MaxReadSetKeys)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ops := make([]clientv3.Op, len(keys))
+	for i, key := range keys {
+		ops[i] = clientv3.OpGet(key)
+	}
+	// One read-only transaction gives every position the same linearizable snapshot,
+	// including repeated keys. Do not use TxnRev: this transaction writes no revision.
+	r, err := retry(ctx, func(ctx context.Context) (*clientv3.TxnResponse, error) {
+		return e.c.Txn(ctx).Then(ops...).Commit()
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(r.Responses) != len(keys) {
+		return nil, fmt.Errorf("read set: %d responses, want %d", len(r.Responses), len(keys))
+	}
+	out := make([]ReadResult, len(keys))
+	for i, response := range r.Responses {
+		g := response.GetResponseRange()
+		if g == nil || len(g.Kvs) > 1 {
+			return nil, fmt.Errorf("read set: invalid response for key %q", keys[i])
+		}
+		if len(g.Kvs) == 0 {
+			continue
+		}
+		kv := g.Kvs[0]
+		if string(kv.Key) != keys[i] {
+			return nil, fmt.Errorf("read set: unexpected key %q for %q", kv.Key, keys[i])
+		}
+		out[i] = ReadResult{Entry: Entry{Key: string(kv.Key), Value: kv.Value, Rev: kv.ModRevision}, Found: true}
+	}
+	return out, nil
+}
+
 // prefixEnd is the etcd exclusive end key for a prefix range.
 func prefixEnd(prefix string) string {
 	return string(clientv3.GetPrefixRangeEnd(prefix))
