@@ -78,3 +78,71 @@ pub fn validate(
     }
     Ok(geometry)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct Vectors {
+        version: u32,
+        cases: Vec<Vector>,
+    }
+
+    #[derive(Deserialize)]
+    struct Vector {
+        id: String,
+        size_bytes: String,
+        chunk_bytes: String,
+        chunks: String,
+        replicas: u32,
+        min_isr: u32,
+        scalar_ok: bool,
+        admission_ok: bool,
+    }
+
+    #[test]
+    fn shared_vectors() {
+        let vectors: Vectors =
+            serde_json::from_str(include_str!("../../../../meta/testdata/geometry-v1.json"))
+                .unwrap();
+        assert_eq!(vectors.version, 1);
+        assert!(!vectors.cases.is_empty());
+        for v in vectors.cases {
+            let size = v.size_bytes.parse().unwrap();
+            let chunk = v.chunk_bytes.parse().unwrap();
+            let scalar = validate_scalar(size, chunk);
+            assert_eq!(scalar.is_ok(), v.scalar_ok, "{}", v.id);
+            assert_eq!(
+                validate(size, chunk, v.replicas, v.min_isr).is_ok(),
+                v.admission_ok,
+                "{}",
+                v.id
+            );
+            if let Ok(shape) = scalar {
+                assert_eq!(u64::from(shape.chunks), v.chunks.parse::<u64>().unwrap());
+                assert_eq!(u64::from(shape.blocks_per_chunk), chunk / BLOCK_BYTES);
+                assert_eq!(u64::from(shape.chunks) * chunk, size);
+            }
+        }
+    }
+
+    #[test]
+    fn checked_bound_and_narrowing_at_every_chunk_size() {
+        for power in 20..=30 {
+            let chunk = 1u64 << power;
+            let shape = validate_scalar(MAX_CHUNKS * chunk, chunk).unwrap();
+            assert_eq!(shape.chunks, 65_536);
+            assert_eq!(shape.blocks_per_chunk, 1u32 << (power - 12));
+            assert!(validate_scalar((MAX_CHUNKS + 1) * chunk, chunk).is_err());
+        }
+        for rf in 1..=5 {
+            assert!(metadata_bound(u64::MAX, rf).is_err());
+        }
+        for rf in [0, 6, u32::MAX] {
+            assert!(metadata_bound(0, rf).is_err());
+            assert!(metadata_bound(u64::MAX, rf).is_err());
+        }
+    }
+}

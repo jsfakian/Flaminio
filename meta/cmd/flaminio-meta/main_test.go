@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/kv"
@@ -55,14 +56,15 @@ func writeIdentity(t *testing.T, ca *pki.CA, dir, name, id string, usage pki.Usa
 // fixture is the metadata service on an in-memory store, behind mutual TLS on a localhost port,
 // counting the calls that reach it.
 type fixture struct {
-	t     *testing.T
-	dir   string
-	ca    *pki.CA
-	addr  string
-	store kv.KV
-	svc   *service.Service
-	mu    sync.Mutex
-	calls map[string]int
+	t          *testing.T
+	dir        string
+	ca         *pki.CA
+	addr       string
+	store      kv.KV
+	svc        *service.Service
+	mu         sync.Mutex
+	calls      map[string]int
+	lastCreate *metav1.CreateVolumeRequest
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -78,6 +80,9 @@ func newFixture(t *testing.T) *fixture {
 	f.svc = service.New(f.store, service.Options{TrustDomain: td})
 	count := func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		f.mu.Lock()
+		if r, ok := req.(*metav1.CreateVolumeRequest); ok {
+			f.lastCreate = proto.Clone(r).(*metav1.CreateVolumeRequest)
+		}
 		f.calls[info.FullMethod[strings.LastIndex(info.FullMethod, "/")+1:]]++
 		f.mu.Unlock()
 		return handler(ctx, req)
@@ -375,5 +380,72 @@ func TestUsage(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("stdout %q", out.String())
+	}
+}
+
+func TestGeometrySizeGrammar(t *testing.T) {
+	for _, x := range []struct {
+		s    string
+		want uint64
+	}{
+		{"1K", 1024}, {"1k", 1024}, {"1M", 1 << 20}, {"1m", 1 << 20}, {"1G", 1 << 30}, {"1g", 1 << 30}, {"1T", 1 << 40}, {"1t", 1 << 40},
+		{"18446744073709551615", ^uint64(0)}, {"18014398509481983K", 18446744073709550592},
+		{"17592186044415M", 18446744073708503040}, {"17179869183G", 18446744072635809792}, {"16777215T", 18446742974197923840},
+	} {
+		n, e := parseSize(x.s)
+		if e != nil || n != x.want {
+			t.Fatalf("%q = %d,%v want %d", x.s, n, e, x.want)
+		}
+	}
+	for _, s := range []string{"17592186044417M", "17592186044416M", "18014398509481984K", "17179869184G", "16777216T", "1Mi", "-1", "1.5M", "", "18446744073709551616"} {
+		if _, e := parseSize(s); e == nil {
+			t.Errorf("accepted %q", s)
+		}
+	}
+}
+
+func TestGeometryAdminRejectsOverflowBeforeRPC(t *testing.T) {
+	f := newFixture(t)
+	admin := f.as("geometry-admin", pki.AdminID(td, "geometry"))
+	for _, s := range []string{"17592186044417M", "18014398509481984K", "17179869184G", "16777216T"} {
+		for _, argument := range []string{"capacity", "chunk"} {
+			t.Run(s+"/"+argument, func(t *testing.T) {
+				args := []string{"create", "overflow", "1M", "1", "1", "1M"}
+				if argument == "capacity" {
+					args[2] = s
+				} else {
+					args[5] = s
+				}
+				before := f.total()
+				_, _, e := f.run(admin, args...)
+				if e == nil || f.total() != before {
+					t.Fatalf("overflow sent RPC: %v, calls=%d", e, f.total()-before)
+				}
+			})
+		}
+	}
+	// An exact parser boundary is forwarded intact, even though service geometry rejects it.
+	for _, argument := range []string{"capacity", "chunk"} {
+		args := []string{"create", "boundary", "1M", "1", "1", "1M"}
+		if argument == "capacity" {
+			args[2] = "17592186044415M"
+		} else {
+			args[5] = "17592186044415M"
+		}
+		before := f.count("CreateVolume")
+		_, _, e := f.run(admin, args...)
+		if status.Code(e) != codes.InvalidArgument || f.count("CreateVolume") != before+1 {
+			t.Fatalf("boundary did not reach admission unchanged: %v", e)
+		}
+		f.mu.Lock()
+		r := f.lastCreate
+		f.mu.Unlock()
+		v := r.SizeBytes
+		if argument == "chunk" {
+			v = r.ChunkBytes
+		}
+		if v != 18446744073708503040 {
+			t.Fatalf("boundary narrowed: %d", v)
+		}
 	}
 }

@@ -3008,10 +3008,11 @@ mod metadata_tests {
 
     #[test]
     fn malformed_refresh_geometry_preserves_cache_and_live_request() {
-        for case in 0..7 {
+        for (case, epoch) in (0..19).flat_map(|case| [6, 7].map(|epoch| (case, epoch))) {
             let mut f = Fixture::new(7);
             let before = f.engine.targets["v"].view.clone();
             let mut v = f.volume.clone();
+            v.epoch = epoch;
             match case {
                 0 => v.id = "other".into(),
                 1 => v.size_bytes += BLOCK as u64,
@@ -3021,13 +3022,313 @@ mod metadata_tests {
                 5 => {
                     v.chunks.pop();
                 }
-                _ => v.target = "fl-b".into(),
+                6 => v.id = "bad/id".into(),
+                7 => v.size_bytes = 0,
+                8 => v.size_bytes = u64::MAX,
+                9 => v.chunk_bytes = 0,
+                10 => v.chunk_bytes = 4096,
+                11 => v.chunk_bytes = 2 << 30,
+                12 => v.chunk_bytes = (1 << 20) + 4096,
+                13 => v.size_bytes = 65_537 << 20,
+                14 => v.size_bytes = 3882 << 20,
+                15 => v.replicas = u32::MAX,
+                16 => v.min_isr = 0,
+                17 => v.chunks.push(v.chunks[0].clone()),
+                _ => v.target = "bad\nnode".into(),
             }
             f.refresh(v);
             let rt = &f.engine.targets["v"];
             assert_eq!(rt.view, before, "case {case}");
             assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
             assert!(rt.sm.accepts_meta_reply(f.refresh_req));
+        }
+        let mut f = Fixture::new(7);
+        let mut v = f.volume.clone();
+        v.target = "fl-b".into();
+        f.refresh(v);
+        assert!(f.engine.targets["v"].sm.accepts_meta_reply(f.refresh_req));
+    }
+
+    /// The first row introduces a legal new peer; a bad later row must not leave that
+    /// peer in the runtime map before the complete payload has been validated.
+    fn malformed_memberships(base: &[pb::ChunkMeta]) -> Vec<(&'static str, Vec<pb::ChunkMeta>)> {
+        let mut cases = Vec::new();
+        for case in 0..15 {
+            let mut chunks = base.to_vec();
+            chunks[0].replicas = vec!["fl-a".into(), "new-peer".into()];
+            chunks[0].isr = vec!["fl-a".into()];
+            chunks[0].isr_ver = 100;
+            let c = &mut chunks[1];
+            let name = match case {
+                0 => {
+                    c.replicas.clear();
+                    "empty replicas"
+                }
+                1 => {
+                    c.replicas.pop();
+                    "short replicas"
+                }
+                2 => {
+                    c.replicas.push("extra".into());
+                    "extra replicas without move"
+                }
+                3 => {
+                    c.replicas[1] = c.replicas[0].clone();
+                    "duplicate replicas"
+                }
+                4 => {
+                    c.replicas[1] = "bad\nnode".into();
+                    "invalid replica id"
+                }
+                5 => {
+                    c.isr.clear();
+                    "empty ISR"
+                }
+                6 => {
+                    c.isr.push("fl-a".into());
+                    "duplicate ISR"
+                }
+                7 => {
+                    c.isr = vec!["outsider".into()];
+                    "ISR outside replicas"
+                }
+                8 => {
+                    c.moving_from = "fl-b".into();
+                    "missing move destination"
+                }
+                9 => {
+                    c.moving_to = "fl-c".into();
+                    "missing move source"
+                }
+                10 => {
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "fl-b".into();
+                    "self move"
+                }
+                11 => {
+                    c.moving_from = "outsider".into();
+                    c.moving_to = "fl-c".into();
+                    "unplaced move source"
+                }
+                12 => {
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "bad/node".into();
+                    "invalid move id"
+                }
+                13 => {
+                    c.replicas.push("fl-c".into());
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "fl-d".into();
+                    "grown move omits destination"
+                }
+                _ => {
+                    c.replicas[1] = "x".repeat(129);
+                    "overlong node id"
+                }
+            };
+            cases.push((name, chunks));
+        }
+        cases
+    }
+
+    #[test]
+    fn every_metadata_membership_refusal_precedes_peer_cache_and_core_mutation() {
+        let base = Fixture::new(7).volume;
+        for (case, chunks) in malformed_memberships(&base.chunks) {
+            let mut initial = base.clone();
+            initial.chunks = chunks.clone();
+            assert!(validate_volume("v", &initial).is_err(), "initial {case}");
+            let mut f = Fixture::new(7);
+            f.engine.targets.clear();
+            let before = f.engine.service.store().device().mutations();
+            let error = f
+                .engine
+                .start_target(
+                    f.engine.start,
+                    "v",
+                    Attaching {
+                        attempt: 1,
+                        token: vec![],
+                        volume: Some(initial.clone()),
+                        nodes: Some(vec![]),
+                    },
+                )
+                .unwrap_err();
+            assert!(error.contains("membership"), "initial {case}: {error}");
+            assert!(f.engine.targets.is_empty());
+            assert_eq!(f.engine.service.store().device().mutations(), before);
+            for id in [ISR, REFRESH] {
+                for epoch in [6, 7] {
+                    let mut f = Fixture::new(7);
+                    let rt = &f.engine.targets["v"];
+                    let before = (rt.view.clone(), rt.nodes.clone(), rt.addrs.clone());
+                    if id == ISR {
+                        f.isr(chunks.clone(), epoch);
+                    } else {
+                        let mut v = initial.clone();
+                        v.epoch = epoch;
+                        f.refresh(v);
+                    }
+                    let rt = &f.engine.targets["v"];
+                    assert_eq!(
+                        (rt.view.clone(), rt.nodes.clone(), rt.addrs.clone()),
+                        before,
+                        "{case}, reply {id}, epoch {epoch}"
+                    );
+                    assert!(rt.sm.accepts_meta_reply(if id == ISR {
+                        f.isr_req
+                    } else {
+                        f.refresh_req
+                    }));
+                    assert!(!rt.sm.is_deposed());
+                    assert!(f.engine.take_output().is_empty(), "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn initial_geometry_and_identity_refuse_before_target_or_replica_creation() {
+        for case in 0..15 {
+            let mut f = Fixture::new(7);
+            f.engine.targets.clear();
+            let mut v = f.volume.clone();
+            match case {
+                0 => v.size_bytes = 0,
+                1 => v.chunk_bytes = 0,
+                2 => v.chunk_bytes = 4096,
+                3 => v.chunk_bytes = 2 << 30,
+                4 => v.size_bytes = u64::MAX,
+                5 => v.size_bytes += 4096,
+                6 => v.size_bytes = 65_537 << 20,
+                7 => v.size_bytes = 3_882 << 20, // RF2's first over-budget count.
+                8 => v.replicas = u32::MAX,
+                9 => v.min_isr = 0,
+                10 => v.min_isr = 3,
+                11 => v.chunks.clear(),
+                12 => v.chunks.push(v.chunks[0].clone()),
+                13 => v.id = "different-volume".into(),
+                _ => v.target = "bad/node".into(),
+            }
+            let before = f.engine.service.store().chunks();
+            let result = f.engine.start_target(
+                f.engine.start,
+                "v",
+                Attaching {
+                    attempt: 1,
+                    token: vec![],
+                    volume: Some(v),
+                    nodes: Some(vec![]),
+                },
+            );
+            let error = result.unwrap_err();
+            assert!(
+                !error.contains("token"),
+                "case {case}: geometry must fail first: {error}"
+            );
+            assert!(f.engine.targets.is_empty());
+            assert_eq!(f.engine.service.store().chunks(), before);
+        }
+    }
+
+    #[test]
+    fn generic_refresh_rejects_even_self_consistent_immutable_geometry_changes() {
+        for case in 0..4 {
+            let mut f = Fixture::new(7);
+            let before = f.engine.targets["v"].view.clone();
+            let mut v = f.volume.clone();
+            match case {
+                0 => {
+                    v.size_bytes *= 2;
+                    v.chunks.extend(v.chunks.clone());
+                }
+                1 => {
+                    v.chunk_bytes *= 2;
+                    v.chunks.pop();
+                }
+                2 => {
+                    v.replicas = 3;
+                    for c in &mut v.chunks {
+                        c.replicas.push("fl-c".into());
+                    }
+                }
+                _ => v.min_isr = 2,
+            }
+            assert!(
+                validate_volume("v", &v).is_ok(),
+                "valid geometry case {case}"
+            );
+            f.refresh(v);
+            let rt = &f.engine.targets["v"];
+            assert_eq!(rt.view, before);
+            assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+            assert!(rt.sm.accepts_meta_reply(f.refresh_req));
+        }
+    }
+
+    #[test]
+    fn isr_saved_indices_are_unique_bounded_and_reply_rows_remain_positional() {
+        for indices in [
+            vec![],
+            vec![0, 0],
+            vec![0, 2],
+            vec![u32::MAX, 0],
+            vec![0; MAX_CHANGES_PER_REQUEST + 1],
+        ] {
+            let mut f = Fixture::new(7);
+            let before = f.engine.targets["v"].view.clone();
+            let MetaWait::Isr { chunks, .. } = f.engine.meta_waits.get_mut(&ISR).unwrap() else {
+                unreachable!()
+            };
+            *chunks = indices.clone();
+            f.isr(vec![f.shrunk(4)[0].clone(); indices.len()], 7);
+            let rt = &f.engine.targets["v"];
+            assert_eq!(rt.view, before, "indices {indices:?}");
+            assert!(rt.sm.accepts_meta_reply(f.isr_req));
+        }
+        let mut f = Fixture::new(7);
+        let MetaWait::Isr { chunks, .. } = f.engine.meta_waits.get_mut(&ISR).unwrap() else {
+            unreachable!()
+        };
+        *chunks = vec![1, 0];
+        let mut rows = f.shrunk(4);
+        rows[1].isr_ver = 5;
+        f.isr(rows, 7);
+        let rt = &f.engine.targets["v"];
+        assert_eq!(rt.view.chunks[1].isr_ver, 4);
+        assert_eq!(rt.view.chunks[0].isr_ver, 5);
+        assert!(!rt.sm.accepts_meta_reply(f.isr_req));
+    }
+
+    #[test]
+    fn valid_concentrated_and_moving_views_at_every_rf_cap() {
+        for (rf, count) in (1..=5).zip([5137, 3881, 3119, 2607, 2239]) {
+            let mut v = Fixture::new(7).volume;
+            v.size_bytes = count * (1 << 30);
+            v.chunk_bytes = 1 << 30;
+            v.replicas = rf;
+            v.min_isr = rf;
+            let members: Vec<_> = (0..rf).map(|i| format!("n{i}")).collect();
+            let mut c = pb::ChunkMeta {
+                replicas: members.clone(),
+                isr: members,
+                isr_ver: u64::MAX,
+                ..Default::default()
+            };
+            v.chunks = vec![c.clone(); count as usize];
+            assert_eq!(validate_volume("v", &v).unwrap().chunks, count as u32);
+            // Requested moves may have only R members; in-progress moves have R+1.
+            c.moving_from = "n0".into();
+            c.moving_to = format!("n{rf}");
+            v.chunks.fill(c.clone());
+            assert!(validate_volume("v", &v).is_ok());
+            c.replicas.push(c.moving_to.clone());
+            c.isr = c.replicas.clone();
+            v.chunks.fill(c.clone());
+            assert!(validate_volume("v", &v).is_ok());
+            v.chunks.push(c);
+            v.size_bytes += 1 << 30;
+            assert!(validate_volume("v", &v).unwrap_err().contains("budget"));
         }
     }
 

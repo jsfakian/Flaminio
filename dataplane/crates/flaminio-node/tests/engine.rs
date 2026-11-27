@@ -261,6 +261,110 @@ fn store_of_size(size: u64) -> Store<MemDevice> {
     Store::open(dev, StoreConfig::default()).unwrap()
 }
 
+#[test]
+fn authenticated_malformed_hello_cannot_erase_or_fence_old_incarnation() {
+    use flaminio_net::frame::Frame;
+    use flaminio_net::session::{Accepted, Conn};
+    use flaminio_net::token::Claims;
+    use futures_lite::AsyncWriteExt;
+    use futures_rustls::{TlsAcceptor, TlsConnector};
+    use smol::Async;
+
+    let dir = std::env::temp_dir().join(format!("flaminio-hostile-hello-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[80; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let acceptor = TlsAcceptor::from(ids["fl-b"].server_config().unwrap());
+    let connector = TlsConnector::from(ids["fl-a"].client_config().unwrap());
+    let mut service = ReplicaService::new(store());
+    service
+        .hello(&Accepted {
+            peer_node: "fl-a".into(),
+            req: 1,
+            epoch: 9,
+            session: 1,
+            claims: Claims {
+                volume: "v".into(),
+                epoch: 9,
+                node: "fl-a".into(),
+                issued_at: 0,
+                first_epoch: 0,
+            },
+            size: 4 * CHUNK,
+            chunk_size: CHUNK,
+            chunks: vec![0, 3],
+        })
+        .unwrap();
+    let before = service.store().chunks();
+    let mutations = service.store().device().mutations();
+    for case in 0..7 {
+        let mut hello = Frame::Hello {
+            req: 2,
+            epoch: 21,
+            session: 2,
+            volume: "v".into(),
+            token: token_first(&signer, "v", 21, "fl-a", 20),
+            size: 4 * CHUNK,
+            chunk_size: CHUNK,
+            chunks: vec![0, 1],
+        };
+        let Frame::Hello {
+            size,
+            chunk_size,
+            chunks,
+            ..
+        } = &mut hello
+        else {
+            unreachable!()
+        };
+        match case {
+            0 => *size = 0,
+            1 => *chunk_size = 0,
+            2 => *chunk_size = 4096,
+            3 => *size += 4096,
+            4 => *chunks = vec![0, 0],
+            5 => *chunks = vec![0, 4],
+            _ => *size = 65_537 * CHUNK,
+        }
+        assert!(hello.encode_checked().is_err());
+        let listener = Async::<TcpListener>::bind((LOCALHOST, 0)).unwrap();
+        let addr = listener.get_ref().local_addr().unwrap();
+        smol::block_on(async {
+            let server = async {
+                let (io, _) = listener.accept().await.unwrap();
+                let (accepted, mut conn) = flaminio_net::session::accept(io, &acceptor, TD, &key)
+                    .await
+                    .unwrap();
+                assert_eq!(accepted.claims.first_epoch, 20);
+                assert_eq!(accepted.peer_node, "fl-a");
+                let why = service.hello(&accepted).unwrap_err();
+                conn.send(&Frame::Refused { reason: why }).await.unwrap();
+            };
+            let client = async {
+                let io = Async::<std::net::TcpStream>::connect(addr).await.unwrap();
+                let mut tls = connector.connect(LOCALHOST.into(), io).await.unwrap();
+                // Deliberately bypass the checked sender as a hostile, authenticated peer.
+                tls.write_all(&hello.encode()).await.unwrap();
+                tls.flush().await.unwrap();
+                let reply = Conn::new(tls).recv().await.unwrap();
+                assert!(
+                    matches!(reply, Frame::Refused { .. }),
+                    "case {case}: {reply:?}"
+                );
+            };
+            futures_lite::future::zip(server, client).await;
+        });
+        assert_eq!(service.store().chunks(), before, "case {case}");
+        assert_eq!(
+            service.store().device().mutations(),
+            mutations,
+            "case {case}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 struct Node {
     inputs: mpsc::Sender<Input>,
     outputs: mpsc::Receiver<Output>,

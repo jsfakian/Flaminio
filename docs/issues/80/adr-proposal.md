@@ -1,6 +1,7 @@
 # Proposal: Admit only complete, representable volume geometries
 
 - **Status:** Accepted with the plan, 2026-11-13; numbered and moved into docs/adr/ when implemented.
+- **Implementation record:** [ADR 0018](../../adr/0018-admit-only-representable-volume-geometries.md).
 - **Date:** 2026-11-12
 - **Issue:** [#80](https://github.com/jsfakian/Flaminio/issues/80)
 

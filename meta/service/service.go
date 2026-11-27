@@ -302,6 +302,15 @@ func decodeHeader(id string, e kv.Entry, ok bool) (domain.Header, int64, error) 
 	if ok {
 		var err error
 		if h, err = decodeHeaderBounded(e.Value); err != nil {
+			if len(e.Value) <= domain.MaxCreateRecordBytes {
+				parseErr := json.Unmarshal(e.Value, &h)
+				var syntaxErr *json.SyntaxError
+				var typeErr *json.UnmarshalTypeError
+				if errors.As(parseErr, &syntaxErr) || errors.As(parseErr, &typeErr) &&
+					typeErr.Field != "create_spec" && !strings.HasPrefix(typeErr.Field, "create_spec.") {
+					err = parseErr
+				}
+			}
 			return h, 0, err
 		}
 	}

@@ -75,3 +75,21 @@ join them before review and publication.
   Missing/unknown/null required identity fields or partial new-format identity are DataLoss;
   current supported geometry is checked separately by shared Admit. Only SizeBytes is replaced
   for full-struct range-compatibility equality; every non-capacity field remains compared.
+
+- **Maximum-view interop fixture:** a test-only loopback server under
+  `meta/testdata/geometry-interop/` seeds admitted RF-cap future-move views and serves the
+  production metadata service with real mTLS/authorization and normal limits. A shared
+  fixture builder feeds protobuf-size tests and the server; `scripts/dev/meta-interop.sh`
+  starts it alongside the existing ordinary fixture. This proves the actual Rust/Go receive
+  boundary without production CLI flags, runtime test hooks or larger-message overrides.
+- **Shared vector contracts:** Go TestSharedVectors and Rust geometry::tests::shared_vectors
+  consume the same independent `meta/testdata/geometry-v1.json` expected results. The new
+  `make geometry-vectors` target is part of `make contracts`; expected values are not
+  regenerated from either helper under test.
+
+- **Normal-read parse compatibility:** bounded creation decoding is stricter than #77's
+  normal header reader. Preserve bounded outer SyntaxError/UnmarshalTypeError through the
+  existing Unavailable mapping, excluding exact/nested create_spec type paths. Keep strict
+  identity and oversize errors DataLoss. The corruption-after-initial-read Check race proves
+  identity DataLoss on both backends; outer syntax/type known-commit/ISR matrices preserve
+  their statuses and exact authority assertions.

@@ -43,10 +43,54 @@ No completed acceptance or readiness is claimed yet.
 
 ## Tests
 
-Joined formatting/lint and generated API checks pass. Pending mapped S1–S8 acceptance, including shared vectors,
-worst metadata/Hello bounds, CSI compatibility, store preflight and later-view refusal.
-Required final checks: `make lint test race hygiene contracts sim`; a short store crash
-campaign is included for the store boundary changes. No lab checks are required.
+Joined `make fmt lint test` passes after all acceptance edits and the normal-reader error
+adapter repair. Independent Go and Rust acceptance covers every mapped rule; no geometry,
+framing, store or epoch safety defect was found in those boundary runs.
+
+| Rules | Acceptance evidence |
+|---|---|
+| S1, S4 | Shared independent JSON vectors, checked counts/arithmetic, RF 1–5 placement and no KV mutation on rejected Create/Check |
+| S2–S3 | CSI signed ranges/defaults/limit-only/chunk rounding, full desired identity forwarding, actual current/grown capacity, conflict/status/legacy cases and no scalar fallback |
+| S3, S8 | Both-backend read-only compatibility/auth/lifecycle/replacement/identity-corruption matrices, unsupported persisted volumes unchanged |
+| S4 | Checked admin/CSI suffixes and no RPC after overflow; outer header parse compatibility and nested identity corruption across the coherent-read race |
+| S5 | Initial and later engine geometry/count/ID/membership/move validation, immutable refresh, saved ISR indices and higher-epoch deposition; authenticated hostile Hello over real TLS |
+| S6 | 65,536 Hello roundtrip and 65,537 refusal, zero-byte invalid sends with connection reuse, 16 Hello fuzz seeds and preserved #86 Fenced regressions |
+| S7–S8 | All five legal store clusters, actual table/max bounds, exact/excess slots, duplicates/existing keys, read-only preflight, startup refusal/delete and durable partial-create retry |
+
+`make geometry-vectors crash-test CASES=2000` passes, including the new contract target and
+the required short memory-store crash campaign. Scoped Rust suite and all-target Clippy,
+including fuzz, pass. Go non-service packages and mapped both-backend service acceptance pass;
+the final joined full suite confirms the repaired service cases too.
+
+Controlled omissions fail their intended assertions and fixed counterparts pass: metadata
+budget removal admits RF-next vector cases; suffix overflow removal lets 17592186044417M
+wrap into a valid 1 MiB RPC; missing engine validation consumes core requests; missing slot
+preflight accepts excess; missing Hello range validation emits invalid data. The experiments
+use isolated copies/overlays and leave branch runtime bytes intact.
+
+Acceptance caught an error-class integration issue: routing normal header reads through the
+strict creation decoder changed #77's parse statuses. The adapter now preserves bounded
+outer syntax/type errors through their existing Unavailable mapping while keeping nested
+create_spec errors DataLoss. A deterministic corruption-after-initial-read Check test failed
+before the precise guard and passes after it on both backends. Exact #77 commit context,
+status, epoch, ISR and applied-history assertions remain intact.
+
+### Joined maximum-view interoperability
+
+`make meta-interop` passes all three tests, including real production-service/Rust-client
+Get/Create/Check/Attach maximum future-move views at every admitted RF cap. The ordinary
+fixture remains in the run. The client uses the normal explicit 4,194,304-byte receive limit.
+
+| RF | N | Encoded Attach bytes | Admission B | Receive limit |
+|---|---|---|---|---|
+| 1 | 5137 | 4,110,252 | 4,193,840 | 4,194,304 |
+| 2 | 3881 | 4,122,273 | 4,193,528 | 4,194,304 |
+| 3 | 3119 | 4,130,207 | 4,193,984 | 4,194,304 |
+| 4 | 2607 | 4,135,353 | 4,194,104 | 4,194,304 |
+| 5 | 2239 | 4,138,323 | 4,193,456 | 4,194,304 |
+
+These are representation boundary checks, not scale/performance certification. Final
+`make race hygiene contracts sim`, sanitizers and independent review/conformance remain.
 
 ## Conformance
 
@@ -58,6 +102,7 @@ None required by the approved design. No shared-lab actions are authorized for t
 
 ## ADRs
 
-The geometry/admission policy was accepted with the approved plan. Prepare the next unused
-numbered ADR for review, then accept it only after code/security review and conformance pass.
+The geometry/admission policy was accepted with the approved plan. Numbered
+[ADR 0018](../../adr/0018-admit-only-representable-volume-geometries.md) is prepared for review
+with Proposed status until code/security review and conformance pass.
 Existing language/etcd/fencing/ISR decisions remain unchanged.

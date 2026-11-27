@@ -11,6 +11,198 @@ use flaminio_repl::meta::{ChunkMeta, MAX_CHANGES_PER_REQUEST, MetaReply, MetaReq
 use flaminio_repl::replica::Replica;
 use flaminio_repl::target::{Output, Target};
 use flaminio_repl::types::{NodeId, Timing, Value};
+use prost::Message;
+
+// Test-only admin methods are outside the data-plane client's normal RPC subset.
+// Tags mirror api/proto/flaminio/meta/v1/meta.proto; Volume is the production decoder.
+#[derive(Clone, PartialEq, Message)]
+struct GeometryCreate {
+    #[prost(string, tag = "1")]
+    id: String,
+    #[prost(uint64, tag = "2")]
+    size_bytes: u64,
+    #[prost(uint64, tag = "3")]
+    chunk_bytes: u64,
+    #[prost(uint32, tag = "4")]
+    replicas: u32,
+    #[prost(uint32, tag = "5")]
+    min_isr: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeometryVolumeResponse {
+    #[prost(message, optional, tag = "1")]
+    volume: Option<pb::Volume>,
+    #[prost(bool, tag = "2")]
+    legacy_identity: bool,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeometryCheck {
+    #[prost(message, optional, tag = "1")]
+    desired: Option<GeometryCreate>,
+    #[prost(int64, tag = "2")]
+    required_bytes: i64,
+    #[prost(int64, tag = "3")]
+    limit_bytes: i64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeometryAttach {
+    #[prost(string, tag = "1")]
+    volume: String,
+    #[prost(string, tag = "2")]
+    node: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct GeometryAttachResponse {
+    #[prost(message, optional, tag = "1")]
+    volume: Option<pb::Volume>,
+    #[prost(bytes, tag = "2")]
+    token: Vec<u8>,
+}
+
+#[test]
+#[ignore = "needs the production geometry fixture: make meta-interop"]
+fn maximum_future_move_views_use_normal_four_mib_limits() {
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+
+    let addr = std::env::var("FLAMINIO_GEOMETRY_INTEROP").expect("set by make meta-interop");
+    let cfg = config(vec![addr.clone()]);
+    let dir = std::env::var("FLAMINIO_META_INTEROP_DIR").unwrap();
+    let read = |file: &str| std::fs::read_to_string(format!("{dir}/{file}")).unwrap();
+    let tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(&cfg.ca_pem))
+        .identity(Identity::from_pem(read("admin.crt"), read("admin.key")))
+        .domain_name("127.0.0.1");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let channel = rt.block_on(async {
+        Endpoint::from_shared(format!("https://{addr}"))
+            .unwrap()
+            .tls_config(tls)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap()
+    });
+    let node = |i: u32| {
+        let prefix = format!("n{i}-");
+        format!("{prefix}{}", "x".repeat(128 - prefix.len()))
+    };
+    for (rf, count) in (1..=5).zip([5137, 3881, 3119, 2607, 2239]) {
+        let prefix = format!("geometry-r{rf}-");
+        let id = format!("{prefix}{}", "x".repeat(128 - prefix.len()));
+        let budget = flaminio_repl::geometry::metadata_bound(count, rf).unwrap() as usize;
+        let Answer::GetVolume(get) = call_blocking(
+            &cfg,
+            Call::GetVolume(pb::GetVolumeRequest { id: id.clone() }),
+        )
+        .unwrap() else {
+            panic!("GetVolume RF{rf} failed")
+        };
+        assert!(get.encoded_len() <= budget);
+        assert!(budget <= 4 << 20);
+        let volume = get.volume.unwrap();
+        assert_eq!(volume.chunks.len(), count as usize);
+        assert_eq!(
+            (volume.size_bytes, volume.chunk_bytes),
+            (count << 30, 1 << 30)
+        );
+        assert_eq!((volume.replicas, volume.min_isr), (rf, rf));
+        assert_eq!(volume.epoch, u64::MAX - 1);
+        for chunk in &volume.chunks {
+            assert_eq!(chunk.replicas, (0..=rf).map(node).collect::<Vec<_>>());
+            assert_eq!(chunk.isr, chunk.replicas);
+            assert_eq!(chunk.isr_ver, u64::MAX);
+            assert_eq!(
+                (&chunk.moving_from, &chunk.moving_to),
+                (&node(0), &node(rf))
+            );
+        }
+        let desired = GeometryCreate {
+            id: id.clone(),
+            size_bytes: volume.size_bytes,
+            chunk_bytes: volume.chunk_bytes,
+            replicas: rf,
+            min_isr: rf,
+        };
+        let created: GeometryVolumeResponse = rt.block_on(geometry_unary(
+            channel.clone(),
+            "CreateVolume",
+            desired.clone(),
+        ));
+        assert!(created.encoded_len() <= budget);
+        assert_eq!(created.volume.as_ref(), Some(&volume));
+        let checked: GeometryVolumeResponse = rt.block_on(geometry_unary(
+            channel.clone(),
+            "CheckCreateVolume",
+            GeometryCheck {
+                desired: Some(desired),
+                required_bytes: volume.size_bytes as i64,
+                limit_bytes: volume.size_bytes as i64,
+            },
+        ));
+        assert!(!checked.legacy_identity);
+        assert_eq!(checked.volume.as_ref(), Some(&volume));
+        assert!(checked.encoded_len() <= budget);
+        let attached: GeometryAttachResponse = rt.block_on(geometry_unary(
+            channel.clone(),
+            "Attach",
+            GeometryAttach {
+                volume: id.clone(),
+                node: node(0),
+            },
+        ));
+        assert!(attached.encoded_len() <= budget);
+        assert!(!attached.token.is_empty());
+        let mut expected = volume;
+        expected.epoch = u64::MAX;
+        assert_eq!(attached.volume.as_ref(), Some(&expected));
+        let Answer::GetVolume(after) =
+            call_blocking(&cfg, Call::GetVolume(pb::GetVolumeRequest { id })).unwrap()
+        else {
+            panic!("GetVolume after Attach RF{rf}")
+        };
+        assert_eq!(after.volume, Some(expected));
+        eprintln!(
+            "geometry interop RF{rf}: N={count}, encoded Attach={}, B={budget}, limit={}",
+            attached.encoded_len(),
+            4 << 20
+        );
+    }
+}
+
+async fn geometry_unary<Req, Resp>(
+    channel: tonic::transport::Channel,
+    method: &'static str,
+    request: Req,
+) -> Resp
+where
+    Req: Message + Send + Sync + 'static,
+    Resp: Message + Default + Send + Sync + 'static,
+{
+    // Exercise all wrappers with the same explicit production limit; never raise the
+    // receive limit just to make the maximum fixture fit.
+    let mut grpc = tonic::client::Grpc::new(channel)
+        .max_decoding_message_size(4 << 20)
+        .max_encoding_message_size(4 << 20);
+    grpc.ready().await.unwrap();
+    let path = format!("/flaminio.meta.v1.MetadataService/{method}")
+        .parse()
+        .unwrap();
+    grpc.unary(
+        tonic::Request::new(request),
+        path,
+        tonic_prost::ProstCodec::default(),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+}
 
 fn config(endpoints: Vec<String>) -> Config {
     let dir = std::env::var("FLAMINIO_META_INTEROP_DIR").expect("set by make meta-interop");

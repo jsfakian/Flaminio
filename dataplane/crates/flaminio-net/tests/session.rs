@@ -371,3 +371,66 @@ fn checked_fenced_refusal_writes_nothing_and_next_send_is_intact() {
         assert_eq!(Frame::decode(&stream.bytes[4..]), Ok(valid));
     }
 }
+
+#[test]
+fn checked_hello_bounds_round_trip_and_refusal_preserves_connection() {
+    let legal = Frame::Hello {
+        req: 1,
+        epoch: u64::MAX,
+        session: u64::MAX,
+        volume: "v".repeat(u16::MAX as usize),
+        token: vec![0; flaminio_net::token::MAX_LEN],
+        size: (1u64 << 16) * (1 << 30),
+        chunk_size: 1 << 30,
+        chunks: (0..MAX_CHUNKS as u32).collect(),
+    };
+    let encoded = legal.encode_checked().unwrap();
+    assert_eq!(Frame::decode(&encoded[4..]), Ok(legal.clone()));
+    assert_eq!(
+        encoded.len(),
+        4 + 49 + u16::MAX as usize + flaminio_net::token::MAX_LEN + 4 * MAX_CHUNKS
+    );
+    assert!(encoded.len() - 4 <= flaminio_net::frame::MAX_BODY);
+
+    for case in 0..10 {
+        let mut invalid = legal.clone();
+        let Frame::Hello {
+            volume,
+            token,
+            size,
+            chunk_size,
+            chunks,
+            ..
+        } = &mut invalid
+        else {
+            unreachable!()
+        };
+        match case {
+            0 => chunks.push(MAX_CHUNKS as u32),
+            1 => volume.push('v'),
+            2 => *token = vec![0; u16::MAX as usize + 1],
+            3 => token.push(0),
+            4 => *size = 0,
+            5 => *chunk_size = 0,
+            6 => *size += 4096,
+            7 => *size += *chunk_size,
+            8 => chunks[0] = MAX_CHUNKS as u32,
+            _ => chunks[1] = chunks[0],
+        }
+        let stream = ObservedWriter::default();
+        let events = std::rc::Rc::clone(&stream.0);
+        let mut conn = Conn::new(stream);
+        assert!(
+            matches!(
+                smol::block_on(conn.send(&invalid)),
+                Err(SessionError::Encode(_))
+            ),
+            "case {case}"
+        );
+        assert!(events.borrow().bytes.is_empty(), "case {case}");
+        assert_eq!((events.borrow().writes, events.borrow().flushes), (0, 0));
+        smol::block_on(conn.send(&legal)).unwrap();
+        assert_eq!(events.borrow().bytes, encoded, "case {case}");
+        assert_eq!(events.borrow().flushes, 1);
+    }
+}

@@ -1,0 +1,386 @@
+{
+  "version": 1,
+  "description": "Independent approved geometry contract. chunks is the scalar result; zero when scalar_ok is false. Integer geometry values are decimal strings.",
+  "cases": [
+    {
+      "id": "block-too-small",
+      "size_bytes": "4096",
+      "chunk_bytes": "4096",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "zero-volume",
+      "size_bytes": "0",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "zero-chunk",
+      "size_bytes": "1048576",
+      "chunk_bytes": "0",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "minimum",
+      "size_bytes": "1048576",
+      "chunk_bytes": "1048576",
+      "chunks": "1",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "chunk-minus-block",
+      "size_bytes": "1044480",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "chunk-plus-block",
+      "size_bytes": "1052672",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "non-power-chunk",
+      "size_bytes": "3145728",
+      "chunk_bytes": "3145728",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "maximum-chunk",
+      "size_bytes": "1073741824",
+      "chunk_bytes": "1073741824",
+      "chunks": "1",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "chunk-over-maximum",
+      "size_bytes": "2147483648",
+      "chunk_bytes": "2147483648",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "hello-maximum",
+      "size_bytes": "68719476736",
+      "chunk_bytes": "1048576",
+      "chunks": "65536",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "hello-over-maximum",
+      "size_bytes": "68720525312",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "old-floor",
+      "size_bytes": "1099511627776",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "old-floor-plus-block",
+      "size_bytes": "1099511631872",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "max-i64",
+      "size_bytes": "9223372036854775807",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "max-u64",
+      "size_bytes": "18446744073709551615",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "max-u64-chunk",
+      "size_bytes": "1048576",
+      "chunk_bytes": "18446744073709551615",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "max-u64-aligned",
+      "size_bytes": "18446744073708503040",
+      "chunk_bytes": "1048576",
+      "chunks": "0",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": false,
+      "admission_ok": false
+    },
+    {
+      "id": "rf1-admission-max",
+      "size_bytes": "5386534912",
+      "chunk_bytes": "1048576",
+      "chunks": "5137",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf1-admission-next",
+      "size_bytes": "5387583488",
+      "chunk_bytes": "1048576",
+      "chunks": "5138",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "rf1-maximum-chunk",
+      "size_bytes": "5515811749888",
+      "chunk_bytes": "1073741824",
+      "chunks": "5137",
+      "replicas": 1,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf2-admission-max",
+      "size_bytes": "4069523456",
+      "chunk_bytes": "1048576",
+      "chunks": "3881",
+      "replicas": 2,
+      "min_isr": 2,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf2-admission-next",
+      "size_bytes": "4070572032",
+      "chunk_bytes": "1048576",
+      "chunks": "3882",
+      "replicas": 2,
+      "min_isr": 2,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "rf2-maximum-chunk",
+      "size_bytes": "4167192018944",
+      "chunk_bytes": "1073741824",
+      "chunks": "3881",
+      "replicas": 2,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf3-admission-max",
+      "size_bytes": "3270508544",
+      "chunk_bytes": "1048576",
+      "chunks": "3119",
+      "replicas": 3,
+      "min_isr": 3,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf3-admission-next",
+      "size_bytes": "3271557120",
+      "chunk_bytes": "1048576",
+      "chunks": "3120",
+      "replicas": 3,
+      "min_isr": 3,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "rf3-maximum-chunk",
+      "size_bytes": "3349000749056",
+      "chunk_bytes": "1073741824",
+      "chunks": "3119",
+      "replicas": 3,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf4-admission-max",
+      "size_bytes": "2733637632",
+      "chunk_bytes": "1048576",
+      "chunks": "2607",
+      "replicas": 4,
+      "min_isr": 4,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf4-admission-next",
+      "size_bytes": "2734686208",
+      "chunk_bytes": "1048576",
+      "chunks": "2608",
+      "replicas": 4,
+      "min_isr": 4,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "rf4-maximum-chunk",
+      "size_bytes": "2799244935168",
+      "chunk_bytes": "1073741824",
+      "chunks": "2607",
+      "replicas": 4,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf5-admission-max",
+      "size_bytes": "2347761664",
+      "chunk_bytes": "1048576",
+      "chunks": "2239",
+      "replicas": 5,
+      "min_isr": 5,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf5-admission-next",
+      "size_bytes": "2348810240",
+      "chunk_bytes": "1048576",
+      "chunks": "2240",
+      "replicas": 5,
+      "min_isr": 5,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "rf5-maximum-chunk",
+      "size_bytes": "2404107943936",
+      "chunk_bytes": "1073741824",
+      "chunks": "2239",
+      "replicas": 5,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": true
+    },
+    {
+      "id": "rf-zero",
+      "size_bytes": "1048576",
+      "chunk_bytes": "1048576",
+      "chunks": "1",
+      "replicas": 0,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "rf-six",
+      "size_bytes": "1048576",
+      "chunk_bytes": "1048576",
+      "chunks": "1",
+      "replicas": 6,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "rf-u32-max",
+      "size_bytes": "1048576",
+      "chunk_bytes": "1048576",
+      "chunks": "1",
+      "replicas": 4294967295,
+      "min_isr": 1,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "isr-zero",
+      "size_bytes": "1048576",
+      "chunk_bytes": "1048576",
+      "chunks": "1",
+      "replicas": 1,
+      "min_isr": 0,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "isr-over-rf",
+      "size_bytes": "1048576",
+      "chunk_bytes": "1048576",
+      "chunks": "1",
+      "replicas": 2,
+      "min_isr": 3,
+      "scalar_ok": true,
+      "admission_ok": false
+    },
+    {
+      "id": "isr-u32-max",
+      "size_bytes": "1048576",
+      "chunk_bytes": "1048576",
+      "chunks": "1",
+      "replicas": 5,
+      "min_isr": 4294967295,
+      "scalar_ok": true,
+      "admission_ok": false
+    }
+  ]
+}

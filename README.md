@@ -77,6 +77,8 @@ of a Kubernetes-native app** and **security turned on by default**.
 
 - A **volume** is split into **chunks** (256 MiB by default). Each chunk has *N* replicas placed in
   different failure domains.
+  Volumes contain whole chunks, with power-of-two chunk sizes from 1 MiB through 1 GiB;
+  [geometry and per-RF admission limits](docs/ARCHITECTURE.md#4-core-concepts) also apply.
 - A **Volume Target** runs on the node that uses the volume. It exposes a block device to the pod
   and sends every write to all in-sync replicas of the affected chunk in parallel.
 - A small **replicated metadata service**, backed by a dedicated etcd cluster (not the Kubernetes

@@ -37,8 +37,22 @@ changes, while other volumes remain available. Recovery requires the existing re
 for a metadata-deleted volume, or explicit operator cleanup and restart.
 
 See [protocol §3/§6](../docs/replication-protocol.md) and
-[issue #86](../docs/issues/86/spec.md). Geometry admission remains
-[issue #80](../docs/issues/80/spec.md); no automatic migration of unsupported volumes is added.
+[issue #86](../docs/issues/86/spec.md).
+
+## Geometry admission
+
+Volumes use 4 KiB logical blocks and whole power-of-two chunks from 1 MiB through 1 GiB.
+The 65,536-chunk wire ceiling is further restricted by metadata's 4 MiB future-view budget:
+RF 1–5 admit at most 5137/3881/3119/2607/2239 chunks. Engine and session validation precedes
+narrowing, peer/core changes and old-incarnation cleanup; higher authoritative epochs still
+depose a target even when the reply's payload is invalid. Hello sends use checked encoding
+and write no bytes on refusal.
+
+Store preflight checks the actual layout and all unique missing chunk slots without writes.
+Startup geometry outside the supported envelope is refused while preserving data/fences.
+Explicit cleanup remains available; no automatic migration is added. These bounds do not
+reserve distributed resources or certify scale. See [issue #80](../docs/issues/80/spec.md)
+and [ADR 0018](../docs/adr/0018-admit-only-representable-volume-geometries.md).
 
 ## Crash consistency
 
