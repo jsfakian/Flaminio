@@ -145,3 +145,10 @@ No finding was judged not to apply.
   It neither alters normal scheduling nor introduces RNG draws. The fast-fence mutation
   has a directly verified witness at 1,001,529 after an honest no-catch [0,200000) search;
   no unsearched first-catch claim is made.
+
+- **R1-A-C1 — atomic in-memory Hello admission:** the simulator's Replica adapter must
+  preflight the whole unique missing set against all held chunks before invoking the core
+  or creating chunks. A partial add followed by no reply diverged from production and S1.
+  Preserve the existing Stale response for an older epoch. The regression preserves fence,
+  session, data, filters and uncertainty in unopened/precise/coarse cases and tests exact-fit
+  duplicates. This applies the existing admission contract; it adds no production rule.

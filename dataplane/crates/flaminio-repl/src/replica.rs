@@ -740,6 +740,23 @@ impl Replica {
         m: &ToReplica<Vec<Value>>,
         mut observe: impl FnMut(&Action<Vec<Value>>),
     ) -> Option<FromReplica<Vec<Value>>> {
+        if let Request::Hello { chunks } = &m.body
+            && m.epoch >= self.core.fenced(m.vol)
+        {
+            // Refuse the entire set before opening a session, fencing or coarsening a
+            // held chunk to create another. Stale Hellos still take the core's stale path.
+            let remaining = (self.core.budget() as usize)
+                .saturating_sub(self.core.uncertainty_stats(m.vol).chunks);
+            let mut missing = BTreeSet::new();
+            for &chunk in chunks {
+                if !self.data.contains_key(&(m.vol, chunk))
+                    && missing.insert(chunk)
+                    && missing.len() > remaining
+                {
+                    return None;
+                }
+            }
+        }
         let mut action = self.core.handle(m);
         if matches!(action, Action::Fence { .. })
             && let Request::Hello { chunks } = &m.body
@@ -1610,6 +1627,95 @@ mod tests {
             body(r.handle(&msg(2, 1, Request::Heartbeat))),
             Some(Response::Stale { fenced: 3 })
         );
+    }
+
+    #[test]
+    fn hello_over_budget_changes_no_fence_session_data_or_uncertainty() {
+        for retained_writes in [0, 1, 2] {
+            let mut r = Replica::with_chunk_size_and_budget(4, 2);
+            r.create_chunk(1, 0, 4).unwrap();
+            if retained_writes > 0 {
+                r.handle(&msg(1, 1, Request::Hello { chunks: vec![0] }))
+                    .unwrap();
+                r.handle(&msg(1, 1, Request::BeginResync { chunk: 0 }))
+                    .unwrap();
+                for seq in 0..retained_writes {
+                    r.handle(&msg(1, 1, write(seq as Block, &[9], seq, None)))
+                        .unwrap();
+                }
+            }
+            let before = r.clone();
+            let mut observed = Vec::new();
+            assert_eq!(
+                r.handle_observed(
+                    &msg(
+                        2,
+                        2,
+                        Request::Hello {
+                            chunks: vec![1, 2, 1]
+                        }
+                    ),
+                    |action| observed.push(action.clone()),
+                ),
+                None
+            );
+            assert!(observed.is_empty());
+            assert_eq!(r.core.fenced(1), before.core.fenced(1));
+            assert_eq!(r.core.vols[&1].session, before.core.vols[&1].session);
+            assert_eq!(r.core.vols[&1].filters, before.core.vols[&1].filters);
+            assert_eq!(r.core.report(1), before.core.report(1));
+            assert_eq!(
+                r.core.uncertainty_stats(1),
+                before.core.uncertainty_stats(1)
+            );
+            assert_eq!(r.data, before.data);
+            assert_eq!(
+                body(r.handle(&msg(1, 1, Request::Heartbeat))),
+                (retained_writes > 0).then_some(Response::Ok)
+            );
+            assert_eq!(r.handle(&msg(2, 2, Request::Heartbeat)), None);
+        }
+    }
+
+    #[test]
+    fn hello_counts_unique_missing_chunks_and_accepts_exact_budget() {
+        let mut r = Replica::with_chunk_size_and_budget(4, 2);
+        r.create_chunk(1, 0, 4).unwrap();
+        r.handle(&msg(1, 1, Request::Hello { chunks: vec![0] }))
+            .unwrap();
+        r.handle(&msg(1, 1, write(1, &[9], 0, None))).unwrap();
+        let hello = msg(
+            2,
+            2,
+            Request::Hello {
+                chunks: vec![1, 0, 1, 0],
+            },
+        );
+        let expected = Some(Response::Fenced {
+            uncertain: vec![(0, vec![Extent::new(0, 4)]), (1, vec![])],
+        });
+        assert_eq!(body(r.handle(&hello)), expected);
+        assert_eq!(body(r.handle(&hello)), expected);
+        assert_eq!(r.block(1, 0, 1), Some(9));
+        assert_eq!(r.block(1, 1, 1), Some(0));
+        assert_eq!(r.core.uncertainty_stats(1).chunks, 2);
+        assert_arena_bound(&r.core, 1);
+    }
+
+    #[test]
+    fn stale_hello_over_budget_still_returns_stale_without_creating() {
+        let mut r = Replica::with_chunk_size_and_budget(4, 2);
+        r.create_chunk(1, 0, 4).unwrap();
+        r.handle(&msg(3, 1, Request::Hello { chunks: vec![0] }))
+            .unwrap();
+        assert_eq!(
+            body(r.handle(&msg(2, 2, Request::Hello { chunks: vec![1, 2] }))),
+            Some(Response::Stale { fenced: 3 })
+        );
+        assert_eq!(r.core.fenced(1), 3);
+        assert_eq!(r.core.vols[&1].session, Some((3, 1)));
+        assert_eq!(r.core.report(1), vec![(0, vec![])]);
+        assert_eq!(r.data.keys().copied().collect::<Vec<_>>(), vec![(1, 0)]);
     }
 
     #[test]

@@ -94,6 +94,29 @@ No comments from the requested review scopes, including Nits.
 
 Status: clear. Approval remains separate; no approval is inferred.
 
+### Code/security review round 1 — cbb4097
+
+Whole implementation and tests: `610f367cfc90d1e6f19e20d2848b8020d8ecb84e..cbb4097`.
+The roughly 5,000-line change is split into A (replica/target/messages), B (node/net/fuzz
+and integration docs) and C (simulator oracle/faults/histories), with a fresh code and
+security reviewer for each part. Reviewers check cross-part call contracts. Built-in review
+skills are unavailable in this environment; direct high-effort review is used and recorded.
+Part A code review confirmed **R1-A-C1 — Medium**: the in-memory Replica Hello adapter
+fences and creates chunks sequentially before discovering whole-set budget overflow. At
+budget 2, held {0}, Hello at epoch 2 advertising {1,2} returns no reply but leaves fence 2
+and chunks {0,1}. Production ReplicaService preflights before those changes; the simulator
+adapter must match it. Fix: count unique missing chunks and refuse before core.handle/create.
+All six reviews are complete. Part A security found no additional issue; Part B and C
+code/security reviews are clear. No nits were reported. Part C security independently ran
+the old-receipt controlled history (clean twin plus expected catch); other runtime evidence
+is the test engineer's and the recorded full checks. The adapter now preflights unique missing chunks before core/session/fence/create changes,
+while preserving Stale replies. Its new regression failed before the fix (fence advanced
+from 1 to 2) and passes after it. Tests cover unopened, precise and coarse state, unchanged
+data/filter/uncertainty and old-session authority, exact-fit duplicates and stale requests.
+All 20 replica tests pass. `make fmt lint test race hygiene contracts sim` passes with the
+fix, including 20,000 normal seeds and all 163 release tests (ignored mutations included).
+Incremental code/security review and final conformance follow.
+
 ## Implementation — 2026-11-27
 
 Branch: `issue/86-bounded-uncertainty`, based on
@@ -139,7 +162,7 @@ Focused acceptance results before formal review:
 
 | Area | Result |
 |---|---|
-| Replica core | 17 tests pass; 28,800 independent exact-oracle operations, partial-page reuse and default 512×128 fill (four covers) |
+| Replica core | 20 tests pass after review fix; 28,800 independent exact-oracle operations, partial-page reuse and default 512×128 fill (four covers) |
 | Node lifecycle | 39 focused tests and full node package (50 library + 19 integration) pass; real-store failed-write/reconnect/restart proof passes |
 | Codec/session/fuzz | 14 net unit + 7 session and 4 fuzz-regression tests pass; real F09 workloads, maximum body, zero-byte refused sends and 17 hostile seeds |
 | Target/engine | All 75 Target tests and local/remote captured-Hello adapter tests pass |
@@ -151,8 +174,13 @@ Focused acceptance results before formal review:
 
 The broad campaign is reproducible from `dataplane/` with
 `FLAMINIO_SIM_SEEDS=20000 cargo test --release --offline -p flaminio-repl sim::tests::forged_epochs_leave_runs_clean -- --exact --nocapture`.
-The default test count remains 200. Final project checks and review findings will be recorded
-below; current focused passes alone do not constitute readiness.
+The default test count remains 200. Final `make fmt lint` and `make test sim` pass at
+`cbb4097` (20,000 normal seeds, then all 160 release tests including ignored mutations).
+`make sanitize QUICK=1` passes (address/leak and thread sanitizers). All seven GitHub CI
+jobs plus GitGuardian pass at the same SHA. Code/security review has an open adapter
+preflight finding awaiting incremental review, so these passes do not constitute readiness.
+After its fix, the complete `make fmt lint test race hygiene contracts sim` rerun also passes
+(20,000 normal seeds and all 163 release tests).
 
 ## Conformance
 
