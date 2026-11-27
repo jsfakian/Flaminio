@@ -67,6 +67,10 @@ type Header struct {
 	// CreateSpec is the normalized full create identity. Retained after visibility. Absent on
 	// legacy headers (scalar matching only).
 	CreateSpec *CreateSpec `json:"create_spec,omitempty"`
+	// AdmissionGeneration is the placement-gate revision the winning create claim compared
+	// (docs/issues/78). Unchanged through creation/recovery, finalization, attach and deletion.
+	// Legacy absence is 0; new admissions never record 0.
+	AdmissionGeneration int64 `json:"admission_generation,omitempty"`
 }
 
 // ChunkCount is the number of chunks the volume is split into.

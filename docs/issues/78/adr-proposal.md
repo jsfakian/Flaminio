@@ -1,8 +1,8 @@
 # Issue #78 proposal: Fence placement admission and validate drain generations
 
-- **Status:** Accepted with the plan, 2026-11-13; numbered and moved into docs/adr/ when implemented.
+- **Status:** Accepted with the plan, 2026-11-13; numbered as [ADR 0019](../../adr/0019-fence-placement-admission-and-drain-completion.md), accepted after implementation review/conformance.
 - **Date:** 2026-11-12
-- **Scope:** issue-local draft; no global ADR number is allocated.
+- **Scope:** historical issue-local proposal; ADR 0019 records the implemented decision.
 
 ## Context
 

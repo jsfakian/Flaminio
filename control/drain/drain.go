@@ -29,10 +29,20 @@ type Progress struct {
 	Remaining, Moving int
 	// Volumes with replicas on the node and no target to move them.
 	Unattached []string
+	// PendingCreations and Incoming come from CheckDrain (docs/issues/78): earlier creating
+	// reservations and recorded moves into the node. Printed when nonzero; Remaining==0 alone
+	// never certifies completion.
+	PendingCreations, Incoming uint64
 }
 
 func (p Progress) String() string {
 	s := fmt.Sprintf("%d chunk replicas left, %d moving", p.Remaining, p.Moving)
+	if p.PendingCreations > 0 {
+		s += fmt.Sprintf("; %d pending creations", p.PendingCreations)
+	}
+	if p.Incoming > 0 {
+		s += fmt.Sprintf("; %d incoming moves", p.Incoming)
+	}
 	if len(p.Unattached) > 0 {
 		s += fmt.Sprintf("; waiting for a target: %v", p.Unattached)
 	}
@@ -166,19 +176,30 @@ func leastLoaded(candidates, exclude []string, load map[string]int) string {
 	return ok[0]
 }
 
-// Run marks the node draining and steps until no replica is left on it, reporting progress
-// after each step.
+// Run marks the node draining and steps until CheckDrain reports complete for that generation,
+// reporting progress after each step. Remaining==0 alone never succeeds (docs/issues/78).
 func Run(ctx context.Context, c metav1.MetadataServiceClient, node string, interval time.Duration, report func(Progress)) error {
-	if _, err := c.DrainNode(ctx, &metav1.DrainNodeRequest{Node: node, Draining: true}); err != nil {
+	mark, err := c.DrainNode(ctx, &metav1.DrainNodeRequest{Node: node, Draining: true})
+	if err != nil {
 		return err
+	}
+	generation := mark.GetGeneration()
+	if generation == 0 {
+		return status.Error(codes.FailedPrecondition, "drain generation is 0; CheckDrain is required")
 	}
 	for {
 		p, err := Step(ctx, c, node)
 		if err != nil {
 			return err
 		}
+		check, err := c.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: node, Generation: generation})
+		if err != nil {
+			return err
+		}
+		p.PendingCreations = check.GetPendingCreations()
+		p.Incoming = check.GetIncomingMoves()
 		report(p)
-		if p.Remaining == 0 {
+		if check.GetComplete() {
 			return nil
 		}
 		select {

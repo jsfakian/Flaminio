@@ -21,6 +21,7 @@
 
 pub mod check;
 pub mod create_recovery;
+pub mod placement_admission;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};

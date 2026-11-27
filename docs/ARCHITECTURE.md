@@ -636,6 +636,17 @@ Other placement rules:
   target, old writers excluded) may be CAS-removed without a new tombstone. Upgrade under a
   maintenance barrier that excludes old writers; rolling mixed-version safety is not claimed.
   Legacy visible headers keep scalar-only identity matching.
+- **Placement admission and drain generations** (docs/issues/78). A single `placement-gate`
+  revision advances atomically with a changed node registration or drain mark/unmark (not with
+  heartbeats). Create and direct-move claims compare the gate revision observed before planning;
+  a create records that immutable `admission_generation` on its header and keeps it through
+  publication and recovery. A drain marker's modification revision is the drain generation.
+  While that generation remains marked, later admissions cannot target the node; earlier
+  reservations may finish. Completion (`CheckDrain`) counts creating headers with
+  `admission_generation` older than D, raw chunk replicas and incoming `moving.to`, then
+  re-compares the same marker: that compare is the linearization point. Unrelated earlier
+  creations can block a drain (conservative global scan). Metadata completion does not certify
+  physical erasure.
 - **Locality migration.** With `dataLocality: preferred`, when a volume attaches on a node with
   no local replicas, a background task migrates one replica of each chunk to that node (only if
   the node has a suitable disk).
@@ -686,7 +697,9 @@ claims them.
 1. `Cordoned`: no new chunks are placed on it.
 2. `Draining`: each chunk replica gets a new replica elsewhere (copy plus live write mirroring,
    §11.4). Once the new replica joins the ISR, the old one is removed. **Redundancy never drops
-   during a drain.**
+   during a drain.** Controllers retain the drain generation from the mark and call `CheckDrain`
+   before treating the node as empty: a zero visible-volume scan alone is not completion
+   (docs/issues/78).
 3. `Drained`, then `release`: the per-disk keys are destroyed (crypto-erase), NVMe
    Sanitize/Format runs with secure erase when supported, the signature is wiped, and the device
    is handed back.

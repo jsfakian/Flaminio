@@ -33,7 +33,9 @@ follow-ups: [#76](https://github.com/jsfakian/Flaminio/issues/76) interrupted cr
 [#77](https://github.com/jsfakian/Flaminio/issues/77) inconsistent volume reads (fixed: validated
 header/prefix snapshots, commit-pinned Attach responses and atomic named ISR views;
 [implementation and validation report](issues/77/report.md)),
-[#78](https://github.com/jsfakian/Flaminio/issues/78) drain admission,
+[#78](https://github.com/jsfakian/Flaminio/issues/78) drain admission
+(fixed: placement-gate CAS, durable earlier reservations and same-generation `CheckDrain`;
+[implementation and validation report](issues/78/report.md)),
 [#79](https://github.com/jsfakian/Flaminio/issues/79) CSI mount ownership,
 [#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation (fixed: shared whole-chunk
 admission and future-view budget, checked CSI capacity/identity retries, and validation before

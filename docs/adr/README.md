@@ -16,6 +16,7 @@ its consequences. An ADR's status is one of **Proposed**, **Accepted**, **Supers
 | [0016](0016-create-retains-immutable-admitted-plan.md) | Creation retains an immutable admitted plan and cooperative progress | Accepted |
 | [0017](0017-bound-uncertainty-with-per-chunk-covers.md) | Bound uncertainty with per-chunk maximum-Version covers | Accepted |
 | [0018](0018-admit-only-representable-volume-geometries.md) | Admit only complete and representable volume geometries | Accepted |
+| [0019](0019-fence-placement-admission-and-drain-completion.md) | Fence placement admission and validate drain generations | Accepted |
 
 The 2026-11-12 review found that ADR 0005's immediate-read rule predates the stricter,
 implemented takeover protocol. Proposed ADR 0007 records the correction; do not use the old

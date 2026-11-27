@@ -175,6 +175,27 @@ func TestAuthorization(t *testing.T) {
 	expect("agent drains its node", err, codes.PermissionDenied)
 	_, err = admin.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a"})
 	expect("admin undrains", err, codes.OK)
+	// CheckDrain is administrator-only (docs/issues/78 S7).
+	_, err = agentA.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("agent CheckDrain", err, codes.PermissionDenied)
+	_, err = nodeA.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("io CheckDrain", err, codes.PermissionDenied)
+	_, err = agentB.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("other-node agent CheckDrain", err, codes.PermissionDenied)
+	_, err = foreign.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1})
+	expect("foreign CheckDrain", err, codes.Unauthenticated)
+	calledCheck := false
+	_, err = svc.Authorize(context.Background(), &metav1.CheckDrainRequest{Node: "fl-a", Generation: 1}, &grpc.UnaryServerInfo{FullMethod: metav1.MetadataService_CheckDrain_FullMethodName}, func(context.Context, any) (any, error) { calledCheck = true; return nil, nil })
+	expect("no identity CheckDrain", err, codes.Unauthenticated)
+	if calledCheck {
+		t.Fatal("unauthenticated completion reached handler")
+	}
+	mark, err := admin.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a", Draining: true})
+	expect("admin marks for completion", err, codes.OK)
+	_, err = admin.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "fl-a", Generation: mark.GetGeneration()})
+	expect("admin CheckDrain", err, codes.OK)
+	_, err = admin.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "fl-a", Draining: false})
+	expect("admin undrains after completion check", err, codes.OK)
 	_, err = nodeB.ListVolumes(ctx, &metav1.ListVolumesRequest{})
 	expect("node lists volumes", err, codes.OK)
 
