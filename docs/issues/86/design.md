@@ -104,6 +104,17 @@ Keep the seed-4 clean counterexample and add a deterministic replay/receipt regr
 an obsolete pinned mutation witness must be replaced by an actual witnessed same-generation
 violation, never an assertion skip. See [decisions](decisions.md).
 
+The wider consistency cases also require two existing-contract repairs. Seed each new
+round's `force_copy` from all current chunk writes before issuing Mapped, retain that evidence
+after client completion, and restore it to dirty state on abort. A cached hole or checksum
+match predating write admission must not omit acknowledged data.
+
+When emitting a source removal, remember source/expected-ISR-version separately from mutable
+next-proposal state. Exclude it from source reads until a strictly newer authoritative version
+fences the old conditional update; equal-version refreshes and local cancellation prove
+nothing. Retire/requeue its pending normal reads, invalidate local fast-read generations, and
+abort affected snapshot-source rounds through existing cleanup. Write quorum is unchanged.
+
 ## Prune and restart proof (S3, S4)
 
 `ReplicaCore::handle` returns `Action::Drop` for a Write whose `version.epoch` or `prune.epoch`,

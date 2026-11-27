@@ -365,6 +365,11 @@ serves I/O.
   members (§4).
 - **Reads and writes during a drop.** Until the drop commits, `from` is an ordinary ISR member:
   every write still needs its acknowledgement.
+- **An emitted source removal retires it from reads.** The target keeps source/expected-version
+  evidence independently of mutable proposal state. Timeouts, local cancellation and an
+  equal-version refresh cannot make it readable again; a strictly newer authoritative version
+  resolves the old conditional update. Pending read receipts are retired/requeued, local fast
+  reads lose their generation, and affected snapshot-source work aborts safely.
 - **After the drop**, nothing depends on `from`'s copy. The simulator deletes it at that
   moment, so a move that dropped its source too early loses data visibly.
 - **A target that dies mid-move** leaves the request in place: the next target finds `to`

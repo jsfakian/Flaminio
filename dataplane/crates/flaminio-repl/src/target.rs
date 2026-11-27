@@ -193,6 +193,8 @@ enum Phase {
 #[derive(Debug)]
 struct Resync {
     member: NodeId,
+    /// Source whose mapped snapshot planned this round.
+    source: NodeId,
     round: u64,
     /// The member's session that carried `BeginResync`.
     session: u64,
@@ -203,8 +205,8 @@ struct Resync {
     started: bool,
     /// Blocks not yet copied and acknowledged.
     todo: ExtentSet,
-    /// Writes that landed on the ISR while Mapped was in flight: always copy these, even if
-    /// the stale Mapped reply omitted them.
+    /// Writes pending before Mapped or started before BeginResync Ack: always copy these,
+    /// even if the stale Mapped reply omitted them.
     force_copy: ExtentSet,
     /// Unmapped on the source: discard on the joiner so stale data does not survive.
     discard: ExtentSet,
@@ -242,6 +244,9 @@ struct Chunk {
     /// The move's next step, to be proposed: add the destination, or drop the source.
     add_replica: Option<NodeId>,
     drop_replica: Option<NodeId>,
+    /// Emitted move removals may already have deleted the source's copy. Only a metadata
+    /// version newer than the conditional update's expected version resolves that hazard.
+    read_blocked: BTreeMap<NodeId, u64>,
     /// Counts the local node's departures from the ISR. A fast read counts only if the local
     /// replica stayed in the ISR throughout: a replica dropped and added again in between holds
     /// different data (possibly a chunk recreated empty), though the lease may hold.
@@ -505,6 +510,7 @@ impl<P: Clone + Debug> Target<P> {
                 moving: m.moving,
                 add_replica: None,
                 drop_replica: None,
+                read_blocked: BTreeMap::new(),
                 local_gen: 0,
             })
             .collect();
@@ -1382,25 +1388,8 @@ impl<P: Clone + Debug> Target<P> {
                 };
                 self.queue.push_front(work);
             }
-            if let ReqKind::Read { id } = kind
-                && let Some(r) = self.reads.remove(&id)
-            {
-                if !matches!(r.purpose, ReadFor::Client { .. }) {
-                    self.release_bulk();
-                }
-                if r.locked {
-                    self.chunks[r.chunk as usize].locks.remove(&r.ext);
-                }
-                let (chunk, ext) = (r.chunk, r.ext);
-                let work = match r.purpose {
-                    ReadFor::Client { op } => Work::Client {
-                        op,
-                        kind: Op::Read { chunk, ext },
-                    },
-                    ReadFor::Repair => Work::Repair { chunk, ext },
-                    ReadFor::Copy { round } => Work::Copy { chunk, round, ext },
-                };
-                self.queue.push_front(work);
+            if let ReqKind::Read { id } = kind {
+                self.retry_read(id);
             }
         }
         for i in 0..self.chunks.len() {
@@ -1417,6 +1406,68 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// Retires a read receipt and retries its work ahead of later queued operations.
+    fn retry_read(&mut self, id: u64) {
+        let Some(r) = self.reads.remove(&id) else {
+            return;
+        };
+        if !matches!(r.purpose, ReadFor::Client { .. }) {
+            self.release_bulk();
+        }
+        if r.locked {
+            self.chunks[r.chunk as usize].locks.remove(&r.ext);
+        }
+        let (chunk, ext) = (r.chunk, r.ext);
+        let work = match r.purpose {
+            ReadFor::Client { op } => Work::Client {
+                op,
+                kind: Op::Read { chunk, ext },
+            },
+            ReadFor::Repair => Work::Repair { chunk, ext },
+            ReadFor::Copy { round } => Work::Copy { chunk, round, ext },
+        };
+        self.queue.push_front(work);
+    }
+
+    /// A move removal was emitted: this source may already have lost its local copy, even
+    /// while the target still sees the old metadata. Retire its reads without failing the
+    /// session or other chunks. Unique request ids keep delayed replies retired after rejoin.
+    fn retire_source_reads(&mut self, i: usize, from: NodeId) {
+        let chunk = i as ChunkIdx;
+        let resync_source = self.chunks[i]
+            .resync
+            .as_ref()
+            .is_some_and(|r| r.source == from)
+            || self
+                .digests
+                .values()
+                .any(|d| d.chunk == chunk && d.resync.is_some() && d.need.contains(&from));
+        if resync_source {
+            // Old snapshot replies name the aborted round and cannot affect its successor.
+            // Copies already sent precede its next BeginResync on the member's stream.
+            self.abort_resync(i);
+        }
+        let pending: Vec<(u64, u64)> = self
+            .peers
+            .get(&from)
+            .and_then(|p| p.session.as_ref())
+            .into_iter()
+            .flat_map(|s| &s.inflight)
+            .filter_map(|(&req, &(_, kind))| match kind {
+                ReqKind::Read { id } if self.reads.get(&id).is_some_and(|r| r.chunk == chunk) => {
+                    Some((req, id))
+                }
+                _ => None,
+            })
+            .collect();
+        for (req, id) in pending.into_iter().rev() {
+            if let Some(s) = self.peers.get_mut(&from).and_then(|p| p.session.as_mut()) {
+                s.inflight.remove(&req);
+            }
+            self.retry_read(id);
+        }
+    }
+
     fn abort_resync(&mut self, i: usize) {
         let c = &mut self.chunks[i];
         if let Some(r) = c.resync.take()
@@ -1424,6 +1475,7 @@ impl<P: Clone + Debug> Target<P> {
         {
             d.extend(&r.live);
             d.extend(&r.todo);
+            d.extend(&r.force_copy);
         }
     }
 
@@ -1894,7 +1946,8 @@ impl<P: Clone + Debug> Target<P> {
         if self.bugs.read_from_removing {
             return true;
         }
-        !self.chunks[i].removing.contains(&n)
+        let c = &self.chunks[i];
+        !c.removing.contains(&n) && c.drop_replica != Some(n) && !c.read_blocked.contains_key(&n)
     }
 
     fn start_read(
@@ -2581,15 +2634,23 @@ impl<P: Clone + Debug> Target<P> {
         // Ask the source what holds data; copy only that, discard the rest (follow-ups §3).
         // A chunk larger than one probe is asked in pieces.
         let probes = ExtentSet::of(Extent::new(0, self.blocks_per_chunk)).pieces(self.max_mapped);
+        // A pending Write may not have been admitted by the source yet. If it completes
+        // before BeginResync Ack, it disappears from replay but must still be copied even
+        // when the earlier Mapped snapshot saw a hole.
+        let mut force_copy = ExtentSet::new();
+        for w in self.writes.values().filter(|w| w.chunk as usize == i) {
+            force_copy.insert(w.ext);
+        }
         self.chunks[i].resync = Some(Resync {
             member,
+            source: from,
             round,
             session,
             awaiting_mapped: probes.len(),
             mapped: ExtentSet::new(),
             started: false,
             todo,
-            force_copy: ExtentSet::new(),
+            force_copy,
             discard: ExtentSet::new(),
             live: ExtentSet::new(),
             unacked: BTreeSet::new(),
@@ -2696,6 +2757,22 @@ impl<P: Clone + Debug> Target<P> {
         if changes.is_empty() {
             return;
         }
+        for change in &changes {
+            let i = change.chunk as usize;
+            let c = &mut self.chunks[i];
+            if let Some(from) = c.drop_replica
+                && change
+                    .new_replicas
+                    .as_ref()
+                    .is_some_and(|replicas| !replicas.contains(&from))
+                && c.read_blocked.insert(from, change.expected_ver).is_none()
+            {
+                if from == self.node {
+                    c.local_gen += 1;
+                }
+                self.retire_source_reads(i, from);
+            }
+        }
         // Advance even if this batch is refused or its reply is lost, so retries of early
         // chunks cannot keep eligible later chunks from getting a transaction slot.
         self.next_meta_chunk = (changes.last().expect("nonempty batch").chunk as usize + 1) % count;
@@ -2754,6 +2831,9 @@ impl<P: Clone + Debug> Target<P> {
             if m.isr_ver <= c.isr_ver {
                 continue;
             }
+            // Even an equal-version snapshot can predate an emitted conditional removal.
+            // A strictly newer chunk version makes every older conditional update final.
+            c.read_blocked.retain(|_, expected| m.isr_ver <= *expected);
             let removed: Vec<NodeId> = c.isr.difference(&m.isr).copied().collect();
             let during_io = c.phase != Phase::Fencing;
             // Digest-first reconciliation may shrink the ISR before every member has been
@@ -4391,9 +4471,9 @@ mod tests {
             .insert(2, |m| matches!(m.body, Request::BeginResync { .. }));
         b.request_move(1, 2);
         b.until("BeginResync Ack held", |b| {
-            b.held.iter().any(|(n, m, _)| {
-                *n == 2 && matches!(m.body, Request::BeginResync { .. })
-            })
+            b.held
+                .iter()
+                .any(|(n, m, _)| *n == 2 && matches!(m.body, Request::BeginResync { .. }))
         });
         assert!(!b.t.chunks[0].resync.as_ref().unwrap().started);
         b.t.retransmit(b.now, 1);

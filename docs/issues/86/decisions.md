@@ -128,3 +128,13 @@ No finding was judged not to apply.
   acknowledgement bookkeeping and request-ID retirement; test-only mutation wiring may retain
   both while leaving normal replay enabled. Establish an actual clean-passing same-seed
   witness; never skip its assertion or compound it with the separate replay-omission bug.
+- **Stable source retirement:** clean cases 1833/9803/14081 showed that mutable move proposal
+  state can disappear while its conditional removal may already have committed. Remember the
+  emitted source/expected version independently, reject its source-read use/completion and
+  clear only on a strictly newer authoritative version. Retire pending normal receipts,
+  invalidate local fast-read generations and abort affected snapshot provenance. This enforces
+  the existing read-from-removing-member rule without using timeout as proof.
+- **Pre-snapshot pending extents:** new-round `force_copy` includes every current chunk write
+  before Mapped is sent, including writes that finish before BeginResync Ack. Restore that
+  evidence to dirty state on abort. An unmapped-source proof fails without the seed and passes
+  with it; the correction changes neither client quorum nor on-disk/wire format.
