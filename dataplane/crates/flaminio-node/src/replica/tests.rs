@@ -66,30 +66,57 @@ fn restart(s: ReplicaService<MemDevice>) -> ReplicaService<MemDevice> {
 }
 
 fn accepted(epoch: u64, session: u64, chunks: &[u32]) -> Accepted {
+    accepted_in("pvc-1", 4, epoch, session, chunks)
+}
+
+fn accepted_in(volume: &str, count: u64, epoch: u64, session: u64, chunks: &[u32]) -> Accepted {
     Accepted {
         peer_node: "fl-a".into(),
         req: 1,
         epoch,
         session,
         claims: Claims {
-            volume: "pvc-1".into(),
+            volume: volume.into(),
             epoch,
             node: "fl-a".into(),
             issued_at: 0,
             first_epoch: 0,
         },
-        size: 4 * CHUNK,
+        size: count * CHUNK,
         chunk_size: CHUNK,
         chunks: chunks.to_vec(),
     }
 }
 
-fn write(req: u64, chunk: u32, start: u32, blocks: &[u8], seq: u64) -> Frame {
+fn store_with_chunks(volumes: &[(&str, &[u64])], epoch: u64) -> Store<MemDevice> {
+    let mut store = store_on(formatted());
+    for (volume, chunks) in volumes {
+        for &index in *chunks {
+            store
+                .create_chunk(
+                    ChunkKey {
+                        volume: volume_uuid(volume),
+                        index,
+                    },
+                    CHUNK,
+                    6 * CHUNK,
+                    epoch,
+                )
+                .unwrap();
+        }
+    }
+    store
+}
+
+fn write(session: SessionRef, req: u64, chunk: u32, start: u32, blocks: &[u8], seq: u64) -> Frame {
     Frame::Write {
         req,
         chunk,
         ext: Extent::new(start, blocks.len() as u32),
-        version: Version { epoch: 1, seq },
+        version: Version {
+            epoch: session.epoch,
+            seq,
+        },
         prune: None,
         data: blocks
             .iter()
@@ -119,7 +146,14 @@ fn blocks(r: &Reply) -> Vec<u8> {
 fn hello_creates_the_placed_chunks_fenced() {
     let mut s = service();
     let (sess, reply) = s.hello(&accepted(3, 1, &[0, 2])).unwrap();
-    assert!(matches!(reply, Frame::Fenced { req: 1, .. }), "{reply:?}");
+    assert_eq!(
+        reply,
+        Frame::Fenced {
+            req: 1,
+            uncertain: vec![(0, vec![]), (2, vec![])],
+        },
+        "newly created chunks must have explicit empty rows"
+    );
     let mut chunks: Vec<(u64, u64)> = s
         .store()
         .chunks()
@@ -129,8 +163,199 @@ fn hello_creates_the_placed_chunks_fenced() {
     chunks.sort();
     assert_eq!(chunks, vec![(0, 3), (2, 3)]);
     // A chunk not placed here is not served.
-    let r = s.handle(&[(sess, write(2, 1, 0, &[9], 0))]);
+    let r = s.handle(&[(sess, write(sess, 2, 1, 0, &[9], 0))]);
     assert_eq!(r, vec![Reply::Nothing]);
+}
+
+#[test]
+fn unsupported_volume_is_refused_and_kept() {
+    let store = store_with_chunks(
+        &[("over-budget", &[0, 1, 2, 3, 4]), ("healthy", &[0, 1])],
+        9,
+    );
+    let mut s = ReplicaService::with_budget(store, 4);
+    let bad = volume_uuid("over-budget");
+    let healthy = volume_uuid("healthy");
+    assert_eq!(s.unsupported.get(&bad), Some(&"too many chunks"));
+    assert!(
+        !s.vols.contains_key(&bad),
+        "quarantine allocates no core volume"
+    );
+    assert_eq!(s.vols.len(), 1, "the healthy volume remains supported");
+    let before = s.store().chunks();
+    for (epoch, first_epoch) in [(10, 0), (21, 20)] {
+        let mut a = accepted_in("over-budget", 6, epoch, epoch, &[0]);
+        a.claims.first_epoch = first_epoch;
+        assert_eq!(
+            s.hello(&a).unwrap_err(),
+            "volume unsupported on this node: too many chunks"
+        );
+        assert_eq!(
+            s.store().chunks(),
+            before,
+            "even a newer incarnation cannot erase quarantine"
+        );
+        assert!(!s.vols.contains_key(&bad));
+    }
+
+    let (good, reply) = s.hello(&accepted_in("healthy", 6, 10, 1, &[0, 1])).unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
+    let replies = s.handle(&[
+        (good, write(good, 2, 0, 0, &[7], 1)),
+        (good, read(3, 0, 0, 1)),
+    ]);
+    assert_eq!(replies[0], Reply::Send(Frame::Ok { req: 2 }));
+    assert_eq!(
+        blocks(&replies[1]),
+        vec![7],
+        "another volume still commits writes"
+    );
+    let healthy_before: Vec<_> = s
+        .store()
+        .chunks()
+        .into_iter()
+        .filter(|chunk| chunk.key.volume == healthy)
+        .collect();
+
+    assert_eq!(s.delete_volume("over-budget"), Ok(5));
+    assert!(!s.unsupported.contains_key(&bad));
+    assert_eq!(
+        s.store()
+            .chunks()
+            .into_iter()
+            .filter(|chunk| chunk.key.volume == healthy)
+            .collect::<Vec<_>>(),
+        healthy_before,
+        "deleting quarantine leaves the healthy volume unchanged"
+    );
+    let mut a = accepted_in("over-budget", 6, 21, 22, &[0]);
+    a.claims.first_epoch = 20;
+    assert_eq!(
+        s.hello(&a).unwrap().1,
+        Frame::Fenced {
+            req: 1,
+            uncertain: vec![(0, vec![])],
+        },
+        "explicit deletion permits a fresh supported allocation"
+    );
+}
+
+#[test]
+fn unsupported_chunk_index_is_refused_and_kept() {
+    let store = store_with_chunks(&[("wide-index", &[1_u64 << 32])], 9);
+    let mut s = ReplicaService::with_budget(store, 4);
+    let uuid = volume_uuid("wide-index");
+    let before = s.store().chunks();
+    assert_eq!(s.unsupported.get(&uuid), Some(&"chunk index out of range"));
+    assert!(
+        s.vols.is_empty(),
+        "unsupported indices are not narrowed into core IDs"
+    );
+    for (epoch, first_epoch) in [(10, 0), (21, 20)] {
+        let mut a = accepted_in("wide-index", 6, epoch, epoch, &[0]);
+        a.claims.first_epoch = first_epoch;
+        assert_eq!(
+            s.hello(&a).unwrap_err(),
+            "volume unsupported on this node: chunk index out of range"
+        );
+        assert_eq!(s.store().chunks(), before);
+        assert!(s.vols.is_empty());
+    }
+    assert_eq!(s.delete_volume("wide-index"), Ok(1));
+    assert!(!s.unsupported.contains_key(&uuid));
+    assert!(s.store().chunks().is_empty());
+}
+
+#[test]
+fn hello_over_budget_is_refused_before_create() {
+    let mut s = ReplicaService::with_budget(store_on(formatted()), 4);
+    let (old, _) = s
+        .hello(&accepted_in("budget", 6, 9, 1, &[0, 1, 2]))
+        .unwrap();
+    let before = s.store().chunks();
+    assert_eq!(
+        s.hello(&accepted_in("budget", 6, 10, 2, &[3, 4]))
+            .unwrap_err(),
+        "volume would hold more than 4 chunks on this node"
+    );
+    assert_eq!(s.store().chunks(), before);
+    assert_eq!(
+        s.fenced_epoch(old),
+        9,
+        "a refused Hello never advances the fence"
+    );
+    assert_eq!(
+        s.vols[&volume_uuid("budget")].chunks,
+        BTreeSet::from([0, 1, 2])
+    );
+    assert_eq!(blocks(&s.handle(&[(old, read(2, 0, 0, 1))])[0]), vec![0]);
+}
+
+#[test]
+fn hello_budget_counts_after_earlier_incarnation_delete() {
+    let mut s = ReplicaService::with_budget(store_on(formatted()), 4);
+    s.hello(&accepted_in("budget", 6, 9, 1, &[0, 1, 2]))
+        .unwrap();
+    let mut a = accepted_in("budget", 6, 21, 2, &[3, 4]);
+    a.claims.first_epoch = 20;
+    let (new, reply) = s.hello(&a).unwrap();
+    assert_eq!(
+        reply,
+        Frame::Fenced {
+            req: 1,
+            uncertain: vec![(3, vec![]), (4, vec![])],
+        }
+    );
+    assert_eq!(chunks_of(&s), vec![(3, 21), (4, 21)]);
+    assert_eq!(s.fenced_epoch(new), 21);
+    assert_eq!(blocks(&s.handle(&[(new, read(2, 3, 0, 1))])[0]), vec![0]);
+}
+
+#[test]
+fn hello_over_budget_after_incarnation_delete_creates_nothing() {
+    let mut s = ReplicaService::with_budget(store_on(formatted()), 4);
+    s.hello(&accepted_in("budget", 6, 9, 1, &[0, 1, 2]))
+        .unwrap();
+    let mut a = accepted_in("budget", 6, 21, 2, &[0, 1, 2, 3, 4]);
+    a.claims.first_epoch = 20;
+    assert_eq!(
+        s.hello(&a).unwrap_err(),
+        "volume would hold more than 4 chunks on this node"
+    );
+    assert!(
+        s.store().chunks().is_empty(),
+        "only the earlier incarnation was deleted"
+    );
+    assert!(!s.vols.contains_key(&volume_uuid("budget")));
+}
+
+#[test]
+fn moved_chunk_over_budget_is_refused_before_create() {
+    let mut s = ReplicaService::with_budget(store_on(formatted()), 4);
+    let (sess, _) = s
+        .hello(&accepted_in("budget", 6, 9, 1, &[0, 1, 2, 3]))
+        .unwrap();
+    let before = s.store().chunks();
+    let reply = s.handle(&[(sess, Frame::BeginResync { req: 2, chunk: 4 })]);
+    assert_eq!(
+        reply,
+        vec![Reply::Close(
+            "create chunk 4: volume would hold more than 4 chunks on this node".into()
+        )]
+    );
+    assert_eq!(s.store().chunks(), before);
+    assert_eq!(s.fenced_epoch(sess), 9);
+
+    let mut s = ReplicaService::with_budget(store_on(s.into_store().into_device()), 4);
+    assert!(
+        s.unsupported.is_empty(),
+        "refusal cannot leave an unsupported fifth chunk"
+    );
+    assert_eq!(s.store().chunks(), before);
+    let (_, reply) = s
+        .hello(&accepted_in("budget", 6, 10, 2, &[0, 1, 2, 3]))
+        .unwrap();
+    assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
 }
 
 #[test]
@@ -138,7 +363,7 @@ fn reads_return_writes_and_unwritten_blocks_are_zero() {
     let mut s = service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let r = s.handle(&[
-        (sess, write(2, 0, 4, &[1, 2, 3], 0)),
+        (sess, write(sess, 2, 0, 4, &[1, 2, 3], 0)),
         (sess, read(3, 0, 3, 5)),
     ]);
     assert_eq!(r[0], Reply::Send(Frame::Ok { req: 2 }));
@@ -152,7 +377,7 @@ fn writes_in_one_batch_share_a_flush() {
     // One write per 64 KiB cluster: a group ends at a write touching a cluster an earlier
     // write of the group touched.
     let items: Vec<_> = (0..32)
-        .map(|i| (sess, write(10 + i, 0, (i * 16) as u32, &[i as u8], i)))
+        .map(|i| (sess, write(sess, 10 + i, 0, (i * 16) as u32, &[i as u8], i)))
         .collect();
     let before = s.store().device().flushes();
     let r = s.handle(&items);
@@ -168,7 +393,7 @@ fn writes_in_one_batch_share_a_flush() {
 fn after_a_restart_the_fence_holds_and_whole_chunks_are_uncertain() {
     let mut s = service();
     let (sess, _) = s.hello(&accepted(5, 1, &[0, 2])).unwrap();
-    s.handle(&[(sess, write(2, 0, 0, &[7], 0))]);
+    s.handle(&[(sess, write(sess, 2, 0, 0, &[7], 0))]);
     let mut s = restart(s);
     // An older epoch is refused: the fence was durable.
     let (_, reply) = s.hello(&accepted(4, 1, &[0, 2])).unwrap();
@@ -202,7 +427,7 @@ fn old_sessions_are_ignored() {
     let mut s = service();
     let (old, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let (new, _) = s.hello(&accepted(1, 2, &[0])).unwrap();
-    let r = s.handle(&[(old, write(2, 0, 0, &[1], 0)), (new, read(3, 0, 0, 1))]);
+    let r = s.handle(&[(old, write(old, 2, 0, 0, &[1], 0)), (new, read(3, 0, 0, 1))]);
     assert_eq!(r[0], Reply::Nothing);
     assert_eq!(blocks(&r[1]), vec![0]);
 }
@@ -222,7 +447,7 @@ fn copies_skip_blocks_with_live_writes() {
     };
     let r = s.handle(&[
         (sess, Frame::BeginResync { req: 2, chunk: 0 }),
-        (sess, write(3, 0, 1, &[1, 2], 0)),
+        (sess, write(sess, 3, 0, 1, &[1, 2], 0)),
         (sess, copy),
         (sess, read(5, 0, 0, 4)),
     ]);
@@ -257,7 +482,7 @@ fn a_commit_in_flight_holds_the_requests_after_its_writes() {
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let items = [
         (sess, Frame::Heartbeat { req: 2 }),
-        (sess, write(3, 0, 4, &[7, 8], 0)),
+        (sess, write(sess, 3, 0, 4, &[7, 8], 0)),
         (sess, Frame::Heartbeat { req: 4 }),
         (sess, read(5, 0, 4, 2)),
     ];
@@ -285,7 +510,7 @@ fn a_commit_in_flight_holds_the_requests_after_its_writes() {
 fn a_hello_waits_for_the_commit_in_flight() {
     let mut s = deferred_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
-    let p = s.start(&[(sess, write(2, 0, 0, &[5], 0))]);
+    let p = s.start(&[(sess, write(sess, 2, 0, 0, &[5], 0))]);
     assert!(p.in_flight());
     // A new target's fence must not be durable before the writes ahead of it.
     s.hello(&accepted(2, 2, &[0])).unwrap();
@@ -301,9 +526,9 @@ fn handle_waits_for_its_commits() {
     let mut s = deferred_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let r = s.handle(&[
-        (sess, write(2, 0, 4, &[1, 2, 3], 0)),
+        (sess, write(sess, 2, 0, 4, &[1, 2, 3], 0)),
         (sess, read(3, 0, 3, 5)),
-        (sess, write(4, 0, 0, &[9], 0)),
+        (sess, write(sess, 4, 0, 0, &[9], 0)),
     ]);
     assert_eq!(r.len(), 3);
     assert_eq!(r[0], Reply::Send(Frame::Ok { req: 2 }));
@@ -316,7 +541,7 @@ fn handle_waits_for_its_commits() {
 fn a_deleted_volume_can_be_created_again_from_epoch_one() {
     let mut s = service();
     let (old, _) = s.hello(&accepted(2, 1, &[0, 1])).unwrap();
-    let r = s.handle(&[(old, write(2, 0, 0, &[3], 1))]);
+    let r = s.handle(&[(old, write(old, 2, 0, 0, &[3], 1))]);
     assert_eq!(r, vec![Reply::Send(Frame::Ok { req: 2 })]);
     assert_eq!(s.delete_volume("pvc-1"), Ok(2));
     assert!(s.store().chunks().is_empty());
@@ -326,9 +551,9 @@ fn a_deleted_volume_can_be_created_again_from_epoch_one() {
     let (new, reply) = s.hello(&accepted(1, 2, &[0])).unwrap();
     assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
     let r = s.handle(&[
-        (new, write(3, 0, 0, &[4], 1)),
+        (new, write(new, 3, 0, 0, &[4], 1)),
         (new, read(4, 0, 0, 2)),
-        (old, write(5, 0, 0, &[5], 2)),
+        (old, write(old, 5, 0, 0, &[5], 2)),
     ]);
     assert_eq!(r[0], Reply::Send(Frame::Ok { req: 3 }));
     assert_eq!(blocks(&r[1]), vec![4, 0], "the old data is gone");
@@ -371,14 +596,14 @@ fn delete_volume_deletes_a_chunk_fenced_at_the_highest_epoch() {
 fn staged_writes_are_answered_after_their_own_commit() {
     let mut s = deferred_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
-    let p = s.start(&[(sess, write(2, 0, 0, &[1], 1))]);
+    let p = s.start(&[(sess, write(sess, 2, 0, 0, &[1], 1))]);
     assert!(p.in_flight());
     // Behind it: a whole-cluster write elsewhere is staged; one into its cluster is not, nor
     // what follows. A small write is not staged either.
-    assert_eq!(s.stage(&[(sess, write(9, 0, 128, &[7], 9))]), 0);
+    assert_eq!(s.stage(&[(sess, write(sess, 9, 0, 128, &[7], 9))]), 0);
     let rest = [
-        (sess, write(3, 0, 64, &[2; 16], 2)),
-        (sess, write(4, 0, 1, &[3], 3)),
+        (sess, write(sess, 3, 0, 64, &[2; 16], 2)),
+        (sess, write(sess, 4, 0, 1, &[3], 3)),
         (sess, read(5, 0, 64, 1)),
     ];
     assert_eq!(s.stage(&rest), 1);
@@ -402,8 +627,11 @@ fn staged_writes_are_answered_after_their_own_commit() {
 fn flush_coalesce_answers_both_after_one_device_flush() {
     let mut s = coalesce_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
-    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
-    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    assert!(
+        s.start(&[(sess, write(sess, 2, 0, 0, &[1; 16], 1))])
+            .in_flight()
+    );
+    assert_eq!(s.stage(&[(sess, write(sess, 3, 0, 16, &[2; 16], 2))]), 1);
     assert!(
         s.coalesce_partner(),
         "partner journal joined before the shared flush"
@@ -424,10 +652,13 @@ fn flush_coalesce_then_stage_again_stays_ordered() {
     // committing / staged tracking must not merge them (that desync panics in start).
     let mut s = coalesce_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
-    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
-    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    assert!(
+        s.start(&[(sess, write(sess, 2, 0, 0, &[1; 16], 1))])
+            .in_flight()
+    );
+    assert_eq!(s.stage(&[(sess, write(sess, 3, 0, 16, &[2; 16], 2))]), 1);
     assert!(s.coalesce_partner());
-    assert_eq!(s.stage(&[(sess, write(4, 0, 32, &[3; 16], 3))]), 1);
+    assert_eq!(s.stage(&[(sess, write(sess, 4, 0, 32, &[3; 16], 3))]), 1);
     assert!(!s.coalesce_partner(), "depth 2: third group stays staged");
     s.store().device().complete();
     assert_eq!(s.poll(false), Some(vec![Reply::Send(Frame::Ok { req: 2 })]));
@@ -444,11 +675,14 @@ fn flush_coalesce_then_stage_again_stays_ordered() {
 fn pipelined_commits_answer_in_order() {
     let mut s = deferred_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
-    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    assert!(
+        s.start(&[(sess, write(sess, 2, 0, 0, &[1; 16], 1))])
+            .in_flight()
+    );
     // Two more groups of whole clusters, each launched behind the commits in flight.
-    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    assert_eq!(s.stage(&[(sess, write(sess, 3, 0, 16, &[2; 16], 2))]), 1);
     assert!(s.launch());
-    assert_eq!(s.stage(&[(sess, write(4, 0, 32, &[3; 16], 3))]), 1);
+    assert_eq!(s.stage(&[(sess, write(sess, 4, 0, 32, &[3; 16], 3))]), 1);
     assert!(s.launch());
     assert_eq!(s.store().device().commits_in_flight(), 3);
     for req in [2, 3, 4] {
@@ -490,8 +724,8 @@ fn a_hello_drops_an_earlier_volumes_chunks() {
     let mut s = service();
     let (old, _) = s.hello(&accepted(9, 1, &[0, 3])).unwrap();
     let r = s.handle(&[
-        (old, write(2, 0, 0, &[7], 1)),
-        (old, write(3, 3, 0, &[8], 2)),
+        (old, write(old, 2, 0, 0, &[7], 1)),
+        (old, write(old, 3, 3, 0, &[8], 2)),
     ]);
     assert!(r.iter().all(|r| matches!(r, Reply::Send(Frame::Ok { .. }))));
     let (new, reply) = s.hello(&accepted_first(20, 21, 2, &[0, 1])).unwrap();
@@ -509,7 +743,7 @@ fn a_hello_drops_an_earlier_volumes_chunks() {
 fn a_leftover_fenced_above_the_epoch_is_dropped_by_a_first_epoch_above_it() {
     let mut s = service();
     let (old, _) = s.hello(&accepted(30, 1, &[0])).unwrap();
-    s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    s.handle(&[(old, write(old, 2, 0, 0, &[7], 1))]);
     let (_, reply) = s.hello(&accepted(21, 2, &[0])).unwrap();
     assert_eq!(reply, Frame::Stale { req: 1, fenced: 30 });
     let (new, reply) = s.hello(&accepted_first(40, 41, 3, &[0])).unwrap();
@@ -536,7 +770,7 @@ fn a_leftover_of_another_geometry_is_dropped() {
 fn a_volume_keeps_its_own_chunks() {
     let mut s = service();
     let (sess, _) = s.hello(&accepted_first(20, 21, 1, &[0])).unwrap();
-    s.handle(&[(sess, write(2, 0, 0, &[7], 1))]);
+    s.handle(&[(sess, write(sess, 2, 0, 0, &[7], 1))]);
     let mut s = restart(s);
     let (sess, reply) = s.hello(&accepted_first(20, 22, 2, &[0])).unwrap();
     assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
@@ -549,7 +783,7 @@ fn a_volume_keeps_its_own_chunks() {
 fn without_a_first_epoch_nothing_is_dropped() {
     let mut s = service();
     let (old, _) = s.hello(&accepted(9, 1, &[0, 3])).unwrap();
-    s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    s.handle(&[(old, write(old, 2, 0, 0, &[7], 1))]);
     let (sess, _) = s.hello(&accepted(10, 2, &[0])).unwrap();
     assert_eq!(chunks_of(&s), vec![(0, 10), (3, 10)]);
     assert_eq!(blocks(&s.handle(&[(sess, read(3, 0, 0, 1))])[0]), vec![7]);
@@ -561,7 +795,7 @@ fn an_earlier_volumes_sessions_end_at_the_drop() {
     let mut s = service();
     let (old, _) = s.hello(&accepted(9, 1, &[0])).unwrap();
     s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
-    let r = s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    let r = s.handle(&[(old, write(old, 2, 0, 0, &[7], 1))]);
     assert!(
         matches!(&r[0], Reply::Close(why) if why.contains("unknown volume")),
         "{r:?}"
@@ -576,11 +810,11 @@ fn an_earlier_volumes_sessions_end_at_the_drop() {
 fn an_earlier_volumes_version_2_token_is_stale_and_drops_nothing() {
     let mut s = service();
     let (old, _) = s.hello(&accepted_first(5, 9, 1, &[0])).unwrap();
-    let r = s.handle(&[(old, write(2, 0, 0, &[7], 1))]);
+    let r = s.handle(&[(old, write(old, 2, 0, 0, &[7], 1))]);
     assert_eq!(r, vec![Reply::Send(Frame::Ok { req: 2 })]);
     let (new, reply) = s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
     assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
-    let r = s.handle(&[(new, write(3, 0, 0, &[8], 1))]);
+    let r = s.handle(&[(new, write(new, 3, 0, 0, &[8], 1))]);
     assert_eq!(r, vec![Reply::Send(Frame::Ok { req: 3 })]);
     let (_, reply) = s.hello(&accepted_first(5, 9, 3, &[0])).unwrap();
     assert_eq!(reply, Frame::Stale { req: 1, fenced: 21 });
@@ -669,8 +903,8 @@ fn a_crash_between_two_batches_of_a_drop_leaves_the_rest_for_the_next_hello() {
 fn a_drop_lands_the_commits_in_flight_and_staged_first() {
     let mut s = deferred_service();
     let (old, _) = s.hello(&accepted(9, 1, &[0])).unwrap();
-    assert!(s.start(&[(old, write(2, 0, 0, &[1], 1))]).in_flight());
-    assert_eq!(s.stage(&[(old, write(3, 0, 64, &[2; 16], 2))]), 1);
+    assert!(s.start(&[(old, write(old, 2, 0, 0, &[1], 1))]).in_flight());
+    assert_eq!(s.stage(&[(old, write(old, 3, 0, 64, &[2; 16], 2))]), 1);
     let (new, reply) = s.hello(&accepted_first(20, 21, 2, &[0])).unwrap();
     assert!(matches!(reply, Frame::Fenced { .. }), "{reply:?}");
     assert!(!s.store().device().in_flight());
@@ -698,7 +932,7 @@ fn holding_stages_with_nothing_in_flight() {
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     assert!(!s.commit_in_flight());
     assert_eq!(
-        s.stage(&[(sess, write(2, 0, 0, &[1; 16], 1))]),
+        s.stage(&[(sess, write(sess, 2, 0, 0, &[1; 16], 1))]),
         1,
         "a whole cluster"
     );
@@ -723,7 +957,7 @@ fn a_held_group_with_no_writes_is_answered() {
     s.hello(&accepted(2, 2, &[0])).unwrap();
     // The old session's write is answered by the replica (fenced), not written: the group has
     // nothing for the store, and nothing in flight would ever land to answer it.
-    assert_eq!(s.stage(&[(old, write(2, 0, 0, &[1; 16], 1))]), 1);
+    assert_eq!(s.stage(&[(old, write(old, 2, 0, 0, &[1; 16], 1))]), 1);
     assert!(s.launch(), "answered without a commit");
     assert!(!s.store().device().in_flight());
     let r = s.poll(false).expect("answered");
@@ -736,8 +970,11 @@ fn a_held_group_with_no_writes_is_answered() {
 fn a_held_group_whose_commit_cannot_start_is_answered_with_the_error() {
     let mut s = held_service();
     let (sess, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
-    assert!(s.start(&[(sess, write(2, 0, 0, &[1; 16], 1))]).in_flight());
-    assert_eq!(s.stage(&[(sess, write(3, 0, 16, &[2; 16], 2))]), 1);
+    assert!(
+        s.start(&[(sess, write(sess, 2, 0, 0, &[1; 16], 1))])
+            .in_flight()
+    );
+    assert_eq!(s.stage(&[(sess, write(sess, 3, 0, 16, &[2; 16], 2))]), 1);
     // The commit ahead fails: the store is poisoned, and the held group cannot start.
     s.store().device().fail_commit();
     let r = s.poll(false).expect("the failed commit answered");
@@ -757,11 +994,14 @@ fn a_staged_write_outside_its_chunk_is_refused_not_a_panic() {
     let mut s = held_service();
     let (old, _) = s.hello(&accepted(1, 1, &[0])).unwrap();
     let (cur, _) = s.hello(&accepted(2, 2, &[0])).unwrap();
-    assert!(s.start(&[(cur, write(2, 0, 0, &[1; 16], 1))]).in_flight());
+    assert!(
+        s.start(&[(cur, write(cur, 2, 0, 0, &[1; 16], 1))])
+            .in_flight()
+    );
     s.store().device().complete();
     assert!(s.poll(false).is_some());
     for (sess, req) in [(cur, 3), (old, 4)] {
-        let w = write(req, 0, BLOCKS * 64, &[2; 16], 2);
+        let w = write(sess, req, 0, BLOCKS * 64, &[2; 16], 2);
         assert_eq!(s.stage(&[(sess, w.clone())]), 0, "session of request {req}");
         let r = s.handle(&[(sess, w)]);
         assert_ne!(r[0], Reply::Send(Frame::Ok { req }), "{:?}", r[0]);
