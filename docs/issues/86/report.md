@@ -93,3 +93,147 @@ Reviewers: r86c4 (incremental design-code), r86s4 (incremental design-security).
 No comments from the requested review scopes, including Nits.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+### Code/security review round 1 — cbb4097
+
+Whole implementation and tests: `610f367cfc90d1e6f19e20d2848b8020d8ecb84e..cbb4097`.
+The roughly 5,000-line change is split into A (replica/target/messages), B (node/net/fuzz
+and integration docs) and C (simulator oracle/faults/histories), with a fresh code and
+security reviewer for each part. Reviewers check cross-part call contracts. Built-in review
+skills are unavailable in this environment; direct high-effort review is used and recorded.
+Part A code review confirmed **R1-A-C1 — Medium**: the in-memory Replica Hello adapter
+fences and creates chunks sequentially before discovering whole-set budget overflow. At
+budget 2, held {0}, Hello at epoch 2 advertising {1,2} returns no reply but leaves fence 2
+and chunks {0,1}. Production ReplicaService preflights before those changes; the simulator
+adapter must match it. Fix: count unique missing chunks and refuse before core.handle/create.
+All six reviews are complete. Part A security found no additional issue; Part B and C
+code/security reviews are clear. No nits were reported. Part C security independently ran
+the old-receipt controlled history (clean twin plus expected catch) with the adapter fix in
+the working tree and its assigned simulator files unchanged; other runtime evidence
+is the test engineer's and the recorded full checks. The adapter now preflights unique missing chunks before core/session/fence/create changes,
+while preserving Stale replies. Its new regression failed before the fix (fence advanced
+from 1 to 2) and passes after it. Tests cover unopened, precise and coarse state, unchanged
+data/filter/uncertainty and old-session authority, exact-fit duplicates and stale requests.
+All 20 replica tests pass. `make fmt lint test race hygiene contracts sim` passes with the
+fix, including 20,000 normal seeds and all 163 release tests (ignored mutations included).
+The fix is committed as `545d3726061dd6e0edf0cc1e7df78f762c3ed29e`.
+Incremental code/security review and final conformance follow.
+
+### Code/security review round 2 — 545d3726061dd6e0edf0cc1e7df78f762c3ed29e
+
+Incremental range: `cbb4097..545d372`, all four changed files. A fresh code reviewer
+confirms R1-A-C1 fixed and reports no new findings or nits. The fresh security reviewer
+independently confirms the fix and reports no new findings or nits. The code/security loop
+is **clear after two rounds**; no accepted or unresolved runtime findings remain.
+The workflow's requested Sonnet model is unavailable; the code reviewer uses the inherited
+default model at medium effort. Direct incremental review is used as the workflow requires.
+
+## Implementation — 2026-11-27
+
+Branch: `issue/86-bounded-uncertainty`, based on
+`610f367cfc90d1e6f19e20d2848b8020d8ecb84e` (main after the user's merge of #81 / PR #102).
+The published clear spec/design were approved on 2026-11-20. This issue precedes #80 because
+its bounded Fenced representation is a dependency of #80's complete transport guarantee.
+[Units](units.md) records the completed implementation and acceptance work.
+
+[PR #103](https://github.com/jsfakian/Flaminio/pull/103) was published as a draft at the user's
+request while validation was in progress. Full checks pass and code/security review is clear;
+conformance passes S1–S9. Publication changes it from draft to ready after final CI. No lab checks are required by the approved design.
+
+### Consistency regressions found by acceptance
+
+The clean forged-epoch campaign initially failed at seed 4 (`forge_epoch_pct=20`,
+`Config::random(4)`, budget 65,536, no mutation): write 294 was acknowledged, then a final
+read returned 292. A mixed-fault repeat at budget 8 also failed. Independent runtime/model
+analysis confirmed that a dropped in-flight write could be admitted after an older value
+was copied to a joiner. BeginResync Ack now retires prior request receipts and replays all
+pending chunk Writes before snapshot work. The resync tracks fresh receipts independently
+of client completion. The original regression assertions remain and pass.
+
+Broader runs found clean cases 1833, 9803 and 14081: a conditional source removal could commit
+while its response was unresolved, mutable proposal state cleared, and a delayed Hello
+recreated the removed chunk empty before a read. Source retirement now survives uncertain
+CAS outcomes until a strictly newer authoritative version. It rejects pending source
+receipts, invalidates fast-read generations and aborts affected snapshot provenance.
+A separate unmapped-source proof showed that pending extents must seed `force_copy` before
+Mapped, including Writes that finish before BeginResync Ack; abort preserves this evidence.
+All three permanent cases and the new edge-case proofs pass.
+
+The replay defense invalidated two old random mutation hints. A test-only deferred Write
+completion provides an honest old-generation receipt history with replay still enabled;
+normal simulation scheduling and RNG are unchanged. The old fast-fence hint 103223 no longer
+catches; an actual search found no witness in [0,200000). Direct checks of previously
+recorded candidates verified seed 1,001,529 (and 3,626,767), each with a passing clean twin.
+The lower verified witness is pinned without claiming it is the first catch beyond the
+searched range. No mutation assertion was skipped or weakened.
+
+## Tests
+
+Acceptance results, including the final post-review suite:
+
+| Area | Result |
+|---|---|
+| Replica core | 20 tests pass after review fix; 28,800 independent exact-oracle operations, partial-page reuse and default 512×128 fill (four covers) |
+| Node lifecycle | 39 focused tests and full node package (52 library + 19 integration) pass; real-store failed-write/reconnect/restart proof passes |
+| Codec/session/fuzz | 15 net unit + 7 session and 4 fuzz-regression tests pass; real F09 workloads, maximum body, zero-byte refused sends and 17 hostile seeds |
+| Target/engine | All 75 Target tests and local/remote captured-Hello adapter tests pass |
+| Small-budget simulation | 200-seed normal/mixed campaigns at budgets 8/16, malformed-report campaign and pending/coarsen/restart/repair/Settle histories pass |
+| Production-bound simulation | Seven #81 large-volume recovery cases and permanent clean cases 1833/9803/14081 pass |
+| Independent controls | All 38 mutation catches pass, including new coverage/prune/budget/epoch/authority, replay omission, pending-seed omission and source-retirement controls |
+| Broad forged-field simulation | Fresh [0,20000) clean campaign passes with 504,912 forged requests; 60.15 s test runtime |
+| Control-plane/contracts | `make race hygiene contracts` passes after the source-retirement fix; generated outputs unchanged and both mutual-TLS interop tests pass |
+
+The broad campaign is reproducible from `dataplane/` with
+`FLAMINIO_SIM_SEEDS=20000 cargo test --release --offline -p flaminio-repl sim::tests::forged_epochs_leave_runs_clean -- --exact --nocapture`.
+The default test count remains 200.
+
+| Required check | Result |
+|---|---|
+| `make fmt lint test race hygiene contracts sim` | PASS after the review fix, source `545d372`; 20,000 normal seeds and all 163 release tests, including ignored mutation controls |
+| `make sanitize QUICK=1` | PASS locally at `cbb4097` (address/leak and thread sanitizers); CI repeats it on the final published commit |
+| GitHub CI | All seven jobs and GitGuardian passed at `cbb4097`; final publication checks are linked from PR #103 |
+
+The adapter-only review fix adds no unsafe code or production node path. Its focused
+regression failed before the correction and passes afterward; full checks were repeated.
+Final CI status is available on [PR #103](https://github.com/jsfakian/Flaminio/pull/103/checks).
+
+## Conformance
+
+Independent checker on source `545d372` plus final documentation, using the inherited
+default model at medium effort because the workflow's Sonnet model is unavailable.
+Its output follows verbatim:
+
+PASS
+
+| Rule | Implemented | Tested | Evidence |
+|---|---|---|---|
+| S1 Bounded retention | yes | yes | `replica.rs:1059` budget boundaries; `:1633` atomic Hello refusal; node pre-create refusal tests pass. |
+| S2 Conservative coarsening | yes | yes | `replica.rs:1106` chunk isolation/max-Version; `:1149` add-at-budget; `:1587` default fill gives four covers. |
+| S3 Pruning | yes | yes | `replica.rs:1191,1233` independent restart/coarse proofs and foreign epochs; `target.rs:4088` actual repair/Settle integration passes. |
+| S4 Lifecycle | yes | yes | Node quarantine, incarnation cleanup, failed-store/reconnect/restart and moved-chunk refusal tests pass; simulator replay/source-retirement regressions pass. |
+| S5 Representable reports | yes | yes | `frame.rs:948` maximum N=T=B roundtrip/work counts; `:1212` real-core F09 workloads; explicit empty-row tests pass. |
+| S6 Checked framing | yes | yes | `frame.rs:238,583` checked encode/decode; zero-byte refusal session test and all fuzz regressions pass. |
+| S7 Consumer validation | yes | yes | `target.rs:959,1499` validation precedes authority; malformed/captured-required/extra-row tests and local/remote engine adapter tests pass. |
+| S8 Bounded work | yes | yes | `replica.rs:1327,1361`, `target.rs:3420,3489` allocation/reuse, coarse updates, scan counters and geometry-bounded union tests pass. |
+| S9 Compatibility/docs | yes | yes | Wire equality and mutual-TLS interoperability pass; protocol, dataplane README and followups document costs, rollout, quarantine and deferred limits. |
+
+Contract drift: none
+
+ADR conformance: consistent
+
+Scope drift: none
+
+Docs: done
+
+Open review findings: none
+
+## Lab
+
+None required by the approved design. No shared-lab actions were run.
+
+## ADRs
+
+The policy was accepted with the approved plan. The numbered
+[ADR 0017](../../adr/0017-bound-uncertainty-with-per-chunk-covers.md) is Accepted after
+clear code/security review and PASS conformance, as covered by plan approval. Existing accepted fencing/ISR
+decisions remain unchanged; clock ADR 0007 remains Proposed.

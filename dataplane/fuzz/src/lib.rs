@@ -129,10 +129,17 @@ pub fn journal(data: &[u8]) {
 /// Replication frames come from the network: decoding must never panic, and whatever decodes
 /// must encode back to the same bytes (except a refusal's reason, which is decoded lossily).
 pub fn repl_frame(data: &[u8]) {
+    // The length-prefix gate runs before body allocation in Conn::recv. Exercise it
+    // independently without changing the existing body-input corpus grammar.
+    if let Some(prefix) = data.get(..4) {
+        let _ = Frame::body_len(prefix.try_into().expect("four-byte prefix"));
+    }
     if let Ok(f) = Frame::decode(data)
         && !matches!(f, Frame::Refused { .. })
     {
-        let b = f.encode();
+        let b = f
+            .encode_checked()
+            .expect("decoded frames must pass checked encoding");
         assert_eq!(&b[4..], data);
     }
 }

@@ -207,11 +207,9 @@ impl BatchRecovery {
         let mut replicas = std::array::from_fn(|_| Replica::with_chunk_size(view.blocks_per_chunk));
         for (chunk, meta) in view.chunks.iter().enumerate() {
             for node in &meta.replicas {
-                replicas[*node as usize].create_chunk(
-                    CORE_VOLUME,
-                    chunk as u32,
-                    view.blocks_per_chunk,
-                );
+                replicas[*node as usize]
+                    .create_chunk(CORE_VOLUME, chunk as u32, view.blocks_per_chunk)
+                    .unwrap();
             }
         }
         Self {

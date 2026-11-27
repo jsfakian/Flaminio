@@ -2037,15 +2037,7 @@ impl<D: BlockDevice> Engine<D> {
         if let Request::Read { ext, .. } = &msg.body {
             rt.reads.insert((to, msg.req), ext.len as usize * BLOCK);
         }
-        if let Request::Hello = msg.body {
-            let chunks: Vec<u32> = rt
-                .view
-                .chunks
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.replicas.contains(&to))
-                .map(|(i, _)| i as u32)
-                .collect();
+        if let Request::Hello { chunks } = msg.body {
             if to == rt.local {
                 let a = Accepted {
                     peer_node: self.cfg.node.clone(),
@@ -2475,7 +2467,7 @@ fn write_data_len(f: &Frame) -> u64 {
 fn to_frame(m: &ToReplica<Payload>) -> Frame {
     let req = m.req;
     match &m.body {
-        Request::Hello => unreachable!("Hello frames carry the session's token"),
+        Request::Hello { .. } => unreachable!("Hello frames carry the session's token"),
         Request::Heartbeat => Frame::Heartbeat { req },
         Request::Write {
             chunk,
@@ -2591,7 +2583,9 @@ mod metadata_tests {
                 .take_output()
                 .into_iter()
                 .find_map(|o| match o {
-                    TOut::Send { to: 0, msg } if matches!(msg.body, Request::Hello) => Some(msg),
+                    TOut::Send { to: 0, msg } if matches!(msg.body, Request::Hello { .. }) => {
+                        Some(msg)
+                    }
                     _ => None,
                 })
                 .unwrap();
@@ -2603,7 +2597,9 @@ mod metadata_tests {
                     epoch: 7,
                     session: hello.session,
                     req: hello.req,
-                    body: Response::Fenced { uncertain: vec![] },
+                    body: Response::Fenced {
+                        uncertain: vec![(0, vec![]), (1, vec![])],
+                    },
                 },
             );
             sm.tick(12);
@@ -3018,6 +3014,77 @@ mod metadata_tests {
                 f.refresh(v);
             }
             assert_eq!(f.engine.targets["v"].view, before);
+        }
+    }
+
+    #[test]
+    fn hello_adapters_preserve_the_captured_chunk_set_instead_of_cached_placement() {
+        for peer in [0, 1] {
+            let mut f = Fixture::new(7);
+            let (net, commands) = crate::net::Net::test_channel();
+            f.engine.net = net;
+            let rt = f.engine.targets.get_mut("v").unwrap();
+            let mut original = rt.view.clone();
+            original.chunks[0].replicas = vec![1 - peer];
+            original.chunks[0].isr = [1 - peer].into();
+            let mut sm = Target::new(0, 0, &original, f.engine.cfg.timing, 1, 0);
+            let hello = sm
+                .take_output()
+                .into_iter()
+                .find_map(|out| match out {
+                    TOut::Send { to, msg }
+                        if to == peer && matches!(msg.body, Request::Hello { .. }) =>
+                    {
+                        Some(msg)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let Request::Hello { chunks } = &hello.body else {
+                unreachable!()
+            };
+            assert_eq!(chunks, &[1]);
+            let captured = chunks.clone();
+            let ids = (hello.req, hello.epoch, hello.session);
+            rt.sm = sm;
+            // Its cached view now places this peer on both chunks, after the Hello was made.
+            assert!(rt.view.chunks.iter().all(|c| c.replicas.contains(&peer)));
+            f.engine.send_from_target(Instant::now(), "v", peer, hello);
+            if peer == 0 {
+                let inventory: Vec<_> = f
+                    .engine
+                    .service
+                    .store()
+                    .chunks()
+                    .into_iter()
+                    .map(|info| info.key.index)
+                    .collect();
+                assert_eq!(
+                    inventory,
+                    vec![1],
+                    "local Accepted must preserve the captured set"
+                );
+                assert!(matches!(
+                    f.engine.targets["v"].sessions.get(&0),
+                    Some(Sess::Local { sref: Some(_), .. })
+                ));
+                assert!(
+                    commands.try_recv().is_err(),
+                    "local Hello does not use the network"
+                );
+            } else {
+                let NetCommand::Connect { node, hello, .. } =
+                    commands.try_recv().expect("actual outgoing Connect")
+                else {
+                    panic!("not a Connect command")
+                };
+                assert_eq!(node, "fl-b");
+                assert!(
+                    matches!(*hello, Frame::Hello { req, epoch, session, size, chunk_size, ref chunks, .. }
+                    if (req, epoch, session) == ids && size == 2 * (64 << 10) && chunk_size == 64 << 10 && *chunks == captured)
+                );
+                assert!(commands.try_recv().is_err());
+            }
         }
     }
 }

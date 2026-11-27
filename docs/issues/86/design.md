@@ -1,7 +1,8 @@
 # Issue #86: Bounded uncertainty with conservative version covers — design
 
 [Spec](spec.md), [intent](intent.md), [proposed ADR](adr-proposal.md),
-[decisions](decisions.md). Approved 2026-11-13; not implemented.
+[decisions](decisions.md). Published clear snapshot approved 2026-11-20;
+implementation and validation are recorded in [report](report.md).
 
 The facts it starts from:
 - CoreChunk.uncertain is Vec<(Extent,Version)>; report builds an ExtentSet without a cap
@@ -86,6 +87,33 @@ needs no check: the store refuses a chunk above 1 GiB at replay (`flaminio-store
 - **Leaving:** `ReplicaService::delete_volume` (`mod.rs:813`, for a volume deleted from the
   metadata service) works as today and removes the mark. Otherwise an operator removes chunks
   and restarts; `new` evaluates the inventory again.
+
+## Resync integration after rejected requests (S4)
+
+The clean forged-epoch campaign exposed an admission gap in the existing ordered-source
+assumption: a Write can be dropped, a later resync read copies the old value, and the retried
+Write completes before the join check examines active writes. After a BeginResync Ack installs
+the new filter, replay every pending chunk Write before pumping snapshot work, even if this
+member acknowledged it earlier. Retire prior same-chunk Write request correlations first;
+their acknowledgements do not prove protection by this filter generation. Add replay extents
+to `r.live`; existing `send_write` records `r.unacked`, which must remain after the client
+operation completes. No new client acknowledgement quorum is introduced.
+
+Keep the seed-4 clean counterexample and add a deterministic replay/receipt regression plus
+`skip_pending_resync_replay` mutation. Preserve S11's stale-ack proof with fresh replay receipts;
+an obsolete pinned mutation witness must be replaced by an actual witnessed same-generation
+violation, never an assertion skip. See [decisions](decisions.md).
+
+The wider consistency cases also require two existing-contract repairs. Seed each new
+round's `force_copy` from all current chunk writes before issuing Mapped, retain that evidence
+after client completion, and restore it to dirty state on abort. A cached hole or checksum
+match predating write admission must not omit acknowledged data.
+
+When emitting a source removal, remember source/expected-ISR-version separately from mutable
+next-proposal state. Exclude it from source reads until a strictly newer authoritative version
+fences the old conditional update; equal-version refreshes and local cancellation prove
+nothing. Retire/requeue its pending normal reads, invalidate local fast-read generations, and
+abort affected snapshot-source rounds through existing cleanup. Write quorum is unchanged.
 
 ## Prune and restart proof (S3, S4)
 
@@ -197,9 +225,14 @@ Local reply conversion must reach the same Target validation as remote frames. F
 Uncertainty storage: ≤B arena slots, ≤B chunk markers and ≤N record-set ids, never historical
 per-chunk spare Vecs. Precise append O(1); prune O(r_chunk); coarse update/prune O(1). Coarsening
 a chunk O(r_chunk+log N), each record freed once. Report O(N+R log R), allocated rows/extents
-O(B); node final rebuild costs at most twice that. Decode/consumer validation/merge
-O(N+T+V×RF), V the chunk table the target already holds. Fixed test operation counters verify
-loops, not timing claims. These bound uncertainty, not every volume/resync filter (#75).
+O(B); node final rebuild costs at most twice that. Decode, consumer validation and
+report/required/chunk/membership scans are O(N+T+V×RF), V the chunk table the target already
+holds. Union into the existing `ExtentSet` run map additionally costs O(T log U + A), where
+U is its existing run count and A is the number of absorbed runs removed. Keep that bounded
+indexed union rather than rescanning the accumulated union for every incoming report; do not
+claim the map operations themselves are linear. Fixed test operation counters verify the new
+scans and union calls, not timing claims. These bound uncertainty, not every volume/resync
+filter (#75). See the implementation clarification in [decisions](decisions.md).
 
 Same wire/disk/token/metadata layout, larger conservative reconciliation cost. Upgrade producers
 and consumers together before new attach/provisioning: old producers omit just-created rows,

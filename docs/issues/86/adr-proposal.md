@@ -1,6 +1,7 @@
 # Proposal: Bound uncertainty with whole-chunk maximum-Version covers
 
-- **Status:** Accepted with the plan, 2026-11-13; numbered and moved into docs/adr/ when implemented.
+- **Status:** Accepted with the plan, 2026-11-13; implemented and recorded in ADR 0017 after review/conformance on 2026-11-27.
+- **Implementation record:** [ADR 0017](../../adr/0017-bound-uncertainty-with-per-chunk-covers.md).
 - **Date:** 2026-11-12
 - **Issue:** [#86](https://github.com/jsfakian/Flaminio/issues/86)
 
