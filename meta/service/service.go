@@ -300,13 +300,17 @@ func (s *Service) readHeader(ctx context.Context, id string) (domain.Header, int
 func decodeHeader(id string, e kv.Entry, ok bool) (domain.Header, int64, error) {
 	var h domain.Header
 	if ok {
-		if err := json.Unmarshal(e.Value, &h); err != nil {
+		var err error
+		if h, err = decodeHeaderBounded(e.Value); err != nil {
 			return h, 0, err
 		}
 	}
 	// A volume being created or deleted does not exist for any other operation.
 	if !ok || h.Creating || h.Deleting {
 		return h, 0, fmt.Errorf("%w: volume %q", domain.ErrNotFound, id)
+	}
+	if (h.CreateOperation == "") != (h.CreateSpec == nil) {
+		return h, 0, status.Errorf(codes.DataLoss, "volume %q has an incomplete create identity", id)
 	}
 	return h, e.Rev, nil
 }
@@ -365,8 +369,12 @@ func (s *Service) readVolumeView(ctx context.Context, id string, expectedRevisio
 		}
 		// Only classify chunk state after the unchanged header proves that it coexisted
 		// with this prefix snapshot. A concurrent replacement discards the whole candidate.
-		if len(entries) != h.ChunkCount() {
-			return nil, 0, status.Errorf(codes.Internal, "volume %q: %d chunk records, want %d", id, len(entries), h.ChunkCount())
+		count, err := h.ChunkCount()
+		if err != nil {
+			return nil, 0, status.Errorf(codes.FailedPrecondition, "volume %q: %v; operator action is required", id, err)
+		}
+		if len(entries) != count {
+			return nil, 0, status.Errorf(codes.Internal, "volume %q: %d chunk records, want %d", id, len(entries), count)
 		}
 		v := &domain.Volume{Header: h, Chunks: make([]domain.Chunk, len(entries))}
 		for i, e := range entries {
@@ -401,14 +409,14 @@ func volumePB(v *domain.Volume) *metav1.Volume {
 	return out
 }
 
-func (s *Service) CreateVolume(ctx context.Context, r *metav1.CreateVolumeRequest) (*metav1.CreateVolumeResponse, error) {
+func requestedCreateSpec(r *metav1.CreateVolumeRequest) (domain.Spec, error) {
 	fd, err := domain.ParseFailureDomain(r.GetFailureDomain())
 	if err != nil {
-		return nil, errStatus(err)
+		return domain.Spec{}, err
 	}
 	pol, err := domain.ParsePlacementPolicy(r.GetFailureDomainPolicy())
 	if err != nil {
-		return nil, errStatus(err)
+		return domain.Spec{}, err
 	}
 	spec := domain.Spec{
 		ID: r.GetId(), SizeBytes: r.GetSizeBytes(), ChunkBytes: r.GetChunkBytes(),
@@ -416,6 +424,14 @@ func (s *Service) CreateVolume(ctx context.Context, r *metav1.CreateVolumeReques
 		Domain: fd, Policy: pol,
 	}
 	if err := spec.Validate(); err != nil {
+		return domain.Spec{}, err
+	}
+	return spec, nil
+}
+
+func (s *Service) CreateVolume(ctx context.Context, r *metav1.CreateVolumeRequest) (*metav1.CreateVolumeResponse, error) {
+	spec, err := requestedCreateSpec(r)
+	if err != nil {
 		return nil, errStatus(err)
 	}
 	v, err := s.createVolume(ctx, spec)
@@ -673,6 +689,9 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 		if err != nil {
 			return nil, errStatus(err)
 		}
+		if _, err := h.ChunkCount(); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "volume %q: %v; operator action is required", h.ID, err)
+		}
 		switch {
 		case r.GetOnlyIfTarget() && h.Target != r.GetNode():
 			return nil, errStatus(fmt.Errorf("%w: %s's target is %q, not %s", domain.ErrNotTarget, h.ID, h.Target, r.GetNode()))
@@ -755,10 +774,14 @@ func (s *Service) ChangeIsr(ctx context.Context, r *metav1.ChangeIsrRequest) (*m
 		if err != nil {
 			return nil, errStatus(err)
 		}
+		count, err := h.ChunkCount()
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "volume %q: %v; operator action is required", h.ID, err)
+		}
 		cmps := []kv.Cmp{{Key: volumeKey(h.ID), Rev: rev}}
 		named := make([]domain.Chunk, len(changes))
 		for i, c := range changes {
-			if int(c.Chunk) >= h.ChunkCount() {
+			if uint64(c.Chunk) >= uint64(count) {
 				return nil, errStatus(fmt.Errorf("%w: chunk %d out of range", domain.ErrInvalid, c.Chunk))
 			}
 			e := snapshot[i+1].Entry
@@ -864,7 +887,11 @@ func (s *Service) MoveReplica(ctx context.Context, r *metav1.MoveReplicaRequest)
 		if err != nil {
 			return nil, errStatus(err)
 		}
-		if int(r.GetChunk()) >= h.ChunkCount() {
+		count, err := h.ChunkCount()
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "volume %q: %v; operator action is required", h.ID, err)
+		}
+		if uint64(r.GetChunk()) >= uint64(count) {
 			return nil, errStatus(fmt.Errorf("%w: chunk %d out of range", domain.ErrInvalid, r.GetChunk()))
 		}
 		e, ok, err := s.kv.Get(ctx, chunkKey(h.ID, r.GetChunk()))

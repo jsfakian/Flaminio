@@ -21,7 +21,7 @@
 //! length the engine asked for. Otherwise it is dropped, and the target's timeout treats the
 //! replica as failed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -34,6 +34,7 @@ use flaminio_net::frame::Frame;
 use flaminio_net::session::Accepted;
 use flaminio_net::token::{Claims, decode_unverified};
 use flaminio_repl::extent::Extent;
+use flaminio_repl::geometry::{self, Geometry};
 use flaminio_repl::meta::{ChunkMeta, MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, VolumeMeta};
 use flaminio_repl::msg::{FromReplica, Request, Response, ToReplica};
 use flaminio_repl::target::{FastRead, Op, OpResult, Output as TOut, Target};
@@ -409,34 +410,27 @@ impl TargetRt {
 
     /// Validate a complete metadata payload before assigning any new peer IDs.
     fn valid_chunks(&self, chunks: &[pb::ChunkMeta]) -> bool {
-        chunks.iter().all(|c| {
-            let replicas = &c.replicas;
-            let moving = !c.moving_from.is_empty() || !c.moving_to.is_empty();
-            let unique = |names: &[String]| {
-                names
-                    .iter()
-                    .enumerate()
-                    .all(|(i, name)| valid_node_name(name) && !names[..i].contains(name))
-            };
-            replicas.len() >= self.replica_count
-                && replicas.len() <= self.replica_count + usize::from(moving)
-                && unique(replicas)
-                && c.isr.len() >= self.view.min_isr
-                && c.isr.len() <= replicas.len()
-                && unique(&c.isr)
-                && c.isr.iter().all(|n| replicas.contains(n))
-                && (!moving
-                    || (valid_node_name(&c.moving_from)
-                        && valid_node_name(&c.moving_to)
-                        && c.moving_from != c.moving_to
-                        && replicas.contains(&c.moving_from)
-                        && (replicas.len() == self.replica_count
-                            || replicas.contains(&c.moving_to))))
-        })
+        if !valid_chunk_membership(chunks, self.replica_count, self.view.min_isr) {
+            return false;
+        }
+        let mut added = BTreeSet::new();
+        for c in chunks {
+            for name in c.replicas.iter().chain([&c.moving_from, &c.moving_to]) {
+                if !name.is_empty() && !self.nodes.contains(name) {
+                    added.insert(name);
+                }
+            }
+        }
+        // Peer IDs are retained across moves, so bound the accumulated map before narrowing.
+        self.nodes
+            .len()
+            .checked_add(added.len())
+            .and_then(|n| n.checked_sub(1))
+            .is_some_and(|last| NodeId::try_from(last).is_ok())
     }
 
     fn valid_refresh(&self, volume: &str, v: &pb::Volume) -> bool {
-        v.id == volume
+        validate_volume(volume, v).is_ok()
             && v.size_bytes == self.size
             && v.chunk_bytes == self.chunk_size
             && v.replicas as usize == self.replica_count
@@ -476,6 +470,59 @@ fn valid_node_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+}
+
+fn valid_chunk_membership(chunks: &[pb::ChunkMeta], replica_count: usize, min_isr: usize) -> bool {
+    chunks.len() <= geometry::MAX_CHUNKS as usize
+        && chunks.iter().all(|c| {
+            let replicas = &c.replicas;
+            let moving = !c.moving_from.is_empty() || !c.moving_to.is_empty();
+            let unique = |names: &[String]| {
+                names
+                    .iter()
+                    .enumerate()
+                    .all(|(i, name)| valid_node_name(name) && !names[..i].contains(name))
+            };
+            replicas.len() >= replica_count
+                && replicas.len() <= replica_count + usize::from(moving)
+                && unique(replicas)
+                && c.isr.len() >= min_isr
+                && c.isr.len() <= replicas.len()
+                && unique(&c.isr)
+                && c.isr.iter().all(|n| replicas.contains(n))
+                && (!moving
+                    || (valid_node_name(&c.moving_from)
+                        && valid_node_name(&c.moving_to)
+                        && c.moving_from != c.moving_to
+                        && replicas.contains(&c.moving_from)
+                        && (replicas.len() == replica_count || replicas.contains(&c.moving_to))))
+        })
+}
+
+/// Metadata chunk rows carry no index: their exact position is the volume's chunk index.
+fn validate_volume(volume: &str, v: &pb::Volume) -> Result<Geometry, String> {
+    let shape = geometry::validate(v.size_bytes, v.chunk_bytes, v.replicas, v.min_isr)
+        .map_err(|e| format!("unsupported volume geometry: {e}"))?;
+    if v.id != volume || !valid_node_name(&v.id) || !valid_node_name(&v.target) {
+        return Err("invalid volume or target identity in metadata".into());
+    }
+    if v.chunks.len() != shape.chunks as usize {
+        return Err("volume chunk-record count does not match its geometry".into());
+    }
+    if !valid_chunk_membership(&v.chunks, v.replicas as usize, v.min_isr as usize) {
+        return Err("invalid replica, ISR or move membership in metadata".into());
+    }
+    // Exact positional rows form unique in-range chunk IDs. Every node's placed/moving
+    // union is a subset of those rows and therefore also fits the scalar Hello limit.
+    Ok(shape)
+}
+
+/// Saved request order is the reply order; ChangeIsr's ChunkMeta rows have no wire index.
+fn valid_isr_indices(chunks: &[u32], count: usize) -> bool {
+    !chunks.is_empty()
+        && chunks.len() <= MAX_CHANGES_PER_REQUEST
+        && chunks.iter().all(|&c| (c as usize) < count)
+        && chunks.iter().copied().collect::<BTreeSet<_>>().len() == chunks.len()
 }
 
 struct Attaching {
@@ -1602,8 +1649,8 @@ impl<D: BlockDevice> Engine<D> {
                     self.drain(now, &volume);
                     return;
                 }
-                if r.chunks.len() != chunks.len()
-                    || chunks.iter().any(|&c| c as usize >= rt.view.chunks.len())
+                if !valid_isr_indices(&chunks, rt.view.chunks.len())
+                    || r.chunks.len() != chunks.len()
                     || !rt.valid_chunks(&r.chunks)
                 {
                     return;
@@ -1699,17 +1746,12 @@ impl<D: BlockDevice> Engine<D> {
 
     fn start_target(&mut self, now: Instant, volume: &str, a: Attaching) -> Result<u64, String> {
         let v = a.volume.ok_or("no such volume")?;
+        let geometry = validate_volume(volume, &v)?;
         if v.target != self.cfg.node {
             return Err(format!(
                 "the volume's target is {:?}, not this node",
                 v.target
             ));
-        }
-        if v.chunk_bytes == 0
-            || !v.chunk_bytes.is_multiple_of(BLOCK as u64)
-            || v.size_bytes % v.chunk_bytes != 0
-        {
-            return Err("unusable volume geometry".into());
         }
         // The local replica takes the volume's first epoch from the token, so the token must be
         // this attach's: epochs of different volumes of a name never overlap, so the epoch fixes
@@ -1724,6 +1766,7 @@ impl<D: BlockDevice> Engine<D> {
                 claims.volume, claims.epoch, claims.node, v.epoch
             ));
         }
+        // Validated record/member caps bound this map to 1 + N*(R+1), below u32::MAX.
         let mut nodes: Vec<String> = Vec::new();
         let id = |name: &str, nodes: &mut Vec<String>| -> NodeId {
             match nodes.iter().position(|n| n == name) {
@@ -1759,7 +1802,7 @@ impl<D: BlockDevice> Engine<D> {
             epoch: v.epoch,
             target: Some(local),
             min_isr: v.min_isr as usize,
-            blocks_per_chunk: (v.chunk_bytes / BLOCK as u64) as Block,
+            blocks_per_chunk: geometry.blocks_per_chunk,
             chunks,
         };
         let us = self.us(now);
@@ -1905,10 +1948,13 @@ impl<D: BlockDevice> Engine<D> {
                         continue;
                     }
                     let rt = self.targets.get(volume).expect("target");
+                    let chunks: Vec<u32> = changes.iter().map(|c| c.chunk).collect();
+                    if !valid_isr_indices(&chunks, rt.view.chunks.len()) {
+                        continue;
+                    }
                     let names = |s: &std::collections::BTreeSet<NodeId>| -> Vec<String> {
                         s.iter().map(|n| rt.nodes[*n as usize].clone()).collect()
                     };
-                    let chunks: Vec<u32> = changes.iter().map(|c| c.chunk).collect();
                     let mut summary: BTreeMap<Vec<String>, usize> = BTreeMap::new();
                     for c in &changes {
                         *summary.entry(names(&c.new_isr)).or_default() += 1;
@@ -2568,7 +2614,7 @@ mod metadata_tests {
                 epoch: 7,
                 target: Some(0),
                 min_isr: 1,
-                blocks_per_chunk: 16,
+                blocks_per_chunk: 256,
                 chunks: (0..2)
                     .map(|_| ChunkMeta {
                         replicas: vec![0, 1],
@@ -2674,8 +2720,8 @@ mod metadata_tests {
                     generation,
                     token: vec![],
                     first_epoch: 7,
-                    size: 2 * (64 << 10),
-                    chunk_size: 64 << 10,
+                    size: 2 << 20,
+                    chunk_size: 1 << 20,
                     replica_count: 2,
                     nodes: vec!["fl-a".into(), "fl-b".into()],
                     addrs: vec![Some("127.0.0.1:1".parse().unwrap()); 2],
@@ -2706,8 +2752,8 @@ mod metadata_tests {
             );
             let volume = pb::Volume {
                 id: "v".into(),
-                size_bytes: 2 * (64 << 10),
-                chunk_bytes: 64 << 10,
+                size_bytes: 2 << 20,
+                chunk_bytes: 1 << 20,
                 replicas: 2,
                 min_isr: 1,
                 epoch: 7,
@@ -3081,7 +3127,7 @@ mod metadata_tests {
                 assert_eq!(node, "fl-b");
                 assert!(
                     matches!(*hello, Frame::Hello { req, epoch, session, size, chunk_size, ref chunks, .. }
-                    if (req, epoch, session) == ids && size == 2 * (64 << 10) && chunk_size == 64 << 10 && *chunks == captured)
+                    if (req, epoch, session) == ids && size == 2 << 20 && chunk_size == 1 << 20 && *chunks == captured)
                 );
                 assert!(commands.try_recv().is_err());
             }

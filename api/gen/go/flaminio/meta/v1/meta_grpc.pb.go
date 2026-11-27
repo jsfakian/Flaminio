@@ -28,19 +28,20 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	MetadataService_RegisterNode_FullMethodName    = "/flaminio.meta.v1.MetadataService/RegisterNode"
-	MetadataService_NodeHeartbeat_FullMethodName   = "/flaminio.meta.v1.MetadataService/NodeHeartbeat"
-	MetadataService_ListNodes_FullMethodName       = "/flaminio.meta.v1.MetadataService/ListNodes"
-	MetadataService_DrainNode_FullMethodName       = "/flaminio.meta.v1.MetadataService/DrainNode"
-	MetadataService_CreateVolume_FullMethodName    = "/flaminio.meta.v1.MetadataService/CreateVolume"
-	MetadataService_GetVolume_FullMethodName       = "/flaminio.meta.v1.MetadataService/GetVolume"
-	MetadataService_ListVolumes_FullMethodName     = "/flaminio.meta.v1.MetadataService/ListVolumes"
-	MetadataService_DeleteVolume_FullMethodName    = "/flaminio.meta.v1.MetadataService/DeleteVolume"
-	MetadataService_ListTombstones_FullMethodName  = "/flaminio.meta.v1.MetadataService/ListTombstones"
-	MetadataService_ConfirmDeletion_FullMethodName = "/flaminio.meta.v1.MetadataService/ConfirmDeletion"
-	MetadataService_Attach_FullMethodName          = "/flaminio.meta.v1.MetadataService/Attach"
-	MetadataService_ChangeIsr_FullMethodName       = "/flaminio.meta.v1.MetadataService/ChangeIsr"
-	MetadataService_MoveReplica_FullMethodName     = "/flaminio.meta.v1.MetadataService/MoveReplica"
+	MetadataService_RegisterNode_FullMethodName      = "/flaminio.meta.v1.MetadataService/RegisterNode"
+	MetadataService_NodeHeartbeat_FullMethodName     = "/flaminio.meta.v1.MetadataService/NodeHeartbeat"
+	MetadataService_ListNodes_FullMethodName         = "/flaminio.meta.v1.MetadataService/ListNodes"
+	MetadataService_DrainNode_FullMethodName         = "/flaminio.meta.v1.MetadataService/DrainNode"
+	MetadataService_CreateVolume_FullMethodName      = "/flaminio.meta.v1.MetadataService/CreateVolume"
+	MetadataService_CheckCreateVolume_FullMethodName = "/flaminio.meta.v1.MetadataService/CheckCreateVolume"
+	MetadataService_GetVolume_FullMethodName         = "/flaminio.meta.v1.MetadataService/GetVolume"
+	MetadataService_ListVolumes_FullMethodName       = "/flaminio.meta.v1.MetadataService/ListVolumes"
+	MetadataService_DeleteVolume_FullMethodName      = "/flaminio.meta.v1.MetadataService/DeleteVolume"
+	MetadataService_ListTombstones_FullMethodName    = "/flaminio.meta.v1.MetadataService/ListTombstones"
+	MetadataService_ConfirmDeletion_FullMethodName   = "/flaminio.meta.v1.MetadataService/ConfirmDeletion"
+	MetadataService_Attach_FullMethodName            = "/flaminio.meta.v1.MetadataService/Attach"
+	MetadataService_ChangeIsr_FullMethodName         = "/flaminio.meta.v1.MetadataService/ChangeIsr"
+	MetadataService_MoveReplica_FullMethodName       = "/flaminio.meta.v1.MetadataService/MoveReplica"
 )
 
 // MetadataServiceClient is the client API for MetadataService service.
@@ -63,6 +64,10 @@ type MetadataServiceClient interface {
 	// Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
 	// administrator.
 	CreateVolume(ctx context.Context, in *CreateVolumeRequest, opts ...grpc.CallOption) (*CreateVolumeResponse, error)
+	// Read-only CSI create compatibility check against the current coherent volume and its
+	// canonical creation identity. Capacity range is the sole identity exception. Caller: an
+	// administrator.
+	CheckCreateVolume(ctx context.Context, in *CheckCreateVolumeRequest, opts ...grpc.CallOption) (*CheckCreateVolumeResponse, error)
 	// Caller: any authenticated identity.
 	GetVolume(ctx context.Context, in *GetVolumeRequest, opts ...grpc.CallOption) (*GetVolumeResponse, error)
 	// Caller: any authenticated identity.
@@ -144,6 +149,16 @@ func (c *metadataServiceClient) CreateVolume(ctx context.Context, in *CreateVolu
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CreateVolumeResponse)
 	err := c.cc.Invoke(ctx, MetadataService_CreateVolume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *metadataServiceClient) CheckCreateVolume(ctx context.Context, in *CheckCreateVolumeRequest, opts ...grpc.CallOption) (*CheckCreateVolumeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckCreateVolumeResponse)
+	err := c.cc.Invoke(ctx, MetadataService_CheckCreateVolume_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -250,6 +265,10 @@ type MetadataServiceServer interface {
 	// Creates a volume and places its chunks. Every replica starts in the ISR. Caller: an
 	// administrator.
 	CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error)
+	// Read-only CSI create compatibility check against the current coherent volume and its
+	// canonical creation identity. Capacity range is the sole identity exception. Caller: an
+	// administrator.
+	CheckCreateVolume(context.Context, *CheckCreateVolumeRequest) (*CheckCreateVolumeResponse, error)
 	// Caller: any authenticated identity.
 	GetVolume(context.Context, *GetVolumeRequest) (*GetVolumeResponse, error)
 	// Caller: any authenticated identity.
@@ -301,6 +320,9 @@ func (UnimplementedMetadataServiceServer) DrainNode(context.Context, *DrainNodeR
 }
 func (UnimplementedMetadataServiceServer) CreateVolume(context.Context, *CreateVolumeRequest) (*CreateVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateVolume not implemented")
+}
+func (UnimplementedMetadataServiceServer) CheckCreateVolume(context.Context, *CheckCreateVolumeRequest) (*CheckCreateVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckCreateVolume not implemented")
 }
 func (UnimplementedMetadataServiceServer) GetVolume(context.Context, *GetVolumeRequest) (*GetVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetVolume not implemented")
@@ -433,6 +455,24 @@ func _MetadataService_CreateVolume_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(MetadataServiceServer).CreateVolume(ctx, req.(*CreateVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _MetadataService_CheckCreateVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckCreateVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MetadataServiceServer).CheckCreateVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MetadataService_CheckCreateVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MetadataServiceServer).CheckCreateVolume(ctx, req.(*CheckCreateVolumeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -607,6 +647,10 @@ var MetadataService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateVolume",
 			Handler:    _MetadataService_CreateVolume_Handler,
+		},
+		{
+			MethodName: "CheckCreateVolume",
+			Handler:    _MetadataService_CheckCreateVolume_Handler,
 		},
 		{
 			MethodName: "GetVolume",

@@ -7,7 +7,7 @@
 - **Spec:** approved by Ioannis Sfakianakis, 2026-11-20, of the published clear snapshot (`docs/issues/publication-2026-11-20.json`, content_sha256=`dbf5cf7cc8bc87afc614d3c5ffce11bea843c303e7573a393d7409721732f792`).
 - **Design:** approved by Ioannis Sfakianakis, 2026-11-20, of the same published clear snapshot.
 
-Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Nothing is implemented yet.
+Approved with the recommended answer to each open question (see Settled at approval). The 2026-11-20 approval covers the published clear post-review text (including every plan-review fix recorded after the earlier 2026-11-13 approval, where present). Implementation status is recorded in [report.md](report.md).
 
 ## Settled at approval
 
@@ -46,3 +46,32 @@ Approved with the recommended answer to each open question (see Settled at appro
 - Review80-R1-C3: both administrative and CSI quantities use checked arithmetic before RPC.
 - Review80-R1-C4: validate every later view before runtime map/core mutation; higher epoch still
   deposes using safe current geometry. Growth requires its separate authorized transition.
+
+## Implementation sequencing — 2026-11-27
+
+#86 / PR #103 and #77 / PR #104 are merged. Resume #80 on
+`946b4ea9deb5c069e51e33d6598739f19bceabbc`, restoring its separately preserved geometry
+helpers and Rust preflight groundwork. The approved design permits independent Go and Rust
+implementation against the shared geometry/formula/RPC contracts; integration and acceptance
+join them before review and publication.
+
+## Implementation clarifications
+
+- **Positional ISR records:** ChunkMeta has no wire index. Preserve the existing request-order
+  contract from #77: validate saved request indices as unique/in-range and require the exact
+  reply count before positional association. Do not add a wire field or claim an independent
+  reply-index check the existing message cannot perform.
+- **Shared checked encoder:** #86 already introduced encode_checked, EncodeError and the
+  Conn::send preflight. Extend that single entry point for Hello while preserving its Fenced
+  checks; no parallel encoder or larger frame limit is introduced.
+
+- **Recovery geometry checks:** before block/index narrowing or core recovery, classify
+  unsupported scalar V/C, inconsistent V/C across held chunks and indices outside N as
+  unsupported read-only state. Preserve stored bytes/fences and the existing explicit delete
+  path. This applies S4/S8 to startup as well as incoming Hello.
+- **Historical canonical identity versus current admission:** validate stored canonical
+  identity with #76's original grammar. A formerly legal but currently unsupported geometry
+  remains a well-formed identity and returns geometry FailedPrecondition, rather than DataLoss.
+  Missing/unknown/null required identity fields or partial new-format identity are DataLoss;
+  current supported geometry is checked separately by shared Admit. Only SizeBytes is replaced
+  for full-struct range-compatibility equality; every non-capacity field remains compared.

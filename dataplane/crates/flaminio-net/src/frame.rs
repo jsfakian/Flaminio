@@ -235,9 +235,74 @@ impl W {
 }
 
 impl Frame {
-    /// Encodes the frame, checking Fenced reports before allocation or sending any bytes.
-    /// Other frame types use the existing trusted encoder until their preflight is added.
+    /// Encodes the frame, checking Hello and Fenced before allocating the encoded body or
+    /// sending any bytes. Other frame types use the existing trusted encoder.
     pub fn encode_checked(&self) -> Result<Vec<u8>, EncodeError> {
+        if let Frame::Hello {
+            req,
+            epoch,
+            session,
+            volume,
+            token,
+            size,
+            chunk_size,
+            chunks,
+        } = self
+        {
+            if chunks.len() > MAX_CHUNKS {
+                return Err(EncodeError::Invalid("too many chunks in Hello"));
+            }
+            if volume.len() > u16::MAX as usize || token.len() > u16::MAX as usize {
+                return Err(EncodeError::Invalid("Hello short field is too long"));
+            }
+            if token.len() > crate::token::MAX_LEN {
+                return Err(EncodeError::Invalid("Hello token is too long"));
+            }
+            let geometry = flaminio_repl::geometry::validate_scalar(*size, *chunk_size)
+                .map_err(|e| EncodeError::Invalid(e.0))?;
+            let body = chunks
+                .len()
+                .checked_mul(4)
+                .and_then(|bytes| bytes.checked_add(volume.len()))
+                .and_then(|bytes| bytes.checked_add(token.len()))
+                .and_then(|bytes| bytes.checked_add(49))
+                .ok_or(EncodeError::Invalid("Hello body length overflow"))?;
+            if body > MAX_BODY {
+                return Err(EncodeError::TooLarge(body));
+            }
+            let mut seen = std::collections::HashSet::new();
+            seen.try_reserve(chunks.len())
+                .map_err(|_| EncodeError::Invalid("Hello allocation failed"))?;
+            for &chunk in chunks {
+                if chunk >= geometry.chunks || !seen.insert(chunk) {
+                    return Err(EncodeError::Invalid(
+                        "Hello chunks must be unique and in range",
+                    ));
+                }
+            }
+            let len = body
+                .checked_add(4)
+                .ok_or(EncodeError::Invalid("Hello frame length overflow"))?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(len)
+                .map_err(|_| EncodeError::Invalid("Hello allocation failed"))?;
+            bytes.extend_from_slice(&(body as u32).to_le_bytes());
+            let mut w = W(bytes);
+            w.u8(tag::HELLO);
+            w.u64(*req);
+            w.u64(*epoch);
+            w.u64(*session);
+            w.short_bytes(volume.as_bytes());
+            w.short_bytes(token);
+            w.u64(*size);
+            w.u64(*chunk_size);
+            w.u32(chunks.len() as u32);
+            for &chunk in chunks {
+                w.u32(chunk);
+            }
+            return Ok(w.0);
+        }
         let Frame::Fenced { req, uncertain } = self else {
             return Ok(self.encode());
         };

@@ -1808,7 +1808,11 @@ func TestGetVolumeSameCountReplacementIsCoherent(t *testing.T) {
 			t.Fatalf("mixed replacement: old=%v replacement=%v got=%v err=%v", old, replacement, got, err)
 		}
 		v, _, err := s.readVolumeView(context.Background(), "v", 0)
-		if err != nil || v.FirstEpoch <= oldFirst || v.FirstEpoch != replacement.Epoch || v.ChunkCount() != len(old.Chunks) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		count, countErr := v.ChunkCount()
+		if countErr != nil || v.FirstEpoch <= oldFirst || v.FirstEpoch != replacement.Epoch || count != len(old.Chunks) {
 			t.Fatalf("incarnation/geometry: %+v %v, old first epoch %d", v, err, oldFirst)
 		}
 	})

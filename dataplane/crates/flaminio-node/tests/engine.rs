@@ -2715,8 +2715,8 @@ fn an_attach_settles_a_held_group() {
     h.reads_back(5, MIB, MIB);
 }
 
-/// Memory devices keep the large-chunk-count recovery cases small: each chunk uses the minimum supported64KiB geometry.
-const SMALL_CHUNK: u64 = 64 << 10;
+/// Sparse memory devices keep recovery cases small with the minimum supported 1 MiB chunks.
+const SMALL_CHUNK: u64 = MIB;
 // Slot capacity is based on logical device size (the256MiB default has only64 slots).
 // MemDevice is sparse:8GiB supplies enough slots without allocating unwritten data blocks.
 const LARGE_STORE: u64 = 8 << 30;
