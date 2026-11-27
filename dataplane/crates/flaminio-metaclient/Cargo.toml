@@ -15,5 +15,8 @@ tonic-prost = "0.14.6"
 tokio = { version = "1.53", default-features = false, features = ["rt", "time"] }
 thiserror.workspace = true
 
+[dev-dependencies]
+flaminio-repl = { path = "../flaminio-repl" }
+
 [lints]
 workspace = true

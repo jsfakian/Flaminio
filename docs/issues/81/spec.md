@@ -1,7 +1,8 @@
 # Issue #81: Bounded ISR updates — specification
 
 [Intent](intent.md). Settled choices: [decisions](decisions.md). How: [design](design.md).
-Approved 2026-11-13; not implemented.
+Published clear snapshot approved 2026-11-20; implementation and validation are recorded in
+[report.md](report.md).
 
 ## Terms
 

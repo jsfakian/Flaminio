@@ -23,11 +23,13 @@ sets of extents. Rules below that speak of "a block" apply to every block of an 
 
 ## 2. Metadata transitions
 
-There are only two kinds of transition, and both are atomic.
+There are only two kinds of transition. Each request is atomic; an ISR request changes only
+the chunks it names, not the whole volume.
 
 - **`Attach(volume, node)`:** `epoch += 1`, target := node. Returns the new epoch, placement and
   ISR. Called by the failover controller, or for a first attach.
 - **`ChangeIsr(volume, epoch, [(chunk, expected_isr_ver, new_isr)])`:** applied only if
+  - the request names 1–64 distinct chunks,
   - `epoch` equals the volume's current epoch,
   - every `expected_isr_ver` matches,
   - every `new_isr` is a subset of the chunk's replicas, and
@@ -38,6 +40,13 @@ There are only two kinds of transition, and both are atomic.
 
 A retried `ChangeIsr` whose earlier attempt was applied gets a version mismatch. The target
 then compares the ISR in the reply with the one it proposed.
+
+The target sends at most one change request at a time and selects pending chunks cyclically,
+so recovery of a volume with more than 64 chunks progresses through several transactions.
+Changes deferred to a later request retain their pending membership and write requirements:
+an omitted shrink is not committed, and a pending joiner still counts where the protocol
+requires it. A lost or refused reply is recovered from authoritative metadata; a reply from
+an expired request or an earlier target instance cannot answer a later batch.
 
 ## 3. Sessions and fencing
 

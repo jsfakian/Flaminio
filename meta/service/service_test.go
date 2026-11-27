@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
 	"github.com/flaminio/flaminio/meta/domain"
@@ -196,6 +197,114 @@ func TestVolumeLifecycle(t *testing.T) {
 		// Created again, it starts above every epoch the earlier volume reached.
 		if g, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"}); err != nil || len(g.Volume.Chunks) != 1 || g.Volume.Epoch <= e+4 {
 			t.Fatalf("recreated: %v %v", g, err)
+		}
+	})
+}
+
+func TestChangeIsrBatchBoundary(t *testing.T) {
+	stores(t, func(t *testing.T, s *Service) {
+		ctx := context.Background()
+		addNodes(t, s, "a", "b")
+		limit := domain.MaxChangesPerRequest
+		for _, tc := range []struct {
+			name    string
+			count   int
+			alter   func(*metav1.ChangeIsrRequest)
+			code    codes.Code
+			applied bool
+		}{
+			{name: "boundary", count: limit, code: codes.OK, applied: true},
+			{name: "oversized", count: limit + 1, code: codes.InvalidArgument},
+			{name: "stale-epoch", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Epoch--
+			}},
+			{name: "wrong-version", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Changes[len(r.Changes)-1].ExpectedVer++
+			}},
+			{name: "duplicate-chunk", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Changes[len(r.Changes)-1] = proto.Clone(r.Changes[0]).(*metav1.IsrChange)
+			}},
+			{name: "below-minimum", count: limit, code: codes.OK, alter: func(r *metav1.ChangeIsrRequest) {
+				r.Changes[len(r.Changes)-1].NewIsr = nil
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				id := "batch-" + tc.name
+				if _, err := create(s, id, uint64(limit+1), 2, 1); err != nil {
+					t.Fatal(err)
+				}
+				att, err := s.Attach(ctx, &metav1.AttachRequest{Volume: id, Node: "a"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Give chunk zero a distinct version, so comparing the reply to request
+				// order also detects a service that sorts the requested chunks.
+				first := att.Volume.Chunks[0]
+				seed, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{
+					Volume: id, Epoch: att.Volume.Epoch,
+					Changes: []*metav1.IsrChange{{Chunk: 0, ExpectedVer: first.IsrVer, NewIsr: first.Replicas[:1]}},
+				})
+				if err != nil || !seed.GetApplied() {
+					t.Fatalf("seed chunk version: %v %v", seed, err)
+				}
+				before, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: id})
+				if err != nil {
+					t.Fatal(err)
+				}
+				entries, err := s.kv.List(ctx, chunkPrefix(id))
+				if err != nil {
+					t.Fatal(err)
+				}
+				req := &metav1.ChangeIsrRequest{Volume: id, Epoch: before.Volume.Epoch}
+				for i := tc.count - 1; i >= 0; i-- {
+					c := before.Volume.Chunks[i]
+					req.Changes = append(req.Changes, &metav1.IsrChange{
+						Chunk: uint32(i), ExpectedVer: c.IsrVer, NewIsr: c.Replicas[:1],
+					})
+				}
+				if tc.alter != nil {
+					tc.alter(req)
+				}
+				reply, err := s.ChangeIsr(ctx, req)
+				if code(err) != tc.code || reply.GetApplied() != tc.applied {
+					t.Fatalf("ChangeIsr: %v %v, want code %v applied %v", reply, err, tc.code, tc.applied)
+				}
+				after, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: id})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := proto.Clone(before.Volume).(*metav1.Volume)
+				if tc.applied {
+					for _, change := range req.Changes {
+						want.Chunks[change.Chunk].Isr = slices.Clone(change.NewIsr)
+						want.Chunks[change.Chunk].IsrVer++
+					}
+				}
+				if !proto.Equal(after.Volume, want) {
+					t.Fatalf("batch changed the wrong chunks: got %v, want %v", after.Volume, want)
+				}
+				if !tc.applied {
+					unchanged, err := s.kv.List(ctx, chunkPrefix(id))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !slices.EqualFunc(entries, unchanged, func(a, b kv.Entry) bool {
+						return a.Key == b.Key && a.Rev == b.Rev && bytes.Equal(a.Value, b.Value)
+					}) {
+						t.Fatal("refused batch wrote chunk metadata")
+					}
+				}
+				if tc.code == codes.OK {
+					if reply.Epoch != before.Volume.Epoch || len(reply.Chunks) != len(req.Changes) {
+						t.Fatalf("reply epoch/count: %v", reply)
+					}
+					for i, change := range req.Changes {
+						if !proto.Equal(reply.Chunks[i], want.Chunks[change.Chunk]) {
+							t.Fatalf("reply item %d does not describe requested chunk %d: %v", i, change.Chunk, reply.Chunks[i])
+						}
+					}
+				}
+			})
 		}
 	})
 }
