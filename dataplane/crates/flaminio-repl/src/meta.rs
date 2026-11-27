@@ -14,6 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, VolumeId};
 
+/// Maximum number of chunk changes accepted by one metadata-service ISR transaction.
+pub const MAX_CHANGES_PER_REQUEST: usize = 64;
+
 /// Placement and ISR of one chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkMeta {

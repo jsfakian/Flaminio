@@ -26,7 +26,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::extent::Extent;
-use crate::meta::{MetaReply, MetaRequest, Metadata, VolumeMeta};
+use crate::meta::{MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, Metadata, VolumeMeta};
 use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, Response, ToReplica};
 use crate::replica::Replica;
 use crate::target::{Op, OpResult, Output, Target};
@@ -173,6 +173,8 @@ impl Config {
 /// Statistics of a run that passed.
 #[derive(Debug, Clone, Default)]
 pub struct Report {
+    /// Largest emitted ISR proposal, including requests refused by the service boundary.
+    pub max_meta_batch: usize,
     pub ops: usize,
     pub completed: usize,
     pub failovers: u64,
@@ -769,6 +771,14 @@ impl Sim {
                 self.after(p.to);
             }
             Body::MetaReq { req, body } => {
+                if let MetaRequest::ChangeIsr { changes, .. } = &body {
+                    self.report.max_meta_batch = self.report.max_meta_batch.max(changes.len());
+                    if changes.len() > MAX_CHANGES_PER_REQUEST {
+                        // Production refuses before touching metadata. The adapter's failure
+                        // supplies no authoritative view, so the target must time out.
+                        return;
+                    }
+                }
                 let before: Vec<Vec<NodeId>> = self
                     .meta
                     .volume(VOL)

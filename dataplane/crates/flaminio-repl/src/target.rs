@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Debug;
 
 use crate::extent::{Extent, ExtentSet};
-use crate::meta::{IsrChange, MetaReply, MetaRequest, VolumeMeta};
+use crate::meta::{IsrChange, MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, VolumeMeta};
 use crate::msg::{FromReplica, MAX_DIGEST_BLOCKS, MAX_MAPPED_BLOCKS, Request, Response, ToReplica};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Version, VolumeId};
 
@@ -59,6 +59,8 @@ pub enum Output<P> {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Bugs {
+    /// Propose every pending chunk together, ignoring the metadata service's batch limit.
+    pub unbounded_meta_batch: bool,
     /// Complete writes once a failed member's removal is proposed, not committed.
     pub ack_before_shrink: bool,
     /// Return reads without checking the lease.
@@ -404,6 +406,8 @@ pub struct Target<P> {
     /// there (docs/issues/5).
     avoid: BTreeMap<u64, (NodeId, u32)>,
     meta_inflight: Option<(u64, Time)>,
+    /// First chunk considered for the next bounded metadata proposal.
+    next_meta_chunk: usize,
     next_heartbeat: Time,
     /// When to read the volume from the metadata service next, and the read in flight. It has
     /// its own slot: an ISR change must never wait behind it.
@@ -495,6 +499,7 @@ impl<P: Clone + Debug> Target<P> {
             queue: VecDeque::new(),
             avoid: BTreeMap::new(),
             meta_inflight: None,
+            next_meta_chunk: 0,
             next_heartbeat: now,
             next_refresh: now + timing.refresh,
             refresh_inflight: None,
@@ -1084,8 +1089,15 @@ impl<P: Clone + Debug> Target<P> {
         self.check_accounting();
     }
 
+    /// Whether `req` still names a live metadata request of this target instance.
+    pub fn accepts_meta_reply(&self, req: u64) -> bool {
+        !self.deposed
+            && (self.refresh_inflight.is_some_and(|(r, _)| r == req)
+                || self.meta_inflight.is_some_and(|(r, _)| r == req))
+    }
+
     fn on_meta_inner(&mut self, now: Time, req: u64, reply: &MetaReply) {
-        if self.deposed {
+        if !self.accepts_meta_reply(req) {
             return;
         }
         if self.refresh_inflight.is_some_and(|(r, _)| r == req) {
@@ -2426,11 +2438,20 @@ impl<P: Clone + Debug> Target<P> {
         let skip_resync = self.bugs.move_without_resync;
         #[cfg(not(test))]
         let skip_resync = false;
-        let changes: Vec<IsrChange> = self
-            .chunks
-            .iter()
-            .enumerate()
+        #[cfg(test)]
+        let batch_limit = if self.bugs.unbounded_meta_batch {
+            usize::MAX
+        } else {
+            MAX_CHANGES_PER_REQUEST
+        };
+        #[cfg(not(test))]
+        let batch_limit = MAX_CHANGES_PER_REQUEST;
+        let count = self.chunks.len();
+        let changes: Vec<IsrChange> = (0..count)
+            .map(|offset| (self.next_meta_chunk + offset) % count)
+            .map(|i| (i, &self.chunks[i]))
             .filter(|(_, c)| c.change_pending())
+            .take(batch_limit)
             .map(|(i, c)| {
                 let mut new_isr: BTreeSet<NodeId> =
                     c.isr.difference(&c.removing).copied().collect();
@@ -2462,6 +2483,9 @@ impl<P: Clone + Debug> Target<P> {
         if changes.is_empty() {
             return;
         }
+        // Advance even if this batch is refused or its reply is lost, so retries of early
+        // chunks cannot keep eligible later chunks from getting a transaction slot.
+        self.next_meta_chunk = (changes.last().expect("nonempty batch").chunk as usize + 1) % count;
         let req = self.next_req;
         self.next_req += 1;
         self.meta_inflight = Some((req, now));

@@ -34,7 +34,7 @@ use flaminio_net::frame::Frame;
 use flaminio_net::session::Accepted;
 use flaminio_net::token::{Claims, decode_unverified};
 use flaminio_repl::extent::Extent;
-use flaminio_repl::meta::{ChunkMeta, MetaReply, MetaRequest, VolumeMeta};
+use flaminio_repl::meta::{ChunkMeta, MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, VolumeMeta};
 use flaminio_repl::msg::{FromReplica, Request, Response, ToReplica};
 use flaminio_repl::target::{FastRead, Op, OpResult, Output as TOut, Target};
 use flaminio_repl::types::{Block, NodeId, Timing};
@@ -361,12 +361,15 @@ enum Sess {
 struct TargetRt {
     sm: Target<Payload>,
     view: VolumeMeta,
+    /// The attach attempt that owns this target, including its metadata requests.
+    generation: u64,
     token: Vec<u8>,
     /// The volume's first epoch, from the token: the local replica's session carries it, as a
     /// remote one's token does (docs/issues/30, S6).
     first_epoch: u64,
     size: u64,
     chunk_size: u64,
+    replica_count: usize,
     /// NodeId → node name, and address.
     nodes: Vec<String>,
     addrs: Vec<Option<SocketAddr>>,
@@ -404,12 +407,75 @@ impl TargetRt {
         }
     }
 
+    /// Validate a complete metadata payload before assigning any new peer IDs.
+    fn valid_chunks(&self, chunks: &[pb::ChunkMeta]) -> bool {
+        chunks.iter().all(|c| {
+            let replicas = &c.replicas;
+            let moving = !c.moving_from.is_empty() || !c.moving_to.is_empty();
+            let unique = |names: &[String]| {
+                names
+                    .iter()
+                    .enumerate()
+                    .all(|(i, name)| valid_node_name(name) && !names[..i].contains(name))
+            };
+            replicas.len() >= self.replica_count
+                && replicas.len() <= self.replica_count + usize::from(moving)
+                && unique(replicas)
+                && c.isr.len() >= self.view.min_isr
+                && c.isr.len() <= replicas.len()
+                && unique(&c.isr)
+                && c.isr.iter().all(|n| replicas.contains(n))
+                && (!moving
+                    || (valid_node_name(&c.moving_from)
+                        && valid_node_name(&c.moving_to)
+                        && c.moving_from != c.moving_to
+                        && replicas.contains(&c.moving_from)
+                        && (replicas.len() == self.replica_count
+                            || replicas.contains(&c.moving_to))))
+        })
+    }
+
+    fn valid_refresh(&self, volume: &str, v: &pb::Volume) -> bool {
+        v.id == volume
+            && v.size_bytes == self.size
+            && v.chunk_bytes == self.chunk_size
+            && v.replicas as usize == self.replica_count
+            && v.min_isr as usize == self.view.min_isr
+            && v.chunks.len() == self.view.chunks.len()
+            && valid_node_name(&v.target)
+            && (v.epoch != self.view.epoch || v.target == self.nodes[self.local as usize])
+            && self.valid_chunks(&v.chunks)
+    }
+
+    /// Retain per-chunk monotonicity when refresh and ISR replies cross in flight.
+    fn merge_chunk(&mut self, i: usize, new: &pb::ChunkMeta) {
+        let version = self.view.chunks[i].isr_ver;
+        if new.isr_ver > version {
+            let meta = self.chunk_meta(new);
+            self.view.chunks[i] = meta;
+        } else if new.isr_ver == version {
+            // A requested move has no ISR version of its own.
+            let moving = (!new.moving_from.is_empty())
+                .then(|| (self.node_id(&new.moving_from), self.node_id(&new.moving_to)));
+            self.view.chunks[i].moving = moving;
+        }
+    }
+
     fn missing_addrs(&self) -> bool {
         self.addrs
             .iter()
             .enumerate()
             .any(|(i, a)| a.is_none() && i as NodeId != self.local)
     }
+}
+
+fn valid_node_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
 struct Attaching {
@@ -445,11 +511,16 @@ enum MetaWait {
     },
     Isr {
         volume: String,
+        generation: u64,
         sm_req: u64,
         chunks: Vec<u32>,
     },
     /// The target's read of its volume.
-    Refresh { volume: String, sm_req: u64 },
+    Refresh {
+        volume: String,
+        generation: u64,
+        sm_req: u64,
+    },
     /// Addresses of nodes the target learned of after it started (a move's destination).
     Nodes { volume: String },
 }
@@ -1508,22 +1579,42 @@ impl<D: BlockDevice> Engine<D> {
             }
             MetaWait::Isr {
                 volume,
+                generation,
                 sm_req,
                 chunks,
             } => {
                 let us = self.us(now);
-                let Some(rt) = self.targets.get_mut(&volume) else {
+                let Some(rt) = self
+                    .targets
+                    .get_mut(&volume)
+                    .filter(|rt| rt.generation == generation && rt.sm.accepts_meta_reply(sm_req))
+                else {
                     return;
                 };
                 let Answer::ChangeIsr(r) = answer else { return };
-                rt.view.epoch = r.epoch;
-                for (c, m) in chunks.iter().zip(&r.chunks) {
-                    let meta = rt.chunk_meta(m);
-                    if let Some(cm) = rt.view.chunks.get_mut(*c as usize) {
-                        *cm = meta;
+                if r.epoch > rt.view.epoch {
+                    // Fencing precedes payload validation: even an unusable payload must
+                    // not hide a higher authenticated epoch from the current target.
+                    let mut view = rt.view.clone();
+                    view.epoch = r.epoch;
+                    rt.sm
+                        .on_meta(us, sm_req, &MetaReply::Rejected { vol: 0, view });
+                    self.drain(now, &volume);
+                    return;
+                }
+                if r.chunks.len() != chunks.len()
+                    || chunks.iter().any(|&c| c as usize >= rt.view.chunks.len())
+                    || !rt.valid_chunks(&r.chunks)
+                {
+                    return;
+                }
+                if r.epoch == rt.view.epoch {
+                    for (&c, m) in chunks.iter().zip(&r.chunks) {
+                        rt.merge_chunk(c as usize, m);
                     }
                 }
-                let view = rt.view.clone();
+                let mut view = rt.view.clone();
+                view.epoch = r.epoch;
                 if rt.missing_addrs() {
                     self.meta_call(
                         Call::ListNodes(pb::ListNodesRequest {}),
@@ -1541,29 +1632,42 @@ impl<D: BlockDevice> Engine<D> {
                 rt.sm.on_meta(us, sm_req, &reply);
                 self.drain(now, &volume);
             }
-            MetaWait::Refresh { volume, sm_req } => {
+            MetaWait::Refresh {
+                volume,
+                generation,
+                sm_req,
+            } => {
                 let us = self.us(now);
-                let Some(rt) = self.targets.get_mut(&volume) else {
+                let Some(rt) = self
+                    .targets
+                    .get_mut(&volume)
+                    .filter(|rt| rt.generation == generation && rt.sm.accepts_meta_reply(sm_req))
+                else {
                     return;
                 };
                 // Without an answer the target's read times out, and it reads again later.
                 let Answer::GetVolume(r) = answer else { return };
                 let Some(v) = r.volume else { return };
-                let mut view = rt.view.clone();
-                view.epoch = v.epoch;
-                view.target = (!v.target.is_empty()).then(|| rt.node_id(&v.target));
-                view.chunks = v.chunks.iter().map(|c| rt.chunk_meta(c)).collect();
+                if v.epoch > rt.view.epoch {
+                    let mut view = rt.view.clone();
+                    view.epoch = v.epoch;
+                    rt.sm
+                        .on_meta(us, sm_req, &MetaReply::Applied { vol: 0, view });
+                    self.drain(now, &volume);
+                    return;
+                }
+                if !rt.valid_refresh(&volume, &v) {
+                    return;
+                }
                 // Keep the newest view per chunk for Hello's chunk lists: the reply may be
                 // older than what an ISR change already showed.
-                if view.epoch == rt.view.epoch {
-                    for (cur, new) in rt.view.chunks.iter_mut().zip(&view.chunks) {
-                        if new.isr_ver > cur.isr_ver
-                            || (new.isr_ver == cur.isr_ver && new.moving != cur.moving)
-                        {
-                            *cur = new.clone();
-                        }
+                if v.epoch == rt.view.epoch {
+                    for (i, new) in v.chunks.iter().enumerate() {
+                        rt.merge_chunk(i, new);
                     }
                 }
+                let mut view = rt.view.clone();
+                view.epoch = v.epoch;
                 if rt.missing_addrs() {
                     self.meta_call(
                         Call::ListNodes(pb::ListNodesRequest {}),
@@ -1665,10 +1769,12 @@ impl<D: BlockDevice> Engine<D> {
             TargetRt {
                 sm,
                 view,
+                generation: a.attempt,
                 token: a.token,
                 first_epoch: claims.first_epoch,
                 size: v.size_bytes,
                 chunk_size: v.chunk_bytes,
+                replica_count: v.replicas as usize,
                 nodes,
                 addrs,
                 local,
@@ -1771,6 +1877,7 @@ impl<D: BlockDevice> Engine<D> {
             let name = rt.nodes.get(node as usize).map_or("?", String::as_str);
             eprintln!("flaminio-node: {volume}: session to {name} failed: {reason}");
         }
+        let generation = rt.generation;
         let outs = rt.sm.take_output();
         for o in outs {
             match o {
@@ -1784,6 +1891,7 @@ impl<D: BlockDevice> Engine<D> {
                     }),
                     MetaWait::Refresh {
                         volume: volume.to_string(),
+                        generation,
                         sm_req: req,
                     },
                 ),
@@ -1791,6 +1899,11 @@ impl<D: BlockDevice> Engine<D> {
                     let MetaRequest::ChangeIsr { epoch, changes, .. } = body else {
                         continue;
                     };
+                    if changes.is_empty() || changes.len() > MAX_CHANGES_PER_REQUEST {
+                        // Keep a producer regression from forwarding an unsupported RPC.
+                        // The core retains its pending work and retries after its timeout.
+                        continue;
+                    }
                     let rt = self.targets.get(volume).expect("target");
                     let names = |s: &std::collections::BTreeSet<NodeId>| -> Vec<String> {
                         s.iter().map(|n| rt.nodes[*n as usize].clone()).collect()
@@ -1829,6 +1942,7 @@ impl<D: BlockDevice> Engine<D> {
                         Call::ChangeIsr(call),
                         MetaWait::Isr {
                             volume: volume.to_string(),
+                            generation,
                             sm_req: req,
                             chunks,
                         },
