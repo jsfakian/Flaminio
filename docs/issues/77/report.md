@@ -54,16 +54,33 @@ tests, code/security review and final conformance follow. No lab or new ADR is r
 
 ## Tests
 
-Implementation checkpoint: `make fmt` passes. Rust/fuzz clippy and formatting, Go vet
-and Go formatting pass; unprivileged lint reaches buf but its module-cache lock is read-only.
-Scoped Go tests compile; localhost restrictions block etcd fixtures. Executed memory cases
-pass except the expected `TestConcurrentTargets` accounting change: known committed but
-superseded Attach responses can advance the epoch while returning Aborted. The independent
-test stage must count actual backend-applied modification revisions and preserve final epoch
-and ISR assertions, as the approved design requires.
+`make fmt lint` passes with installed cache access. Independent acceptance passes on both
+memory and embedded etcd: `go test ./meta/kv ./meta/service -count=1 -v` (KV 6.032 s,
+service 47.564 s). No production bug was found during acceptance.
 
-Independent S1–S7 acceptance is pending. Required project checks will run with the authorized
-local cache/socket access: `make lint test race hygiene contracts sim`.
+| Rules | Passing acceptance evidence |
+|---|---|
+| S1–S2 | `TestGetVolumeSameCountReplacementIsCoherent`, `TestGetVolumeHeaderChurnIsBounded`: equal-count RF/geometry/incarnation replacements, revision-only churn, bounded retries and caller context |
+| S3 | `TestGetVolumeClassifiesChunksOnlyAfterHeaderValidation`: changing-header JSON/missing/noncanonical chunks retry, stable corrupt chunks return Internal without partial success |
+| S4, S7 | `TestAttachResponsePinnedToCommitRevision`, `TestAttachKnownCommitThenReadFailureKeepsEpoch`: phase hooks, token authority, missing/hidden/superseded pins, exact committed context and backend/cancellation statuses |
+| S4, S7 | `TestAttachLostCommitReplyDoesNotRollBack`, `TestAttachSupersededCommitAccounting`, `TestAttachAmbiguousBackendRetryCountsEveryAppliedEpoch`: lost/ambiguous responses, two commits with one success, exact backend revision counting |
+| S5 | `TestReadSet`: order/missing/repeated positions/cloning/context/65-key cap and concurrent atomic snapshots on both backends |
+| S5 | `TestChangeIsrRejectedViewIsCoherent`, `TestChangeIsrDuplicatePositionsAndRawCap`, `TestChangeIsrCASReadRetriesAndCommitPoint`, `TestChangeIsrSnapshotErrors`: replacement/multi-key snapshots, duplicate refusal, raw 65 cap, CAS retries/commit point, backend/context errors |
+| S6 | Existing lifecycle, legacy-header and authorization cases pass in the full scoped packages; vectors and Rust interoperability remain required final checks |
+
+`TestConcurrentTargets` now deduplicates actual backend-applied Attach header modification
+revisions and retains its exact final epoch and per-chunk ISR-version assertions. Both backend
+variants pass. Baseline verification confirms raw header JSON errors keep the existing
+Unavailable mapping; stable malformed chunk records are Internal.
+
+Controlled-omission proof: an isolated temporary copy disables only the final header-revision
+comparison. Both-backend replacement tests then return old RF 2 / 2 MiB authority with RF 3
+replacement chunks, and changing-header corruption tests prematurely return Internal. Stable
+corruption controls still pass. The unmodified counterparts all pass; production bytes on
+the branch were untouched by the experiment.
+
+Full required gates pending: `make test race hygiene contracts sim`; formatting/lint already
+pass on the same source. No shared-lab or unsafe-code change is involved.
 
 ## Conformance
 

@@ -44,3 +44,8 @@ client budgets remain #80's work. Preserve existing KV transport configuration r
 impose a backend-wide cap that could make currently readable volumes inaccessible. This is
 a correction to the description of the existing limit, not acceptance of a new allocation
 policy; the review must still examine allocations introduced by ReadSet.
+
+- **Header parse status:** baseline source verification confirms unchanged errStatus maps raw
+  header JSON errors to Unavailable. Preserve that explicit existing error classification;
+  the new validated-prefix rule classifies stable chunk corruption as Internal. New tests
+  distinguish the two rather than changing a pre-existing header status under this issue.

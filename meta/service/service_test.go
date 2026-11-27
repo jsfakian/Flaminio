@@ -514,14 +514,32 @@ func TestFailureDomainPlacement(t *testing.T) {
 // its chunk's version by exactly one, every attach bumped the epoch, and no ISR ever fell
 // below the minimum.
 func TestConcurrentTargets(t *testing.T) {
-	stores(t, func(t *testing.T, s *Service) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		store := &scheduledKV{KV: backend}
+		s := New(store, Options{})
 		ctx := context.Background()
 		addNodes(t, s, "a", "b", "c", "d")
 		v, err := create(s, "v", 4, 3, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var attaches, applied atomic.Int64
+		var applied atomic.Int64
+		var commitsMu sync.Mutex
+		commits := map[int64]bool{}
+		// Observe successful backend application, before any response assembly can fail.
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil {
+				for _, op := range ops {
+					if op.Key == volumeKey("v") && !op.Delete {
+						commitsMu.Lock()
+						commits[rev] = true
+						commitsMu.Unlock()
+					}
+				}
+			}
+			return rev, ok, err
+		}
 		perChunk := make([]atomic.Int64, len(v.Chunks))
 		var wg sync.WaitGroup
 		for w := range 8 {
@@ -534,13 +552,12 @@ func TestConcurrentTargets(t *testing.T) {
 					if view == nil || rng.IntN(5) == 0 {
 						r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "abcd"[w%4 : w%4+1]})
 						if code(err) == codes.Aborted {
-							continue // contention: nothing was committed
+							continue // A committed Attach may have been superseded before its response.
 						}
 						if err != nil {
 							t.Error(err)
 							return
 						}
-						attaches.Add(1)
 						view = r.Volume
 						continue
 					}
@@ -577,8 +594,8 @@ func TestConcurrentTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if g.Volume.Epoch != v.Epoch+uint64(attaches.Load()) {
-			t.Fatalf("epoch %d after %d attaches from %d", g.Volume.Epoch, attaches.Load(), v.Epoch)
+		if g.Volume.Epoch != v.Epoch+uint64(len(commits)) {
+			t.Fatalf("epoch %d after %d committed attaches from %d", g.Volume.Epoch, len(commits), v.Epoch)
 		}
 		for i, c := range g.Volume.Chunks {
 			if c.IsrVer != uint64(perChunk[i].Load()) {
@@ -588,7 +605,7 @@ func TestConcurrentTargets(t *testing.T) {
 				t.Fatalf("chunk %d: ISR %v below the minimum", i, c.Isr)
 			}
 		}
-		t.Logf("%d attaches, %d ISR changes applied", attaches.Load(), applied.Load())
+		t.Logf("%d backend-applied attaches, %d ISR changes applied", len(commits), applied.Load())
 	})
 }
 
@@ -725,6 +742,52 @@ func TestMoveAndDrain(t *testing.T) {
 // returning that read, or after the first write of `txnKey` that applied. The hook can make
 // another write land between a read and the write that follows it, or between two writes. It
 // counts the writes of `key` made outside the hook.
+// scheduledKV places deterministic interleavings at real storage operation boundaries.
+// Unset operations always reach the backend; hooks call KV directly to avoid recursion.
+type scheduledKV struct {
+	kv.KV
+	get     func(context.Context, string) (kv.Entry, bool, error)
+	list    func(context.Context, string) ([]kv.Entry, error)
+	readSet func(context.Context, []string) ([]kv.ReadResult, error)
+	txn     func(context.Context, []kv.Cmp, []kv.Op) (bool, error)
+	txnRev  func(context.Context, []kv.Cmp, []kv.Op) (int64, bool, error)
+}
+
+func (k *scheduledKV) Get(ctx context.Context, key string) (kv.Entry, bool, error) {
+	if k.get != nil {
+		return k.get(ctx, key)
+	}
+	return k.KV.Get(ctx, key)
+}
+
+func (k *scheduledKV) List(ctx context.Context, prefix string) ([]kv.Entry, error) {
+	if k.list != nil {
+		return k.list(ctx, prefix)
+	}
+	return k.KV.List(ctx, prefix)
+}
+
+func (k *scheduledKV) ReadSet(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+	if k.readSet != nil {
+		return k.readSet(ctx, keys)
+	}
+	return k.KV.ReadSet(ctx, keys)
+}
+
+func (k *scheduledKV) Txn(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+	if k.txn != nil {
+		return k.txn(ctx, cmps, ops)
+	}
+	return k.KV.Txn(ctx, cmps, ops)
+}
+
+func (k *scheduledKV) TxnRev(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+	if k.txnRev != nil {
+		return k.txnRev(ctx, cmps, ops)
+	}
+	return k.KV.TxnRev(ctx, cmps, ops)
+}
+
 type interleaveKV struct {
 	kv.KV
 	key    string
@@ -758,6 +821,14 @@ func (k *interleaveKV) GetBounded(ctx context.Context, key string, maxBytes int)
 		k.runHook()
 	}
 	return e, ok, err
+}
+
+func (k *interleaveKV) ReadSet(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+	rows, err := k.KV.ReadSet(ctx, keys)
+	if slices.Contains(keys, k.key) {
+		k.runHook()
+	}
+	return rows, err
 }
 
 func (k *interleaveKV) List(ctx context.Context, prefix string) ([]kv.Entry, error) {
@@ -1580,6 +1651,666 @@ func TestCreateAfterAnInterruptedCreationStartsAboveItsClaim(t *testing.T) {
 		v, err := create(s, "v", 2, 2, 1)
 		if err != nil || v.Epoch <= uint64(claim) {
 			t.Fatalf("created at epoch %d (%v), want above the interrupted claim %d", v.GetEpoch(), err, claim)
+		}
+	})
+}
+
+func coherentFixture(t *testing.T, backend kv.KV, opts Options) (*Service, *scheduledKV, *metav1.Volume) {
+	t.Helper()
+	entries, err := backend.List(context.Background(), prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ops []kv.Op
+	for _, e := range entries {
+		ops = append(ops, kv.Op{Key: e.Key, Delete: true})
+	}
+	if len(ops) > 0 {
+		writeTestOps(t, backend, ops...)
+	}
+	store := &scheduledKV{KV: backend}
+	s := New(store, opts)
+	addNodes(t, s, "a", "b")
+	v, err := create(s, "v", 2, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addNodes(t, s, "c")
+	return s, store, v
+}
+
+func writeTestOps(t *testing.T, backend kv.KV, ops ...kv.Op) {
+	t.Helper()
+	if ok, err := backend.Txn(context.Background(), nil, ops); err != nil || !ok {
+		t.Fatalf("fixture transaction: %v %v", ok, err)
+	}
+}
+
+func writeTestHeader(t *testing.T, backend kv.KV, h domain.Header) {
+	t.Helper()
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestOps(t, backend, kv.Op{Key: volumeKey(h.ID), Value: b})
+}
+
+func replaceTestVolume(t *testing.T, s *Service) *metav1.Volume {
+	t.Helper()
+	deleteAndConfirm(t, s, "v", "a", "b", "c")
+	r, err := s.CreateVolume(context.Background(), &metav1.CreateVolumeRequest{
+		Id: "v", SizeBytes: 4 * mib, ChunkBytes: 2 * mib, Replicas: 3, MinIsr: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r.Volume
+}
+
+// The audit F02 schedule keeps the chunk count equal while replacing every authority field.
+func TestGetVolumeSameCountReplacementIsCoherent(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		oldFirst := header(t, backend, "v").FirstEpoch
+		var replacement *metav1.Volume
+		store.get = func(ctx context.Context, key string) (kv.Entry, bool, error) {
+			e, ok, err := backend.Get(ctx, key)
+			if key == volumeKey("v") {
+				store.get = nil
+				replacement = replaceTestVolume(t, s)
+			}
+			return e, ok, err
+		}
+		got, err := s.GetVolume(context.Background(), &metav1.GetVolumeRequest{Id: "v"})
+		if err != nil || replacement == nil || !proto.Equal(got.GetVolume(), replacement) {
+			t.Fatalf("mixed replacement: old=%v replacement=%v got=%v err=%v", old, replacement, got, err)
+		}
+		v, _, err := s.readVolumeView(context.Background(), "v", 0)
+		if err != nil || v.FirstEpoch <= oldFirst || v.FirstEpoch != replacement.Epoch || v.ChunkCount() != len(old.Chunks) {
+			t.Fatalf("incarnation/geometry: %+v %v, old first epoch %d", v, err, oldFirst)
+		}
+	})
+}
+
+func TestGetVolumeClassifiesChunksOnlyAfterHeaderValidation(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, damage := range []string{"json", "missing", "noncanonical"} {
+			for _, replacing := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/replacing=%t", damage, replacing), func(t *testing.T) {
+					s, store, _ := coherentFixture(t, backend, Options{})
+					e, _, err := backend.Get(context.Background(), chunkKey("v", 1))
+					if err != nil {
+						t.Fatal(err)
+					}
+					switch damage {
+					case "json":
+						writeTestOps(t, backend, kv.Op{Key: e.Key, Value: []byte("{")})
+					case "missing":
+						writeTestOps(t, backend, kv.Op{Key: e.Key, Delete: true})
+					case "noncanonical":
+						writeTestOps(t, backend, kv.Op{Key: e.Key, Delete: true}, kv.Op{Key: chunkPrefix("v") + "1", Value: e.Value})
+					}
+					var replacement *metav1.Volume
+					if replacing {
+						store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+							entries, err := backend.List(ctx, p)
+							if p == chunkPrefix("v") {
+								store.list = nil
+								// Restore the damaged old prefix so deletion can inspect it, after
+								// the reader already acquired its invalid candidate.
+								writeTestOps(t, backend, kv.Op{Key: e.Key, Value: e.Value}, kv.Op{Key: chunkPrefix("v") + "1", Delete: true})
+								replacement = replaceTestVolume(t, s)
+							}
+							return entries, err
+						}
+					}
+					got, err := s.GetVolume(context.Background(), &metav1.GetVolumeRequest{Id: "v"})
+					if replacing {
+						if err != nil || !proto.Equal(got.GetVolume(), replacement) {
+							t.Fatalf("changing header classified as corruption: %v %v", got, err)
+						}
+					} else if got != nil || code(err) != codes.Internal {
+						t.Fatalf("stable corruption returned partial/success: %v %v", got, err)
+					}
+				})
+			}
+		}
+	})
+}
+
+func TestGetVolumeHeaderChurnIsBounded(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, ending := range []string{"budget", "cancel", "deadline"} {
+			t.Run(ending, func(t *testing.T) {
+				s, store, _ := coherentFixture(t, backend, Options{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if ending == "deadline" {
+					var stop context.CancelFunc
+					ctx, stop = context.WithTimeout(context.Background(), 100*time.Millisecond)
+					defer stop()
+				}
+				reads := 0
+				store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+					es, err := backend.List(ctx, p)
+					if p == chunkPrefix("v") {
+						reads++
+						// Equal header values with a new revision still invalidate the candidate.
+						writeTestHeader(t, backend, header(t, backend, "v"))
+						if ending == "cancel" {
+							cancel()
+						}
+					}
+					return es, err
+				}
+				got, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: "v"})
+				want := map[string]codes.Code{"budget": codes.Aborted, "cancel": codes.Canceled, "deadline": codes.DeadlineExceeded}[ending]
+				if got != nil || code(err) != want || reads == 0 || reads > retries || ending == "budget" && reads != retries || ending == "cancel" && reads != 1 {
+					t.Fatalf("churn: response=%v err=%v reads=%d", got, err, reads)
+				}
+			})
+		}
+	})
+}
+
+func requireCommittedError(t *testing.T, err error, want codes.Code, epoch uint64, rev int64) {
+	t.Helper()
+	context := fmt.Sprintf("attach committed volume=v epoch=%d revision=%d; response unavailable:", epoch, rev)
+	if code(err) != want || !strings.Contains(fmt.Sprint(err), context) {
+		t.Fatalf("want %s with exact known-commit context %q, got %v", want, context, err)
+	}
+}
+
+func TestAttachResponsePinnedToCommitRevision(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, phase := range []string{"commit", "first-header", "prefix", "final-header"} {
+			for _, action := range []string{"attach", "delete", "replace"} {
+				t.Run(phase+"/"+action, func(t *testing.T) {
+					pub, key, _ := ed25519.GenerateKey(nil)
+					s, store, old := coherentFixture(t, backend, Options{TokenKey: key})
+					oldFirst := header(t, backend, "v").FirstEpoch
+					var attachRev int64
+					triggered := false
+					trigger := func() {
+						if triggered {
+							return
+						}
+						triggered = true
+						store.get, store.list, store.txnRev = nil, nil, nil
+						switch action {
+						case "attach":
+							if _, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "b"}); err != nil {
+								t.Fatal(err)
+							}
+						case "delete":
+							if _, err := s.DeleteVolume(context.Background(), &metav1.DeleteVolumeRequest{Id: "v"}); err != nil {
+								t.Fatal(err)
+							}
+						case "replace":
+							replaceTestVolume(t, s)
+						}
+					}
+					store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+						rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+						if ok && err == nil {
+							attachRev = rev
+							if phase == "commit" {
+								trigger()
+							}
+						}
+						return rev, ok, err
+					}
+					reads := 0
+					store.get = func(ctx context.Context, k string) (kv.Entry, bool, error) {
+						e, ok, err := backend.Get(ctx, k)
+						if k == volumeKey("v") {
+							reads++
+							if phase == "first-header" && reads == 2 || phase == "final-header" && reads == 3 {
+								trigger()
+							}
+						}
+						return e, ok, err
+					}
+					store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+						es, err := backend.List(ctx, p)
+						if p == chunkPrefix("v") && phase == "prefix" {
+							trigger()
+						}
+						return es, err
+					}
+					r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+					if !triggered || attachRev == 0 {
+						t.Fatalf("schedule did not run: triggered=%t rev=%d", triggered, attachRev)
+					}
+					if phase != "final-header" {
+						if r != nil {
+							t.Fatalf("superseded attach returned token/view: %v", r)
+						}
+						requireCommittedError(t, err, codes.Aborted, old.Epoch+1, attachRev)
+					} else {
+						// Supersession after the final snapshot may leave a valid older response;
+						// ordinary epoch fencing handles it. Its token and view must still agree.
+						if err != nil {
+							t.Fatal(err)
+						}
+						want := proto.Clone(old).(*metav1.Volume)
+						want.Epoch++
+						want.Target = "a"
+						claims, verifyErr := captoken.Verify(pub, r.Token)
+						if !proto.Equal(r.Volume, want) || verifyErr != nil || claims.Epoch != want.Epoch || claims.FirstEpoch != oldFirst || claims.Node != want.Target || claims.Volume != "v" {
+							t.Fatalf("unpinned token/view: %v claims=%+v err=%v", r, claims, verifyErr)
+						}
+					}
+					if action == "attach" && header(t, backend, "v").Epoch != old.Epoch+2 {
+						t.Fatal("committed epochs were rolled back")
+					}
+				})
+			}
+		}
+	})
+}
+
+func TestAttachKnownCommitThenReadFailureKeepsEpoch(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, phase := range []string{"first-header", "final-header"} {
+			for _, failure := range []string{"missing", "creating", "deleting", "backend", "list-backend", "corrupt-header", "corrupt-chunk", "cancel", "deadline"} {
+				t.Run(phase+"/"+failure, func(t *testing.T) {
+					s, store, old := coherentFixture(t, backend, Options{})
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					var attachRev int64
+					var committed domain.Header
+					store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+						rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+						if ok && err == nil {
+							attachRev = rev
+							committed = header(t, backend, "v")
+						}
+						return rev, ok, err
+					}
+					reads := 0
+					store.get = func(ctx context.Context, k string) (kv.Entry, bool, error) {
+						if k == volumeKey("v") {
+							reads++
+							at := 2
+							if phase == "final-header" {
+								at = 3
+							}
+							if reads == at {
+								switch failure {
+								case "missing":
+									writeTestOps(t, backend, kv.Op{Key: k, Delete: true})
+								case "creating", "deleting":
+									h := committed
+									h.Creating = failure == "creating"
+									h.Deleting = failure == "deleting"
+									writeTestHeader(t, backend, h)
+								case "backend":
+									return kv.Entry{}, false, status.Error(codes.Unavailable, "injected read failure")
+								case "corrupt-header":
+									writeTestOps(t, backend, kv.Op{Key: k, Value: []byte("{")})
+								case "cancel":
+									cancel()
+									return kv.Entry{}, false, ctx.Err()
+								case "deadline":
+									return kv.Entry{}, false, context.DeadlineExceeded
+								}
+							}
+						}
+						return backend.Get(ctx, k)
+					}
+					if failure == "corrupt-chunk" {
+						store.list = func(ctx context.Context, p string) ([]kv.Entry, error) {
+							writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: []byte("{")})
+							return backend.List(ctx, p)
+						}
+					}
+					if failure == "list-backend" {
+						store.list = func(context.Context, string) ([]kv.Entry, error) {
+							return nil, status.Error(codes.Unavailable, "injected prefix failure")
+						}
+					}
+					r, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a"})
+					want := codes.Aborted
+					switch failure {
+					case "backend", "list-backend", "corrupt-header":
+						want = codes.Unavailable
+					case "corrupt-chunk":
+						want = codes.Internal
+					case "cancel":
+						want = codes.Canceled
+					case "deadline":
+						want = codes.DeadlineExceeded
+					}
+					if r != nil || attachRev == 0 || committed.Epoch != old.Epoch+1 {
+						t.Fatalf("lost commit evidence: response=%v rev=%d header=%+v", r, attachRev, committed)
+					}
+					requireCommittedError(t, err, want, old.Epoch+1, attachRev)
+					// Restore only deliberately removed/damaged publication, never its epoch.
+					if failure == "missing" || failure == "creating" || failure == "deleting" || failure == "corrupt-header" {
+						writeTestHeader(t, backend, committed)
+					}
+					if h := header(t, backend, "v"); h.Epoch != committed.Epoch || h.Target != "a" {
+						t.Fatalf("postcommit error rolled back authority: %+v", h)
+					}
+				})
+			}
+		}
+	})
+}
+
+func TestAttachLostCommitReplyDoesNotRollBack(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		var applied []int64
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil {
+				applied = append(applied, rev)
+				store.txnRev = nil
+				return 0, false, status.Error(codes.Unavailable, "commit reply lost")
+			}
+			return rev, ok, err
+		}
+		if r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"}); r != nil || code(err) != codes.Unavailable {
+			t.Fatalf("ambiguous response: %v %v", r, err)
+		}
+		if len(applied) != 1 || header(t, backend, "v").Epoch != old.Epoch+1 {
+			t.Fatalf("actual application evidence: %v header=%+v", applied, header(t, backend, "v"))
+		}
+		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "b"})
+		if err != nil || r.Volume.Epoch != old.Epoch+2 {
+			t.Fatalf("fresh recovery attach: %v %v", r, err)
+		}
+	})
+}
+
+func TestChangeIsrRejectedViewIsCoherent(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, mutation := range []string{"replacement", "multi-chunk"} {
+			for _, refusal := range []string{"wrong-target", "stale-epoch", "invalid-change"} {
+				t.Run(mutation+"/"+refusal, func(t *testing.T) {
+					s, store, _ := coherentFixture(t, backend, Options{})
+					a, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					before := a.Volume
+					ctx := context.Background()
+					if refusal == "wrong-target" {
+						ctx = context.WithValue(ctx, identityKey{}, pki.Identity{Node: "c", Component: "io"})
+					}
+					req := &metav1.ChangeIsrRequest{Volume: "v", Epoch: before.Epoch, Changes: []*metav1.IsrChange{
+						{Chunk: 1, ExpectedVer: 0, NewIsr: []string{"a"}}, {Chunk: 0, ExpectedVer: 0, NewIsr: []string{"a"}},
+					}}
+					if refusal == "stale-epoch" {
+						req.Epoch--
+					}
+					if refusal == "invalid-change" {
+						req.Changes[0].ExpectedVer++
+					}
+					triggered := false
+					var postMutation []kv.Entry
+					trigger := func() {
+						if triggered {
+							return
+						}
+						triggered = true
+						store.get, store.readSet = nil, nil
+						if mutation == "replacement" {
+							replaceTestVolume(t, s)
+						} else {
+							var ops []kv.Op
+							for i, c := range before.Chunks {
+								changed := domain.Chunk{Replicas: c.Replicas, ISR: []string{"b"}, ISRVer: 7}
+								b, _ := json.Marshal(changed)
+								ops = append(ops, kv.Op{Key: chunkKey("v", uint32(i)), Value: b})
+							}
+							writeTestOps(t, backend, ops...)
+						}
+						postMutation, err = backend.List(context.Background(), prefix)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					store.readSet = func(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+						rows, err := backend.ReadSet(ctx, keys)
+						trigger()
+						return rows, err
+					}
+					// This also reproduces the old sequential-reader bug: replacement after
+					// its header, or a multi-key update after the first requested chunk.
+					store.get = func(ctx context.Context, k string) (kv.Entry, bool, error) {
+						e, ok, err := backend.Get(ctx, k)
+						if mutation == "replacement" && k == volumeKey("v") || mutation == "multi-chunk" && k == chunkKey("v", 1) {
+							trigger()
+						}
+						return e, ok, err
+					}
+					r, err := s.ChangeIsr(ctx, req)
+					if !triggered || err != nil || r.GetApplied() || r.GetEpoch() != before.Epoch || len(r.GetChunks()) != 2 || !proto.Equal(r.Chunks[0], before.Chunks[1]) || !proto.Equal(r.Chunks[1], before.Chunks[0]) {
+						t.Fatalf("torn refusal: %v %v, before=%v", r, err, before)
+					}
+					after, err := backend.List(context.Background(), prefix)
+					if err != nil || !equalTestEntries(postMutation, after) {
+						t.Fatalf("refusal changed storage: %v", err)
+					}
+				})
+			}
+		}
+	})
+}
+
+func equalTestEntries(a, b []kv.Entry) bool {
+	return slices.EqualFunc(a, b, func(a, b kv.Entry) bool { return a.Key == b.Key && a.Rev == b.Rev && bytes.Equal(a.Value, b.Value) })
+}
+
+func TestChangeIsrDuplicatePositionsAndRawCap(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, _ := coherentFixture(t, backend, Options{})
+		a, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := backend.List(context.Background(), prefix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reads := 0
+		store.readSet = func(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+			reads++
+			if !slices.Equal(keys, []string{volumeKey("v"), chunkKey("v", 0), chunkKey("v", 0)}) {
+				t.Fatalf("deduplicated/reordered request positions: %v", keys)
+			}
+			return backend.ReadSet(ctx, keys)
+		}
+		change := &metav1.IsrChange{Chunk: 0, NewIsr: []string{"a"}}
+		r, err := s.ChangeIsr(context.Background(), &metav1.ChangeIsrRequest{Volume: "v", Epoch: a.Volume.Epoch, Changes: []*metav1.IsrChange{change, change}})
+		if err != nil || r.GetApplied() || r.GetEpoch() != a.Volume.Epoch || len(r.GetChunks()) != 2 || !proto.Equal(r.Chunks[0], a.Volume.Chunks[0]) || !proto.Equal(r.Chunks[1], a.Volume.Chunks[0]) || reads != 1 {
+			t.Fatalf("duplicate refusal: %v %v reads=%d", r, err, reads)
+		}
+		after, err := backend.List(context.Background(), prefix)
+		if err != nil || !equalTestEntries(before, after) {
+			t.Fatal("duplicate refusal wrote metadata")
+		}
+		tooMany := make([]*metav1.IsrChange, 65)
+		for i := range tooMany {
+			tooMany[i] = change
+		}
+		if r, err := s.ChangeIsr(context.Background(), &metav1.ChangeIsrRequest{Volume: "v", Epoch: a.Volume.Epoch, Changes: tooMany}); r != nil || code(err) != codes.InvalidArgument || reads != 1 {
+			t.Fatalf("raw cap did not precede ReadSet: %v %v reads=%d", r, err, reads)
+		}
+	})
+}
+
+func TestChangeIsrCASReadRetriesAndCommitPoint(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, schedule := range []string{"failed-cas", "commit-point", "cancel", "bounded"} {
+			t.Run(schedule, func(t *testing.T) {
+				s, store, v := coherentFixture(t, backend, Options{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				reads, writes := 0, 0
+				store.readSet = func(ctx context.Context, keys []string) ([]kv.ReadResult, error) {
+					reads++
+					return backend.ReadSet(ctx, keys)
+				}
+				store.txn = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (bool, error) {
+					writes++
+					if schedule == "cancel" {
+						cancel()
+						return false, nil
+					}
+					if schedule == "bounded" {
+						return false, nil
+					}
+					if schedule == "failed-cas" && writes == 1 {
+						changed := domain.Chunk{Replicas: v.Chunks[0].Replicas, ISR: []string{"b"}, ISRVer: 1}
+						b, _ := json.Marshal(changed)
+						writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: b})
+					}
+					ok, err := backend.Txn(ctx, cmps, ops)
+					if schedule == "commit-point" && ok {
+						// A newer authority immediately after CAS cannot rewrite its reply.
+						h := header(t, backend, "v")
+						h.Attach("b")
+						writeTestHeader(t, backend, h)
+					}
+					return ok, err
+				}
+				r, err := s.ChangeIsr(ctx, &metav1.ChangeIsrRequest{Volume: "v", Epoch: v.Epoch, Changes: []*metav1.IsrChange{{Chunk: 0, NewIsr: []string{"a"}}}})
+				switch schedule {
+				case "failed-cas":
+					if err != nil || r.GetApplied() || reads != 2 || writes != 1 || r.Chunks[0].IsrVer != 1 || !slices.Equal(r.Chunks[0].Isr, []string{"b"}) {
+						t.Fatalf("failed CAS did not acquire fresh snapshot: %v %v reads=%d writes=%d", r, err, reads, writes)
+					}
+				case "commit-point":
+					if err != nil || !r.GetApplied() || r.Epoch != v.Epoch || r.Chunks[0].IsrVer != 1 || !slices.Equal(r.Chunks[0].Isr, []string{"a"}) || reads != 1 || header(t, backend, "v").Epoch != v.Epoch+1 {
+						t.Fatalf("CAS reply lost its commit point: %v %v reads=%d", r, err, reads)
+					}
+				case "cancel":
+					if r != nil || code(err) != codes.Canceled || reads != 1 || writes != 1 {
+						t.Fatalf("CAS cancellation: %v %v reads=%d writes=%d", r, err, reads, writes)
+					}
+				case "bounded":
+					if r != nil || code(err) != codes.Aborted || reads != retries || writes != retries {
+						t.Fatalf("CAS retry budget: %v %v reads=%d writes=%d", r, err, reads, writes)
+					}
+				}
+			})
+		}
+	})
+}
+
+func TestAttachSupersededCommitAccounting(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		commits := map[int64]bool{}
+		successes := 0
+		var firstRevision int64
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil {
+				commits[rev] = true
+				if firstRevision == 0 {
+					firstRevision = rev
+					if _, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "b"}); err != nil {
+						t.Fatal(err)
+					}
+					successes++
+				}
+			}
+			return rev, ok, err
+		}
+		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if r != nil {
+			successes++
+		}
+		requireCommittedError(t, err, codes.Aborted, old.Epoch+1, firstRevision)
+		if len(commits) != 2 || successes != 1 || header(t, backend, "v").Epoch != old.Epoch+2 || header(t, backend, "v").Target != "b" {
+			t.Fatalf("commits=%v successes=%d header=%+v", commits, successes, header(t, backend, "v"))
+		}
+	})
+}
+
+func TestAttachAmbiguousBackendRetryCountsEveryAppliedEpoch(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, old := coherentFixture(t, backend, Options{})
+		var commits []int64
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if ok && err == nil {
+				commits = append(commits, rev)
+				if len(commits) == 1 {
+					// The backend applies the write, loses its reply, and retries the same CAS.
+					// Its outer result reports a failed compare despite that earlier application.
+					return backend.TxnRev(ctx, cmps, ops)
+				}
+			}
+			return rev, ok, err
+		}
+		r, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a"})
+		if err != nil || len(commits) != 2 || commits[0] == commits[1] || r.GetVolume().GetEpoch() != old.Epoch+2 || header(t, backend, "v").Epoch != old.Epoch+2 {
+			t.Fatalf("ambiguous retry lost epoch: %v %v applied=%v", r, err, commits)
+		}
+	})
+}
+
+func TestChangeIsrSnapshotErrors(t *testing.T) {
+	backends(t, func(t *testing.T, backend kv.KV) {
+		for _, failure := range []string{"missing-header", "creating", "deleting", "missing-chunk", "bad-chunk", "bad-header", "out-of-range", "backend", "cancel", "deadline"} {
+			t.Run(failure, func(t *testing.T) {
+				s, store, v := coherentFixture(t, backend, Options{})
+				req := &metav1.ChangeIsrRequest{Volume: "v", Epoch: v.Epoch, Changes: []*metav1.IsrChange{{Chunk: 0, NewIsr: []string{"a"}}}}
+				want := codes.Internal
+				switch failure {
+				case "missing-header":
+					writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Delete: true})
+					want = codes.NotFound
+				case "creating", "deleting":
+					h := header(t, backend, "v")
+					h.Creating = failure == "creating"
+					h.Deleting = failure == "deleting"
+					writeTestHeader(t, backend, h)
+					// Publication must be decoded before diagnosing the named chunk.
+					writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: []byte("{")})
+					want = codes.NotFound
+				case "missing-chunk":
+					writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Delete: true})
+				case "bad-chunk":
+					writeTestOps(t, backend, kv.Op{Key: chunkKey("v", 0), Value: []byte("{")})
+				case "bad-header":
+					writeTestOps(t, backend, kv.Op{Key: volumeKey("v"), Value: []byte("{")})
+					want = codes.Unavailable
+				case "out-of-range":
+					req.Changes[0].Chunk = 2
+					want = codes.InvalidArgument
+				case "backend", "cancel", "deadline":
+					err := status.Error(codes.Unavailable, "injected snapshot failure")
+					want = codes.Unavailable
+					if failure == "cancel" {
+						err = context.Canceled
+						want = codes.Canceled
+					}
+					if failure == "deadline" {
+						err = context.DeadlineExceeded
+						want = codes.DeadlineExceeded
+					}
+					store.readSet = func(context.Context, []string) ([]kv.ReadResult, error) { return nil, err }
+				}
+				before, err := backend.List(context.Background(), prefix)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r, err := s.ChangeIsr(context.Background(), req)
+				if r != nil || code(err) != want {
+					t.Fatalf("snapshot error: %v %v, want %s", r, err, want)
+				}
+				after, err := backend.List(context.Background(), prefix)
+				if err != nil || !equalTestEntries(before, after) {
+					t.Fatal("failed snapshot changed storage")
+				}
+			})
 		}
 	})
 }
