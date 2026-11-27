@@ -101,9 +101,7 @@ impl MetaPort for FakeMeta {
                 }
                 let v = m.volume.as_mut().unwrap();
                 let distinct = r.changes.iter().map(|c| c.chunk).collect::<BTreeSet<_>>();
-                if distinct.len() != r.changes.len()
-                    || r.changes.iter().any(|c| c.chunk as usize >= v.chunks.len())
-                {
+                if r.changes.iter().any(|c| c.chunk as usize >= v.chunks.len()) {
                     let _ = self.inbox.send(Input::Meta {
                         id,
                         answer: Answer::Failed {
@@ -114,6 +112,7 @@ impl MetaPort for FakeMeta {
                     return;
                 }
                 let ok = r.epoch == v.epoch
+                    && distinct.len() == r.changes.len()
                     && r.changes.iter().all(|c| {
                         let ch = &v.chunks[c.chunk as usize];
                         let replicas = if c.change_replicas {
@@ -3074,12 +3073,40 @@ fn fake_meta_atomically_refuses_unsupported_batches() {
     assert_eq!(model.lock().unwrap().volume.as_ref().unwrap(), &original);
     let mut duplicate = changes[..64].to_vec();
     duplicate[63] = duplicate[0].clone();
+    let expected_chunks: Vec<_> = duplicate
+        .iter()
+        .map(|c| original.chunks[c.chunk as usize].clone())
+        .collect();
+    for (id, epoch) in [(4, original.epoch), (6, original.epoch - 1)] {
+        meta.call(
+            id,
+            Call::ChangeIsr(pb::ChangeIsrRequest {
+                volume: "v".into(),
+                epoch,
+                changes: duplicate.clone(),
+            }),
+        );
+        let Input::Meta {
+            id: reply_id,
+            answer: Answer::ChangeIsr(answer),
+        } = replies.recv().unwrap()
+        else {
+            panic!("duplicate chunks must receive an authoritative refusal")
+        };
+        assert_eq!(reply_id, id);
+        assert!(!answer.applied);
+        assert_eq!(answer.epoch, original.epoch);
+        assert_eq!(answer.chunks, expected_chunks);
+        assert_eq!(model.lock().unwrap().volume.as_ref().unwrap(), &original);
+    }
+    let mut out_of_range = changes[..64].to_vec();
+    out_of_range[63].chunk = original.chunks.len() as u32;
     meta.call(
-        4,
+        7,
         Call::ChangeIsr(pb::ChangeIsrRequest {
             volume: "v".into(),
             epoch: 1,
-            changes: duplicate,
+            changes: out_of_range,
         }),
     );
     assert!(matches!(

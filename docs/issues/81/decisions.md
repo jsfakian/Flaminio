@@ -32,3 +32,9 @@ Runtime regressions and checks named in the design are recorded in [report.md](r
   on `flaminio-repl`, with the corresponding workspace lockfile update. This adds no runtime
   dependency or protocol change; the manifest and lockfile changes support the specified
   interoperation test.
+- **Code81-R1-C1 / Sec81-R1-S1:** duplicate chunk IDs are a conditional refusal, not an RPC
+  validation error, in the production metadata service. The engine fixture must return
+  `applied=false`, the authoritative epoch and every requested chunk in order (including
+  repeated entries), without mutating metadata. Out-of-range chunk IDs remain an RPC error.
+  The regression includes a stale-epoch duplicate request so this refusal cannot hide a
+  higher authoritative epoch from the target.

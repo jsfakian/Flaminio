@@ -25,6 +25,26 @@ Changes/resolution: Both fresh reviewers confirmed higher-epoch ordering and mis
 
 Status: clear. Approval remains separate; no approval is inferred.
 
+### Code review round 1 — 220f0caab2434dc97d39943ec71b14749de5c181
+
+Scope: the complete implementation and acceptance-test diff from
+`1d9b26b5b2ffbd5b3c956093aef45531e06683a5`. Independent code and security reviewers used
+direct review because the built-in review-skill tools are unavailable in this environment.
+
+- **Code81-R1-C1 — Low:** the engine metadata fixture treats duplicate chunk IDs as an RPC
+  error, whereas the real service returns an authoritative `applied=false` reply in request
+  order. Its new fixture assertion incorrectly preserves the divergence.
+- **Sec81-R1-S1 — Medium (confidence 1.0):** independently confirmed the same divergence;
+  a stale-epoch duplicate proposal must carry the higher authoritative epoch for fencing,
+  rather than force timeout/refresh recovery.
+
+No other Low-or-worse findings or Nits. Both findings share one fixture-parity fix:
+distinctness now participates in the atomic acceptance predicate, and the regression checks
+ordered duplicate entries, unchanged metadata and both current/stale epochs. Out-of-range
+IDs still return `InvalidArgument`. The strengthened focused test failed before the fixture
+fix and passed afterward; `make fmt lint test` also passes on the corrected fixture. Fresh
+incremental reviews are pending.
+
 ## Implementation — 2026-11-27
 
 Branch: `issue/81-bounded-isr-updates`, based on
