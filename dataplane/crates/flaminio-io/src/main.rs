@@ -1,13 +1,12 @@
 //! `flaminio-io`: the Flaminio data-plane daemon.
 //!
-//! - `serve` (Linux): a volume as a ublk block device, `/dev/ublkbN`, on the local replica
-//!   store, optionally mirrored to a remote replica (MVP steps 4 and 5).
-//! - `replica`: this disk as the remote replica of a volume.
-//! - `digest`: per-chunk checksums of a volume, to compare replicas offline.
-//! - `node`: a phase-1 node: replicas served over mutual TLS, and optionally a volume target
-//!   (`--attach`), on the replication core and the metadata service.
+//! - `digest`: offline per-chunk checksums on quiesced storage.
+//! - `clock-check`: read-only inspection of the explicit physical clock contract.
+//! - `node`: qualified, authenticated replicas and targets started through a signed
+//!   current-process agent/admin Attach handoff. Legacy `serve`/`replica` starts refuse.
 
 mod cli;
+use flaminio_io::clock;
 #[cfg(target_os = "linux")]
 mod control;
 mod node;
@@ -25,12 +24,14 @@ use std::process::ExitCode;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
-        Some(cmd @ ("replica" | "digest")) => cli::main(cmd, &args[1..]),
+        Some("replica") => Err("legacy replica is unsupported; use node --clock-contract PATH for qualified authenticated storage".into()),
+        Some("clock-check") => clock::main(&args[1..]),
+        Some("digest") => cli::main("digest", &args[1..]),
         Some("node") => node::main(&args[1..]),
         #[cfg(target_os = "linux")]
         _ => ublk::main(args),
         #[cfg(not(target_os = "linux"))]
-        _ => Err("serve and del need Linux (ublk); replica and digest work anywhere".into()),
+        _ => Err("node requires a qualified Linux host; del needs Linux (ublk); digest is offline".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -197,6 +197,24 @@ pub async fn connect<IO>(
 where
     IO: AsyncRead + AsyncWrite + Unpin,
 {
+    connect_with_admission(io, connector, ip, trust_domain, node, hello, || true).await
+}
+
+/// Like `connect`, with a final process admission check after the TLS handshake and
+/// immediately before sending the lease-bearing Hello. Transport users supply their gate.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_with_admission<IO>(
+    io: IO,
+    connector: &TlsConnector,
+    ip: IpAddr,
+    trust_domain: &str,
+    node: &str,
+    hello: &Frame,
+    admit: impl FnOnce() -> bool,
+) -> Result<Conn<futures_rustls::client::TlsStream<IO>>, SessionError>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
     let tls = connector
         .connect(ServerName::IpAddress(ip.into()), io)
         .await?;
@@ -207,6 +225,11 @@ where
         )));
     }
     let mut conn = Conn::new(tls);
+    if !admit() {
+        return Err(SessionError::Refused(
+            "clock quarantined; operator restart required".into(),
+        ));
+    }
     conn.send(hello).await?;
     Ok(conn)
 }

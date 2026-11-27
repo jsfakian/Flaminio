@@ -83,3 +83,57 @@ strict handoff verifier validates the signed FLCT claim and its exact capability
 then U3 matches volume/node/current epoch against the coherent metadata view. Landed #76
 birth/epoch fencing supplies incarnation uniqueness. General FLCT v2 validation remains
 0 < FirstEpoch < Epoch; strict FLCH additionally refuses v1's FirstEpoch 0.
+
+### U3 baseline integration
+
+The IO crate has no existing JSON parser despite the design's dependency estimate. Use direct
+serde/serde_json declarations at already locked versions for bounded strict clock-contract and
+inspection JSON; do not write a bespoke parser. Record actual manifest/lock changes and keep
+unknown/duplicate/trailing fields and oversized inputs rejected.
+
+The appendix's described ran_epochs guard is absent in the current baseline. Add the required
+process-local highest-started-epoch guard after proof/domain/current-metadata/geometry checks,
+before target session effects. Invalid geometry or credentials must not poison this history.
+An exact existing live-lifetime retry may return it; stopped/older lifetimes need a fresh epoch.
+
+The old standalone replicated serve mode has no authorized handoff and must refuse before
+prepare/device effects. All live networked storage roles need enforced profile/domain or an
+explicit refusal; assess offline inspection/digest/store tools as non-authorizing operations.
+
+### U3 concrete profile inputs
+
+The strict JSON contract keys are version/profile/node/host_kind/clocksource/lease_us/drift_ppm/
+rate_bound_attested/observation_error_ns/no_live_rollback. The read-only clock-check validates
+the file node's grammar; daemon startup additionally matches its configured node identity.
+The elapsed source reported by status is CLOCK_BOOTTIME, distinct from the kernel clocksource.
+
+Container provenance uses the fixed read-only /run/flaminio/host prefix with the host proc/sys
+hierarchy. Validate the actual opened input files' filesystem read-only state, including nested
+mounts, rather than inferring it from the parent mount. Direct-host inputs are proc CPU flags,
+DMI vendor/product, hypervisor type and the current kernel clocksource. These observe required
+prerequisites, not future rate accuracy, absence of concealed virtualization, or rollback safety.
+
+### U3 syscall isolation and validation
+
+The IO crate forbids unsafe code. Put the minimal synchronous clock_gettime/clock_getres and
+read-only-filesystem syscall wrappers behind a safe Linux-gated flaminio-uring interface, with
+precise SAFETY arguments and checked outputs, instead of widening IO's unsafe permission.
+Profile parsing/backend policy stays in IO and its library exposes the pure bounded decoder
+for fuzzing. The wrappers always compile on Linux. Add flaminio-io to the sanitizer crate set
+so ASAN/TSAN exercise frontend/profile tests as well as uring's syscall boundary. Do not claim
+aligned-only Miri covers these syscalls. Async completion/pin lifetime validation is mandatory.
+
+### U3 retries and queued metadata
+
+Control attach may replay the exact current-process capability/proof of an already-live
+lifetime. A new-epoch proof never returns an older target as its result. U4 retains issued
+credentials across socket/busy retries; the existing higher-epoch metadata refresh/depose and
+kill/drain route can retire the old lifetime before retrying the retained proof. No automatic
+status-based unconditional detach is authorized by credential loss; ambiguous cleanup requires
+an exact lifecycle mechanism or quiesced operator action, not inference from a device path.
+
+Metadata endpoint fallback runs independently of Engine. Add guarded production worker
+admission with persistent observers before each queued attempt/retry, while preserving tools'
+existing unguarded API. Late RPC results cannot reactivate a quarantined Engine. ReplicaCore
+clock invalidation revokes volatile sessions without clearing durable fences, #86 uncertainty,
+pending-write reservations/retirement evidence or actual in-flight I/O ownership.

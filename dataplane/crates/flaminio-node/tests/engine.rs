@@ -27,6 +27,46 @@ use rcgen::{
 };
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 
+const NONCE: [u8; 32] = [83; 32];
+struct TestClock(Instant);
+impl flaminio_node::clock::ElapsedClock for TestClock {
+    fn read(&self) -> Result<flaminio_node::clock::ClockReading, flaminio_node::clock::ClockFault> {
+        let ns = self.0.elapsed().as_nanos();
+        Ok(flaminio_node::clock::ClockReading {
+            monotonic_before_ns: ns,
+            boottime_ns: ns,
+            monotonic_after_ns: ns,
+        })
+    }
+}
+fn clock() -> Arc<flaminio_node::clock::ClockDomain> {
+    Arc::new(
+        flaminio_node::clock::ClockDomain::new(
+            Arc::new(TestClock(Instant::now())),
+            flaminio_node::clock::ClockQualification::new(1, 1, 1000).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+fn proof(
+    key: &Ed25519KeyPair,
+    token: Vec<u8>,
+) -> Result<flaminio_net::handoff::VerifiedHandoff, String> {
+    let mut handoff = b"FLCH\x01\x01".to_vec();
+    handoff.extend_from_slice(&NONCE);
+    handoff.extend_from_slice(ring::digest::digest(&ring::digest::SHA256, &token).as_ref());
+    handoff.extend_from_slice(key.sign(&handoff).as_ref());
+    TokenKey::from_raw(key.public_key().as_ref())
+        .unwrap()
+        .verify_handoff(
+            &token,
+            &handoff,
+            &NONCE,
+            flaminio_net::handoff::Purpose::Normal,
+        )
+        .map_err(|_| "invalid capability token or target handoff".into())
+}
+
 const TD: &str = "lab";
 const MIB: u64 = 1 << 20;
 const CHUNK: u64 = 4 * MIB;
@@ -225,13 +265,14 @@ fn identities(dir: &Path) -> BTreeMap<&'static str, Files> {
 }
 
 fn token(key: &Ed25519KeyPair, volume: &str, epoch: u64, node: &str) -> Vec<u8> {
-    let mut b = b"FLCT\x01".to_vec();
+    let mut b = b"FLCT\x02".to_vec();
     b.extend_from_slice(&(volume.len() as u16).to_be_bytes());
     b.extend_from_slice(volume.as_bytes());
     b.extend_from_slice(&epoch.to_be_bytes());
     b.extend_from_slice(&(node.len() as u16).to_be_bytes());
     b.extend_from_slice(node.as_bytes());
     b.extend_from_slice(&0i64.to_be_bytes());
+    b.extend_from_slice(&1u64.to_be_bytes());
     let sig = key.sign(&b);
     b.extend_from_slice(sig.as_ref());
     b
@@ -386,8 +427,10 @@ fn start_node_with_store(
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<Input>();
     let sink_tx = Mutex::new(tx.clone());
+    let clock = clock();
     let net = net::spawn(
         NetConfig {
+            clock: clock.clone(),
             trust_domain: TD.into(),
             server: Some(ServerSide {
                 listener,
@@ -420,7 +463,7 @@ fn start_node_with_store(
         model,
         inbox: tx.clone(),
     });
-    let engine = Engine::new(cfg, ReplicaService::new(store), net, meta);
+    let engine = Engine::new(cfg, ReplicaService::new(store), net, meta, clock, NONCE);
     let (otx, orx) = mpsc::channel();
     let worker = thread::spawn(move || {
         engine.run(rx, move |o| {
@@ -536,7 +579,7 @@ fn replicated_volume_through_a_replica_failure() {
             chunk_bytes: CHUNK,
             replicas: 2,
             min_isr: 1,
-            epoch: 1,
+            epoch: 2,
             target: "fl-a".into(),
             chunks: (0..2)
                 .map(|_| pb::ChunkMeta {
@@ -551,10 +594,10 @@ fn replicated_volume_through_a_replica_failure() {
     a.inputs
         .send(Input::Attach {
             volume: "v".into(),
-            token: token(&signer, "v", 1, "fl-a"),
+            proof: proof(&signer, token(&signer, "v", 2, "fl-a")).unwrap(),
         })
         .unwrap();
-    a.wait("attach", |o| matches!(o, Output::Attached { epoch: 1, .. }));
+    a.wait("attach", |o| matches!(o, Output::Attached { epoch: 2, .. }));
 
     // Writes, one across the chunk boundary, then read them back on the target, and from the
     // other node's own replica.
@@ -646,8 +689,10 @@ fn hand_driven(
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<Input>();
     let sink_tx = Mutex::new(tx.clone());
+    let clock = clock();
     let net = net::spawn(
         NetConfig {
+            clock: clock.clone(),
             trust_domain: TD.into(),
             server: Some(ServerSide {
                 listener,
@@ -670,7 +715,7 @@ fn hand_driven(
     };
     let meta = Box::new(FakeMeta { model, inbox: tx });
     (
-        Engine::new(cfg, ReplicaService::new(store()), net, meta),
+        Engine::new(cfg, ReplicaService::new(store()), net, meta, clock, NONCE),
         rx,
     )
 }
@@ -699,7 +744,7 @@ fn serve_local_read(
     }
     engine.device().read_many(&mut reads).unwrap();
     let ok = !fail && plan.verify(&buf[lr.at..lr.at + lr.len]).is_ok();
-    engine.local_read_done(Instant::now(), lr, Some(plan), ok);
+    engine.local_read_done(lr, Some(plan), ok);
 }
 
 /// What the tests do with a local read, as the ublk frontend would: read it into the buffer and
@@ -709,11 +754,11 @@ type Frontend<'a> =
 
 /// One turn of `engine`, after the inputs that arrived: its outputs.
 fn pump(engine: &mut Engine<MemDevice>, rx: &mpsc::Receiver<Input>) -> Vec<Output> {
-    let now = Instant::now();
+    let _now = Instant::now();
     while let Ok(i) = rx.try_recv() {
-        engine.handle(now, i);
+        engine.handle(i);
     }
-    engine.turn(now);
+    engine.turn();
     engine.take_output()
 }
 
@@ -791,7 +836,7 @@ fn direct_reads_from_the_local_replica() {
         chunk_bytes: CHUNK,
         replicas: 1,
         min_isr: 1,
-        epoch: 1,
+        epoch: 2,
         target: "fl-a".into(),
         chunks: (0..2)
             .map(|_| pb::ChunkMeta {
@@ -813,11 +858,11 @@ fn direct_reads_from_the_local_replica() {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             assert!(Instant::now() < deadline, "timed out");
-            let now = Instant::now();
+            let _now = Instant::now();
             while let Ok(i) = rx.try_recv() {
-                engine.handle(now, i);
+                engine.handle(i);
             }
-            engine.turn(now);
+            engine.turn();
             for o in engine.take_output() {
                 if let Output::LocalRead(lr) = &o {
                     serve_local_read(engine, buf, lr, false);
@@ -831,28 +876,22 @@ fn direct_reads_from_the_local_replica() {
         }
     };
 
-    engine.handle(
-        Instant::now(),
-        Input::Attach {
-            volume: "v".into(),
-            token: token(&signer, "v", 1, "fl-a"),
-        },
-    );
+    engine.handle(Input::Attach {
+        volume: "v".into(),
+        proof: proof(&signer, token(&signer, "v", 2, "fl-a")).unwrap(),
+    });
     run(&mut engine, &mut buf, &|o| {
         matches!(o, Output::Attached { .. })
     });
     let off = CHUNK - MIB; // across the chunk boundary
-    engine.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op: 1,
-            io: Io::Write {
-                offset: off,
-                data: pattern(9, 2 * MIB).into(),
-            },
+    engine.handle(Input::Io {
+        volume: "v".into(),
+        op: 1,
+        io: Io::Write {
+            offset: off,
+            data: pattern(9, 2 * MIB).into(),
         },
-    );
+    });
     let w = run(&mut engine, &mut buf, &|o| {
         matches!(o, Output::Done { op: 1, .. })
     });
@@ -860,20 +899,18 @@ fn direct_reads_from_the_local_replica() {
         w,
         Output::Done {
             op: 1,
-            result: Ok(None)
+            result: Ok(None),
+            permit: None
         }
     );
-    engine.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op: 2,
-            io: Io::ReadDirect {
-                offset: off,
-                len: 2 * MIB,
-            },
+    engine.handle(Input::Io {
+        volume: "v".into(),
+        op: 2,
+        io: Io::ReadDirect {
+            offset: off,
+            len: 2 * MIB,
         },
-    );
+    });
     let r = run(&mut engine, &mut buf, &|o| {
         matches!(o, Output::Done { op: 2, .. })
     });
@@ -881,7 +918,8 @@ fn direct_reads_from_the_local_replica() {
         r,
         Output::Done {
             op: 2,
-            result: Ok(None)
+            result: Ok(None),
+            permit: None
         },
         "data placed, not returned"
     );
@@ -889,7 +927,7 @@ fn direct_reads_from_the_local_replica() {
 
     // The fast path: the same read, admitted at once and served without the queue.
     let fast_read = |engine: &mut Engine<MemDevice>, buf: &mut Vec<u8>| -> Option<bool> {
-        let fast = engine.try_fast_read(Instant::now(), "v", off, 2 * MIB)?;
+        let fast = engine.try_fast_read("v", off, 2 * MIB)?;
         let pieces: Vec<(usize, usize)> = fast.pieces().collect();
         assert_eq!(pieces.len(), 2, "one piece per chunk");
         let mut ok = true;
@@ -910,7 +948,12 @@ fn direct_reads_from_the_local_replica() {
             ok &= plan.verify(&buf[at..at + n]).is_ok();
             engine.finish_plan(plan);
         }
-        Some(engine.finish_fast_read(Instant::now(), "v", fast, ok))
+        Some(
+            engine
+                .finish_fast_read("v", fast, ok)
+                .map(|p| p.consume())
+                .is_some(),
+        )
     };
     let mut fast_buf = vec![0u8; 2 * MIB as usize];
     assert_eq!(fast_read(&mut engine, &mut fast_buf), Some(true));
@@ -921,17 +964,14 @@ fn direct_reads_from_the_local_replica() {
 
     // A write in flight holds its blocks: an overlapping fast read is refused, and admitted
     // again once the write is done.
-    engine.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op: 3,
-            io: Io::Write {
-                offset: off,
-                data: pattern(10, 2 * MIB).into(),
-            },
+    engine.handle(Input::Io {
+        volume: "v".into(),
+        op: 3,
+        io: Io::Write {
+            offset: off,
+            data: pattern(10, 2 * MIB).into(),
         },
-    );
+    });
     assert_eq!(
         fast_read(&mut engine, &mut fast_buf),
         None,
@@ -956,17 +996,14 @@ fn request_timeout() -> Duration {
 
 /// Writes `data` at 0 through `engine` as operation `op`, serving its local reads.
 fn write_at_0(engine: &mut Engine<MemDevice>, rx: &mpsc::Receiver<Input>, op: u64, data: Vec<u8>) {
-    engine.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op,
-            io: Io::Write {
-                offset: 0,
-                data: data.into(),
-            },
+    engine.handle(Input::Io {
+        volume: "v".into(),
+        op,
+        io: Io::Write {
+            offset: 0,
+            data: data.into(),
         },
-    );
+    });
     let mut serve =
         |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
     let done = drive(
@@ -990,14 +1027,11 @@ fn write_at_0(engine: &mut Engine<MemDevice>, rx: &mpsc::Receiver<Input>, op: u6
 
 /// Submits a direct read of `len` bytes at 0 as operation `op`.
 fn read_direct_at_0(engine: &mut Engine<MemDevice>, op: u64, len: u64) {
-    engine.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op,
-            io: Io::ReadDirect { offset: 0, len },
-        },
-    );
+    engine.handle(Input::Io {
+        volume: "v".into(),
+        op,
+        io: Io::ReadDirect { offset: 0, len },
+    });
 }
 
 /// Attaches the volume on a hand-driven engine at `epoch`.
@@ -1007,13 +1041,10 @@ fn attach(
     signer: &Ed25519KeyPair,
     epoch: u64,
 ) {
-    engine.handle(
-        Instant::now(),
-        Input::Attach {
-            volume: "v".into(),
-            token: token(signer, "v", epoch, "fl-a"),
-        },
-    );
+    engine.handle(Input::Attach {
+        volume: "v".into(),
+        proof: proof(signer, token(signer, "v", epoch, "fl-a")).unwrap(),
+    });
     let mut serve =
         |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
     drive(
@@ -1031,7 +1062,7 @@ fn fail_local_read(
     _: &mut [u8],
     lr: flaminio_node::engine::LocalRead,
 ) {
-    engine.local_read_done(Instant::now(), &lr, None, false);
+    engine.local_read_done(&lr, None, false);
 }
 
 /// A failed local read on a single-replica volume ends at once, with an error (docs/issues/5), not
@@ -1054,8 +1085,8 @@ fn a_failed_local_read_on_the_only_replica_fails_at_once() {
         Timing::default(),
         None,
     );
-    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
-    attach(&mut engine, &rx, &signer, 1);
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 2));
+    attach(&mut engine, &rx, &signer, 2);
     write_at_0(&mut engine, &rx, 1, pattern(1, 64 << 10));
 
     let t = Instant::now();
@@ -1107,8 +1138,8 @@ fn a_failed_local_read_is_read_from_the_other_replica() {
         assert!(Instant::now() < deadline, "fl-b did not register");
         thread::sleep(Duration::from_millis(10));
     }
-    model.lock().unwrap().volume = Some(volume(&["fl-a", "fl-b"], 1));
-    attach(&mut engine, &rx, &signer, 1);
+    model.lock().unwrap().volume = Some(volume(&["fl-a", "fl-b"], 2));
+    attach(&mut engine, &rx, &signer, 2);
     write_at_0(&mut engine, &rx, 1, pattern(2, 64 << 10));
 
     let t = Instant::now();
@@ -1160,7 +1191,7 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
         Timing::default(),
         None,
     );
-    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 2));
 
     // A direct read whose local read is held back.
     let held = |engine: &mut Engine<MemDevice>, op: u64| {
@@ -1177,7 +1208,7 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
             thread::sleep(Duration::from_millis(1));
         }
     };
-    attach(&mut engine, &rx, &signer, 1);
+    attach(&mut engine, &rx, &signer, 2);
     for op in 10..16 {
         write_at_0(&mut engine, &rx, op, pattern(3, 64 << 10));
     }
@@ -1186,20 +1217,20 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
 
     // A newer epoch deposes the target, which the engine drops without purging its local
     // reads; then the volume is attached again here.
-    model.lock().unwrap().volume.as_mut().unwrap().epoch = 2;
+    model.lock().unwrap().volume.as_mut().unwrap().epoch = 3;
     let mut serve =
         |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
     drive(&mut engine, &rx, &mut [], &mut serve, &|o| {
         matches!(o, Output::Deposed { .. })
     });
-    attach(&mut engine, &rx, &signer, 2);
+    attach(&mut engine, &rx, &signer, 3);
     write_at_0(&mut engine, &rx, 3, pattern(4, 64 << 10));
     let mut buf = vec![0u8; 64 << 10];
     let mut op = 100;
     let fresh = loop {
         let lr = held(&mut engine, op);
         let (epoch, s, r) = engine.local_read_ids(&lr).unwrap();
-        assert_eq!((epoch, s), (2, session), "the new target's first session");
+        assert_eq!((epoch, s), (3, session), "the new target's first session");
         assert!(r <= req, "request {r} went past the stale one, {req}");
         if r == req {
             break lr;
@@ -1219,7 +1250,7 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
     let fresh_op = op;
 
     let t = Instant::now();
-    engine.local_read_done(Instant::now(), &stale, None, false);
+    engine.local_read_done(&stale, None, false);
     buf.fill(0);
     serve_local_read(&mut engine, &mut buf, &fresh, false);
     let mut again = 0;
@@ -1256,8 +1287,8 @@ fn a_stale_failed_local_read_leaves_the_new_target_alone() {
 
 /// A local read that fails because a newer target fenced the replica meanwhile is answered
 /// `Stale`, which deposes the target, rather than sent to another member or ended as
-/// unreadable (docs/issues/5). fl-b becomes the volume's target at epoch 2 and fences fl-a's
-/// replica while fl-a's target, at epoch 1, has a local read in flight. fl-a's target neither
+/// unreadable (docs/issues/5). fl-b becomes the volume's target at epoch 3 and fences fl-a's
+/// replica while fl-a's target, at epoch 2, has a local read in flight. fl-a's target neither
 /// heartbeats nor refreshes during the test, so the failed read is what tells it.
 #[test]
 fn a_local_read_failed_by_a_fence_deposes_the_target() {
@@ -1284,8 +1315,8 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
         pump(&mut engine, &rx);
         thread::sleep(Duration::from_millis(10));
     }
-    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
-    attach(&mut engine, &rx, &signer, 1);
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 2));
+    attach(&mut engine, &rx, &signer, 2);
     write_at_0(&mut engine, &rx, 1, pattern(5, 64 << 10));
     read_direct_at_0(&mut engine, 2, 64 << 10);
     let held = loop {
@@ -1299,17 +1330,17 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
         thread::sleep(Duration::from_millis(1));
     };
 
-    // fl-b attaches at epoch 2 and fences fl-a's replica, which fl-a's engine serves.
+    // fl-b attaches at epoch 3 and fences fl-a's replica, which fl-a's engine serves.
     {
         let mut m = model.lock().unwrap();
         let v = m.volume.as_mut().unwrap();
-        v.epoch = 2;
+        v.epoch = 3;
         v.target = "fl-b".into();
     }
     b.inputs
         .send(Input::Attach {
             volume: "v".into(),
-            token: token(&signer, "v", 2, "fl-b"),
+            proof: proof(&signer, token(&signer, "v", 3, "fl-b")).unwrap(),
         })
         .unwrap();
     // Attached comes as fl-b's target starts; a read through it completes only once its Hello
@@ -1323,7 +1354,7 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
         );
         pump(&mut engine, &rx);
         match b.outputs.try_recv() {
-            Ok(Output::Attached { epoch: 2, .. }) => {
+            Ok(Output::Attached { epoch: 3, .. }) => {
                 attached = true;
                 b.inputs
                     .send(Input::Io {
@@ -1336,7 +1367,7 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
                     })
                     .unwrap();
             }
-            Ok(Output::Done { op: 50, result }) => {
+            Ok(Output::Done { op: 50, result, .. }) => {
                 assert!(attached);
                 assert_eq!(result.unwrap(), Some(pattern(5, 4096)));
                 break;
@@ -1345,8 +1376,8 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
         }
     }
 
-    // The store refuses to plan a read at epoch 1 now, so the frontend reports it failed.
-    engine.local_read_done(Instant::now(), &held, None, false);
+    // The store refuses to plan a read at epoch 2 now, so the frontend reports it failed.
+    engine.local_read_done(&held, None, false);
     let (mut done, mut deposed) = (None, false);
     let deadline = Instant::now() + Duration::from_secs(20);
     while done.is_none() || !deposed {
@@ -1356,7 +1387,7 @@ fn a_local_read_failed_by_a_fence_deposes_the_target() {
         );
         for o in pump(&mut engine, &rx) {
             match o {
-                Output::Done { op: 2, result } => done = Some(result),
+                Output::Done { op: 2, result, .. } => done = Some(result),
                 Output::Deposed { .. } => deposed = true,
                 _ => {}
             }
@@ -1405,20 +1436,20 @@ fn dropped_attach(late: Late) {
         Timing::default(),
         None,
     );
-    model.lock().unwrap().volume = Some(volume(&["fl-a"], 1));
+    model.lock().unwrap().volume = Some(volume(&["fl-a"], 2));
     let attach_input = |epoch| Input::Attach {
         volume: "v".into(),
-        token: token(&signer, "v", epoch, "fl-a"),
+        proof: proof(&signer, token(&signer, "v", epoch, "fl-a")).unwrap(),
     };
     // Hands every waiting input to the engine, after `edit`, and returns its outputs.
     let deliver = |engine: &mut Engine<MemDevice>, edit: &dyn Fn(&mut Vec<Input>)| {
         let mut inputs: Vec<Input> = rx.try_iter().collect();
         edit(&mut inputs);
-        let now = Instant::now();
+        let _now = Instant::now();
         for i in inputs {
-            engine.handle(now, i);
+            engine.handle(i);
         }
-        engine.turn(now);
+        engine.turn();
         engine.take_output()
     };
     let attached = |outs: &[Output]| -> Vec<u64> {
@@ -1434,42 +1465,40 @@ fn dropped_attach(late: Late) {
             .any(|o| matches!(o, Output::AttachFailed { .. }))
     };
 
-    // The attach's metadata calls are answered into the channel at once, at epoch 1.
-    engine.handle(Instant::now(), attach_input(1));
-    engine.handle(Instant::now(), Input::Detach { volume: "v".into() });
+    // The attach's metadata calls are answered into the channel at once, at epoch 2.
+    engine.handle(attach_input(2));
+    engine.handle(Input::Detach { volume: "v".into() });
     match late {
         Late::Ignored => {
             let outs = deliver(&mut engine, &|_| {});
             assert!(attached(&outs).is_empty() && !failed(&outs), "{outs:?}");
-            engine.handle(
-                Instant::now(),
-                Input::Io {
-                    volume: "v".into(),
-                    op: 1,
-                    io: Io::Read {
-                        offset: 0,
-                        len: 4096,
-                    },
+            engine.handle(Input::Io {
+                volume: "v".into(),
+                op: 1,
+                io: Io::Read {
+                    offset: 0,
+                    len: 4096,
                 },
-            );
+            });
             let outs = engine.take_output();
             assert!(
                 outs.iter().any(|o| matches!(
                     o,
                     Output::Done {
                         op: 1,
-                        result: Err(IoError::NotAttached)
+                        result: Err(IoError::NotAttached),
+                        permit: None
                     }
                 )),
                 "no target: {outs:?}"
             );
-            engine.handle(Instant::now(), attach_input(1));
+            engine.handle(attach_input(2));
             let outs = deliver(&mut engine, &|_| {});
-            assert_eq!(attached(&outs), [1], "{outs:?}");
+            assert_eq!(attached(&outs), [2], "{outs:?}");
         }
         Late::BeforeNewAttach | Late::FailedBeforeNewAttach => {
-            model.lock().unwrap().volume.as_mut().unwrap().epoch = 2;
-            engine.handle(Instant::now(), attach_input(2));
+            model.lock().unwrap().volume.as_mut().unwrap().epoch = 3;
+            engine.handle(attach_input(3));
             let fail = matches!(late, Late::FailedBeforeNewAttach);
             // The dropped attach's answers come first in the channel: the first GetVolume and
             // the first ListNodes (the engine's own RegisterNode comes before them).
@@ -1496,7 +1525,7 @@ fn dropped_attach(late: Late) {
                 }
                 assert_eq!(seen, (true, true));
             });
-            assert_eq!(attached(&outs), [2], "{outs:?}");
+            assert_eq!(attached(&outs), [3], "{outs:?}");
             assert!(!failed(&outs), "{outs:?}");
         }
     }
@@ -1514,13 +1543,10 @@ fn an_attach_of_an_unknown_volume_fails_at_once() {
     let signer = Ed25519KeyPair::from_seed_unchecked(&[12; 32]).unwrap();
     let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
     let (mut engine, rx) = hand_driven("fl-a", &ids["fl-a"], key, model, Timing::default(), None);
-    engine.handle(
-        Instant::now(),
-        Input::Attach {
-            volume: "v".into(),
-            token: token(&signer, "v", 1, "fl-a"),
-        },
-    );
+    engine.handle(Input::Attach {
+        volume: "v".into(),
+        proof: proof(&signer, token(&signer, "v", 2, "fl-a")).unwrap(),
+    });
     let t = Instant::now();
     let mut serve =
         |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
@@ -1607,8 +1633,10 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     let (tx, rx) = mpsc::channel::<Input>();
     let sink_tx = Mutex::new(tx.clone());
     let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+    let clock = clock();
     let net = net::spawn(
         NetConfig {
+            clock: clock.clone(),
             trust_domain: TD.into(),
             server: Some(ServerSide {
                 listener,
@@ -1635,8 +1663,8 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     });
     let dev = store().into_device();
     let deferred = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
-    let mut engine = Engine::new(cfg, ReplicaService::new(deferred), net, meta);
-    engine.set_async_commits(Instant::now(), true);
+    let mut engine = Engine::new(cfg, ReplicaService::new(deferred), net, meta, clock, NONCE);
+    engine.set_async_commits(true);
     // Count/time gather for the paths below; the byte-floor section turns this back on.
     engine.set_commit_target_bytes(0);
     model.lock().unwrap().volume = Some(pb::Volume {
@@ -1645,7 +1673,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         chunk_bytes: CHUNK,
         replicas: 1,
         min_isr: 1,
-        epoch: 1,
+        epoch: 2,
         target: "fl-a".into(),
         chunks: (0..4)
             .map(|_| pb::ChunkMeta {
@@ -1667,11 +1695,11 @@ fn commits_in_flight_hold_writes_but_not_reads() {
      -> Vec<Output> {
         let mut got = Vec::new();
         for _ in 0..turns {
-            let now = Instant::now();
+            let _now = Instant::now();
             while let Ok(i) = rx.try_recv() {
-                engine.handle(now, i);
+                engine.handle(i);
             }
-            engine.turn(now);
+            engine.turn();
             for o in engine.take_output() {
                 if let Output::LocalRead(lr) = &o {
                     let lr: LocalRead = lr.clone();
@@ -1685,7 +1713,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
                             .unwrap();
                     }
                     let ok = plan.verify(&buf[lr.at..lr.at + lr.len]).is_ok();
-                    engine.local_read_done(Instant::now(), &lr, Some(plan), ok);
+                    engine.local_read_done(&lr, Some(plan), ok);
                     continue;
                 }
                 if want(&o) {
@@ -1701,24 +1729,18 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     };
     let until = 20_000; // turns: a ceiling, the loop stops at the first match
     let io = |engine: &mut Engine<DeferredDevice>, op: u64, io: Io| {
-        engine.handle(
-            Instant::now(),
-            Input::Io {
-                volume: "v".into(),
-                op,
-                io,
-            },
-        );
+        engine.handle(Input::Io {
+            volume: "v".into(),
+            op,
+            io,
+        });
     };
     let done = |op: u64| move |o: &Output| matches!(o, Output::Done { op: d, .. } if *d == op);
 
-    engine.handle(
-        Instant::now(),
-        Input::Attach {
-            volume: "v".into(),
-            token: token(&signer, "v", 1, "fl-a"),
-        },
-    );
+    engine.handle(Input::Attach {
+        volume: "v".into(),
+        proof: proof(&signer, token(&signer, "v", 2, "fl-a")).unwrap(),
+    });
     run(&mut engine, &mut buf, until, &|o| {
         matches!(o, Output::Attached { .. })
     });
@@ -1758,7 +1780,8 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         r,
         vec![Output::Done {
             op: 3,
-            result: Ok(None)
+            result: Ok(None),
+            permit: None
         }]
     );
     assert!(buf[..64 * 1024].iter().all(|&b| b == 0), "never written");
@@ -1770,7 +1793,8 @@ fn commits_in_flight_hold_writes_but_not_reads() {
         w,
         vec![Output::Done {
             op: 1,
-            result: Ok(None)
+            result: Ok(None),
+            permit: None
         }]
     );
     // Then the second write's commit starts.
@@ -1797,17 +1821,14 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     let cluster = 64 * 1024;
     let at = |i: u64| 2 * MIB + i * cluster;
     let write = |engine: &mut Engine<DeferredDevice>, op: u64, i: u64| {
-        engine.handle(
-            Instant::now(),
-            Input::Io {
-                volume: "v".into(),
-                op,
-                io: Io::Write {
-                    offset: at(i),
-                    data: pattern(op as u8, cluster).into(),
-                },
+        engine.handle(Input::Io {
+            volume: "v".into(),
+            op,
+            io: Io::Write {
+                offset: at(i),
+                data: pattern(op as u8, cluster).into(),
             },
-        );
+        });
     };
     let acked = |engine: &mut Engine<DeferredDevice>,
                  buf: &mut Vec<u8>,
@@ -1903,17 +1924,14 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     engine.set_commit_target_bytes(8 << 20);
     engine.set_commit_gather(Duration::from_secs(10));
     let write_mib = |engine: &mut Engine<DeferredDevice>, op: u64, i: u64| {
-        engine.handle(
-            Instant::now(),
-            Input::Io {
-                volume: "v".into(),
-                op,
-                io: Io::Write {
-                    offset: i * MIB,
-                    data: pattern(op as u8, MIB).into(),
-                },
+        engine.handle(Input::Io {
+            volume: "v".into(),
+            op,
+            io: Io::Write {
+                offset: i * MIB,
+                data: pattern(op as u8, MIB).into(),
             },
-        );
+        });
     };
     for (op, i) in [(20u64, 0u64), (21, 1), (22, 2), (23, 3)] {
         write_mib(&mut engine, op, i);
@@ -1968,17 +1986,14 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     acked(&mut engine, &mut buf, 32..=39);
 
     // 4K path: byte floor does not hold the commit for 8 MiB; the gather window ends it.
-    engine.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op: 40,
-            io: Io::Write {
-                offset: 0,
-                data: pattern(40, 4096).into(),
-            },
+    engine.handle(Input::Io {
+        volume: "v".into(),
+        op: 40,
+        io: Io::Write {
+            offset: 0,
+            data: pattern(40, 4096).into(),
         },
-    );
+    });
     run(&mut engine, &mut buf, 30, &done(40));
     assert!(
         engine.device().in_flight(),
@@ -1987,7 +2002,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
     engine.device().complete();
     acked(&mut engine, &mut buf, 40..=40);
 
-    engine.set_async_commits(Instant::now(), false);
+    engine.set_async_commits(false);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -1995,7 +2010,7 @@ fn commits_in_flight_hold_writes_but_not_reads() {
 /// metadata service signs it.
 fn token_first(key: &Ed25519KeyPair, volume: &str, epoch: u64, node: &str, first: u64) -> Vec<u8> {
     let mut b = token(key, volume, epoch, node);
-    b.truncate(b.len() - 64);
+    b.truncate(b.len() - 64 - 8);
     b[4] = 2;
     b.extend_from_slice(&first.to_be_bytes());
     let sig = key.sign(&b);
@@ -2021,11 +2036,11 @@ fn volume_on(chunks: u64, replicas: &[&str], target: &str, epoch: u64) -> pb::Vo
 }
 
 /// Waits for `node`'s answer to an attach: its epoch, or why it failed.
-fn attach_result(node: &Node, token: Vec<u8>) -> Result<u64, String> {
+fn attach_result(node: &Node, signer: &Ed25519KeyPair, token: Vec<u8>) -> Result<u64, String> {
     node.inputs
         .send(Input::Attach {
             volume: "v".into(),
-            token,
+            proof: proof(signer, token)?,
         })
         .unwrap();
     match node.wait("attach", |o| {
@@ -2062,10 +2077,10 @@ fn a_volume_created_again_neither_adopts_nor_is_deposed() {
     let b = start_node("fl-b", &ids["fl-b"], key.clone(), model.clone());
     both_registered(&model);
 
-    // The earlier volume, from before first epochs: epoch 1, a version 1 token.
-    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1));
-    let old = token(&signer, "v", 1, "fl-a");
-    assert_eq!(attach_result(&a, old.clone()), Ok(1));
+    // The earlier volume, from before first epochs: epoch 2, a version 1 token.
+    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 2));
+    let old = token(&signer, "v", 2, "fl-a");
+    assert_eq!(attach_result(&a, &signer, old.clone()), Ok(2));
     for (op, off) in [(1, 0), (2, CHUNK)] {
         a.io(
             op,
@@ -2082,8 +2097,8 @@ fn a_volume_created_again_neither_adopts_nor_is_deposed() {
     // Deleted and created again at first epoch 1000; attached at 1001. (A new geometry is
     // dropped as well: the replica service's tests.)
     model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1001));
-    let why = attach_result(&a, old.clone()).unwrap_err();
-    assert!(why.contains("epoch 1 ") && why.contains("1001"), "{why}");
+    let why = attach_result(&a, &signer, old.clone()).unwrap_err();
+    assert!(why.contains("epoch 2 ") && why.contains("1001"), "{why}");
     for (what, tok) in [
         (
             "another volume's",
@@ -2095,15 +2110,18 @@ fn a_volume_created_again_neither_adopts_nor_is_deposed() {
         ),
         ("no", Vec::new()),
     ] {
-        assert!(attach_result(&a, tok).is_err(), "{what} token accepted");
+        assert!(
+            attach_result(&a, &signer, tok).is_err(),
+            "{what} token accepted"
+        );
     }
     let new = token_first(&signer, "v", 1001, "fl-a", 1000);
     // A token that does not decode: the right one with an unknown version.
     let mut garbled = new.clone();
     garbled[4] = 9;
-    let why = attach_result(&a, garbled).unwrap_err();
+    let why = attach_result(&a, &signer, garbled).unwrap_err();
     assert!(why.contains("invalid capability token"), "{why}");
-    assert_eq!(attach_result(&a, new), Ok(1001));
+    assert_eq!(attach_result(&a, &signer, new), Ok(1001));
     for (op, off) in [(10, 0), (11, CHUNK)] {
         let got = a
             .io(
@@ -2149,7 +2167,7 @@ fn a_volume_created_again_neither_adopts_nor_is_deposed() {
         let addr = model.lock().unwrap().nodes["fl-b"].clone();
         let mut m = old_model.lock().unwrap();
         m.nodes.insert("fl-b".into(), addr);
-        m.volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1));
+        m.volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 2));
     }
     let (mut zombie, rx) = hand_driven(
         "fl-a",
@@ -2159,18 +2177,15 @@ fn a_volume_created_again_neither_adopts_nor_is_deposed() {
         Timing::default(),
         None,
     );
-    attach(&mut zombie, &rx, &signer, 1);
-    zombie.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op: 1,
-            io: Io::Write {
-                offset: 0,
-                data: pattern(3, 4096).into(),
-            },
+    attach(&mut zombie, &rx, &signer, 2);
+    zombie.handle(Input::Io {
+        volume: "v".into(),
+        op: 1,
+        io: Io::Write {
+            offset: 0,
+            data: pattern(3, 4096).into(),
         },
-    );
+    });
     let mut serve =
         |e: &mut Engine<MemDevice>, b: &mut [u8], lr| serve_local_read(e, b, &lr, false);
     drive(&mut zombie, &rx, &mut [], &mut serve, &|o| {
@@ -2203,8 +2218,11 @@ fn a_drop_under_a_target_of_the_earlier_volume_fails_its_io() {
     let b = start_node("fl-b", &ids["fl-b"], key, model.clone());
     both_registered(&model);
 
-    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-b", 1));
-    assert_eq!(attach_result(&b, token(&signer, "v", 1, "fl-b")), Ok(1));
+    model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-b", 2));
+    assert_eq!(
+        attach_result(&b, &signer, token(&signer, "v", 2, "fl-b")),
+        Ok(2)
+    );
     b.io(
         1,
         Io::Write {
@@ -2215,7 +2233,7 @@ fn a_drop_under_a_target_of_the_earlier_volume_fails_its_io() {
 
     model.lock().unwrap().volume = Some(volume_on(2, &["fl-a", "fl-b"], "fl-a", 1001));
     let new = token_first(&signer, "v", 1001, "fl-a", 1000);
-    assert_eq!(attach_result(&a, new), Ok(1001));
+    assert_eq!(attach_result(&a, &signer, new), Ok(1001));
     a.io(
         2,
         Io::Write {
@@ -2278,8 +2296,10 @@ impl Holding {
         let (tx, rx) = mpsc::channel::<Input>();
         let sink_tx = Mutex::new(tx.clone());
         let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
+        let clock = clock();
         let net = net::spawn(
             NetConfig {
+                clock: clock.clone(),
                 trust_domain: TD.into(),
                 server: Some(ServerSide {
                     listener,
@@ -2306,8 +2326,8 @@ impl Holding {
         });
         let dev = store().into_device();
         let deferred = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
-        let mut engine = Engine::new(cfg, ReplicaService::new(deferred), net, meta);
-        engine.set_async_commits(Instant::now(), true);
+        let mut engine = Engine::new(cfg, ReplicaService::new(deferred), net, meta, clock, NONCE);
+        engine.set_async_commits(true);
         let arrivals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         engine.set_arrivals(arrivals.clone());
         model.lock().unwrap().volume = Some(pb::Volume {
@@ -2316,7 +2336,7 @@ impl Holding {
             chunk_bytes: CHUNK,
             replicas: 1,
             min_isr: 1,
-            epoch: 1,
+            epoch: 2,
             target: "fl-a".into(),
             chunks: (0..4)
                 .map(|_| pb::ChunkMeta {
@@ -2335,13 +2355,10 @@ impl Holding {
             arrivals,
             model,
         };
-        h.engine.handle(
-            Instant::now(),
-            Input::Attach {
-                volume: "v".into(),
-                token: token(&signer, "v", 1, "fl-a"),
-            },
-        );
+        h.engine.handle(Input::Attach {
+            volume: "v".into(),
+            proof: proof(&signer, token(&signer, "v", 2, "fl-a")).unwrap(),
+        });
         h.run(20_000, &|o| matches!(o, Output::Attached { .. }));
         h
     }
@@ -2352,11 +2369,11 @@ impl Holding {
         use flaminio_store::BlockDevice;
         let mut got = Vec::new();
         for _ in 0..turns {
-            let now = Instant::now();
+            let _now = Instant::now();
             while let Ok(i) = self.rx.try_recv() {
-                self.engine.handle(now, i);
+                self.engine.handle(i);
             }
-            self.engine.turn(now);
+            self.engine.turn();
             for o in self.engine.take_output() {
                 if let Output::LocalRead(lr) = &o {
                     let piece = &mut self.buf[lr.at..lr.at + lr.len];
@@ -2369,8 +2386,7 @@ impl Holding {
                             .unwrap();
                     }
                     let ok = plan.verify(&self.buf[lr.at..lr.at + lr.len]).is_ok();
-                    self.engine
-                        .local_read_done(Instant::now(), lr, Some(plan), ok);
+                    self.engine.local_read_done(lr, Some(plan), ok);
                     continue;
                 }
                 if want(&o) {
@@ -2386,17 +2402,14 @@ impl Holding {
     }
 
     fn write(&mut self, op: u64, offset: u64, len: u64) {
-        self.engine.handle(
-            Instant::now(),
-            Input::Io {
-                volume: "v".into(),
-                op,
-                io: Io::Write {
-                    offset,
-                    data: pattern(op as u8, len).into(),
-                },
+        self.engine.handle(Input::Io {
+            volume: "v".into(),
+            op,
+            io: Io::Write {
+                offset,
+                data: pattern(op as u8, len).into(),
             },
-        );
+        });
     }
 
     /// Drives the engine until every write of `ops` is acknowledged, completing commits as they
@@ -2411,7 +2424,7 @@ impl Holding {
             n += self
                 .run(
                     1,
-                    &|o| matches!(o, Output::Done { op, result: Ok(_) } if ops.contains(op)),
+                    &|o| matches!(o, Output::Done { op, result: Ok(_), .. } if ops.contains(op)),
                 )
                 .len();
             if n == want {
@@ -2431,14 +2444,11 @@ impl Holding {
     }
 
     fn reads_back(&mut self, op: u64, offset: u64, len: u64) {
-        self.engine.handle(
-            Instant::now(),
-            Input::Io {
-                volume: "v".into(),
-                op: 1000 + op,
-                io: Io::ReadDirect { offset, len },
-            },
-        );
+        self.engine.handle(Input::Io {
+            volume: "v".into(),
+            op: 1000 + op,
+            io: Io::ReadDirect { offset, len },
+        });
         let done = self.run(
             20_000,
             &|o| matches!(o, Output::Done { op: d, .. } if *d == 1000 + op),
@@ -2542,26 +2552,23 @@ fn holding_staged_groups() {
         .take_gather_timer()
         .expect("the landing arms a wait");
     h.arrivals.store(1, Ordering::Relaxed);
-    h.engine.handle(
-        Instant::now(),
-        Input::Io {
-            volume: "v".into(),
-            op: 44,
-            io: Io::Write {
-                offset: 6 * MIB,
-                data,
-            },
+    h.engine.handle(Input::Io {
+        volume: "v".into(),
+        op: 44,
+        io: Io::Write {
+            offset: 6 * MIB,
+            data,
         },
-    );
+    });
     // Turns as `run` does, at instants of our own, until one is past the window: the hold ends
     // 8 ms after the window by the clock, not by turns, and a slow build (the sanitizers) can be
     // past that already, where the turn shows nothing.
     loop {
         let now = Instant::now();
         while let Ok(i) = h.rx.try_recv() {
-            h.engine.handle(now, i);
+            h.engine.handle(i);
         }
-        h.engine.turn(now);
+        h.engine.turn();
         if now >= until {
             if now < until + Duration::from_millis(8) {
                 assert!(
@@ -2657,15 +2664,12 @@ fn holding_staged_groups() {
     // Inspecting the local replica.
     hold(&mut h, 60);
     let (tx, rx) = mpsc::channel();
-    h.engine.handle(
-        Instant::now(),
-        Input::InspectLocal {
-            volume: "v".into(),
-            offset: 11 * MIB,
-            len: 4096,
-            reply: tx,
-        },
-    );
+    h.engine.handle(Input::InspectLocal {
+        volume: "v".into(),
+        offset: 11 * MIB,
+        len: 4096,
+        reply: tx,
+    });
     let got = rx
         .recv_timeout(Duration::from_secs(5))
         .unwrap()
@@ -2679,13 +2683,10 @@ fn holding_staged_groups() {
     // Deleting another volume's replicas.
     hold(&mut h, 70);
     let (tx, rx) = mpsc::channel();
-    h.engine.handle(
-        Instant::now(),
-        Input::DeleteReplicas {
-            volume: "w".into(),
-            reply: tx,
-        },
-    );
+    h.engine.handle(Input::DeleteReplicas {
+        volume: "w".into(),
+        reply: tx,
+    });
     rx.recv_timeout(Duration::from_secs(5))
         .unwrap()
         .expect("deleted");
@@ -2693,29 +2694,26 @@ fn holding_staged_groups() {
     // A peer opening a session (its Hello fences the store).
     hold(&mut h, 80);
     let (replies, peer) = smol::channel::unbounded();
-    h.engine.handle(
-        Instant::now(),
-        Input::Net(net::NetEvent::Opened {
-            conn: 99,
-            accepted: Box::new(flaminio_net::session::Accepted {
-                peer_node: "fl-b".into(),
-                req: 1,
-                epoch: 1,
-                session: 7,
-                claims: flaminio_net::token::Claims {
-                    volume: "w".into(),
-                    epoch: 1,
-                    node: "fl-b".into(),
-                    issued_at: 0,
-                    first_epoch: 0,
-                },
-                size: CHUNK,
-                chunk_size: CHUNK,
-                chunks: vec![0],
-            }),
-            replies,
+    h.engine.handle(Input::Net(net::NetEvent::Opened {
+        conn: 99,
+        accepted: Box::new(flaminio_net::session::Accepted {
+            peer_node: "fl-b".into(),
+            req: 1,
+            epoch: 2,
+            session: 7,
+            claims: flaminio_net::token::Claims {
+                volume: "w".into(),
+                epoch: 2,
+                node: "fl-b".into(),
+                issued_at: 0,
+                first_epoch: 0,
+            },
+            size: CHUNK,
+            chunk_size: CHUNK,
+            chunks: vec![0],
         }),
-    );
+        replies,
+    }));
     assert!(peer.try_recv().is_ok(), "the Hello was answered");
     h.acked(82..=82);
     // Turning asynchronous commits off (detach), with a commit in flight, a group staged
@@ -2728,11 +2726,11 @@ fn holding_staged_groups() {
     h.write(93, 14 * MIB + MIB / 2, 4096); // queued behind the group
     h.idle(3);
     assert_eq!(h.engine.device().commits_in_flight(), 1);
-    h.engine.set_async_commits(Instant::now(), false);
+    h.engine.set_async_commits(false);
     let mut answered = Vec::new();
     for _ in 0..100 {
         for o in h.run(1, &|o| matches!(o, Output::Done { op: 90..=93, .. })) {
-            if let Output::Done { op, result } = o {
+            if let Output::Done { op, result, .. } = o {
                 assert!(result.is_ok(), "write {op}: {result:?}");
                 answered.push(op);
             }
@@ -2780,13 +2778,10 @@ fn an_attach_settles_a_held_group() {
         m.volume = Some(w);
     }
     let signer = Ed25519KeyPair::from_seed_unchecked(&[7; 32]).unwrap();
-    h.engine.handle(
-        Instant::now(),
-        Input::Attach {
-            volume: "w".into(),
-            token: token(&signer, "w", 1, "fl-a"),
-        },
-    );
+    h.engine.handle(Input::Attach {
+        volume: "w".into(),
+        proof: proof(&signer, token(&signer, "w", 2, "fl-a")).unwrap(),
+    });
     // The test completes no commit: write 4 is durable only if the Hello's settle waited for it.
     let (mut attached, mut acked) = (false, false);
     for _ in 0..5_000 {
@@ -2829,7 +2824,7 @@ fn small_volume(chunks: u64) -> pb::Volume {
     pb::Volume {
         size_bytes: chunks * SMALL_CHUNK,
         chunk_bytes: SMALL_CHUNK,
-        ..volume_on(chunks, &["fl-a", "fl-b"], "fl-a", 1)
+        ..volume_on(chunks, &["fl-a", "fl-b"], "fl-a", 2)
     }
 }
 
@@ -2877,7 +2872,10 @@ fn large_volume_recovers_with_production_batch_limit() {
             until: Instant::now() + Duration::from_secs(60),
         })
         .unwrap();
-    assert_eq!(attach_result(&a, token(&signer, "v", 1, "fl-a")), Ok(1));
+    assert_eq!(
+        attach_result(&a, &signer, token(&signer, "v", 2, "fl-a")),
+        Ok(2)
+    );
     wait_model(&model, "the first bounded shrink", |m| {
         !m.held_isr.is_empty()
     });
@@ -3024,7 +3022,10 @@ fn bounded_batches_complete_mixed_moves_and_preserve_data() {
     );
     wait_model(&model, "three registered nodes", |m| m.nodes.len() == 3);
     model.lock().unwrap().volume = Some(small_volume(129));
-    assert_eq!(attach_result(&a, token(&signer, "v", 1, "fl-a")), Ok(1));
+    assert_eq!(
+        attach_result(&a, &signer, token(&signer, "v", 2, "fl-a")),
+        Ok(2)
+    );
     for (op, chunk) in [0, 1, 127].into_iter().enumerate() {
         a.io(
             100 + op as u64,
@@ -3142,7 +3143,7 @@ fn fake_meta_atomically_refuses_unsupported_batches() {
         1,
         Call::ChangeIsr(pb::ChangeIsrRequest {
             volume: "v".into(),
-            epoch: 1,
+            epoch: 2,
             changes: changes.clone(),
         }),
     );
@@ -3163,7 +3164,7 @@ fn fake_meta_atomically_refuses_unsupported_batches() {
         2,
         Call::ChangeIsr(pb::ChangeIsrRequest {
             volume: "v".into(),
-            epoch: 1,
+            epoch: 2,
             changes: wrong,
         }),
     );
@@ -3209,7 +3210,7 @@ fn fake_meta_atomically_refuses_unsupported_batches() {
         7,
         Call::ChangeIsr(pb::ChangeIsrRequest {
             volume: "v".into(),
-            epoch: 1,
+            epoch: 2,
             changes: out_of_range,
         }),
     );
@@ -3230,7 +3231,7 @@ fn fake_meta_atomically_refuses_unsupported_batches() {
         5,
         Call::ChangeIsr(pb::ChangeIsrRequest {
             volume: "v".into(),
-            epoch: 1,
+            epoch: 2,
             changes: outside,
         }),
     );
@@ -3248,7 +3249,7 @@ fn fake_meta_atomically_refuses_unsupported_batches() {
         3,
         Call::ChangeIsr(pb::ChangeIsrRequest {
             volume: "v".into(),
-            epoch: 1,
+            epoch: 2,
             changes: ordered,
         }),
     );

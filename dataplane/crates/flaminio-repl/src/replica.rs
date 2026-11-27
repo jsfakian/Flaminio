@@ -489,6 +489,14 @@ impl ReplicaCore {
         Ok(())
     }
 
+    /// Close every volatile session after process clock admission has been quarantined.
+    /// Keep durable fences and uncertainty records; outstanding device writes may land.
+    pub fn invalidate_clock(&mut self) {
+        for v in self.vols.values_mut() {
+            v.session = None;
+        }
+    }
+
     /// Loses the volatile state, as after a process or node crash.
     pub fn restart(&mut self) {
         for v in self.vols.values_mut() {

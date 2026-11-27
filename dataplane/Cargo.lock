@@ -616,6 +616,8 @@ dependencies = [
  "io-uring",
  "libc",
  "libublk",
+ "serde",
+ "serde_json",
  "smol",
 ]
 

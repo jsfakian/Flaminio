@@ -40,7 +40,7 @@ COUNT     ?= 1
 # so a real hang still prints its goroutine dump.
 RACE_TIMEOUT ?= $(shell expr 10 + 2 \* $(COUNT))m
 # The data plane crates with threads, io_uring or unsafe code, for the sanitizers.
-SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net
+SANITIZE_CRATES := -p flaminio-uring -p flaminio-store -p flaminio-node -p flaminio-net -p flaminio-io
 # Instrumented builds go apart from the normal ones, under CARGO_TARGET_DIR when it is set (CI).
 SANITIZE_TARGET := $(or $(CARGO_TARGET_DIR),target)
 # QUICK=1 (pull requests): ThreadSanitizer skips the store's two long single-threaded tests, where

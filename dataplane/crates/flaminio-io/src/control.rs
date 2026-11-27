@@ -2,7 +2,7 @@
 //! connection, one line each way:
 //!
 //! ```text
-//! attach VOLUME TOKEN-BASE64 [MS] ->  ok /dev/ublkbN   (or: error ...)
+//! attach VOLUME TOKEN-BASE64 HANDOFF-BASE64URL [MS] ->  ok /dev/ublkbN   (or: error ...)
 //! detach VOLUME                ->  ok
 //! status                       ->  ok VOLUME /dev/ublkbN | ok none
 //! ```
@@ -15,10 +15,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use flaminio_net::handoff::{Purpose, VerifiedHandoff};
+use flaminio_net::token::TokenKey;
+use flaminio_node::clock::ClockDomain;
 use flaminio_node::engine::Input;
 use libublk::ctrl::UblkCtrl;
 
@@ -36,12 +40,19 @@ pub(crate) const ATTACH_LIMIT: Duration = METADATA_LIMIT
 /// How long a delete may take: below the CSI node plugin's limit, like an attach.
 const DELETE_LIMIT: Duration = Duration::from_secs(50);
 
+pub struct ClockControl {
+    pub domain: Arc<ClockDomain>,
+    pub nonce: [u8; 32],
+    pub key: TokenKey,
+}
+
 pub fn spawn(
     path: &Path,
     ctl: mpsc::Sender<Control>,
     engine: mpsc::Sender<Input>,
     wake: Wake,
     attached: Attached,
+    clock: ClockControl,
 ) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -50,6 +61,7 @@ pub fn spawn(
     let listener = UnixListener::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    let clock = Arc::new(clock);
     thread::Builder::new()
         .name("flaminio-control".into())
         .spawn(move || {
@@ -57,7 +69,8 @@ pub fn spawn(
                 let (ctl, engine, wake, attached) =
                     (ctl.clone(), engine.clone(), wake.clone(), attached.clone());
                 // Attaches take a while; one thread per command keeps a detach possible.
-                thread::spawn(move || serve(conn, &ctl, &engine, &wake, &attached));
+                let clock = clock.clone();
+                thread::spawn(move || serve(conn, &ctl, &engine, &wake, &attached, &clock));
             }
         })
         .map_err(|e| format!("control thread: {e}"))?;
@@ -70,6 +83,7 @@ fn serve(
     engine: &mpsc::Sender<Input>,
     wake: &Wake,
     attached: &Attached,
+    clock: &ClockControl,
 ) {
     let mut line = String::new();
     let Ok(read) = conn.try_clone() else { return };
@@ -80,33 +94,48 @@ fn serve(
         return;
     }
     let words: Vec<&str> = line.split_whitespace().collect();
+    let mut observer = clock.domain.observer();
     let answer = match words.as_slice() {
-        ["attach", volume, token, within @ ..] if within.len() <= 1 => {
-            // Not in the match below: a guard there would be held through the attach, and the
-            // device's ready callback takes this lock.
-            let current = attached.lock().expect("attached").clone();
-            match (
-                base64_decode(token),
-                attach_limit(within.first().copied()),
-                current,
-            ) {
-                // The main thread takes commands only while no volume is attached.
-                (_, _, Some((v, _))) => {
-                    format!("error: {v} is attached here; one volume at a time")
+        ["clock-status"] => crate::clock::status(&clock.domain),
+        ["attach-challenge"] => match observer.sample().and_then(|sample| observer.success_permit(sample)) {
+            Ok(permit) => { permit.consume(); format!("ok {}", clock.nonce.iter().map(|b| format!("{b:02x}")).collect::<String>()) }
+            Err(_) => "error: clock quarantined; operator restart required".into(),
+        },
+        ["attach", volume, token, handoff, within @ ..] if within.len() <= 1 => {
+            if observer.sample().is_err() { "error: clock quarantined; operator restart required".into() }
+            else if token.len() > 4096 || handoff.len() != 179 { "error: invalid bounded token or handoff".into() }
+            else {
+                let proof = base64_decode(token).and_then(|token| decode_handoff(handoff).and_then(|handoff| clock.key.verify_handoff(&token, &handoff, &clock.nonce, Purpose::Normal).ok()));
+                let current = attached.lock().expect("attached").clone();
+                match (proof, attach_limit(within.first().copied()), current) {
+                    (None, _, _) => "error: invalid current-process target handoff".into(),
+                    (_, Err(e), _) => format!("error: {e}"),
+                    (Some(proof), Ok(_), Some(device)) => {
+                        if device.volume == *volume && device.proof.capability() == proof.capability() {
+                            match device.retry_permit(&proof) {
+                                Some(permit) => { permit.consume(); format!("ok /dev/ublkb{}", device.id) }
+                                None => if clock.domain.status().is_healthy() { "error: existing target lifetime is no longer live".into() } else { "error: clock quarantined; operator restart required".into() },
+                            }
+                        } else { format!("error: {} has an existing device lifetime; retry this handoff only after that device stops", device.volume) }
+                    },
+                    (Some(proof), Ok(limit), None) => {
+                        if proof.claims().volume != *volume { "error: handoff volume mismatch".into() }
+                        else { attach(ctl, wake, volume, proof, limit) }
+                    }
                 }
-                (None, _, None) => "error: the token is not base64".into(),
-                (_, Err(e), None) => format!("error: {e}"),
-                (Some(token), Ok(limit), None) => attach(ctl, wake, volume, token, limit),
             }
         }
+        ["attach", ..] => "error: attach requires VOLUME TOKEN HANDOFF [MS]; obtain an authorized agent/admin Attach bound to attach-challenge".into(),
         ["detach", volume] => detach(engine, wake, attached, volume),
-        ["delete", volume] => delete(engine, wake, volume),
+        ["delete", volume] => {
+            if observer.sample().is_err() { "error: clock quarantined; operator restart required".into() } else { delete(engine, wake, volume) }
+        },
         ["status"] => match attached.lock().expect("attached").clone() {
-            Some((v, id)) => format!("ok {v} /dev/ublkb{id}"),
+            Some(device) => format!("ok {} /dev/ublkb{}", device.volume, device.id),
             None => "ok none".into(),
         },
         _ => {
-            "error: usage: attach VOLUME TOKEN-BASE64 [MS] | detach VOLUME | delete VOLUME | status"
+            "error: usage: attach VOLUME TOKEN HANDOFF [MS] | detach VOLUME | delete VOLUME | status | clock-status | attach-challenge"
                 .into()
         }
     };
@@ -114,18 +143,44 @@ fn serve(
     let _ = writeln!(conn, "{answer}");
 }
 
+fn decode_handoff(text: &str) -> Option<Vec<u8>> {
+    if text.len() != 179
+        || !text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return None;
+    }
+    let standard = text.replace('-', "+").replace('_', "/");
+    // 134 bytes leave four significant bits in the final base64 digit.
+    let last = *standard.as_bytes().last()?;
+    let digit = match last {
+        b'A'..=b'Z' => last - b'A',
+        b'a'..=b'z' => last - b'a' + 26,
+        b'0'..=b'9' => last - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    };
+    if digit & 3 != 0 {
+        return None;
+    }
+    let bytes = base64_decode(&standard)?;
+    (bytes.len() == flaminio_net::handoff::LEN).then_some(bytes)
+}
+
 fn attach(
     ctl: &mpsc::Sender<Control>,
     wake: &Wake,
     volume: &str,
-    token: Vec<u8>,
+    proof: VerifiedHandoff,
     limit: Duration,
 ) -> String {
     let (reply, answer) = mpsc::channel();
     if ctl
         .send(Control::Attach {
             volume: volume.to_string(),
-            token,
+            proof,
             reply,
             deadline: Instant::now() + limit,
         })
@@ -191,7 +246,10 @@ fn delete(engine: &mpsc::Sender<Input>, wake: &Wake, volume: &str) -> String {
 
 fn detach(engine: &mpsc::Sender<Input>, wake: &Wake, attached: &Attached, volume: &str) -> String {
     let id = match attached.lock().expect("attached").clone() {
-        Some((v, id)) if v == volume => id,
+        Some(device) if device.volume == volume => {
+            device.live.store(false, Ordering::SeqCst);
+            device.id
+        }
         _ => return format!("error: {volume} is not attached here"),
     };
     // End the target first, so pending I/O fails cleanly; then stop the device.
@@ -216,12 +274,26 @@ fn detach(engine: &mpsc::Sender<Input>, wake: &Wake, attached: &Attached, volume
 mod tests {
     use super::*;
 
+    fn proof() -> VerifiedHandoff {
+        fn hex(s: &str) -> Vec<u8> {
+            s.as_bytes()
+                .chunks_exact(2)
+                .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap(), 16).unwrap())
+                .collect()
+        }
+        let key = TokenKey::from_raw(&hex(
+            "f80cccdce4ae1c07ae208a2adf99a310ae4207e0306fa0236110b06827bbb8d0 ".trim(),
+        ))
+        .unwrap();
+        key.verify_handoff(&hex("464c43540200017600000000000000070004666c2d6100000000000000000000000000000001e8a6fbb12562c66dbedd45c0b6381850b830a84206caae91f956af865481a307cab6d64e665cd3f89f4f9cbed328c028fb21c97ed3e5d91b111ee60a147ed701"), &hex("464c43480101535353535353535353535353535353535353535353535353535353535353535341b30ce88401383246cdf81d88bbce4c9783641c1ccd4fad99dbc536addd2d4ff04803810d0dca256f98003af248a1d4df145b68970cd403a336ce4746acf1bb3477bba1bca30625ca7ba0ec4d336ff3b83fecda13eca8851aa05eaf6900000e"), &[83;32], Purpose::Normal).unwrap()
+    }
+
     #[test]
     fn an_attach_without_an_answer_times_out_at_its_deadline() {
         let (ctl, requests) = mpsc::channel();
         let wake: Wake = Arc::new(|| {});
         let sent = Instant::now();
-        let answer = attach(&ctl, &wake, "v", vec![1], Duration::from_millis(100));
+        let answer = attach(&ctl, &wake, "v", proof(), Duration::from_millis(100));
         assert_eq!(answer, "error: no answer within 0.1 s");
         // The request carries the caller's deadline, passed now: the node will skip it.
         let Ok(Control::Attach { deadline, .. }) = requests.try_recv() else {
@@ -245,7 +317,7 @@ mod tests {
         let wake: Wake = Arc::new(|| {});
         // The node takes the request and drops its reply channel, as a panicking attach does.
         let node = thread::spawn(move || drop(requests.recv()));
-        let answer = attach(&ctl, &wake, "v", vec![1], Duration::from_secs(5));
+        let answer = attach(&ctl, &wake, "v", proof(), Duration::from_secs(5));
         node.join().unwrap();
         assert!(answer.contains("dropped the attach"), "{answer}");
     }

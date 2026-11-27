@@ -3,8 +3,8 @@
 //! Each execution thread owns an observer. Only the immutable startup guard and atomic
 //! admission domain are shared; no steady-state mutex or metadata access is required.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub use flaminio_repl::clock::{
     ClockFault, ClockGuard, ClockQualification, ClockReading, OffsetInterval, checked_clock_ns,
@@ -111,6 +111,8 @@ pub struct ClockDomain {
     startup: ClockGuard,
     identity: u64,
     state: AtomicU64,
+    // Registered at startup; locked only on subscription or the exceptional fault path.
+    cancellation: Mutex<Vec<smol::channel::Sender<()>>>,
 }
 
 impl ClockDomain {
@@ -139,11 +141,24 @@ impl ClockDomain {
             startup,
             identity,
             state: AtomicU64::new(0),
+            cancellation: Mutex::new(Vec::new()),
         })
     }
 
     pub fn status(&self) -> ClockStatus {
         self.decode(self.state.load(Ordering::SeqCst))
+    }
+
+    /// Wake asynchronous workers on the first fault, including workers with no pending I/O.
+    pub fn subscribe(&self) -> smol::channel::Receiver<()> {
+        let (tx, rx) = smol::channel::bounded(1);
+        let mut listeners = self.cancellation.lock().unwrap_or_else(|e| e.into_inner());
+        if self.status().is_healthy() {
+            listeners.push(tx);
+        } else {
+            let _ = tx.try_send(());
+        }
+        rx
     }
 
     /// One observer per execution thread. Cloning the startup guard preserves the common
@@ -181,7 +196,17 @@ impl ClockDomain {
             .state
             .compare_exchange(0, closed, Ordering::SeqCst, Ordering::SeqCst)
         {
-            Ok(_) => closed,
+            Ok(_) => {
+                for listener in self
+                    .cancellation
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .drain(..)
+                {
+                    let _ = listener.try_send(());
+                }
+                closed
+            }
             Err(existing) => existing,
         };
         self.decode(state)
@@ -191,13 +216,25 @@ impl ClockDomain {
     /// epoch, session and membership against its elapsed time. This CAS, including its
     /// successful 0-to-0 write, and quarantine's CAS share one atomic modification order.
     pub fn success_permit(&self, sample: ClockSample) -> Result<SuccessPermit, ClockError> {
-        if sample.generation.domain != self.identity || sample.generation.number != 0 {
+        self.admit_generation(sample.generation)?;
+        Ok(SuccessPermit { sample })
+    }
+
+    /// Order a freshly sampled operation/session dispatch against the first fault.
+    /// This grants no client success; a separate final permit is still required.
+    pub fn admit(&self, sample: ClockSample) -> Result<ClockGeneration, ClockError> {
+        self.admit_generation(sample.generation)?;
+        Ok(sample.generation)
+    }
+
+    fn admit_generation(&self, generation: ClockGeneration) -> Result<(), ClockError> {
+        if generation.domain != self.identity || generation.number != 0 {
             return Err(ClockError::StaleGeneration);
         }
         self.state
             .compare_exchange(0, 0, Ordering::SeqCst, Ordering::SeqCst)
             .map_err(|state| self.closed_error(state))?;
-        Ok(SuccessPermit { sample })
+        Ok(())
     }
 
     fn decode(&self, state: u64) -> ClockStatus {

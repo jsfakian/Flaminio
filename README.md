@@ -14,7 +14,7 @@ and you restore from an encrypted, immutable backup.
 > The [2026-11-12 correctness audit](docs/audits/2026-11-12/README.md) records known defects,
 > validation evidence and unsupported environments. Historical results are in the
 > [MVP plan](docs/mvp-plan.md), [lab guide](docs/lab.md) and [benchmarks](docs/benchmarks/).
-> Current storage admission requires the qualified physical clock profile described below;
+> Current replicated-node admission requires the qualified physical clock profile below;
 > the historical VM results do not qualify that profile or authorize a VM bypass.
 >
 > **Phase 1 under way** ([plan](docs/phase1-plan.md)). The failover and consistency rules

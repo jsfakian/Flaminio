@@ -163,7 +163,12 @@ fn prepare(c: &Config) -> Result<(), String> {
     Ok(())
 }
 
+fn refuse_legacy_target() -> Result<(), String> {
+    Err("legacy serve cannot authorize a target; use node --clock-contract PATH and an authorized agent/admin Attach challenge handoff".into())
+}
+
 fn serve(c: Config) -> Result<(), String> {
+    refuse_legacy_target()?;
     prepare(&c)?;
     let ctrl = UblkCtrlBuilder::default()
         .name("flaminio")
@@ -387,7 +392,8 @@ async fn read(
         }
         let mut io_ok = true;
         for (completion, expected) in pending {
-            io_ok &= completion.await == expected;
+            let completed = completion.await == expected;
+            io_ok &= completed;
         }
         let verified = io_ok && {
             let data = buf.borrow();
@@ -473,7 +479,7 @@ async fn drive(
     }
 }
 
-// --- Phase 1: a volume served by the node engine (flaminio-io node --attach) ---------------
+// --- Phase 1: a volume served by the node engine after the authorized control handshake -----
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -482,10 +488,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+use flaminio_net::handoff::VerifiedHandoff;
+use flaminio_node::clock::{ClockObserver, SuccessPermit};
 use flaminio_node::engine::{Input, Io, IoError, LocalRead, Output};
 use flaminio_uring::{AlignedBuf, EventFd, Staging};
 
-use crate::node::{NodeConfig, Parts, drive_until, log_output, read_token};
+use crate::node::{NodeConfig, Parts, drive_until, log_output};
 
 /// What a tag task waits for while the engine serves its request.
 enum Event {
@@ -513,6 +521,7 @@ struct Shared {
     /// A zero-copy read was copied through the staging area, and logged (docs/issues/5): once per
     /// device, as a line per read would flood the log under a workload misaligned on purpose.
     staged: AtomicBool,
+    live: Arc<AtomicBool>,
     /// Op id → the waiting tag task's queue and channel.
     waiters: Mutex<HashMap<u64, (u16, Waiter)>>,
     next_op: AtomicU64,
@@ -557,6 +566,7 @@ impl Drop for Arrival<'_> {
 
 /// A queue thread's handle on the shared engine.
 struct EngineCtx {
+    observer: RefCell<ClockObserver>,
     shared: Arc<Shared>,
     qid: u16,
     /// Requests were submitted since the last pump. The event loop pumps once per round, after
@@ -573,6 +583,21 @@ struct EngineCtx {
 }
 
 impl EngineCtx {
+    fn observe(&self) -> bool {
+        let healthy = self.observer.borrow_mut().sample().is_ok();
+        if !healthy {
+            self.shared.live.store(false, Ordering::SeqCst);
+            self.shared.wakes[0].signal();
+        }
+        healthy
+    }
+
+    fn noop_permit(&self) -> Option<SuccessPermit> {
+        let mut observer = self.observer.borrow_mut();
+        let sample = observer.sample().ok()?;
+        observer.success_permit(sample).ok()
+    }
+
     fn engine(&self) -> std::sync::MutexGuard<'_, flaminio_node::engine::Engine<UringDevice>> {
         self.shared.engine.lock().expect("engine")
     }
@@ -580,18 +605,17 @@ impl EngineCtx {
     /// Feeds the engine what other threads sent, flushes it (a full turn with ticks when
     /// `tick`), and delivers completions, waking the queue threads they belong to.
     fn pump_with(&self, tick: bool) {
-        let now = Instant::now();
         let outputs = {
             let mut e = self.engine();
             if let Ok(inputs) = self.shared.inputs.try_lock() {
                 while let Ok(i) = inputs.try_recv() {
-                    e.handle(now, i);
+                    e.handle(i);
                 }
             }
             if tick {
-                e.turn(now);
+                e.turn();
             } else {
-                e.flush(now);
+                e.flush();
             }
             if let (Some(at), Some(tx)) = (e.take_gather_timer(), self.gather.get()) {
                 let _ = tx.try_send(at);
@@ -612,11 +636,18 @@ impl EngineCtx {
                     wake[q as usize] |= q != self.qid;
                 }
             };
+            let _ = self.observe();
             match o {
-                Output::Done { op, result } => deliver(op, Event::Done(result), true),
+                Output::Done { op, result, permit } => {
+                    if let Some(permit) = permit {
+                        permit.consume();
+                    }
+                    deliver(op, Event::Done(result), true)
+                }
                 Output::LocalRead(lr) => deliver(lr.op, Event::Local(lr), false),
-                Output::Piece { op, at, data } => deliver(op, Event::Piece { at, data }, false),
+                Output::Piece { op, at, data, .. } => deliver(op, Event::Piece { at, data }, false),
                 Output::Deposed { ref volume } if *volume == self.shared.volume => {
+                    self.shared.live.store(false, Ordering::SeqCst);
                     log_output(&o);
                     // Every I/O would fail from now on. Stopping the device frees the node
                     // for its next attach; a queue thread cannot wait for its own end, so
@@ -627,6 +658,10 @@ impl EngineCtx {
                             eprintln!("flaminio-io: stop ublk device {id} after deposition: {e}");
                         }
                     });
+                }
+                Output::Detached { ref volume } if *volume == self.shared.volume => {
+                    self.shared.live.store(false, Ordering::SeqCst);
+                    log_output(&o);
                 }
                 other => log_output(&other),
             }
@@ -661,14 +696,11 @@ impl EngineCtx {
             .lock()
             .expect("waiters")
             .insert(op, (self.qid, waiter));
-        self.engine().handle(
-            Instant::now(),
-            Input::Io {
-                volume: self.shared.volume.clone(),
-                op,
-                io,
-            },
-        );
+        self.engine().handle(Input::Io {
+            volume: self.shared.volume.clone(),
+            op,
+            io,
+        });
         // Pumped at the end of the event loop's round: see `due`.
         self.due.set(true);
     }
@@ -678,14 +710,33 @@ impl EngineCtx {
 /// attached and the device's queue thread while one is.
 pub type Slot = Arc<Mutex<Option<Parts<UringDevice>>>>;
 
-/// The attached volume and its ublk device id, if any.
-pub type Attached = Arc<Mutex<Option<(String, i32)>>>;
+/// An existing device's exact same-process lifetime. Its proof can answer a lost reply,
+/// but a newly issued epoch must never reuse this device while it serves the old one.
+#[derive(Clone)]
+pub struct LiveDevice {
+    pub volume: String,
+    pub id: i32,
+    pub proof: VerifiedHandoff,
+    pub live: Arc<AtomicBool>,
+    engine: std::sync::Weak<Shared>,
+}
+impl LiveDevice {
+    pub fn retry_permit(&self, proof: &VerifiedHandoff) -> Option<SuccessPermit> {
+        if !self.live.load(Ordering::SeqCst) || self.proof.capability() != proof.capability() {
+            return None;
+        }
+        let shared = self.engine.upgrade()?;
+        let mut engine = shared.engine.lock().ok()?;
+        engine.attachment_permit(&self.volume, proof)
+    }
+}
+pub type Attached = Arc<Mutex<Option<LiveDevice>>>;
 
 /// A command from the control socket to the main thread.
 pub enum Control {
     Attach {
         volume: String,
-        token: Vec<u8>,
+        proof: VerifiedHandoff,
         reply: mpsc::Sender<String>,
         /// When the caller stops waiting. The node skips a request that it would begin after
         /// it, and bounds the attach's steps by it (docs/issues/6, S2).
@@ -701,8 +752,6 @@ pub(crate) const ADD_DEVICE_LIMIT: Duration = Duration::from_secs(10);
 /// character device, and a kernel that scans partitions inside the start waits for the first
 /// reads, up to a takeover (5.5 s).
 pub(crate) const START_LIMIT: Duration = Duration::from_secs(10);
-/// How long the attach given at startup (`--attach`) is tried again after it fails.
-const STARTUP_ATTACH_LIMIT: Duration = Duration::from_secs(300);
 
 /// Runs a node: the main thread drives the engine (replicas only) until an attach command
 /// arrives, then serves that volume as a ublk device until it is detached, and so on. The
@@ -711,6 +760,7 @@ pub fn serve_node(
     c: &NodeConfig,
     parts: Parts<UringDevice>,
     efd: Arc<EventFd>,
+    nonce: [u8; 32],
 ) -> Result<(), String> {
     parts
         .engine
@@ -728,52 +778,25 @@ pub fn serve_node(
             efd.signal();
         })
     };
-    if let (Some(volume), Some(path)) = (c.attach.clone(), c.token.as_ref()) {
-        let token = read_token(path)?;
-        let request = |volume: &str, token: &[u8]| {
-            let (reply, answer) = mpsc::channel();
-            let request = Control::Attach {
-                volume: volume.to_string(),
-                token: token.to_vec(),
-                reply,
-                deadline: Instant::now() + crate::control::ATTACH_LIMIT,
-            };
-            (request, answer)
-        };
-        // Sent before the control socket opens, so that it comes before any of its commands.
-        let (first, mut answer) = request(&volume, &token);
-        ctl_tx.send(first).expect("own channel");
-        // Nobody else retries an attach at startup: after a cluster restart, the metadata
-        // service may take a while to answer, or refuse connections (docs/issues/6). A failure is
-        // tried again every 5 s for up to 5 minutes, while the node has no other volume.
-        let (ctl, attached) = (ctl_tx.clone(), attached.clone());
-        thread::spawn(move || {
-            let until = Instant::now() + STARTUP_ATTACH_LIMIT;
-            let done = || Instant::now() >= until || attached.lock().expect("attached").is_some();
-            loop {
-                let Ok(a) = answer.recv() else { return };
-                eprintln!("flaminio-io: attach at startup: {a}");
-                if a.starts_with("ok") || done() {
-                    return;
-                }
-                thread::sleep(Duration::from_secs(5));
-                if done() {
-                    return;
-                }
-                let (next, rx) = request(&volume, &token);
-                if ctl.send(next).is_err() {
-                    return;
-                }
-                answer = rx;
-            }
-        });
-    }
+    let clock = {
+        let guard = slot.lock().expect("slot");
+        let engine = &guard.as_ref().expect("engine").engine;
+        crate::control::ClockControl {
+            domain: engine.clock_domain().clone(),
+            nonce,
+            key: flaminio_net::token::TokenKey::from_pem(
+                &std::fs::read_to_string(c.pki.join("token.pub")).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?,
+        }
+    };
     crate::control::spawn(
         &c.control,
         ctl_tx.clone(),
         engine_tx,
         wake,
         attached.clone(),
+        clock,
     )?;
     eprintln!(
         "flaminio-io: serving replicas; control socket {}",
@@ -788,13 +811,13 @@ pub fn serve_node(
         match ctl_rx.try_recv() {
             Ok(Control::Attach {
                 volume,
-                token,
+                proof,
                 reply,
                 deadline,
             }) => {
                 let request = AttachRequest {
                     volume,
-                    token,
+                    proof,
                     // The target's start and adding the device end by then: the rest is left
                     // for starting the device (docs/issues/6).
                     steps_by: deadline.checked_sub(START_LIMIT).unwrap_or(deadline),
@@ -823,7 +846,7 @@ pub fn serve_node(
 /// An attach taken from the control socket.
 struct AttachRequest {
     volume: String,
-    token: Vec<u8>,
+    proof: VerifiedHandoff,
     /// When the target's start and adding the device must have ended: the caller's deadline
     /// less `START_LIMIT`, which is left for starting the device.
     steps_by: Instant,
@@ -842,19 +865,16 @@ fn attach_and_serve(
 ) -> Result<(), String> {
     let AttachRequest {
         volume,
-        token,
+        proof,
         steps_by,
     } = request;
     let size = {
         let mut guard = slot.lock().expect("slot");
         let parts = guard.as_mut().expect("the main thread holds the engine");
-        parts.engine.handle(
-            Instant::now(),
-            Input::Attach {
-                volume: volume.clone(),
-                token,
-            },
-        );
+        parts.engine.handle(Input::Attach {
+            volume: volume.clone(),
+            proof: proof.clone(),
+        });
         let wait = METADATA_LIMIT.min(steps_by.saturating_duration_since(Instant::now()));
         match drive_until(parts, wait, |o| {
             matches!(o, Output::Attached { .. } | Output::AttachFailed { .. })
@@ -866,12 +886,9 @@ fn attach_and_serve(
             _ => {
                 // Drop the attach in the engine: an answer that comes later must not start a
                 // target that no device serves (docs/issues/6, S3).
-                parts.engine.handle(
-                    Instant::now(),
-                    Input::Detach {
-                        volume: volume.clone(),
-                    },
-                );
+                parts.engine.handle(Input::Detach {
+                    volume: volume.clone(),
+                });
                 // Say so when the wait was cut short: then the caller's time ran out too.
                 let cut = if wait < METADATA_LIMIT {
                     ", all the time its caller had left"
@@ -885,13 +902,19 @@ fn attach_and_serve(
             }
         }
     };
-    let result = run_device(c, slot, attached, (&volume, size), efd, reply, steps_by);
+    let result = run_device(
+        c,
+        slot,
+        attached,
+        (&volume, size, proof),
+        efd,
+        reply,
+        steps_by,
+    );
     *attached.lock().expect("attached") = None;
     // Whatever stopped the device, the target ends with it.
     if let Some(parts) = slot.lock().expect("slot").as_mut() {
-        parts
-            .engine
-            .handle(Instant::now(), Input::Detach { volume });
+        parts.engine.handle(Input::Detach { volume });
     }
     result
 }
@@ -899,7 +922,12 @@ fn attach_and_serve(
 /// Adds the node's ublk device. The previous device with the same id may still be going away
 /// (a deposed target's device is stopped by another thread): the kernel refuses the id until
 /// it is gone, so adding is tried again for a few seconds, and not past `by`.
-fn add_device(c: &NodeConfig, by: Instant) -> Result<UblkCtrl, String> {
+fn add_device(
+    c: &NodeConfig,
+    by: Instant,
+    clock: &Arc<flaminio_node::clock::ClockDomain>,
+) -> Result<UblkCtrl, String> {
+    let mut observer = clock.observer();
     let deadline = (Instant::now() + ADD_DEVICE_LIMIT).min(by);
     // Zero copy: the kernel registers each request's pages as fixed buffer `tag` of the
     // queue's ring before handing the request over (see `engine_io_task_zc`).
@@ -909,6 +937,8 @@ fn add_device(c: &NodeConfig, by: Instant) -> Result<UblkCtrl, String> {
         0
     };
     loop {
+        let sample = observer.sample().map_err(|e| e.to_string())?;
+        clock.admit(sample).map_err(|e| e.to_string())?;
         match UblkCtrlBuilder::default()
             .name("flaminio")
             .id(c.id)
@@ -937,12 +967,20 @@ fn run_device(
     c: &NodeConfig,
     slot: &Slot,
     attached: &Attached,
-    (volume, size): (&str, u64),
+    (volume, size, proof): (&str, u64, VerifiedHandoff),
     efd: Arc<EventFd>,
     reply: &mpsc::Sender<String>,
     add_by: Instant,
 ) -> Result<(), String> {
-    let ctrl = add_device(c, add_by)?;
+    let clock = slot
+        .lock()
+        .expect("slot")
+        .as_ref()
+        .ok_or("engine unavailable")?
+        .engine
+        .clock_domain()
+        .clone();
+    let ctrl = add_device(c, add_by, &clock)?;
     let tgt_init = move |dev: &mut UblkDev| {
         let max = dev.dev_info.max_io_buf_bytes;
         dev.tgt.dev_size = size;
@@ -975,7 +1013,7 @@ fn run_device(
     };
     // The queue threads pump the engine when the store's device signals a commit done (the
     // node's eventfd, queue 0's wake-up), so commits need not block them.
-    engine.set_async_commits(Instant::now(), !c.sync_commits);
+    engine.set_async_commits(!c.sync_commits);
     if let Some(us) = c.gather_us {
         engine.set_commit_gather(Duration::from_micros(us));
     }
@@ -1001,6 +1039,7 @@ fn run_device(
         fd: engine.device().as_raw_fd(),
         device: c.device.clone(),
         staged: AtomicBool::new(false),
+        live: Arc::new(AtomicBool::new(false)),
         engine: Mutex::new(engine),
         inputs: Mutex::new(inputs),
         sender,
@@ -1018,7 +1057,14 @@ fn run_device(
     });
     let (qshared, zero_copy) = (shared.clone(), c.zero_copy);
     let queue = move |qid: u16, dev: &UblkDev| {
+        let observer = qshared
+            .engine
+            .lock()
+            .expect("engine")
+            .clock_domain()
+            .observer();
         let ctx = EngineCtx {
+            observer: RefCell::new(observer),
             shared: qshared.clone(),
             qid,
             due: Cell::new(false),
@@ -1034,14 +1080,39 @@ fn run_device(
         attached.clone(),
         volume.to_string(),
     );
+    let ready_shared = shared.clone();
     let ready = move |ctrl: &UblkCtrl| {
+        let permit = ready_shared
+            .engine
+            .lock()
+            .expect("engine")
+            .attachment_permit(&ready_vol, &proof);
+        let Some(permit) = permit else {
+            let id = ctrl.dev_info().dev_id as i32;
+            thread::spawn(move || {
+                let _ = UblkCtrl::new_simple(id).and_then(|c| c.kill_dev());
+            });
+            let _ = ready_reply
+                .lock()
+                .expect("reply")
+                .send("error: target lost authority while starting device".into());
+            return;
+        };
         let path = ctrl.get_bdev_path();
         let id = ctrl.dev_info().dev_id as i32;
         println!(
             "flaminio-io: serving {} MiB at {path} (ublk id {id})",
             size >> 20
         );
-        *ready_attached.lock().expect("attached") = Some((ready_vol.clone(), id));
+        ready_shared.live.store(true, Ordering::SeqCst);
+        *ready_attached.lock().expect("attached") = Some(LiveDevice {
+            volume: ready_vol.clone(),
+            id,
+            proof: proof.clone(),
+            live: ready_shared.live.clone(),
+            engine: Arc::downgrade(&ready_shared),
+        });
+        permit.consume();
         let _ = ready_reply
             .lock()
             .expect("reply")
@@ -1055,7 +1126,7 @@ fn run_device(
         return Err("a queue thread still holds the engine".into());
     };
     let mut engine = shared.engine.into_inner().expect("engine");
-    engine.set_async_commits(Instant::now(), false);
+    engine.set_async_commits(false);
     *slot.lock().expect("slot") = Some(Parts {
         engine,
         inputs: shared.inputs.into_inner().expect("inputs"),
@@ -1226,63 +1297,77 @@ async fn engine_io_task(
             )
         };
         let n = len as usize;
-        let res = match op {
-            // Reads land in the tag's buffer directly: pieces from the local replica are read
-            // here, on this ring, as the engine admits them; other pieces are copied.
-            sys::UBLK_IO_OP_READ
-                if n <= bufs[tag as usize].borrow().len()
-                    && fast_read_copy(q, &bufs[tag as usize], ctx, offset, len).await =>
-            {
-                len as i32
-            }
-            sys::UBLK_IO_OP_READ if n <= bufs[tag as usize].borrow().len() => {
-                ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
-                loop {
-                    match done_rx.recv().await {
-                        Ok(Event::Local(lr)) => local_read(q, &bufs[tag as usize], ctx, lr).await,
-                        Ok(Event::Piece { at, data }) => {
-                            bufs[tag as usize].borrow_mut()[at..at + data.len()]
-                                .copy_from_slice(&data);
+        let admitted = ctx.observe();
+        let res = if !admitted {
+            -libc::EIO
+        } else {
+            match op {
+                // Reads land in the tag's buffer directly: pieces from the local replica are read
+                // here, on this ring, as the engine admits them; other pieces are copied.
+                sys::UBLK_IO_OP_READ
+                    if n <= bufs[tag as usize].borrow().len()
+                        && fast_read_copy(q, &bufs[tag as usize], ctx, offset, len).await =>
+                {
+                    len as i32
+                }
+                sys::UBLK_IO_OP_READ if n <= bufs[tag as usize].borrow().len() => {
+                    ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
+                    loop {
+                        match done_rx.recv().await {
+                            Ok(Event::Local(lr)) => {
+                                local_read(q, &bufs[tag as usize], ctx, lr).await
+                            }
+                            Ok(Event::Piece { at, data }) => {
+                                bufs[tag as usize].borrow_mut()[at..at + data.len()]
+                                    .copy_from_slice(&data);
+                            }
+                            Ok(Event::Done(Ok(_))) => break len as i32,
+                            Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
+                            _ => break -libc::EIO,
                         }
-                        Ok(Event::Done(Ok(_))) => break len as i32,
-                        Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
-                        _ => break -libc::EIO,
                     }
                 }
-            }
-            sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE
-                if n <= bufs[tag as usize].borrow().len() =>
-            {
-                let io = if op == sys::UBLK_IO_OP_READ {
-                    Io::Read { offset, len }
-                } else {
-                    // One copy, into an aligned shared buffer: the store and the replicas take
-                    // slices of it.
-                    Io::Write {
-                        offset,
-                        data: AlignedBuf::shared_copy_of(&bufs[tag as usize].borrow()[..n]),
+                sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE
+                    if n <= bufs[tag as usize].borrow().len() =>
+                {
+                    let io = if op == sys::UBLK_IO_OP_READ {
+                        Io::Read { offset, len }
+                    } else {
+                        // One copy, into an aligned shared buffer: the store and the replicas take
+                        // slices of it.
+                        Io::Write {
+                            offset,
+                            data: AlignedBuf::shared_copy_of(&bufs[tag as usize].borrow()[..n]),
+                        }
+                    };
+                    ctx.submit(io, done_tx.clone());
+                    match done_rx.recv().await {
+                        Ok(Event::Done(Ok(Some(data)))) if data.len() == n => {
+                            bufs[tag as usize].borrow_mut()[..n].copy_from_slice(&data);
+                            len as i32
+                        }
+                        Ok(Event::Done(Ok(None))) => len as i32,
+                        Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
+                        _ => -libc::EIO,
                     }
-                };
-                ctx.submit(io, done_tx.clone());
-                match done_rx.recv().await {
-                    Ok(Event::Done(Ok(Some(data)))) if data.len() == n => {
-                        bufs[tag as usize].borrow_mut()[..n].copy_from_slice(&data);
-                        len as i32
-                    }
-                    Ok(Event::Done(Ok(None))) => len as i32,
-                    Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
-                    _ => -libc::EIO,
                 }
+                // Writes are durable when acknowledged; the protocol has no discard yet, and a
+                // discard is only a hint.
+                sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => match ctx.noop_permit() {
+                    Some(p) => {
+                        p.consume();
+                        0
+                    }
+                    None => -libc::EIO,
+                },
+                sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
+                _ => -libc::EOPNOTSUPP,
             }
-            // Writes are durable when acknowledged; the protocol has no discard yet, and a
-            // discard is only a hint.
-            sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => 0,
-            sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
-            _ => -libc::EOPNOTSUPP,
         };
         let buf = bufs[tag as usize].borrow();
         q.submit_io_commit_cmd(tag, BufDesc::Slice(buf.as_slice()), res)
             .await?;
+        let _ = ctx.observe();
     }
 }
 
@@ -1316,7 +1401,9 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
         }
         let mut io_ok = true;
         for (completion, expected) in pending {
-            io_ok &= completion.await == expected;
+            let completed = completion.await == expected;
+            let healthy = ctx.observe();
+            io_ok &= completed && healthy;
         }
         let verified =
             io_ok && (!ctx.shared.verify || plan.verify(&buf.borrow()[at..at + n]).is_ok());
@@ -1328,15 +1415,13 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
             );
         }
         if verified || !io_ok || attempt == 1 {
-            ctx.engine()
-                .local_read_done(Instant::now(), &lr, Some(plan), verified);
+            ctx.engine().local_read_done(&lr, Some(plan), verified);
             ctx.pump();
             return;
         }
         ctx.engine().finish_plan(plan);
     }
-    ctx.engine()
-        .local_read_done(Instant::now(), &lr, None, false);
+    ctx.engine().local_read_done(&lr, None, false);
     ctx.pump();
 }
 
@@ -1381,7 +1466,7 @@ async fn engine_io_task_zc(
             )
         };
         let n = len as usize;
-        let res = if flags & sys::UBLK_IO_F_NEED_REG_BUF != 0 {
+        let res = if !ctx.observe() || flags & sys::UBLK_IO_F_NEED_REG_BUF != 0 {
             // The kernel could not register the request's pages.
             -libc::EIO
         } else {
@@ -1401,7 +1486,9 @@ async fn engine_io_task_zc(
                                 st.with_slot(tag as usize, |b| {
                                     b[at..at + data.len()].copy_from_slice(&data)
                                 });
-                                failed |= !stage_to_request(q, st, tag, at, data.len()).await;
+                                let copied = stage_to_request(q, st, tag, at, data.len()).await;
+                                let _ = ctx.observe();
+                                failed |= !copied;
                             }
                             Ok(Event::Done(Ok(_))) if !failed => break len as i32,
                             Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
@@ -1429,10 +1516,11 @@ async fn engine_io_task_zc(
                         ctx.staging.set(ctx.staging.get() + 1);
                     }
                     let copied = q.ublk_submit_sqe(sqe).await;
+                    let healthy = ctx.observe();
                     if !large {
                         ctx.staging.set(ctx.staging.get() - 1);
                     }
-                    if copied != n as i32 {
+                    if copied != n as i32 || !healthy {
                         drop(arrival);
                         // A wait for writes may have held for this one: the engine looks again.
                         ctx.due.set(true);
@@ -1451,13 +1539,20 @@ async fn engine_io_task_zc(
                         }
                     }
                 }
-                sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => 0,
+                sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => match ctx.noop_permit() {
+                    Some(p) => {
+                        p.consume();
+                        0
+                    }
+                    None => -libc::EIO,
+                },
                 sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
                 _ => -libc::EOPNOTSUPP,
             }
         };
         q.submit_io_commit_cmd(tag, BufDesc::AutoReg(reg), res)
             .await?;
+        let _ = ctx.observe();
     }
 }
 
@@ -1471,14 +1566,12 @@ async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCt
         ctx.engine().plan_local_read(&lr, &mut b[at..at + n])
     });
     let Ok(plan) = plan else {
-        ctx.engine()
-            .local_read_done(Instant::now(), &lr, None, false);
+        ctx.engine().local_read_done(&lr, None, false);
         ctx.pump();
         return;
     };
     let ok = zc_read_plan(q, tag, st, ctx, &plan, at, n).await;
-    ctx.engine()
-        .local_read_done(Instant::now(), &lr, Some(plan), ok);
+    ctx.engine().local_read_done(&lr, Some(plan), ok);
     ctx.pump();
 }
 
@@ -1517,7 +1610,9 @@ async fn zc_read_plan(
     }
     let mut ok = true;
     for (start, len) in zeros {
-        if !stage_to_request(q, st, tag, at + start, len).await {
+        let copied = stage_to_request(q, st, tag, at + start, len).await;
+        let healthy = ctx.observe();
+        if !copied || !healthy {
             eprintln!("flaminio-io: local read: zero fill of {len} bytes at {start} failed");
             ok = false;
         }
@@ -1525,6 +1620,8 @@ async fn zc_read_plan(
     let mut refused = Vec::new();
     for (completion, to, len, device_offset) in pending {
         let got = completion.await;
+        let healthy = ctx.observe();
+        ok &= healthy;
         if got == -libc::EINVAL {
             refused.push((to, len, device_offset));
         } else if got != len as i32 {
@@ -1575,11 +1672,14 @@ async fn stage_device_read(
     .offset(device_offset)
     .build();
     let got = q.ublk_submit_sqe(sqe).await;
-    if got != len as i32 {
+    let healthy = ctx.observe();
+    if got != len as i32 || !healthy {
         eprintln!("flaminio-io: local read: device read returned {got}, not {len} (staged)");
         return false;
     }
-    if !stage_to_request(q, st, tag, to, len).await {
+    let copied = stage_to_request(q, st, tag, to, len).await;
+    let healthy = ctx.observe();
+    if !copied || !healthy {
         eprintln!("flaminio-io: local read: copy of {len} staged bytes at {to} failed");
         return false;
     }
@@ -1595,10 +1695,7 @@ async fn fast_read_zc(
     offset: u64,
     len: u64,
 ) -> bool {
-    let Some(fast) = ctx
-        .engine()
-        .try_fast_read(Instant::now(), &ctx.shared.volume, offset, len)
-    else {
+    let Some(fast) = ctx.engine().try_fast_read(&ctx.shared.volume, offset, len) else {
         return false;
     };
     let mut ok = true;
@@ -1617,11 +1714,14 @@ async fn fast_read_zc(
             break;
         }
     }
-    let served = ctx
-        .engine()
-        .finish_fast_read(Instant::now(), &ctx.shared.volume, fast, ok);
+    let served = ctx.engine().finish_fast_read(&ctx.shared.volume, fast, ok);
     ctx.pump();
-    served
+    if let Some(permit) = served {
+        permit.consume();
+        true
+    } else {
+        false
+    }
 }
 
 /// The fast path, into the tag's buffer: the pieces are planned, read and verified here,
@@ -1633,10 +1733,7 @@ async fn fast_read_copy(
     offset: u64,
     len: u64,
 ) -> bool {
-    let Some(fast) = ctx
-        .engine()
-        .try_fast_read(Instant::now(), &ctx.shared.volume, offset, len)
-    else {
+    let Some(fast) = ctx.engine().try_fast_read(&ctx.shared.volume, offset, len) else {
         return false;
     };
     let mut ok = true;
@@ -1673,7 +1770,9 @@ async fn fast_read_copy(
         }
     }
     for (completion, expected) in pending {
-        ok &= completion.await == expected;
+        let completed = completion.await == expected;
+        let healthy = ctx.observe();
+        ok &= completed && healthy;
     }
     if ok && ctx.shared.verify {
         let b = buf.borrow();
@@ -1692,11 +1791,14 @@ async fn fast_read_copy(
     for (plan, _, _) in plans {
         ctx.engine().finish_plan(plan);
     }
-    let served = ctx
-        .engine()
-        .finish_fast_read(Instant::now(), &ctx.shared.volume, fast, ok);
+    let served = ctx.engine().finish_fast_read(&ctx.shared.volume, fast, ok);
     ctx.pump();
-    served
+    if let Some(permit) = served {
+        permit.consume();
+        true
+    } else {
+        false
+    }
 }
 
 /// libublk's event loop, with polling: for `poll` after the last completion, the ring is

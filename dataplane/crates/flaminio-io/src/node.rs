@@ -4,9 +4,8 @@
 //! (and its own), over mutual TLS. It registers with the metadata service and sends liveness
 //! heartbeats.
 //!
-//! **With `--attach VOLUME --token FILE`** (Linux), the node also becomes the volume's target,
-//! with the capability token from the volume's attach. It serves the volume as
-//! `/dev/ublkbN`, replicated as the metadata service placed it.
+//! A root-only control socket accepts targets only with an authorized agent/admin Attach
+//! handoff bound to the healthy daemon's current unpredictable challenge.
 //!
 //! One thread, the engine, owns the store and every state machine:
 //! - **Network and metadata threads** hand it their events through a channel, and wake it.
@@ -34,13 +33,13 @@ use crate::cli::{format_if_asked, parse_size};
 const USAGE: &str = "\
 usage: flaminio-io node --device PATH --node NAME --listen IP:PORT --meta IP:PORT[,IP:PORT...]
                         --pki DIR --trust-domain TD [options]
+      --clock-contract PATH root-owned physical-boottime-v1 deployment attestation (required)
       --advertise IP:PORT  replication address registered for this node (default: --listen)
       --format             format the device first (refuses an existing Flaminio disk
                            unless --force)
       --force              allow --format to destroy an existing Flaminio disk
       --buffered           use the page cache instead of O_DIRECT
-      --attach VOLUME      also be VOLUME's target, serving it as /dev/ublkbN (Linux)
-      --token FILE         the capability token from VOLUME's attach (raw bytes)
+      --attach/--token     legacy startup flags refused; use the authorized control handshake
       --depth N            ublk queue depth (default 128)
       --io-buf SIZE        largest single I/O, at most 1M (default 512K)
       --poll-us N          after any completion, a queue thread checks its ring without sleeping
@@ -86,6 +85,7 @@ token.pub (the metadata service's token key). Runs in the foreground.";
 
 #[derive(Clone)]
 pub(crate) struct NodeConfig {
+    pub clock_contract: PathBuf,
     pub device: String,
     pub format: bool,
     pub force: bool,
@@ -119,6 +119,7 @@ pub(crate) struct NodeConfig {
 
 fn parse(args: &[String]) -> Result<NodeConfig, String> {
     let mut c = NodeConfig {
+        clock_contract: PathBuf::new(),
         device: String::new(),
         format: false,
         force: false,
@@ -156,6 +157,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
         };
         let addr = |s: String| s.parse::<SocketAddr>().map_err(|e| format!("{s}: {e}"));
         match flag.as_str() {
+            "--clock-contract" => c.clock_contract = value()?.into(),
             "--device" => c.device = value()?,
             "--format" => c.format = true,
             "--force" => c.force = true,
@@ -166,8 +168,7 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
             "--meta" => c.meta = value()?.split(',').map(str::to_string).collect(),
             "--pki" => c.pki = value()?.into(),
             "--trust-domain" => c.trust_domain = value()?,
-            "--attach" => c.attach = Some(value()?),
-            "--token" => c.token = Some(value()?.into()),
+            "--attach" | "--token" => return Err("legacy --attach/--token cannot start a target; start unattached with --clock-contract PATH, then use an authorized agent/admin Attach challenge handoff".into()),
             "--depth" => c.depth = value()?.parse().map_err(|_| "invalid --depth")?,
             "--io-buf" => {
                 c.io_buf =
@@ -215,8 +216,11 @@ fn parse(args: &[String]) -> Result<NodeConfig, String> {
     {
         return Err(USAGE.into());
     }
-    if c.attach.is_some() != c.token.is_some() {
-        return Err("--attach and --token go together".into());
+    if c.attach.is_some() || c.token.is_some() {
+        return Err("legacy --attach/--token cannot start a target; start unattached with --clock-contract PATH, then use an authorized agent/admin Attach challenge handoff".into());
+    }
+    if c.clock_contract.as_os_str().is_empty() {
+        return Err("node requires --clock-contract PATH".into());
     }
     // A write or read travels as one frame of at most 1 MiB of data.
     if c.io_buf == 0 || c.io_buf > (1 << 20) || !c.io_buf.is_multiple_of(4096) {
@@ -251,6 +255,7 @@ pub(crate) fn build<D: BlockDevice + 'static>(
     c: &NodeConfig,
     dev: D,
     wake: Wake,
+    admission: &crate::clock::Admission,
 ) -> Result<Parts<D>, String> {
     format_if_asked(&dev, &c.device, c.format, c.force)?;
     let config = StoreConfig {
@@ -289,6 +294,7 @@ pub(crate) fn build<D: BlockDevice + 'static>(
     let (net_tx, net_wake) = (Mutex::new(tx.clone()), wake.clone());
     let net = net::spawn(
         NetConfig {
+            clock: admission.domain.clone(),
             trust_domain: c.trust_domain.clone(),
             server: Some(ServerSide {
                 listener,
@@ -305,7 +311,8 @@ pub(crate) fn build<D: BlockDevice + 'static>(
     .map_err(|e| format!("network thread: {e}"))?;
 
     let (meta_tx, meta_wake) = (Mutex::new(tx.clone()), wake);
-    let meta = MetaClient::spawn(
+    let mut meta_clock = admission.domain.observer();
+    let meta = MetaClient::spawn_guarded(
         flaminio_metaclient::Config {
             endpoints: c.meta.clone(),
             cert_pem: read("io.crt")?,
@@ -320,6 +327,12 @@ pub(crate) fn build<D: BlockDevice + 'static>(
                 .send(Input::Meta { id, answer });
             meta_wake();
         },
+        move || {
+            let Ok(sample) = meta_clock.sample() else {
+                return false;
+            };
+            meta_clock.domain().admit(sample).is_ok()
+        },
     )
     .map_err(|e| format!("metadata client: {e}"))?;
 
@@ -330,7 +343,14 @@ pub(crate) fn build<D: BlockDevice + 'static>(
         max_io: 256,
         heartbeat: Some(Duration::from_secs(3)),
     };
-    let engine = Engine::new(cfg, service, net, Box::new(meta));
+    let engine = Engine::new(
+        cfg,
+        service,
+        net,
+        Box::new(meta),
+        admission.domain.clone(),
+        admission.nonce,
+    );
     Ok(Parts {
         engine,
         inputs: rx,
@@ -349,7 +369,7 @@ pub(crate) fn drive_until<D: BlockDevice>(
     let end = Instant::now() + limit;
     loop {
         let now = Instant::now();
-        p.engine.turn(now);
+        p.engine.turn();
         for o in p.engine.take_output() {
             log_output(&o);
             if stop(&o) {
@@ -366,10 +386,9 @@ pub(crate) fn drive_until<D: BlockDevice>(
             .saturating_duration_since(Instant::now())
             .max(Duration::from_micros(100));
         if let Ok(i) = p.inputs.recv_timeout(wait) {
-            let now = Instant::now();
-            p.engine.handle(now, i);
+            p.engine.handle(i);
             while let Ok(i) = p.inputs.try_recv() {
-                p.engine.handle(now, i);
+                p.engine.handle(i);
             }
         }
     }
@@ -398,6 +417,8 @@ pub(crate) fn log_output(o: &Output) {
 
 pub fn main(args: &[String]) -> Result<(), String> {
     let c = parse(args)?;
+    // Admission and CSPRNG challenge precede opening the storage device or any listener.
+    let admission = crate::clock::admit(&c.clock_contract, &c.node)?;
     #[cfg(target_os = "linux")]
     {
         let dev = flaminio_uring::UringDevice::open(&c.device, !c.buffered)
@@ -407,8 +428,8 @@ pub fn main(args: &[String]) -> Result<(), String> {
             let efd = efd.clone();
             Arc::new(move || efd.signal())
         };
-        let parts = build(&c, dev, wake)?;
-        crate::ublk::serve_node(&c, parts, efd)
+        let parts = build(&c, dev, wake, &admission)?;
+        crate::ublk::serve_node(&c, parts, efd, admission.nonce)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -417,7 +438,7 @@ pub fn main(args: &[String]) -> Result<(), String> {
         }
         let dev = flaminio_store::FileDevice::open(&c.device)
             .map_err(|e| format!("open {}: {e}", c.device))?;
-        serve_replicas(build(&c, dev, Arc::new(|| {}))?)
+        serve_replicas(build(&c, dev, Arc::new(|| {}), &admission)?)
     }
 }
 
@@ -433,12 +454,6 @@ fn serve_replicas<D: BlockDevice>(p: Parts<D>) -> Result<(), String> {
     let _keep = sender;
     engine.run(inputs, |o| log_output(&o));
     Ok(())
-}
-
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-/// The token file: the raw token bytes.
-pub(crate) fn read_token(path: &PathBuf) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -477,6 +492,8 @@ mod tests {
 
     fn args(extra: &[&str]) -> Vec<String> {
         let mut a = vec![
+            "--clock-contract",
+            "/not-opened-in-parse",
             "--device",
             "/dev/null",
             "--node",

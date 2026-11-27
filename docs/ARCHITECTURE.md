@@ -983,7 +983,9 @@ then depose it, and whose data it adopts.
 ### 15.5 Runtime hardening
 
 - **Memory-safe data plane** (Rust). `unsafe` is confined to the io_uring, ublk and crypto FFI
-  modules, which get extra review and fuzzing.
+  modules and small audited Linux clock/provenance/entropy syscall wrappers in `flaminio-uring`.
+  These boundaries get extra review and applicable fuzzing/sanitizer checks; the daemon uses
+  safe interfaces without widening its unsafe-code permission.
 - **Privilege separation** (§5.1). Only the small helper is privileged. Controllers run as
   non-root with a read-only root filesystem and distroless images.
 - **Seccomp, AppArmor and SELinux profiles** ship for every container. The data-plane profile

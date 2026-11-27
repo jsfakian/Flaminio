@@ -36,7 +36,8 @@ What the targets check:
 - **`sim`:** the replication-protocol simulator, 20 000 random runs, then every injected bug
   must be caught.
 - **`sanitize`** (nightly toolchain): the tests of the crates with threads, io_uring or unsafe code
-  under AddressSanitizer, which also reports memory leaks, then ThreadSanitizer. With `QUICK=1`
+  (uring, store, node, net and io/frontend, including its clock/profile boundary) under
+  AddressSanitizer, which also reports memory leaks, then ThreadSanitizer. With `QUICK=1`
   (pull requests), ThreadSanitizer skips the store's two long single-threaded tests
   (`power_loss_anywhere`, `a_power_cut_with_commits_in_flight_keeps_a_prefix_of_them`), where it
   can find nothing: about a minute instead of five. The sanitizers slow the tests down several

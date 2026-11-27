@@ -75,11 +75,36 @@ Real maximum Attach replies including FLCH are 4,110,389 / 4,122,410 / 4,130,344
 Runtime enforcement, authorized callers, executable models and independent crypto/fuzz
 acceptance remain later units. No lab runs or hardware clock qualification.
 
+### U3 Runtime enforcement
+
+Production profile/backend, clock sampling and sticky quarantine are integrated through engine,
+network, control and copied/zero-copy/staged/pipelined frontend paths. Dispatch and final
+success permits are distinct; handles, replies, commands and metadata endpoint retries are
+generation guarded. Invalidation preserves physical fences, uncertainty and in-flight ownership.
+Strict target starts require current-process proof and increasing started epochs. Exact live
+proof replay can return its existing device; a new epoch stays busy until normal higher-epoch
+observation/deposition retires the old lifetime. Status cannot authorize unconditional detach.
+
+The process nonce uses Linux getrandom(flags=0) after profile admission and before storage,
+registration or listening; failures/short/all-zero output refuse with no fallback. Safe Linux
+clock/resolution/readonly-filesystem/entropy syscall wrappers live in uring; IO keeps its unsafe
+prohibition and exposes the pure bounded decoder through its library for fuzzing. Direct serde
+1.0.229/serde_json 1.0.154 declarations use already-locked versions. Legacy MVP serve/replica and
+startup --attach/--token refuse; offline inspection/store tools remain administrative operations.
+
+Checks pass: fmt/lint, workspace all-target compilation, whitespace, IO18, net15+8, node62+20,
+repl143 (30 ignored), uring26, all three mTLS interop tests and CLI refusal smoke checks.
+Logs: `/tmp/u3-final-lint.log`, `/tmp/u3-final-tests.log`, `/tmp/u3-meta-interop.log` and
+`/tmp/u3-cli-smoke.json`. This is unit validation, not independent S1–S8 acceptance or hardware
+qualification. Authorized callers, models, adversarial acceptance and final sanitizers follow.
+
 ## Tests
 
 Pending implementation and independent S1–S8 acceptance. Required final checks:
-`make lint test race hygiene contracts sim` and `make sanitize QUICK=1` for changed asynchronous
-completion/lifetime handling. No hardware qualification is claimed by local or model tests.
+`make lint test race hygiene contracts sim`, `make sanitize QUICK=1` (now including IO/frontend)
+and `make miri` for the expanded syscall/lifetime boundary. Miri's aligned-helper scope cannot
+validate Linux clock/filesystem syscalls; native tests and sanitizers must cover those paths.
+No hardware qualification is claimed by local or model tests.
 
 ## Conformance
 

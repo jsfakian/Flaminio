@@ -6,8 +6,9 @@ small witness VM and a metadata cluster (see [below](#phase-1-witness-overlay-an
 
 **Clock admission (#83):** these KVM VMs are unqualified for physical-boottime-v1. The strict
 node daemon refuses storage startup here; do not supply a false physical attestation or add a
-bypass. Storage campaigns below document earlier results/procedures and need a separately
-qualified host/profile before they can run against this revision. Metadata and injected-clock
+bypass. Replicated-node campaigns below document earlier results/procedures and need a separately
+qualified host/profile before they can run against this revision. Offline disk/store tools and
+injected-clock tests do not grant replicated-node admission. Metadata and injected-clock
 unit/loopback tests do not qualify a hypervisor. No shared host suspend, VM pause or rollback
 campaign is authorized by the issue's implementation/testing workflow.
 
@@ -26,6 +27,52 @@ available. Both use the same libvirt definition
 ([`scripts/templates/libvirt-domain.xml`](../scripts/templates/libvirt-domain.xml)): q35,
 host-passthrough CPU, and a virtio-blk data disk backed by a preallocated raw file with
 `cache=none` and `io=native`. So the two sides differ only in hardware.
+
+## Qualified physical clock admission and restart
+
+This procedure is for a separately qualified physical deployment, not the KVM guests above.
+Provision a root-owned regular clock-contract file (for example mode 0600), with no symlink and
+no group/world write permission. Its JSON schema is strict; replace these identity/source
+placeholders and attest the booleans only after hardware qualification and deployment checks:
+
+```json
+{
+  "version": 1,
+  "profile": "physical-boottime-v1",
+  "node": "your-node-id",
+  "host_kind": "physical",
+  "clocksource": "your-qualified-clocksource",
+  "lease_us": 5000000,
+  "drift_ppm": 100000,
+  "rate_bound_attested": true,
+  "observation_error_ns": 1000,
+  "no_live_rollback": true
+}
+```
+
+Qualification covers the pairwise rate bound, physical suspend behavior and absolute read error
+at most 1 µs, including quantization. Reported clock resolution alone does not prove accuracy.
+All nodes use the fixed timing profile. Coordinate the upgrade and exclude older binaries
+before advertising this profile; mixed-profile timing is not qualified. Virtualization, live
+migration and rollback remain
+excluded; trusted root/hypervisor operators must honor those exclusions. Containers require
+read-only host proc/sys provenance under `/run/flaminio/host`; readonly input files, matching
+source and physical provenance are checked rather than inferred from the container identity.
+
+`flaminio-io clock-check --clock-contract /etc/flaminio/clock-contract.json --json` is read-only
+and makes no metadata call. Exit 0 reports satisfied prerequisites, not measured clock-rate or
+rollback certification; exit 1 refuses. Start `node` with the same `--clock-contract` file and
+matching node identity. No force/environment fallback qualifies an unsupported host.
+
+On a clock fault, `clock-status` remains available on the root-only control socket and reports
+the sticky quarantined generation/reason. Diagnose before restarting. Keep the existing disks
+and uncertainty evidence: unanswered writes may have landed. Start the daemon unattached, read
+its new `attach-challenge`, and have the authorized node agent/administrator obtain an Attach
+under only-if-target semantics bound to that nonce. Pass the exact FLCT and FLCH to the daemon;
+old startup tokens and old process handoffs cannot resume it. Metadata outage or changed target
+blocks recovery. Full ISR fencing, required wait and reconciliation still precede serving.
+A good later clock sample never clears quarantine. Private initialization interrupted by a
+future #79 daemon restart requires quiesced manual recovery, without another format.
 
 ## Requirements on the workstation
 

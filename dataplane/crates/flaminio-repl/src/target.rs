@@ -1918,6 +1918,16 @@ impl<P: Clone + Debug> Target<P> {
         c.required()
     }
 
+    /// Revalidate a queued client success at the frontend's final clock sample.
+    /// The operation already passed its read/write rules; leases must still hold for
+    /// every chunk it touched, and no fencing transition may have deposed this target.
+    pub fn revalidate_success(&self, now: Time, chunks: &[ChunkIdx]) -> bool {
+        !self.deposed
+            && chunks.iter().all(|&chunk| {
+                self.chunks.get(chunk as usize).is_some() && self.lease_ok(chunk as usize, now)
+            })
+    }
+
     /// Every member that must confirm the lease has done so recently (spec §5).
     fn lease_ok(&self, i: usize, now: Time) -> bool {
         let c = &self.chunks[i];
