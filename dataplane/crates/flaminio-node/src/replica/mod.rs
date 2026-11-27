@@ -290,7 +290,9 @@ impl<D: BlockDevice> ReplicaService<D> {
             epoch: a.epoch,
             session: a.session,
             req: a.req,
-            body: Request::<()>::Hello,
+            body: Request::<()>::Hello {
+                chunks: a.chunks.clone(),
+            },
         };
         let reply = match self.core.handle(&msg) {
             Action::Fence { epoch, .. } => {

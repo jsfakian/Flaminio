@@ -197,9 +197,14 @@ Local reply conversion must reach the same Target validation as remote frames. F
 Uncertainty storage: ≤B arena slots, ≤B chunk markers and ≤N record-set ids, never historical
 per-chunk spare Vecs. Precise append O(1); prune O(r_chunk); coarse update/prune O(1). Coarsening
 a chunk O(r_chunk+log N), each record freed once. Report O(N+R log R), allocated rows/extents
-O(B); node final rebuild costs at most twice that. Decode/consumer validation/merge
-O(N+T+V×RF), V the chunk table the target already holds. Fixed test operation counters verify
-loops, not timing claims. These bound uncertainty, not every volume/resync filter (#75).
+O(B); node final rebuild costs at most twice that. Decode, consumer validation and
+report/required/chunk/membership scans are O(N+T+V×RF), V the chunk table the target already
+holds. Union into the existing `ExtentSet` run map additionally costs O(T log U + A), where
+U is its existing run count and A is the number of absorbed runs removed. Keep that bounded
+indexed union rather than rescanning the accumulated union for every incoming report; do not
+claim the map operations themselves are linear. Fixed test operation counters verify the new
+scans and union calls, not timing claims. These bound uncertainty, not every volume/resync
+filter (#75). See the implementation clarification in [decisions](decisions.md).
 
 Same wire/disk/token/metadata layout, larger conservative reconciliation cost. Upgrade producers
 and consumers together before new attach/provisioning: old producers omit just-created rows,

@@ -730,7 +730,7 @@ impl Sim {
                         | R::Mapped { chunk, ext }
                         | R::Discard { chunk, ext } => chunk == tc && ext.contains(tb),
                         R::BeginResync { chunk } | R::Settle { chunk, .. } => chunk == tc,
-                        R::Hello => true,
+                        R::Hello { .. } => true,
                         R::Heartbeat => false,
                     };
                     if watched {

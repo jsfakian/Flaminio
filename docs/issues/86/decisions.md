@@ -94,3 +94,14 @@ Approved with the recommended answer to each open question (see Settled at appro
   an earlier incarnation is discarded as today. Three cases pin the position of the check.
 
 No finding was judged not to apply.
+
+## Implementation clarification — 2026-11-27
+
+- **U3 work bound:** the design's original combined "validation/merge O(N+T+V×RF)" sentence
+  omitted existing `ExtentSet`/B-tree union costs. Keep that existing representation and
+  remove repeated per-chunk report searches. New row/required/chunk/membership scans are
+  linear; indexed union adds O(T log U + A), with U existing runs and A absorbed runs removed.
+  A bulk helper would instead rescan the accumulated union on each peer reply. Document and
+  test the actual bounded scans/union calls rather than rewrite extent storage or claim
+  linear B-tree operations. This corrects the work description while preserving S1–S9,
+  uncertainty budgets, conservative coverage and all authority/durability rules.

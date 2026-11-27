@@ -2037,15 +2037,7 @@ impl<D: BlockDevice> Engine<D> {
         if let Request::Read { ext, .. } = &msg.body {
             rt.reads.insert((to, msg.req), ext.len as usize * BLOCK);
         }
-        if let Request::Hello = msg.body {
-            let chunks: Vec<u32> = rt
-                .view
-                .chunks
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.replicas.contains(&to))
-                .map(|(i, _)| i as u32)
-                .collect();
+        if let Request::Hello { chunks } = msg.body {
             if to == rt.local {
                 let a = Accepted {
                     peer_node: self.cfg.node.clone(),
@@ -2475,7 +2467,7 @@ fn write_data_len(f: &Frame) -> u64 {
 fn to_frame(m: &ToReplica<Payload>) -> Frame {
     let req = m.req;
     match &m.body {
-        Request::Hello => unreachable!("Hello frames carry the session's token"),
+        Request::Hello { .. } => unreachable!("Hello frames carry the session's token"),
         Request::Heartbeat => Frame::Heartbeat { req },
         Request::Write {
             chunk,
@@ -2591,7 +2583,9 @@ mod metadata_tests {
                 .take_output()
                 .into_iter()
                 .find_map(|o| match o {
-                    TOut::Send { to: 0, msg } if matches!(msg.body, Request::Hello) => Some(msg),
+                    TOut::Send { to: 0, msg } if matches!(msg.body, Request::Hello { .. }) => {
+                        Some(msg)
+                    }
                     _ => None,
                 })
                 .unwrap();
@@ -2603,7 +2597,9 @@ mod metadata_tests {
                     epoch: 7,
                     session: hello.session,
                     req: hello.req,
-                    body: Response::Fenced { uncertain: vec![] },
+                    body: Response::Fenced {
+                        uncertain: vec![(0, vec![]), (1, vec![])],
+                    },
                 },
             );
             sm.tick(12);

@@ -115,6 +115,16 @@ Unit 2: formatting and targeted Clippy (net/node, all targets, warnings denied) 
 checked Fenced codec acceptance tests are next. Node lifecycle acceptance passes all 39
 focused replica tests and the full node package (50 library + 19 integration tests).
 
+Core acceptance: all 17 replica tests pass, including 28,800 exact-oracle mixed operations,
+partial-page arena reuse and the 512×128 fill with exactly four whole-chunk covers.
+Codec acceptance: all 14 net unit + 7 session tests and 4 fuzz-regression tests pass,
+including exact F09 workloads, maximum body size and zero-byte refused sends.
+
+Unit 3: formatting, targeted all-target Rust type checking and diff hygiene pass. The
+read-only authority queries are available to normal simulator builds; their temporary unused
+warnings will end when Unit 4 consumes them. Target/engine acceptance tests and independent
+simulator assurance are next.
+
 Pending the mapped core/reference, node, frame/session, target/engine, simulator/mutation and
 fuzz regressions; `make lint test race hygiene contracts sim`; and `make sanitize QUICK=1` for
 the arena/lifecycle changes.

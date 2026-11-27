@@ -543,7 +543,7 @@ impl ReplicaCore {
         if m.epoch < v.fenced {
             return Action::Reply(Response::Stale { fenced: v.fenced });
         }
-        if let Request::Hello = m.body {
+        if let Request::Hello { .. } = m.body {
             v.fenced = m.epoch;
             if v.session.is_none_or(|s| s < (m.epoch, m.session)) {
                 v.session = Some((m.epoch, m.session));
@@ -567,7 +567,7 @@ impl ReplicaCore {
                 .is_some_and(|c| ext.len > 0 && ext.end() <= c.blocks)
         };
         match &m.body {
-            Request::Hello => unreachable!(),
+            Request::Hello { .. } => unreachable!(),
             Request::Heartbeat => Action::Reply(Response::Ok),
             Request::Read { chunk, ext } if in_range(chunk, ext) => Action::Read {
                 chunk: *chunk,
@@ -731,6 +731,24 @@ impl Replica {
     /// Handles one request. Returns the reply, or `None` if the request is dropped.
     pub fn handle(&mut self, m: &ToReplica<Vec<Value>>) -> Option<FromReplica<Vec<Value>>> {
         let mut action = self.core.handle(m);
+        if matches!(action, Action::Fence { .. })
+            && let Request::Hello { chunks } = &m.body
+        {
+            // The packet carries the send-time placement, even if its target is now gone.
+            // The core's stale check runs before creating anything, as on the real node.
+            for &chunk in chunks {
+                if !self.data.contains_key(&(m.vol, chunk)) {
+                    self.create_chunk(m.vol, chunk, self.blocks_per_chunk)
+                        .ok()?;
+                }
+            }
+            action = Action::Fence {
+                epoch: m.epoch,
+                reply: Response::Fenced {
+                    uncertain: self.core.report(m.vol),
+                },
+            };
+        }
         if let Action::CreateChunk { chunk } = action {
             let blocks = self.blocks_per_chunk;
             self.core.can_add_chunk(m.vol, chunk).ok()?;
@@ -897,7 +915,7 @@ mod tests {
             self.epoch = epoch;
             self.session += 1;
             assert!(
-                matches!(self.send(Request::Hello), Action::Fence { epoch: e, .. } if e == epoch)
+                matches!(self.send(Request::Hello { chunks: vec![] }), Action::Fence { epoch: e, .. } if e == epoch)
             );
         }
 
@@ -1279,14 +1297,17 @@ mod tests {
 
     #[test]
     fn arena_slots_are_reused_across_chunks_and_partial_pages() {
-        for budget in [4, 257, 513] {
-            let mut h = UncertaintyHarness::new(budget, &[0, 1], 1024);
+        for budget in [4, 259, 515] {
+            let mut h = UncertaintyHarness::new(budget, &[0, 1], 2048);
             let records = (budget - 2) as usize;
             for n in 0..records {
                 h.write(0, Extent::new((n * 2) as Block, 1), n as u64, None);
             }
             let high_water = h.core.uncertainty_stats(1).allocated_slots;
-            assert!(high_water >= records);
+            assert_eq!(
+                high_water, budget as usize,
+                "the capped final page is allocated"
+            );
             for round in 0..32 {
                 let chunk = round % 2;
                 h.settle(0, u64::MAX);
@@ -1301,7 +1322,7 @@ mod tests {
             h.core.remove_chunk(1, 1);
             assert_eq!(h.core.uncertainty_stats(1).records, 0);
             assert_eq!(h.core.uncertainty_stats(1).allocated_slots, high_water);
-            h.core.add_chunk(1, 2, 1024).unwrap();
+            h.core.add_chunk(1, 2, 2048).unwrap();
             h.write(2, Extent::new(5, 1), 99, None);
             assert_eq!(h.core.uncertainty_stats(1).allocated_slots, high_water);
             assert_arena_bound(&h.core, 1);
@@ -1567,10 +1588,11 @@ mod tests {
     #[test]
     fn fencing_refuses_older_epochs_and_survives_restart() {
         let mut r = replica();
-        r.handle(&msg(3, 1, Request::Hello)).unwrap();
+        r.handle(&msg(3, 1, Request::Hello { chunks: vec![] }))
+            .unwrap();
         r.restart();
         assert_eq!(
-            body(r.handle(&msg(2, 9, Request::Hello))),
+            body(r.handle(&msg(2, 9, Request::Hello { chunks: vec![] }))),
             Some(Response::Stale { fenced: 3 })
         );
         assert_eq!(
@@ -1582,8 +1604,10 @@ mod tests {
     #[test]
     fn only_the_current_session_is_served() {
         let mut r = replica();
-        r.handle(&msg(1, 1, Request::Hello)).unwrap();
-        r.handle(&msg(1, 2, Request::Hello)).unwrap();
+        r.handle(&msg(1, 1, Request::Hello { chunks: vec![] }))
+            .unwrap();
+        r.handle(&msg(1, 2, Request::Hello { chunks: vec![] }))
+            .unwrap();
         assert_eq!(r.handle(&msg(1, 1, write(0, &[5], 0, None))), None);
         assert_eq!(r.block(1, 0, 0), Some(0));
         assert_eq!(
@@ -1591,7 +1615,8 @@ mod tests {
             Some(Response::Ok)
         );
         // An older session's late Hello does not take over.
-        r.handle(&msg(1, 1, Request::Hello)).unwrap();
+        r.handle(&msg(1, 1, Request::Hello { chunks: vec![] }))
+            .unwrap();
         assert_eq!(
             body(r.handle(&msg(1, 2, Request::Heartbeat))),
             Some(Response::Ok)
@@ -1604,7 +1629,8 @@ mod tests {
     #[test]
     fn out_of_range_requests_are_dropped() {
         let mut r = replica();
-        r.handle(&msg(1, 1, Request::Hello)).unwrap();
+        r.handle(&msg(1, 1, Request::Hello { chunks: vec![] }))
+            .unwrap();
         assert_eq!(r.handle(&msg(1, 1, write(7, &[1, 2], 0, None))), None);
         let read = Request::Read {
             chunk: 3,
@@ -1616,13 +1642,14 @@ mod tests {
     #[test]
     fn uncertain_set_is_pruned_by_completed_writes() {
         let mut r = replica();
-        r.handle(&msg(1, 1, Request::Hello)).unwrap();
+        r.handle(&msg(1, 1, Request::Hello { chunks: vec![] }))
+            .unwrap();
         r.handle(&msg(1, 1, write(0, &[10, 11], 0, None))).unwrap();
         r.handle(&msg(1, 1, write(2, &[12], 1, Some(0)))).unwrap();
         r.handle(&msg(1, 1, write(5, &[13, 14], 2, Some(2))))
             .unwrap();
         assert_eq!(
-            uncertain(r.handle(&msg(2, 1, Request::Hello))),
+            uncertain(r.handle(&msg(2, 1, Request::Hello { chunks: vec![] }))),
             vec![Extent::new(5, 2)]
         );
     }
@@ -1630,16 +1657,17 @@ mod tests {
     #[test]
     fn after_a_restart_everything_is_uncertain_until_a_newer_epoch_prunes() {
         let mut r = replica();
-        r.handle(&msg(1, 1, Request::Hello)).unwrap();
+        r.handle(&msg(1, 1, Request::Hello { chunks: vec![] }))
+            .unwrap();
         r.restart();
         assert_eq!(
-            uncertain(r.handle(&msg(1, 2, Request::Hello))),
+            uncertain(r.handle(&msg(1, 2, Request::Hello { chunks: vec![] }))),
             vec![Extent::new(0, 8)]
         );
         // Pruning by the same epoch is not enough: its unfinished writes may be anywhere.
         r.handle(&msg(1, 2, write(0, &[1], 5, Some(5)))).unwrap();
         assert_eq!(
-            uncertain(r.handle(&msg(2, 1, Request::Hello))),
+            uncertain(r.handle(&msg(2, 1, Request::Hello { chunks: vec![] }))),
             vec![Extent::new(0, 8)]
         );
         let newer = Request::Write {
@@ -1650,13 +1678,17 @@ mod tests {
             prune: Some(Version { epoch: 2, seq: 1 }),
         };
         r.handle(&msg(2, 1, newer)).unwrap();
-        assert_eq!(uncertain(r.handle(&msg(3, 1, Request::Hello))), vec![]);
+        assert_eq!(
+            uncertain(r.handle(&msg(3, 1, Request::Hello { chunks: vec![] }))),
+            vec![]
+        );
     }
 
     #[test]
     fn copies_skip_blocks_with_live_writes() {
         let mut r = replica();
-        r.handle(&msg(1, 1, Request::Hello)).unwrap();
+        r.handle(&msg(1, 1, Request::Hello { chunks: vec![] }))
+            .unwrap();
         r.handle(&msg(1, 1, Request::BeginResync { chunk: 0 }))
             .unwrap();
         r.handle(&msg(1, 1, write(1, &[20, 21], 0, None))).unwrap();

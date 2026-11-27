@@ -13,6 +13,7 @@ use std::fmt::Debug;
 use crate::extent::{Extent, ExtentSet};
 use crate::meta::{IsrChange, MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, VolumeMeta};
 use crate::msg::{FromReplica, MAX_DIGEST_BLOCKS, MAX_MAPPED_BLOCKS, Request, Response, ToReplica};
+use crate::replica::UNCERTAINTY_BUDGET;
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Version, VolumeId};
 
 /// A client operation on one extent of one chunk.
@@ -59,6 +60,8 @@ pub enum Output<P> {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Bugs {
+    /// Grant authority before validating the complete reply to Hello.
+    pub accept_invalid_fenced: bool,
     /// Propose every pending chunk together, ignoring the metadata service's batch limit.
     pub unbounded_meta_batch: bool,
     /// Complete writes once a failed member's removal is proposed, not committed.
@@ -115,6 +118,37 @@ pub struct Stats {
     pub waited_pumps_with_resync: u64,
     /// Client operations submitted while their chunk was not `Ready`.
     pub waiting_submits: u64,
+}
+
+/// Fixed operation counts for complete Fenced validation and its sorted merge.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FencedWork {
+    pub rows: u64,
+    pub extents: u64,
+    pub required: u64,
+    pub merged_rows: u64,
+    pub chunks: u64,
+    pub replica_checks: u64,
+    /// Calls into the existing ordered run-map union, excluding its internal tree operations.
+    pub union_extents: u64,
+}
+
+/// Read-only authority facts, independent of the session's retry bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FencedAuthority {
+    pub(crate) session_open: bool,
+    pub(crate) confirmed_until: Time,
+    pub(crate) chunks: Vec<FencedChunkAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FencedChunkAuthority {
+    pub(crate) fenced: BTreeSet<NodeId>,
+    pub(crate) first_fence: Option<Time>,
+    pub(crate) uncertain: Vec<Extent>,
+    pub(crate) reconciling: Option<Vec<Extent>>,
+    pub(crate) ready: bool,
 }
 
 /// A read admitted by [`Target::try_fast_read`]: carried out by the caller on the local
@@ -358,6 +392,8 @@ enum ReqKind {
 struct Session {
     id: u64,
     open: bool,
+    /// The required rows, captured when this session's Hello was sent.
+    hello_chunks: Vec<ChunkIdx>,
     inflight: BTreeMap<u64, (Time, ReqKind)>,
 }
 
@@ -386,6 +422,8 @@ pub struct Target<P> {
     timing: Timing,
     chunks: Vec<Chunk>,
     peers: BTreeMap<NodeId, Peer>,
+    #[cfg(test)]
+    fenced_work: FencedWork,
     next_session: u64,
     next_req: u64,
     next_seq: u64,
@@ -485,6 +523,8 @@ impl<P: Clone + Debug> Target<P> {
             timing,
             chunks,
             peers,
+            #[cfg(test)]
+            fenced_work: FencedWork::default(),
             next_session: 1,
             next_req: 1,
             next_seq: 0,
@@ -909,6 +949,25 @@ impl<P: Clone + Debug> Target<P> {
             return;
         }
         if matches!(kind, ReqKind::Hello) {
+            // Neither transport decoding nor the local path supplies volume geometry or the
+            // send-time required set. Validate all rows before installing any authority.
+            let valid = match &m.body {
+                Response::Fenced { uncertain } => Self::valid_fenced(
+                    uncertain,
+                    &session.hello_chunks,
+                    self.chunks.len(),
+                    self.blocks_per_chunk,
+                    #[cfg(test)]
+                    &mut self.fenced_work,
+                ),
+                _ => false,
+            };
+            #[cfg(test)]
+            let valid = valid || self.bugs.accept_invalid_fenced;
+            if !valid {
+                self.fail_reply(now, from, m.req, sent_at, kind, "an invalid Fenced reply");
+                return;
+            }
             session.open = true;
         }
         peer.confirmed_until = peer.confirmed_until.max(sent_at + self.timing.lease);
@@ -993,15 +1052,14 @@ impl<P: Clone + Debug> Target<P> {
                 }
             }
             _ => {
-                // A reply that does not answer its request: treat the session as broken. The
-                // request goes back in flight first, so that the session's failure handles it
-                // with the others.
-                self.put_back(from, m.req, sent_at, kind);
-                self.events.push(Event::SessionFailed {
-                    node: from,
-                    reason: "a reply did not answer its request",
-                });
-                self.fail_peer(now, from);
+                self.fail_reply(
+                    now,
+                    from,
+                    m.req,
+                    sent_at,
+                    kind,
+                    "a reply did not answer its request",
+                );
             }
         }
         match scope {
@@ -1177,16 +1235,40 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    fn fail_reply(
+        &mut self,
+        now: Time,
+        from: NodeId,
+        req: u64,
+        sent_at: Time,
+        kind: ReqKind,
+        reason: &'static str,
+    ) {
+        // Put the request back first, so the failed session handles it with the others.
+        self.put_back(from, req, sent_at, kind);
+        self.events
+            .push(Event::SessionFailed { node: from, reason });
+        self.fail_peer(now, from);
+    }
+
     fn open_session(&mut self, now: Time, to: NodeId) {
         let id = self.next_session;
         self.next_session += 1;
+        let chunks: Vec<ChunkIdx> = self
+            .chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.replicas.contains(&to))
+            .map(|(i, _)| i as ChunkIdx)
+            .collect();
         let peer = self.peers.get_mut(&to).expect("known peer");
         peer.session = Some(Session {
             id,
             open: false,
+            hello_chunks: chunks.clone(),
             inflight: BTreeMap::new(),
         });
-        self.send(now, to, Request::Hello, ReqKind::Hello);
+        self.send(now, to, Request::Hello { chunks }, ReqKind::Hello);
     }
 
     /// Sends a request on the peer's session. Only `Hello` may go on a session that is not
@@ -1320,19 +1402,113 @@ impl<P: Clone + Debug> Target<P> {
         }
     }
 
+    /// One pass over report rows/extents and the Hello's sorted required set. The transport
+    /// shares the row/extent budget; this also checks geometry on local, unencoded replies.
+    fn valid_fenced(
+        uncertain: &[(ChunkIdx, Vec<Extent>)],
+        required: &[ChunkIdx],
+        chunks: usize,
+        blocks_per_chunk: Block,
+        #[cfg(test)] work: &mut FencedWork,
+    ) -> bool {
+        if uncertain.len() > UNCERTAINTY_BUDGET as usize {
+            return false;
+        }
+        let mut total = 0usize;
+        let mut previous_chunk = None;
+        let mut needed = required.iter().peekable();
+        for (chunk, exts) in uncertain {
+            #[cfg(test)]
+            {
+                work.rows += 1;
+            }
+            if *chunk as usize >= chunks
+                || previous_chunk.is_some_and(|previous| previous >= *chunk)
+            {
+                return false;
+            }
+            previous_chunk = Some(*chunk);
+            if needed.peek().is_some_and(|&&next| next < *chunk) {
+                return false;
+            }
+            if needed.peek().is_some_and(|&&next| next == *chunk) {
+                needed.next();
+                #[cfg(test)]
+                {
+                    work.required += 1;
+                }
+            }
+            let Some(count) = total.checked_add(exts.len()) else {
+                return false;
+            };
+            total = count;
+            if total > UNCERTAINTY_BUDGET as usize {
+                return false;
+            }
+            let mut previous_end = None;
+            for ext in exts {
+                #[cfg(test)]
+                {
+                    work.extents += 1;
+                }
+                let Some(end) = ext.start.checked_add(ext.len) else {
+                    return false;
+                };
+                if ext.len == 0
+                    || end > blocks_per_chunk
+                    || previous_end.is_some_and(|previous| previous > ext.start)
+                {
+                    return false;
+                }
+                previous_end = Some(end);
+            }
+        }
+        // Existing Fenced v1 body: tag + request + row count, then 8 bytes per row/extent.
+        // Keep the check here as local replies do not pass through the transport preflight.
+        let body = uncertain
+            .len()
+            .checked_add(total)
+            .and_then(|entries| entries.checked_mul(8))
+            .and_then(|bytes| bytes.checked_add(13));
+        needed.next().is_none() && body.is_some_and(|bytes| bytes <= 1_048_704)
+    }
+
     fn on_fenced(&mut self, now: Time, from: NodeId, uncertain: &[(ChunkIdx, Vec<Extent>)]) {
+        let mut rows = uncertain.iter().peekable();
         for (i, c) in self.chunks.iter_mut().enumerate() {
-            if !c.replicas.contains(&from) {
+            #[cfg(test)]
+            {
+                self.fenced_work.chunks += 1;
+            }
+            let exts = if rows.peek().is_some_and(|(chunk, _)| *chunk as usize == i) {
+                #[cfg(test)]
+                {
+                    self.fenced_work.merged_rows += 1;
+                }
+                rows.next().map(|(_, exts)| exts)
+            } else {
+                None
+            };
+            let placed = c.replicas.iter().any(|node| {
+                #[cfg(test)]
+                {
+                    self.fenced_work.replica_checks += 1;
+                }
+                *node == from
+            });
+            if !placed {
                 continue;
             }
             c.fenced.insert(from);
             if c.phase == Phase::Fencing && c.isr.contains(&from) {
                 c.first_fence.get_or_insert(now);
-                if let Some((_, exts)) = uncertain.iter().find(|(ci, _)| *ci as usize == i) {
+                if let Some(exts) = exts {
                     for x in exts {
-                        if x.len > 0 && x.end() <= self.blocks_per_chunk {
-                            c.uncertain.insert(*x);
+                        #[cfg(test)]
+                        {
+                            self.fenced_work.union_extents += 1;
                         }
+                        c.uncertain.insert(*x);
                     }
                 }
             }
@@ -2675,8 +2851,52 @@ impl<P: Clone + Debug> Target<P> {
     }
 }
 
+impl<P: Clone + Debug> Target<P> {
+    /// The set captured by a still-pending Hello, for an independent reply checker.
+    pub(crate) fn hello_chunks_for_reply(
+        &self,
+        from: NodeId,
+        epoch: Epoch,
+        session: u64,
+        req: u64,
+    ) -> Option<&[ChunkIdx]> {
+        if self.deposed || epoch != self.epoch {
+            return None;
+        }
+        let s = self.peers.get(&from)?.session.as_ref()?;
+        (s.id == session && matches!(s.inflight.get(&req)?.1, ReqKind::Hello))
+            .then_some(s.hello_chunks.as_slice())
+    }
+
+    pub(crate) fn fenced_authority(&self, from: NodeId) -> Option<FencedAuthority> {
+        let peer = self.peers.get(&from)?;
+        Some(FencedAuthority {
+            session_open: peer.session.as_ref().is_some_and(|s| s.open),
+            confirmed_until: peer.confirmed_until,
+            chunks: self
+                .chunks
+                .iter()
+                .map(|c| FencedChunkAuthority {
+                    fenced: c.fenced.clone(),
+                    first_fence: c.first_fence,
+                    uncertain: c.uncertain.iter().collect(),
+                    reconciling: match &c.phase {
+                        Phase::Reconciling { pending } => Some(pending.iter().collect()),
+                        _ => None,
+                    },
+                    ready: c.phase == Phase::Ready,
+                })
+                .collect(),
+        })
+    }
+}
+
 #[cfg(test)]
 impl<P: Clone + Debug> Target<P> {
+    pub fn fenced_work(&self) -> FencedWork {
+        self.fenced_work
+    }
+
     /// Read-only scheduling observations for deterministic deferred-membership scenarios.
     pub(crate) fn pending_membership(&self) -> Vec<(ChunkIdx, Option<NodeId>, BTreeSet<NodeId>)> {
         self.chunks
@@ -2874,7 +3094,7 @@ mod tests {
     }
 
     fn is_hello(m: &ToReplica<Vec<Value>>) -> bool {
-        matches!(m.body, Request::Hello)
+        matches!(m.body, Request::Hello { .. })
     }
 
     fn is_read(m: &ToReplica<Vec<Value>>) -> bool {
