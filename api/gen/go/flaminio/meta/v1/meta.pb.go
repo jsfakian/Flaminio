@@ -1522,7 +1522,11 @@ type AttachRequest struct {
 	// make this call for itself, to start its own target again under a new epoch; it cannot take
 	// a volume from another node. A target never restarts under the epoch it had: replicas order
 	// a target's sessions by epoch and session number, and a new process numbers from 1 again.
-	OnlyIfTarget  bool `protobuf:"varint,4,opt,name=only_if_target,json=onlyIfTarget,proto3" json:"only_if_target,omitempty"`
+	OnlyIfTarget bool `protobuf:"varint,4,opt,name=only_if_target,json=onlyIfTarget,proto3" json:"only_if_target,omitempty"`
+	// Field 5 is left for the initialization use profile (#79).
+	// Bind this new-epoch Attach to the target daemon's current process challenge. Empty keeps
+	// legacy semantics; otherwise exactly 32 bytes, not all zero. Incompatible with unless_target.
+	TargetNonce   []byte `protobuf:"bytes,6,opt,name=target_nonce,json=targetNonce,proto3" json:"target_nonce,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1585,12 +1589,22 @@ func (x *AttachRequest) GetOnlyIfTarget() bool {
 	return false
 }
 
+func (x *AttachRequest) GetTargetNonce() []byte {
+	if x != nil {
+		return x.TargetNonce
+	}
+	return nil
+}
+
 type AttachResponse struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Volume *Volume                `protobuf:"bytes,1,opt,name=volume,proto3" json:"volume,omitempty"`
 	// Capability token for the new target: volume, epoch and node, signed by the metadata
 	// service. Replicas accept the target's I/O only with it (ARCHITECTURE §8.4, §15.2).
-	Token         []byte `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
+	Token []byte `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
+	// Signed FLCH envelope binding the exact token to target_nonce. Issued only after a new
+	// epoch commits, and only when target_nonce is nonempty. Replica tokens are unchanged.
+	TargetHandoff []byte `protobuf:"bytes,3,opt,name=target_handoff,json=targetHandoff,proto3" json:"target_handoff,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1635,6 +1649,13 @@ func (x *AttachResponse) GetVolume() *Volume {
 func (x *AttachResponse) GetToken() []byte {
 	if x != nil {
 		return x.Token
+	}
+	return nil
+}
+
+func (x *AttachResponse) GetTargetHandoff() []byte {
+	if x != nil {
+		return x.TargetHandoff
 	}
 	return nil
 }
@@ -2067,15 +2088,17 @@ const file_flaminio_meta_v1_meta_proto_rawDesc = "" +
 	"\x16ConfirmDeletionRequest\x12\x16\n" +
 	"\x06volume\x18\x01 \x01(\tR\x06volume\x12\x12\n" +
 	"\x04node\x18\x02 \x01(\tR\x04node\"\x19\n" +
-	"\x17ConfirmDeletionResponse\"\x86\x01\n" +
+	"\x17ConfirmDeletionResponse\"\xa9\x01\n" +
 	"\rAttachRequest\x12\x16\n" +
 	"\x06volume\x18\x01 \x01(\tR\x06volume\x12\x12\n" +
 	"\x04node\x18\x02 \x01(\tR\x04node\x12#\n" +
 	"\runless_target\x18\x03 \x01(\bR\funlessTarget\x12$\n" +
-	"\x0eonly_if_target\x18\x04 \x01(\bR\fonlyIfTarget\"X\n" +
+	"\x0eonly_if_target\x18\x04 \x01(\bR\fonlyIfTarget\x12!\n" +
+	"\ftarget_nonce\x18\x06 \x01(\fR\vtargetNonce\"\x7f\n" +
 	"\x0eAttachResponse\x120\n" +
 	"\x06volume\x18\x01 \x01(\v2\x18.flaminio.meta.v1.VolumeR\x06volume\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\fR\x05token\"\xa9\x01\n" +
+	"\x05token\x18\x02 \x01(\fR\x05token\x12%\n" +
+	"\x0etarget_handoff\x18\x03 \x01(\fR\rtargetHandoff\"\xa9\x01\n" +
 	"\tIsrChange\x12\x14\n" +
 	"\x05chunk\x18\x01 \x01(\rR\x05chunk\x12!\n" +
 	"\fexpected_ver\x18\x02 \x01(\x04R\vexpectedVer\x12\x17\n" +

@@ -223,6 +223,14 @@ under-replicated when `len(isr) < replicas`. The view's outcomes:
 `unsupported`, with the evidence `not checked; owner #83` or `not checked; later step of #71`.
 The observer sends the first three evidences, and the CLI builds the others.
 
+The upstream #83 clock contract is available for a later doctor integration: read-only
+`flaminio-io clock-check --clock-contract PATH --json` returns `profile`, `source`, `lease_us`,
+`drift_ppm`, `attestation`, `observed_prerequisites`, `excluded_events`, `decision` and `reason`;
+exit 0 means prerequisites satisfied, exit 1 means refusal. Root-only `clock-status` returns
+bounded profile/source/state/generation/reason JSON. A healthy state or attestation is not proof
+of measured drift or rollback tolerance. Unknown/refused provenance must never become a pass.
+This does not silently expand #71 step 1's unsupported clock row or implement its later CLI.
+
 ## CLI (S6)
 
 ```text

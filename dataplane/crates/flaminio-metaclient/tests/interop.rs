@@ -53,6 +53,8 @@ struct GeometryAttach {
     volume: String,
     #[prost(string, tag = "2")]
     node: String,
+    #[prost(bytes, tag = "6")]
+    target_nonce: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -61,6 +63,8 @@ struct GeometryAttachResponse {
     volume: Option<pb::Volume>,
     #[prost(bytes, tag = "2")]
     token: Vec<u8>,
+    #[prost(bytes, tag = "3")]
+    target_handoff: Vec<u8>,
 }
 
 #[test]
@@ -155,10 +159,14 @@ fn maximum_future_move_views_use_normal_four_mib_limits() {
             GeometryAttach {
                 volume: id.clone(),
                 node: node(0),
+                target_nonce: vec![1; 32],
             },
         ));
         assert!(attached.encoded_len() <= budget);
         assert!(!attached.token.is_empty());
+        assert_eq!(attached.target_handoff.len(), 134);
+        assert_eq!(&attached.target_handoff[..6], b"FLCH\x01\x01");
+        assert_eq!(&attached.target_handoff[6..38], &[1; 32]);
         let mut expected = volume;
         expected.epoch = u64::MAX;
         assert_eq!(attached.volume.as_ref(), Some(&expected));

@@ -577,19 +577,35 @@ metadata service stays off the I/O path.
   within `L`.
 - **When the new target may serve.** It serves a chunk once every ISR member is fenced and the
   in-flight writes are reconciled. If some ISR members cannot be reached, it first waits
-  `L × (1 + ρ)` after fencing the first one, then removes the unreachable ones from the ISR.
+  `ceil((L + E) × (1 + ρ)) + E` after fencing the first one (E = 3 µs), then removes
+  the unreachable ones from the ISR.
   Serving earlier would let the old target, reading an unfenced member, and the new target
   disagree about an unfinished write. An old target never reads from a member whose ISR
   removal is in flight. The exact rules, checked by simulation, are in
   [replication-protocol.md](replication-protocol.md).
-- **Timing assumption:** bounded relative clock *rate* drift ρ throughout takeover. A
-  confirmation expires at the request's **send time + L**, not the response's receipt time + L.
-  Process pauses, host suspend and stopped/rolled-back VM clocks are different cases. Linux
-  `CLOCK_MONOTONIC` stops during host suspend; `CLOCK_BOOTTIME` includes it but cannot by itself
-  make VM rollback safe. Current runtime clocks use `std::time::Instant`; suspend, unbounded VM
-  clock pauses and snapshot rollback are unsupported until enforcement and model coverage exist.
-  No wall-clock synchronization is required within the supported rate assumption. See
-  [Linux timekeeping](https://www.kernel.org/doc/html/latest/core-api/timekeeping.html).
+- **Timing profile** ([ADR 0020](adr/0020-admit-qualified-physical-clocks-and-quarantine-faults.md),
+  [#83](issues/83/design.md)): physical-boottime-v1 requires qualified physical Linux hosts,
+  fixed L = 5 s and pairwise relative rate factor at most 1 + ρ (ρ = 100,000 ppm). Root-owned
+  operator attestation covers hardware behavior, absolute clock-read error ≤ 1 µs and rollback
+  exclusion; probes check prerequisites, not future rate safety. Virtual/unknown provenance and
+  current lab VMs are refused. Qualified containers must expose the underlying physical host.
+  Confirmation expires at **send time + L**. BOOTTIME supplies checked elapsed authority and
+  fresh admission/completion samples; timers only wake work. With E = 3 µs elapsed-observation
+  error, the conservative takeover wait is 5,500,007 µs at defaults. No wall-clock synchronization.
+- **Clock quarantine:** per-thread MONOTONIC/BOOTTIME interval observations share an immutable
+  anchor with 1 ms suspend-detection tolerance. This tolerance is separate from clock accuracy.
+  Process scheduling pauses advance elapsed time; detectable discontinuities close a shared
+  atomic generation before processing their event. No further old-generation success permit or
+  session is admitted. Already permitted operations may deliver later; unanswered writes may
+  have landed. Both session directions, callbacks and read handles are invalidated without
+  clearing durable epochs or releasing buffers before their I/O ends.
+- **Restart after quarantine:** a later good sample never reopens the gate. Diagnose and restart,
+  recover the store, then have the authorized agent/admin obtain a fresh Attach epoch under
+  only-if-target semantics. Signed FLCH binds that exact capability to the new daemon's random
+  32-byte challenge. Every target start verifies it; node/io cannot mint it. Metadata outage or
+  changed ownership blocks recovery. Full ISR fencing/reconciliation still applies. A short
+  undetected physical suspend is safe only under the qualified BOOTTIME assumption; stopped or
+  jointly rolled-back virtual clocks remain excluded and can be locally indistinguishable.
 - The same rule protects writes (all ISR members must ack) and leases (all ISR members must
   confirm). There is one invariant to reason about, not two.
 - **Node liveness** records in the metadata service still exist, but only to decide *when* to

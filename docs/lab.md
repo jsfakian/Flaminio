@@ -4,6 +4,13 @@ Two servers with KVM VMs, driven from a workstation with `make`. The VMs are whe
 plane is built, tested and benchmarked on Linux (see [mvp-plan.md](mvp-plan.md)). Phase 1 adds a
 small witness VM and a metadata cluster (see [below](#phase-1-witness-overlay-and-metadata)).
 
+**Clock admission (#83):** these KVM VMs are unqualified for physical-boottime-v1. The strict
+node daemon refuses storage startup here; do not supply a false physical attestation or add a
+bypass. Storage campaigns below document earlier results/procedures and need a separately
+qualified host/profile before they can run against this revision. Metadata and injected-clock
+unit/loopback tests do not qualify a hypervisor. No shared host suspend, VM pause or rollback
+campaign is authorized by the issue's implementation/testing workflow.
+
 ```
  workstation ── ssh ──▶ rhythm (147.52.71.227)              rhythm-backup (147.52.71.226)
    make …                 └─ fl-a  192.168.122.50 (NAT)        └─ fl-b  192.168.122.51 (NAT)

@@ -240,6 +240,10 @@ message AttachRequest {
   // a volume from another node. A target never restarts under the epoch it had: replicas order
   // a target's sessions by epoch and session number, and a new process numbers from 1 again.
   bool only_if_target = 4;
+  // Field 5 is left for the initialization use profile (#79).
+  // Bind this new-epoch Attach to the target daemon's current process challenge. Empty keeps
+  // legacy semantics; otherwise exactly 32 bytes, not all zero. Incompatible with unless_target.
+  bytes target_nonce = 6;
 }
 
 message AttachResponse {
@@ -247,6 +251,9 @@ message AttachResponse {
   // Capability token for the new target: volume, epoch and node, signed by the metadata
   // service. Replicas accept the target's I/O only with it (ARCHITECTURE §8.4, §15.2).
   bytes token = 2;
+  // Signed FLCH envelope binding the exact token to target_nonce. Issued only after a new
+  // epoch commits, and only when target_nonce is nonempty. Replica tokens are unchanged.
+  bytes target_handoff = 3;
 }
 
 message IsrChange {

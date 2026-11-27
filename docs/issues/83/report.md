@@ -58,6 +58,23 @@ Focused Clippy, workspace compilation, formatting/whitespace and repl/node tests
 The existing localhost integration fixtures needed escalation; no lab or clock hardware was
 accessed. Acceptance, runtime wiring and executable clock/handoff models remain later units.
 
+### U2 Signed process handoff
+
+Additive Attach nonce/handoff fields, Go signing/verification and an opaque Rust VerifiedHandoff
+are implemented. Nonce validation precedes reads/effects; signing follows an actual successful
+new-epoch CAS and committed-view/FLCT validation. Legacy RPC compatibility remains distinct
+from strict FirstEpoch-0 refusal. FLCT bytes, per-method roles, transport and disk formats are
+unchanged. The shared Attach guard now refuses exhausted epoch increments before CAS.
+
+Checks pass: proto generation, formatting, full lint, scoped vet, workspace all-target check,
+14 net unit + 8 session tests, all three mTLS interop tests and Go captoken/service tests.
+Exhaustion regression covers modern/legacy × nonce/no-nonce on memory and etcd with unchanged
+header bytes/revisions; controlled guard omission causes epoch-zero mutations and is caught.
+Real maximum Attach replies including FLCH are 4,110,389 / 4,122,410 / 4,130,344 / 4,135,490 /
+4,138,460 bytes for RF1–5, inside unchanged B budgets and the normal 4 MiB limit.
+Runtime enforcement, authorized callers, executable models and independent crypto/fuzz
+acceptance remain later units. No lab runs or hardware clock qualification.
+
 ## Tests
 
 Pending implementation and independent S1–S8 acceptance. Required final checks:

@@ -68,10 +68,14 @@ impl TokenKey {
             return Err(TokenError::Invalid);
         }
         let (body, sig) = tok.split_at(tok.len() - SIG);
+        self.verify_signature(body, sig)?;
+        parse(body)
+    }
+
+    pub(crate) fn verify_signature(&self, body: &[u8], sig: &[u8]) -> Result<(), TokenError> {
         UnparsedPublicKey::new(&ED25519, &self.0)
             .verify(body, sig)
-            .map_err(|_| TokenError::Invalid)?;
-        parse(body)
+            .map_err(|_| TokenError::Invalid)
     }
 }
 

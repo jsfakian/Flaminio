@@ -57,3 +57,29 @@ The approved physical-only profile, fixed timing, old-token refusal, sticky quar
 operator attestation are binding. #15/#79 unimplemented additions remain separate; implement
 current target-entry and authorized-caller paths strictly and report any true prerequisite
 before introducing a bypass or silently weakening an accepted contract.
+
+### U2 legacy issuance boundary
+
+Existing legacy Attach RPC behavior remains: an actual new-epoch CAS may return a FLCH binding
+its valid legacy FLCT bytes. The strict daemon verifier refuses FirstEpoch 0 before allocation
+or Hello. The appendix forbids admitting that target lifetime; it does not add a metadata
+migration or separate pre-CAS legacy issuer policy. Tests must cover both RPC compatibility
+and strict start refusal. No legacy header is rewritten to fabricate a FirstEpoch.
+
+### U2 epoch exhaustion
+
+The existing Attach increment can wrap at uint64 maximum. The new-epoch handoff contract
+requires refusal at that shared mutation boundary: apply one pre-CAS FailedPrecondition guard
+for all epoch-advancing Attach calls, with or without a nonce. A wrapping epoch is not valid
+legacy behavior; retaining it on the empty-nonce path would preserve the same safety defect.
+Read-only legacy responses and ordinary valid Attach semantics remain unchanged. No repair or
+epoch reset is introduced. Acceptance must assert no mutation/handoff on exhausted increments;
+the executable issuance model must refuse a mint without strict epoch advance.
+
+### U2 existing metadata view
+
+The existing Volume protobuf does not expose FirstEpoch. Do not invent another field: the
+strict handoff verifier validates the signed FLCT claim and its exact capability digest,
+then U3 matches volume/node/current epoch against the coherent metadata view. Landed #76
+birth/epoch fencing supplies incarnation uniqueness. General FLCT v2 validation remains
+0 < FirstEpoch < Epoch; strict FLCH additionally refuses v1's FirstEpoch 0.

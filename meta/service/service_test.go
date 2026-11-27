@@ -299,6 +299,50 @@ func TestVolumeLifecycle(t *testing.T) {
 	})
 }
 
+func TestAttachEpochExhaustion(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{TokenKey: ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))})
+		addNodes(t, s, "a")
+		if _, err := create(s, "v", 1, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+		original := header(t, store, "v")
+		for _, first := range []uint64{original.FirstEpoch, 0} {
+			for _, withNonce := range []bool{false, true} {
+				t.Run(fmt.Sprintf("first%d/nonce%t", first, withNonce), func(t *testing.T) {
+					h := original
+					h.Epoch, h.FirstEpoch, h.Target = ^uint64(0), first, "a"
+					writeTestHeader(t, store, h)
+					before, ok, err := store.Get(ctx, volumeKey("v"))
+					if err != nil || !ok {
+						t.Fatalf("read before attach: found=%t error=%v", ok, err)
+					}
+					r := &metav1.AttachRequest{Volume: "v", Node: "a", OnlyIfTarget: true}
+					if withNonce {
+						r.TargetNonce = make([]byte, captoken.TargetNonceLen)
+						r.TargetNonce[0] = 1
+					}
+					out, err := s.Attach(ctx, r)
+					if code(err) != codes.FailedPrecondition || out != nil {
+						t.Errorf("exhausted attach: response_present=%t error=%v", out != nil, err)
+					}
+					after, ok, err := store.Get(ctx, volumeKey("v"))
+					if err != nil || !ok || before.Rev != after.Rev || !bytes.Equal(before.Value, after.Value) {
+						t.Errorf("exhausted attach changed stored header or revision: found=%t error=%v", ok, err)
+					}
+					// A repeated controller publish still makes no epoch transition or credentials.
+					unchanged, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a", UnlessTarget: true})
+					if err != nil || unchanged.GetVolume().GetEpoch() != ^uint64(0) ||
+						len(unchanged.GetToken()) != 0 || len(unchanged.GetTargetHandoff()) != 0 {
+						t.Errorf("read-only attach at exhausted epoch: error=%v", err)
+					}
+				})
+			}
+		}
+	})
+}
+
 func TestChangeIsrBatchBoundary(t *testing.T) {
 	stores(t, func(t *testing.T, s *Service) {
 		ctx := context.Background()
@@ -2665,12 +2709,18 @@ func TestGeometryWorstMetadataReplies(t *testing.T) {
 			if len(tok) != 4+1+2+128+8+2+128+8+8+64 {
 				t.Fatalf("token len %d", len(tok))
 			}
+			nonce := make([]byte, captoken.TargetNonceLen)
+			nonce[0] = 1
+			handoff, e := captoken.SignHandoff(key, captoken.HandoffNormal, nonce, tok)
+			if e != nil || len(handoff) != captoken.HandoffLen || len(handoff) > 134 {
+				t.Fatalf("handoff len %d: %v", len(handoff), e)
+			}
 			p := volumePB(v)
 			b, e := geometry.MetadataBound(uint64(n), uint32(r+1))
 			if e != nil || b > 4<<20 {
 				t.Fatalf("budget %d,%v", b, e)
 			}
-			for name, msg := range map[string]proto.Message{"create": &metav1.CreateVolumeResponse{Volume: p}, "get": &metav1.GetVolumeResponse{Volume: p}, "attach": &metav1.AttachResponse{Volume: p, Token: tok}, "check": &metav1.CheckCreateVolumeResponse{Volume: p, LegacyIdentity: true}} {
+			for name, msg := range map[string]proto.Message{"create": &metav1.CreateVolumeResponse{Volume: p}, "get": &metav1.GetVolumeResponse{Volume: p}, "attach": &metav1.AttachResponse{Volume: p, Token: tok, TargetHandoff: handoff}, "check": &metav1.CheckCreateVolumeResponse{Volume: p, LegacyIdentity: true}} {
 				size := proto.Size(msg)
 				if uint64(size) > b {
 					t.Errorf("%s proto.Size=%d exceeds B=%d", name, size, b)
