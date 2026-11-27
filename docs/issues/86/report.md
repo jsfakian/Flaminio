@@ -93,3 +93,34 @@ Reviewers: r86c4 (incremental design-code), r86s4 (incremental design-security).
 No comments from the requested review scopes, including Nits.
 
 Status: clear. Approval remains separate; no approval is inferred.
+
+## Implementation — 2026-11-27
+
+Branch: `issue/86-bounded-uncertainty`, based on
+`610f367cfc90d1e6f19e20d2848b8020d8ecb84e` (main after the user's merge of #81 / PR #102).
+The published clear spec/design were approved on 2026-11-20. This issue precedes #80 because
+the approved plans require its bounded Fenced representation before #80's complete transport
+guarantee. Ordered implementation units are tracked in [units.md](units.md).
+
+Implementation, tests, independent code/security review and final conformance are in progress.
+No completed runtime validation or issue closure is claimed by this entry.
+
+## Tests
+
+Pending the mapped core/reference, node, frame/session, target/engine, simulator/mutation and
+fuzz regressions; `make lint test race hygiene contracts sim`; and `make sanitize QUICK=1` for
+the arena/lifecycle changes.
+
+## Conformance
+
+Pending final implementation, review clearance and acceptance results.
+
+## Lab
+
+None required by the approved design. No shared-lab actions are authorized for this run.
+
+## ADRs
+
+The issue-local bounded-uncertainty ADR was accepted with the approved plan. It will receive
+the next unused number and be recorded under `docs/adr/` after review/conformance clear.
+Existing accepted fencing/ISR decisions remain unchanged; clock ADR 0007 remains Proposed.
