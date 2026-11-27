@@ -3,8 +3,8 @@
 //! Models a global placement gate, creating-header reservations with
 //! `admission_generation`, drain markers, chunk replicas / incoming moves, and a
 //! CheckDrain split into check-start / header-scan / chunk-scan / final-validation.
-//! Injected mutants omit the admission compare, reservation count, or final marker
-//! compare; each must produce a bounded counterexample.
+//! Injected mutants omit the admission compare, reservation count, final marker
+//! compare, or publication fence; each must produce a bounded counterexample.
 
 use std::collections::BTreeMap;
 
@@ -36,6 +36,8 @@ pub enum Mutant {
     OmittedReservationCount,
     /// CheckDrain final-validation skips the drain-marker compare.
     OmittedFinalMarkerCompare,
+    /// A delayed copy batch omits its original creating-header comparison.
+    OmittedPublicationFence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +82,10 @@ pub struct Store {
     rev: i64,
     data: BTreeMap<String, (i64, String)>,
     planned_moves: BTreeMap<(String, u32), PlannedMove>,
+    // Independent history of successful admission/publication events, never read by scans.
+    // It survives model restarts and is retired only by publication or a committed fence.
+    admitted: BTreeMap<String, (i64, i64)>, // volume -> (claim, admission generation)
+    published: BTreeMap<String, Chunk>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +94,8 @@ pub enum InvariantViolation {
     PostMarkAdmission { node: String, drain_gen: i64 },
     /// CheckDrain reported complete while work remained for D, or validated a stale D.
     PrematureOrStaleCompletion { node: String, drain_gen: i64 },
+    /// A successful public copy had no live admission for its original claim.
+    FencedPublication { volume: String },
 }
 
 impl Store {
@@ -303,6 +311,7 @@ impl Store {
         {
             return Ok(false);
         }
+        self.admitted.insert(volume.into(), (plan.claim, plan.gate));
         for node in plan.chunks.iter().flat_map(|chunk| &chunk.replicas) {
             if let Some((d, _)) = self.get(&drain_key(node)) {
                 return Err(InvariantViolation::PostMarkAdmission {
@@ -344,28 +353,37 @@ impl Store {
             .collect();
         // The real cleaner changes to copying only after a separate empty-prefix observation.
         plan.cleaned = ops.is_empty();
+        let removed: Vec<_> = ops.iter().map(|(key, _)| key.clone()).collect();
         ops.push((
             Self::root_key(volume),
             Some(serde_json::to_string(&plan).unwrap_or_default()),
         ));
-        self.transaction(
-            &[
-                (volume_key(volume), plan.claim),
-                (Self::root_key(volume), rev),
-            ],
-            ops,
-        )
-        .is_some()
+        let applied = self
+            .transaction(
+                &[
+                    (volume_key(volume), plan.claim),
+                    (Self::root_key(volume), rev),
+                ],
+                ops,
+            )
+            .is_some();
+        if applied {
+            for key in removed {
+                self.published.remove(&key);
+            }
+        }
+        applied
     }
 
     /// One bounded public-copy batch compares both claim and root, preserving admission.
-    pub fn copy_batch(&mut self, volume: &str) -> bool {
+    pub fn copy_batch(&mut self, volume: &str, mutant: Mutant) -> Result<bool, InvariantViolation> {
         let Some((rev, mut plan)) = self.plan(volume) else {
-            return false;
+            return Ok(false);
         };
         if plan.claim == 0 || !plan.cleaned {
-            return false;
+            return Ok(false);
         }
+        let start = plan.next;
         let end = (plan.next + 32).min(plan.chunks.len());
         let mut ops: Vec<_> = (plan.next..end)
             .map(|i| {
@@ -380,14 +398,23 @@ impl Store {
             Self::root_key(volume),
             Some(serde_json::to_string(&plan).unwrap_or_default()),
         ));
-        self.transaction(
-            &[
-                (volume_key(volume), plan.claim),
-                (Self::root_key(volume), rev),
-            ],
-            ops,
-        )
-        .is_some()
+        let mut cmps = vec![(Self::root_key(volume), rev)];
+        if mutant != Mutant::OmittedPublicationFence {
+            cmps.push((volume_key(volume), plan.claim));
+        }
+        if self.transaction(&cmps, ops).is_none() {
+            return Ok(false);
+        }
+        if !matches!(self.admitted.get(volume), Some((claim, _)) if *claim == plan.claim) {
+            return Err(InvariantViolation::FencedPublication {
+                volume: volume.into(),
+            });
+        }
+        for i in start..end {
+            self.published
+                .insert(chunk_key(volume, i as u32), plan.chunks[i].clone());
+        }
+        Ok(true)
     }
 
     pub fn publish(&mut self, volume: &str) -> bool {
@@ -407,23 +434,28 @@ impl Store {
             return false;
         }
         h.creating = false;
-        self.transaction(
-            &[
-                (volume_key(volume), plan.claim),
-                (Self::root_key(volume), rev),
-            ],
-            vec![
-                (
-                    volume_key(volume),
-                    Some(serde_json::to_string(&h).unwrap_or_default()),
-                ),
-                (
-                    Self::root_key(volume),
-                    Some(serde_json::to_string(&plan).unwrap_or_default()),
-                ),
-            ],
-        )
-        .is_some()
+        let applied = self
+            .transaction(
+                &[
+                    (volume_key(volume), plan.claim),
+                    (Self::root_key(volume), rev),
+                ],
+                vec![
+                    (
+                        volume_key(volume),
+                        Some(serde_json::to_string(&h).unwrap_or_default()),
+                    ),
+                    (
+                        Self::root_key(volume),
+                        Some(serde_json::to_string(&plan).unwrap_or_default()),
+                    ),
+                ],
+            )
+            .is_some();
+        if applied {
+            self.admitted.remove(volume);
+        }
+        applied
     }
 
     /// #76 rolls an unpublished claim back with a delete-only header CAS. Visible deletion
@@ -436,12 +468,16 @@ impl Store {
             return false;
         };
         if h.creating {
-            return self
+            let applied = self
                 .transaction(
                     &[(volume_key(volume), rev), (Self::tombstone_key(volume), 0)],
                     vec![(volume_key(volume), None)],
                 )
                 .is_some();
+            if applied {
+                self.admitted.remove(volume);
+            }
+            return applied;
         }
         h.deleting = true;
         self.transaction(
@@ -481,7 +517,12 @@ impl Store {
             .take(32)
             .map(|key| (key.clone(), None))
             .collect();
-        self.transaction(&[(volume_key(volume), 0)], ops);
+        let removed: Vec<_> = ops.iter().map(|(key, _)| key.clone()).collect();
+        if self.transaction(&[(volume_key(volume), 0)], ops).is_some() {
+            for key in removed {
+                self.published.remove(&key);
+            }
+        }
     }
 
     pub fn delete_volume(&mut self, volume: &str) {
@@ -549,11 +590,17 @@ impl Store {
         if self
             .transaction(
                 &cmps,
-                vec![(key, Some(serde_json::to_string(&c).unwrap_or_default()))],
+                vec![(
+                    key.clone(),
+                    Some(serde_json::to_string(&c).unwrap_or_default()),
+                )],
             )
             .is_none()
         {
             return Ok(false);
+        }
+        if let Some(published) = self.published.get_mut(&key) {
+            published.moving_to = plan.to.clone();
         }
         if let Some((d, _)) = self.get(&drain_key(&plan.to)) {
             return Err(InvariantViolation::PostMarkAdmission {
@@ -650,11 +697,16 @@ impl Store {
             });
         }
         if complete && marker_ok {
-            // This oracle is independent of the scanned counters and the injected mutant.
-            // Any live older reservation or current placement makes zero completion unsafe.
-            let real_pending = self.header_scan(d, Mutant::None);
-            let (real_placement, real_incoming) = self.chunk_scan(node);
-            if real_pending > 0 || real_placement > 0 || real_incoming > 0 {
+            // Replay successful admission/publication events, independently of the inventory
+            // representation and scanners. A counting omission must not erase its own oracle.
+            let reservation = self
+                .admitted
+                .values()
+                .any(|(_, generation)| *generation < d);
+            let occupied = self.published.values().any(|chunk| {
+                chunk.replicas.iter().any(|replica| replica == node) || chunk.moving_to == node
+            });
+            if reservation || occupied {
                 return Err(InvariantViolation::PrematureOrStaleCompletion {
                     node: node.to_string(),
                     drain_gen: d,
@@ -747,6 +799,12 @@ pub enum Step {
     FinalValidation {
         node: String,
         generation: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_pending: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_placement: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect_incoming: Option<u64>,
     },
 }
 
@@ -815,10 +873,7 @@ pub fn run_schedule(sched: &Schedule) -> Result<Option<InvariantViolation>, Stri
                 Ok(())
             }
             Step::Claim { volume } => store.claim_create(volume, sched.mutant).map(|_| ()),
-            Step::Batch { volume } => {
-                store.copy_batch(volume);
-                Ok(())
-            }
+            Step::Batch { volume } => store.copy_batch(volume, sched.mutant).map(|_| ()),
             Step::Clean { volume } => {
                 store.clean_batch(volume);
                 Ok(())
@@ -905,7 +960,13 @@ pub fn run_schedule(sched: &Schedule) -> Result<Option<InvariantViolation>, Stri
                 }
                 Ok(())
             }
-            Step::FinalValidation { node, generation } => {
+            Step::FinalValidation {
+                node,
+                generation,
+                expect_pending,
+                expect_placement,
+                expect_incoming,
+            } => {
                 // generation 0 means the drain generation captured at check-start (or the last
                 // mark if the check never started). Re-mark must not silently validate D2 when
                 // the schedule is certifying the original D.
@@ -934,7 +995,29 @@ pub fn run_schedule(sched: &Schedule) -> Result<Option<InvariantViolation>, Stri
                         check.incoming,
                         sched.mutant,
                     ) {
-                        Ok(_) => Ok(()),
+                        Ok(complete) => {
+                            let current = matches!(store.get(&drain_key(node)), Some((d, _)) if d == drain_gen);
+                            if current {
+                                for (name, expected, actual) in [
+                                    ("pending", expect_pending, check.pending),
+                                    ("placement", expect_placement, check.placement),
+                                    ("incoming", expect_incoming, check.incoming),
+                                ] {
+                                    if expected.is_some_and(|expected| expected != actual) {
+                                        return Err(format!(
+                                            "{name}: expected {expected:?}, got {actual}"
+                                        ));
+                                    }
+                                }
+                                if let (Some(p), Some(c), Some(i)) =
+                                    (expect_pending, expect_placement, expect_incoming)
+                                    && complete != (*p == 0 && *c == 0 && *i == 0)
+                                {
+                                    return Err("completion disagrees with fixture counters".into());
+                                }
+                            }
+                            Ok(())
+                        }
                         Err(v) => Err(v),
                     }
                 }
@@ -964,6 +1047,7 @@ fn violation_name(v: &InvariantViolation) -> &'static str {
     match v {
         InvariantViolation::PostMarkAdmission { .. } => "PostMarkAdmission",
         InvariantViolation::PrematureOrStaleCompletion { .. } => "PrematureOrStaleCompletion",
+        InvariantViolation::FencedPublication { .. } => "FencedPublication",
     }
 }
 
@@ -1038,6 +1122,9 @@ pub fn builtin_schedules() -> Vec<Schedule> {
                 Step::FinalValidation {
                     node: "a".into(),
                     generation: 0,
+                    expect_pending: None,
+                    expect_placement: None,
+                    expect_incoming: None,
                 },
             ],
             expect_violation: Some("PrematureOrStaleCompletion".into()),
@@ -1058,6 +1145,9 @@ pub fn builtin_schedules() -> Vec<Schedule> {
                 Step::FinalValidation {
                     node: "a".into(),
                     generation: 0,
+                    expect_pending: None,
+                    expect_placement: None,
+                    expect_incoming: None,
                 },
             ],
             expect_violation: Some("PrematureOrStaleCompletion".into()),
@@ -1079,6 +1169,9 @@ pub fn builtin_schedules() -> Vec<Schedule> {
                 Step::FinalValidation {
                     node: "a".into(),
                     generation: 0,
+                    expect_pending: None,
+                    expect_placement: None,
+                    expect_incoming: None,
                 },
             ],
             expect_violation: None,
@@ -1101,6 +1194,9 @@ pub fn builtin_schedules() -> Vec<Schedule> {
                 Step::FinalValidation {
                     node: "a".into(),
                     generation: 0,
+                    expect_pending: None,
+                    expect_placement: None,
+                    expect_incoming: None,
                 },
             ],
             expect_violation: None,
@@ -1174,6 +1270,9 @@ pub fn explore_short_schedules() -> Result<usize, String> {
         Step::FinalValidation {
             node: "a".into(),
             generation: 0,
+            expect_pending: None,
+            expect_placement: None,
+            expect_incoming: None,
         },
     ];
     let mut drain = vec![Step::Mark { node: "a".into() }];
@@ -1223,6 +1322,77 @@ mod tests {
         for sched in &file.schedules {
             run_schedule(sched).unwrap_or_else(|e| panic!("schedule {}: {e}", sched.name));
         }
+    }
+
+    #[test]
+    fn fixture_counter_expectations_are_enforced() {
+        let raw = std::fs::read_to_string(fixture_path()).unwrap();
+        let original: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        for field in ["expect_pending", "expect_placement", "expect_incoming"] {
+            let mut value = original.clone();
+            let schedule = value["schedules"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|schedule| schedule["name"] == "publication_between_header_and_chunk_scan")
+                .unwrap();
+            let validation = schedule["steps"]
+                .as_array_mut()
+                .unwrap()
+                .last_mut()
+                .unwrap();
+            let expected = validation[field].as_u64().unwrap();
+            validation[field] = (expected + 1).into();
+            let schedule: Schedule = serde_json::from_value(schedule.clone()).unwrap();
+            assert!(run_schedule(&schedule).is_err(), "ignored {field}");
+        }
+    }
+
+    #[test]
+    fn delayed_copy_cannot_publish_after_claim_fence() {
+        let mut store = Store::new();
+        store.register_node("a");
+        assert!(store.plan_create_chunks("v", &["a".into()], 40));
+        assert!(store.stage_create("v"));
+        assert!(store.claim_create("v", Mutant::None).unwrap());
+        assert!(store.clean_batch("v"));
+        assert!(store.copy_batch("v", Mutant::None).unwrap());
+        assert!(store.delete_fence("v"));
+        assert!(!store.copy_batch("v", Mutant::None).unwrap());
+        assert_eq!(store.chunk_scan("a"), (32, 0));
+    }
+
+    #[test]
+    fn completion_oracle_accounts_for_admission_publication_and_incoming_history() {
+        let mut store = Store::new();
+        store.register_node("a");
+        store.register_node("b");
+        assert!(
+            store
+                .admit_create("v", &["b".into()], Mutant::None)
+                .unwrap()
+        );
+        let d = store.mark_drain("a").unwrap();
+        // Even an unrelated earlier reservation blocks a claimed zero completion.
+        assert!(matches!(
+            store.final_validation("a", d, 0, 0, 0, Mutant::None),
+            Err(InvariantViolation::PrematureOrStaleCompletion { .. })
+        ));
+        assert!(store.clean_batch("v"));
+        assert!(store.copy_batch("v", Mutant::None).unwrap());
+        assert!(store.publish("v"));
+        let d = store.mark_drain("b").unwrap();
+        assert!(matches!(
+            store.final_validation("b", d, 0, 0, 0, Mutant::None),
+            Err(InvariantViolation::PrematureOrStaleCompletion { .. })
+        ));
+        assert!(store.unmark_drain("a"));
+        assert!(store.move_replica("v", 0, "a", Mutant::None).unwrap());
+        let d = store.mark_drain("a").unwrap();
+        assert!(matches!(
+            store.final_validation("a", d, 0, 0, 0, Mutant::None),
+            Err(InvariantViolation::PrematureOrStaleCompletion { .. })
+        ));
     }
 
     #[test]

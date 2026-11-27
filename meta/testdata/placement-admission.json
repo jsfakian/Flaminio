@@ -710,6 +710,193 @@
         }
       ],
       "expect_violation": "PrematureOrStaleCompletion"
+    },
+    {
+      "name": "omitted_publication_fence_counterexample",
+      "mutant": "omitted_publication_fence",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "plan",
+          "volume": "phased",
+          "nodes": [
+            "a"
+          ],
+          "chunk_count": 40
+        },
+        {
+          "action": "stage",
+          "volume": "phased"
+        },
+        {
+          "action": "claim",
+          "volume": "phased"
+        },
+        {
+          "action": "clean",
+          "volume": "phased"
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "delete_fence",
+          "volume": "phased"
+        },
+        {
+          "action": "batch",
+          "volume": "phased"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 32,
+          "expect_incoming": 0
+        },
+        {
+          "action": "delete_header",
+          "volume": "phased"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 32,
+          "expect_incoming": 0
+        },
+        {
+          "action": "delete_chunks",
+          "volume": "phased"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 0,
+          "expect_incoming": 0
+        }
+      ],
+      "expect_violation": "FencedPublication"
+    },
+    {
+      "name": "incoming_move_admitted_before_mark",
+      "mutant": "none",
+      "steps": [
+        {
+          "action": "register",
+          "node": "a"
+        },
+        {
+          "action": "register",
+          "node": "b"
+        },
+        {
+          "action": "admit",
+          "volume": "incoming",
+          "nodes": [
+            "b"
+          ]
+        },
+        {
+          "action": "clean",
+          "volume": "incoming"
+        },
+        {
+          "action": "batch",
+          "volume": "incoming"
+        },
+        {
+          "action": "publish",
+          "volume": "incoming"
+        },
+        {
+          "action": "plan_move",
+          "volume": "incoming",
+          "chunk": 0,
+          "to": "a"
+        },
+        {
+          "action": "commit_move",
+          "volume": "incoming",
+          "chunk": 0
+        },
+        {
+          "action": "mark",
+          "node": "a"
+        },
+        {
+          "action": "check_start",
+          "node": "a",
+          "generation": 0
+        },
+        {
+          "action": "header_scan"
+        },
+        {
+          "action": "chunk_scan",
+          "node": "a"
+        },
+        {
+          "action": "final_validation",
+          "node": "a",
+          "generation": 0,
+          "expect_pending": 0,
+          "expect_placement": 0,
+          "expect_incoming": 1
+        }
+      ]
     }
   ]
 }

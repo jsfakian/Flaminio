@@ -25,6 +25,57 @@ Changes/resolution: Both fresh reviewers confirmed legacy gate initialization an
 
 Status: clear. Approval remains separate; no approval is inferred.
 
+### Code/security round 1 — fd279dbcd6e8af9319f367bb1e87bf46e16f1fbe
+
+Full change reviewed against main `7d03b6b08bee86058b3dfbc6942ca7b053aab547`, excluding
+generated bindings. Split into Go/service/controller/docs and Rust model/shared schedules
+because the non-generated change exceeds 3,000 lines. Each part has independent code and
+security reviewers. Built-in review Skill tools are unavailable; reviewers use the repository
+standards directly at high effort.
+
+- **R1-G-C1 — Medium:** exact-spelling duplicate JSON detection misses Go's case-insensitive
+  struct field aliases. Conflicting `moving.to`/`moving.To` or `replicas`/`Replicas` can conceal
+  incoming or placed work and return `complete:true`. Independently reproduced by both Go
+  reviewers through production CheckDrain. Requires malformed persisted inventory; no public
+  RPC injection path was demonstrated. Fix semantic aliases in struct namespaces while
+  retaining valid case-sensitive user map keys; add both-store regression cases.
+- **R1-M-C1 — Medium:** Rust completion's supposedly independent occupancy oracle calls the
+  same inventory scanners under test; serde ignores the shared fixture's explicit expected
+  counters. Scanner omissions can escape its tests/exploration. Parse and assert independent
+  fixture counts, derive occupancy separately, and cover a positive admitted incoming move.
+
+Model security independently confirms R1-M-C1: removing the copy header comparison can publish
+an extra eight chunks after deletion fencing while the ignored count expectations leave the
+Rust tests green. This adds explicit stale-publication control to the same fix.
+
+- **R1-CI-C1 — Medium:** required hygiene fails staticcheck: `admission.go:113` compares an
+  int64 with a greater-than-MaxInt64 condition (SA4003), and `service.go:197` assigns an unused
+  gate revision (SA4006). Remove the dead expressions while preserving validation and gate init.
+
+All four reviewers are complete with no other findings or Nits. A fresh implementer addressed
+all three findings in one pending fix commit:
+
+- Known struct field aliases (including Unicode case folding) are DataLoss; unknown/user map
+  keys retain case semantics. Both-store regressions failed before the fix with `complete:true`
+  for all five alias classes, then passed. The 22 committed fuzz seeds and a five-second fuzz
+  run (265,047 executions) pass.
+- Rust validates fixture count/completion expectations and uses independent successful
+  admission/publication history. Positive incoming-move replay now succeeds on both backends.
+  A new explicit FencedPublication control catches delayed copy after deletion fencing.
+  The original three mutation witnesses and 827 interleavings remain covered; eight focused
+  model tests pass. The new count-expectation test failed before the fix.
+- Controlled omissions after the fix all fail as intended: placement expected 32/got 0;
+  incoming accounting triggers PrematureOrStaleCompletion from independent history; missing
+  copy-header comparison triggers FencedPublication. Every omission was restored before checks.
+- Removed the statically dead comparison/assignment. The first post-fix full run stopped on
+  Clippy's collapsible-if lint; that statement was corrected, scoped Clippy/model tests passed,
+  and the complete required suite restarted.
+
+Post-fix `make lint test race hygiene contracts sim` passed in full. This includes all three
+TLS interop tests, 20,000 simulation seeds (zero failures), and all 173 release replication
+checks including ignored mutation controls. One R1 fix commit follows, then fresh incremental
+code/security review. Status: fixes tested; incremental review pending.
+
 ## Implementation integration — 2026-11-27
 
 Existing commits `62f7424` (implementation) and `19a45ac` (tests), authored before the recent
@@ -54,9 +105,14 @@ Transaction audit: gate initialization 1 compare/1 operation; changed registrati
 
 ## Tests
 
-Independent acceptance is completing. Required project checks are
+Independent acceptance passed S1–S8 at `fd279db`. Required project checks are
 `make lint test race hygiene contracts sim`, including real service CAS schedule replay and
-all three placement-admission mutation controls.
+all three original placement-admission mutation controls plus the publication-fence control.
+Final post-fix `make lint test race hygiene contracts sim` passed in full; the three TLS
+interoperability tests, 20,000 seeds and 173 release replication checks passed.
+The baseline run at `fd279db` passed
+`make lint test race`, then stopped in `make hygiene` at R1-CI-C1; contracts and sim were not
+reached in that combined run. All required checks will rerun after the fixes.
 
 Controlled negative evidence: temporarily omitting recursive raw-inventory validation makes
 `TestCheckDrainRejectsAmbiguousNestedMove` fail on memory and embedded etcd with
@@ -69,11 +125,16 @@ fuzz campaign completed 68,699 executions from 14 seeds. The complete flaminio-r
 
 The first full service/drain run exposed a test-fixture error: the witness-change case used
 `witness` instead of the existing `flaminio.io/witness` label. The fixture was corrected while
-retaining fresh-planning, generation and replica assertions; no runtime change was needed.
+retaining fresh-planning, generation and replica assertions; no runtime change was needed. The
+corrected focused case and complete service/drain packages then passed (78.310s / 0.121s).
 
 ## Conformance
 
-Pending integration, acceptance and review clearance.
+Independent test acceptance passed S1–S8; the final conformance gate follows review clearance.
+Acceptance includes actual memory/etcd claim/mark and paused batch/scan schedules, cooperative
+and uncertain-reply recovery, original plan/generation retention, deletion fences, conservative
+raw inventory, controller generation/cancellation and direct-move lifecycle refusal. Inventory
+oracles in shared fixtures are independent of runtime count helpers. Final checker table pending.
 
 ## Lab
 

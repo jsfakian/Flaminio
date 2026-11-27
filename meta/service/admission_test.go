@@ -671,6 +671,7 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 				creators := map[string]*admissionScheduleActor{}
 				deletions := map[string]*admissionScheduleActor{}
 				moves := map[string]*admissionScheduleActor{}
+				moveDestinations := map[string]string{}
 				requests := map[string]*metav1.CreateVolumeRequest{}
 				generations := map[string]int64{}
 				claims := map[string]uint64{}
@@ -811,6 +812,7 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 						req := &metav1.MoveReplicaRequest{Volume: step.Volume, Chunk: step.Chunk, From: v.Volume.Chunks[step.Chunk].Replicas[0], To: step.To}
 						a := startAdmissionActor(t, store, step.Volume, "move", func(ctx context.Context, svc *Service) (any, error) { return svc.MoveReplica(ctx, req) })
 						moves[step.Volume] = a
+						moveDestinations[step.Volume] = step.To
 						a.requirePhase(t, "move")
 						if step.Action == "plan_move" {
 							break
@@ -819,9 +821,23 @@ func TestAdmissionScheduleReplay(t *testing.T) {
 					case "commit_move":
 						a := moves[step.Volume]
 						a.requirePhase(t, "move")
+						_, draining, err := store.Get(ctx, drainKey(moveDestinations[step.Volume]))
+						if err != nil {
+							t.Fatal(err)
+						}
 						a.advance(t)
-						if a.result == nil || code(a.result.err) != codes.FailedPrecondition {
-							t.Fatalf("move crossed a winning mark: %+v", a.result)
+						if a.result == nil || draining && code(a.result.err) != codes.FailedPrecondition || !draining && a.result.err != nil {
+							t.Fatalf("move result disagrees with admission order: draining=%v result=%+v", draining, a.result)
+						}
+						if !draining {
+							v, err := s.GetVolume(ctx, &metav1.GetVolumeRequest{Id: step.Volume})
+							if err != nil {
+								t.Fatal(err)
+							}
+							c := v.Volume.Chunks[step.Chunk]
+							if c.GetMovingTo() != moveDestinations[step.Volume] {
+								t.Fatalf("successful admission did not retain its incoming move: %+v", c)
+							}
 						}
 					case "check_start":
 						checkNode = step.Node
@@ -1208,6 +1224,41 @@ func TestCheckDrainRejectsAmbiguousNestedMove(t *testing.T) {
 		got, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
 		if code(err) != codes.DataLoss {
 			t.Fatalf("ambiguous incoming destination must fail closed: got=%+v err=%v", got, err)
+		}
+	})
+}
+
+func TestCheckDrainRejectsStructFieldAliases(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{})
+		addNodes(t, s, "a", "b", "c")
+		mark, err := s.DrainNode(ctx, &metav1.DrainNodeRequest{Node: "a", Draining: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cases := []struct{ name, key, raw string }{
+			{"nested-destination", chunkKey("raw", 0), `{"replicas":["b"],"isr":["b"],"isr_ver":0,"moving":{"from":"b","to":"a","To":"c"}}`},
+			{"replicas", chunkKey("raw", 0), `{"replicas":["a"],"Replicas":["b"],"isr":["b"],"isr_ver":0}`},
+			{"generation", volumeKey("raw"), fmt.Sprintf(`{"id":"raw","size_bytes":4096,"chunk_bytes":4096,"replicas":1,"min_isr":1,"epoch":0,"creating":true,"admission_generation":0,"Admission_Generation":%d}`, mark.GetGeneration())},
+			{"unicode-isr", chunkKey("raw", 0), `{"replicas":["b"],"isr":["b"],"iſr":["b"],"isr_ver":0}`},
+			{"identity", volumeKey("raw"), `{"id":"raw","size_bytes":1048576,"chunk_bytes":1048576,"replicas":1,"min_isr":1,"epoch":7,"create_operation":"op","create_spec":{"size_bytes":1048576,"chunk_bytes":1048576,"replicas":1,"Replicas":1,"min_isr":1,"failure_domain":0,"failure_domain_policy":0}}`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				writeTestOps(t, store, kv.Op{Key: tc.key, Value: []byte(tc.raw)})
+				got, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+				writeTestOps(t, store, kv.Op{Key: tc.key, Delete: true})
+				if code(err) != codes.DataLoss || got != nil {
+					t.Fatalf("struct alias must fail closed: got=%+v err=%v", got, err)
+				}
+			})
+		}
+		// Unknown user maps have case-sensitive keys; their names do not address struct fields.
+		writeTestOps(t, store, kv.Op{Key: volumeKey("raw"), Value: []byte(`{"id":"raw","size_bytes":4096,"chunk_bytes":4096,"replicas":1,"min_isr":1,"epoch":7,"identity":{"Team":"red","team":"blue","To":"a","to":"b"}}`)})
+		got, err := s.CheckDrain(ctx, &metav1.CheckDrainRequest{Node: "a", Generation: mark.GetGeneration()})
+		if err != nil || !got.GetComplete() {
+			t.Fatalf("case-sensitive user map must remain valid: got=%+v err=%v", got, err)
 		}
 	})
 }
@@ -1670,6 +1721,10 @@ func FuzzDrainInventory(f *testing.F) {
 		[]byte(`{"id":"raw","size_bytes":4096,"chunk_bytes":4096,"replicas":1,"min_isr":1,"epoch":7}`),
 		[]byte(`{"replicas":["a"],"isr":["a"],"isr_ver":0}`),
 		[]byte(`{"replicas":["b"],"isr":["b"],"isr_ver":0,"moving":{"from":"b","to":"a","to":"c"}}`),
+		[]byte(`{"replicas":["b"],"isr":["b"],"isr_ver":0,"moving":{"from":"b","to":"a","To":"c"}}`),
+		[]byte(`{"replicas":["a"],"Replicas":["b"],"isr":["b"],"isr_ver":0}`),
+		[]byte(`{"id":"raw","size_bytes":4096,"chunk_bytes":4096,"replicas":1,"min_isr":1,"epoch":0,"creating":true,"admission_generation":0,"Admission_Generation":99}`),
+		[]byte(`{"replicas":["b"],"isr":["b"],"iſr":["b"],"isr_ver":0}`),
 		[]byte(`{"creating":true,"creating":false}`), []byte("null"), []byte("{"),
 		bytes.Repeat([]byte("x"), domain.MaxCreateRecordBytes+1),
 	} {

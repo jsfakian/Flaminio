@@ -194,8 +194,7 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 				return nil, errStatus(err)
 			}
 		}
-		gateRev, err := s.ensurePlacementGate(ctx)
-		if err != nil {
+		if _, err := s.ensurePlacementGate(ctx); err != nil {
 			return nil, errStatus(err)
 		}
 		e, ok, err := s.kv.Get(ctx, key)
@@ -240,7 +239,7 @@ func (s *Service) RegisterNode(ctx context.Context, r *metav1.RegisterNodeReques
 		if !gok {
 			continue
 		}
-		gateRev = ge.Rev
+		gateRev := ge.Rev
 		// e.Rev is 0 when it read none: the record must then still be absent.
 		applied, err := s.kv.Txn(ctx,
 			[]kv.Cmp{{Key: key, Rev: e.Rev}, {Key: placementGateKey, Rev: gateRev}},

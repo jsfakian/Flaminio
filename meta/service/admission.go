@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -110,7 +111,7 @@ func (s *Service) readPlacementGate(ctx context.Context) (int64, error) {
 }
 
 func generationToUint64(rev int64) (uint64, error) {
-	if rev <= 0 || rev > math.MaxInt64 {
+	if rev <= 0 {
 		return 0, fmt.Errorf("%w: generation %d is not a positive int64", domain.ErrInvalid, rev)
 	}
 	return uint64(rev), nil
@@ -213,7 +214,7 @@ func (s *Service) countDrainChunks(ctx context.Context, node string) (placement,
 
 // Inventory validates stored schema, not current geometry admission. Unsupported legacy
 // volumes and orphan/deleting chunks still count; no visible-header join may conceal them.
-func inventoryObject(b []byte, required ...string) error {
+func inventoryObject(b []byte, schema reflect.Type, required ...string) error {
 	if len(b) > domain.MaxCreateRecordBytes {
 		return status.Error(codes.DataLoss, "inventory record exceeds bound")
 	}
@@ -227,12 +228,34 @@ func inventoryObject(b []byte, required ...string) error {
 		}
 	}
 	for field, value := range fields {
+		var child reflect.Type
+		if schema != nil {
+			for schema.Kind() == reflect.Pointer {
+				schema = schema.Elem()
+			}
+			if schema.Kind() == reflect.Struct {
+				for i := range schema.NumField() {
+					f := schema.Field(i)
+					name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+					if strings.EqualFold(field, name) {
+						// encoding/json accepts case-folded aliases, including Unicode folds.
+						// Stored struct fields must use their canonical spelling; arbitrary
+						// user-map keys retain their case-sensitive identity.
+						if field != name {
+							return status.Errorf(codes.DataLoss, "inventory field %q aliases %q", field, name)
+						}
+						child = f.Type
+						break
+					}
+				}
+			}
+		}
 		value = bytes.TrimSpace(value)
 		if bytes.Equal(value, []byte("null")) {
 			return status.Errorf(codes.DataLoss, "inventory record has null %s", field)
 		}
 		if len(value) > 0 && value[0] == '{' {
-			if err := inventoryObject(value); err != nil {
+			if err := inventoryObject(value, child); err != nil {
 				return err
 			}
 		}
@@ -263,7 +286,7 @@ func inventoryObject(b []byte, required ...string) error {
 }
 
 func drainInventoryHeader(e kv.Entry) (domain.Header, error) {
-	if err := inventoryObject(e.Value, "id", "size_bytes", "chunk_bytes", "replicas", "min_isr", "epoch"); err != nil {
+	if err := inventoryObject(e.Value, reflect.TypeFor[domain.Header](), "id", "size_bytes", "chunk_bytes", "replicas", "min_isr", "epoch"); err != nil {
 		return domain.Header{}, err
 	}
 	h, err := decodeHeaderBounded(e.Value)
@@ -290,7 +313,7 @@ func drainInventoryHeader(e kv.Entry) (domain.Header, error) {
 }
 
 func drainInventoryChunk(e kv.Entry) (domain.Chunk, error) {
-	if err := inventoryObject(e.Value, "replicas", "isr", "isr_ver"); err != nil {
+	if err := inventoryObject(e.Value, reflect.TypeFor[domain.Chunk](), "replicas", "isr", "isr_ver"); err != nil {
 		return domain.Chunk{}, err
 	}
 	c, err := decodeChunkBounded(e.Value)

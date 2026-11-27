@@ -50,3 +50,15 @@ Issue #18's additional move failure-domain policy has not landed; #78 preserves 
 move eligibility and creation's `domain.Place` constraints. Changed registrations advance the
 gate atomically, fencing stale creation planning. Future #18 node-record comparisons must compose
 with this gate; no new move-domain policy is claimed here.
+
+## Implementation review round 1
+
+- R1-G-C1: inventory must reject aliases of known struct field names, including Go's Unicode
+  case folding. Keep canonical field spelling, exact duplicate refusal and valid case-sensitive
+  map keys distinct. This tightens corruption refusal without filtering unsupported geometry.
+- R1-M-C1: shared fixture expectations must be checked by both implementations. The Rust model
+  needs an occupancy oracle independent of its scanners and explicit stale-publication controls;
+  blocked completion alone cannot prove a fenced writer was refused. Add positive pre-mark
+  incoming move accounting and retain all original witnesses and the 827 exploration budget.
+- R1-CI-C1: remove the two statically dead expressions; preserve positive revision checks and
+  missing-gate initialization on no-op mutations. No protocol change or accepted risk.
