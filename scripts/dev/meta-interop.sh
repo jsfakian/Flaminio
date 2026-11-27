@@ -34,6 +34,8 @@ for n in fl-a fl-b; do
 done
 admin create v 2M 2 1 1M
 admin attach v fl-a
+admin create bounded-isr 129M 2 1 1M
+admin attach bounded-isr fl-a
 
 cd dataplane
 FLAMINIO_META_INTEROP="127.0.0.1:$port" FLAMINIO_META_INTEROP_DIR="$dir" \

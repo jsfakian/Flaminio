@@ -2537,3 +2537,487 @@ fn from_frame(f: Frame) -> Option<(u64, Response<Payload>)> {
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+    use flaminio_format::Uuid;
+    use flaminio_format::layout::LayoutParams;
+    use flaminio_format::mkfs::FormatOptions;
+    use flaminio_store::{MemDevice, Store, StoreConfig};
+
+    const ISR: u64 = 100;
+    const REFRESH: u64 = 101;
+
+    struct NoMeta;
+    impl MetaPort for NoMeta {
+        fn call(&self, _: u64, _: Call) {}
+    }
+
+    struct Fixture {
+        engine: Engine<MemDevice>,
+        volume: pb::Volume,
+        isr_req: u64,
+        refresh_req: u64,
+    }
+
+    impl Fixture {
+        fn new(generation: u64) -> Self {
+            let timing = Timing {
+                lease: 10,
+                drift_ppm: 0,
+                heartbeat: 1_000_000,
+                request_timeout: 1_000_000,
+                reconnect: 1_000_000,
+                meta_timeout: 1_000,
+                refresh: 30,
+            };
+            let view = VolumeMeta {
+                epoch: 7,
+                target: Some(0),
+                min_isr: 1,
+                blocks_per_chunk: 16,
+                chunks: (0..2)
+                    .map(|_| ChunkMeta {
+                        replicas: vec![0, 1],
+                        isr: [0, 1].into(),
+                        isr_ver: 0,
+                        moving: None,
+                    })
+                    .collect(),
+            };
+            let mut sm = Target::new(0, 0, &view, timing, 1, 0);
+            let hello = sm
+                .take_output()
+                .into_iter()
+                .find_map(|o| match o {
+                    TOut::Send { to: 0, msg } if matches!(msg.body, Request::Hello) => Some(msg),
+                    _ => None,
+                })
+                .unwrap();
+            sm.on_reply(
+                1,
+                0,
+                &FromReplica {
+                    vol: 0,
+                    epoch: 7,
+                    session: hello.session,
+                    req: hello.req,
+                    body: Response::Fenced { uncertain: vec![] },
+                },
+            );
+            sm.tick(12);
+            let isr_req = sm
+                .take_output()
+                .into_iter()
+                .find_map(|o| match o {
+                    TOut::Meta {
+                        req,
+                        body: MetaRequest::ChangeIsr { changes, .. },
+                    } => {
+                        assert_eq!(changes.len(), 2);
+                        Some(req)
+                    }
+                    _ => None,
+                })
+                .expect("the missing peer requires a real shrink proposal");
+            sm.tick(30);
+            let refresh_req = sm
+                .take_output()
+                .into_iter()
+                .find_map(|o| match o {
+                    TOut::Meta {
+                        req,
+                        body: MetaRequest::Get { .. },
+                    } => Some(req),
+                    _ => None,
+                })
+                .unwrap();
+            let device = MemDevice::new(256 << 20);
+            Store::format(
+                &device,
+                &FormatOptions {
+                    disk_uuid: Uuid([81; 16]),
+                    cluster_uuid: Uuid::NIL,
+                    format_nonce: 1,
+                    created_unix_secs: 0,
+                    layout: LayoutParams {
+                        journal_size: Some(16 << 20),
+                        ..Default::default()
+                    },
+                    label: String::new(),
+                },
+            )
+            .unwrap();
+            let net = crate::net::spawn(
+                crate::net::NetConfig {
+                    trust_domain: "test".into(),
+                    server: None,
+                    client: None,
+                },
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+            let mut engine = Engine::new(
+                EngineConfig {
+                    node: "fl-a".into(),
+                    address: "127.0.0.1:1".into(),
+                    timing,
+                    max_io: 1,
+                    heartbeat: None,
+                },
+                ReplicaService::new(Store::open(device, StoreConfig::default()).unwrap()),
+                net,
+                Box::new(NoMeta),
+            );
+            engine.targets.insert(
+                "v".into(),
+                TargetRt {
+                    sm,
+                    view,
+                    generation,
+                    token: vec![],
+                    first_epoch: 7,
+                    size: 2 * (64 << 10),
+                    chunk_size: 64 << 10,
+                    replica_count: 2,
+                    nodes: vec!["fl-a".into(), "fl-b".into()],
+                    addrs: vec![Some("127.0.0.1:1".parse().unwrap()); 2],
+                    local: 0,
+                    sessions: BTreeMap::new(),
+                    ops: BTreeMap::new(),
+                    subs: BTreeMap::new(),
+                    reads: BTreeMap::new(),
+                    deposed_reported: false,
+                },
+            );
+            engine.meta_waits.insert(
+                ISR,
+                MetaWait::Isr {
+                    volume: "v".into(),
+                    generation,
+                    sm_req: isr_req,
+                    chunks: vec![0, 1],
+                },
+            );
+            engine.meta_waits.insert(
+                REFRESH,
+                MetaWait::Refresh {
+                    volume: "v".into(),
+                    generation,
+                    sm_req: refresh_req,
+                },
+            );
+            let volume = pb::Volume {
+                id: "v".into(),
+                size_bytes: 2 * (64 << 10),
+                chunk_bytes: 64 << 10,
+                replicas: 2,
+                min_isr: 1,
+                epoch: 7,
+                target: "fl-a".into(),
+                chunks: (0..2)
+                    .map(|_| pb::ChunkMeta {
+                        replicas: vec!["fl-a".into(), "fl-b".into()],
+                        isr: vec!["fl-a".into(), "fl-b".into()],
+                        ..Default::default()
+                    })
+                    .collect(),
+            };
+            Self {
+                engine,
+                volume,
+                isr_req,
+                refresh_req,
+            }
+        }
+
+        fn answer(&mut self, id: u64, answer: Answer) {
+            self.engine
+                .on_meta(self.engine.start + Duration::from_micros(31), id, answer);
+        }
+
+        fn isr(&mut self, chunks: Vec<pb::ChunkMeta>, epoch: u64) {
+            self.answer(
+                ISR,
+                Answer::ChangeIsr(pb::ChangeIsrResponse {
+                    applied: true,
+                    epoch,
+                    chunks,
+                }),
+            );
+        }
+
+        fn refresh(&mut self, volume: pb::Volume) {
+            self.answer(
+                REFRESH,
+                Answer::GetVolume(pb::GetVolumeResponse {
+                    volume: Some(volume),
+                }),
+            );
+        }
+
+        fn shrunk(&self, version: u64) -> Vec<pb::ChunkMeta> {
+            self.volume
+                .chunks
+                .iter()
+                .cloned()
+                .map(|mut c| {
+                    c.isr = vec!["fl-a".into()];
+                    c.isr_ver = version;
+                    c
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn stale_isr_reply_does_not_regress_cache() {
+        let mut f = Fixture::new(7);
+        let mut fresh = f.volume.clone();
+        fresh.chunks = f.shrunk(5);
+        f.refresh(fresh);
+        f.isr(f.shrunk(1), 7);
+        let rt = &f.engine.targets["v"];
+        assert!(
+            rt.view
+                .chunks
+                .iter()
+                .all(|c| c.isr_ver == 5 && c.isr == [0].into())
+        );
+        assert!(!rt.sm.is_deposed());
+        assert!(!rt.sm.accepts_meta_reply(f.isr_req));
+    }
+
+    #[test]
+    fn stale_refresh_reply_does_not_regress_cache() {
+        let mut f = Fixture::new(7);
+        f.isr(f.shrunk(5), 7);
+        f.refresh(f.volume.clone());
+        let rt = &f.engine.targets["v"];
+        assert!(
+            rt.view
+                .chunks
+                .iter()
+                .all(|c| c.isr_ver == 5 && c.isr == [0].into())
+        );
+        assert!(!rt.sm.accepts_meta_reply(f.refresh_req));
+    }
+
+    #[test]
+    fn expired_isr_reply_cannot_answer_or_depose_the_next_batch() {
+        let mut f = Fixture::new(7);
+        let rt = f.engine.targets.get_mut("v").unwrap();
+        rt.sm.tick(1_100);
+        let next = rt
+            .sm
+            .take_output()
+            .into_iter()
+            .find_map(|o| match o {
+                TOut::Meta {
+                    req,
+                    body: MetaRequest::ChangeIsr { .. },
+                } => Some(req),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(next, f.isr_req);
+        assert!(rt.sm.accepts_meta_reply(next));
+        let before = rt.view.clone();
+        let mut delayed = f.shrunk(999);
+        delayed[0].replicas = vec!["fl-a".into(), "new-node".into()];
+        f.isr(delayed, 7);
+        let rt = &f.engine.targets["v"];
+        assert_eq!(rt.view, before);
+        assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+        assert!(rt.sm.accepts_meta_reply(next));
+        assert!(!rt.sm.is_deposed());
+    }
+
+    #[test]
+    fn expired_refresh_reply_cannot_pollute_the_next_request() {
+        let mut f = Fixture::new(7);
+        let rt = f.engine.targets.get_mut("v").unwrap();
+        rt.sm.tick(1_100);
+        let next = rt
+            .sm
+            .take_output()
+            .into_iter()
+            .find_map(|o| match o {
+                TOut::Meta {
+                    req,
+                    body: MetaRequest::Get { .. },
+                } => Some(req),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(next, f.refresh_req);
+        let before = rt.view.clone();
+        let mut delayed = f.volume.clone();
+        delayed.chunks = f.shrunk(999);
+        delayed.chunks[0].replicas = vec!["fl-a".into(), "new-node".into()];
+        f.refresh(delayed);
+        let rt = &f.engine.targets["v"];
+        assert_eq!(rt.view, before);
+        assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+        assert!(rt.sm.accepts_meta_reply(next));
+        assert!(!rt.sm.is_deposed());
+    }
+
+    #[test]
+    fn reattach_ignores_previous_generation() {
+        for id in [ISR, REFRESH] {
+            let mut f = Fixture::new(7);
+            let mut replacement = Fixture::new(8);
+            assert_eq!(f.isr_req, replacement.isr_req);
+            assert_eq!(f.refresh_req, replacement.refresh_req);
+            f.engine
+                .targets
+                .insert("v".into(), replacement.engine.targets.remove("v").unwrap());
+            let answer = if id == ISR {
+                Answer::ChangeIsr(pb::ChangeIsrResponse {
+                    applied: true,
+                    epoch: 999,
+                    chunks: vec![],
+                })
+            } else {
+                let mut v = f.volume.clone();
+                v.epoch = 999;
+                v.chunks.clear();
+                Answer::GetVolume(pb::GetVolumeResponse { volume: Some(v) })
+            };
+            f.answer(id, answer);
+            let rt = &f.engine.targets["v"];
+            assert_eq!(rt.generation, 8);
+            assert_eq!(rt.view.epoch, 7);
+            assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+            assert!(rt.sm.accepts_meta_reply(f.isr_req));
+            assert!(rt.sm.accepts_meta_reply(f.refresh_req));
+        }
+    }
+
+    #[test]
+    fn isr_reply_requires_complete_count() {
+        for count in [0, 1, 3] {
+            let mut f = Fixture::new(7);
+            let before = f.engine.targets["v"].view.clone();
+            let mut c = f.shrunk(4).remove(0);
+            c.replicas = vec!["fl-a".into(), "fl-c".into()];
+            f.isr(vec![c; count], 7);
+            let rt = &f.engine.targets["v"];
+            assert_eq!(rt.view, before);
+            assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+            assert!(rt.sm.accepts_meta_reply(f.isr_req));
+        }
+    }
+
+    #[test]
+    fn higher_epoch_malformed_metadata_deposes_before_conversion() {
+        for id in [ISR, REFRESH] {
+            let mut f = Fixture::new(7);
+            if id == ISR {
+                f.isr(vec![], 8);
+            } else {
+                let mut v = f.volume.clone();
+                v.epoch = 8;
+                v.size_bytes = 0;
+                v.chunks.clear();
+                v.target = "bad\nnode".into();
+                f.refresh(v);
+            }
+            assert!(!f.engine.targets.contains_key("v"));
+            assert!(
+                f.engine
+                    .take_output()
+                    .iter()
+                    .any(|o| matches!(o, Output::Deposed { volume } if volume == "v"))
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_membership_is_not_partially_converted_or_adopted() {
+        for id in [ISR, REFRESH] {
+            for epoch in [6, 7] {
+                let mut f = Fixture::new(7);
+                let before = f.engine.targets["v"].view.clone();
+                let mut chunks = f.shrunk(4);
+                chunks[0].replicas = vec!["fl-a".into(), "new-valid-node".into()];
+                chunks[1].isr = vec!["fl-a".into(), "fl-a".into()];
+                if id == ISR {
+                    f.isr(chunks, epoch);
+                } else {
+                    let mut v = f.volume.clone();
+                    v.chunks = chunks;
+                    v.epoch = epoch;
+                    f.refresh(v);
+                }
+                let rt = &f.engine.targets["v"];
+                assert_eq!(rt.view, before);
+                assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+                assert!(rt.sm.accepts_meta_reply(if id == ISR {
+                    f.isr_req
+                } else {
+                    f.refresh_req
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_refresh_geometry_preserves_cache_and_live_request() {
+        for case in 0..7 {
+            let mut f = Fixture::new(7);
+            let before = f.engine.targets["v"].view.clone();
+            let mut v = f.volume.clone();
+            match case {
+                0 => v.id = "other".into(),
+                1 => v.size_bytes += BLOCK as u64,
+                2 => v.chunk_bytes *= 2,
+                3 => v.replicas = 1,
+                4 => v.min_isr = 2,
+                5 => {
+                    v.chunks.pop();
+                }
+                _ => v.target = "fl-b".into(),
+            }
+            f.refresh(v);
+            let rt = &f.engine.targets["v"];
+            assert_eq!(rt.view, before, "case {case}");
+            assert_eq!(rt.nodes, ["fl-a", "fl-b"]);
+            assert!(rt.sm.accepts_meta_reply(f.refresh_req));
+        }
+    }
+
+    #[test]
+    fn equal_version_refresh_changes_only_the_requested_move() {
+        let mut f = Fixture::new(7);
+        let mut v = f.volume.clone();
+        v.chunks[0].isr = vec!["fl-b".into()];
+        v.chunks[0].moving_from = "fl-b".into();
+        v.chunks[0].moving_to = "fl-c".into();
+        f.refresh(v);
+        let rt = &f.engine.targets["v"];
+        assert_eq!(rt.view.chunks[0].isr, [0, 1].into());
+        assert_eq!(rt.view.chunks[0].replicas, vec![0, 1]);
+        assert_eq!(rt.view.chunks[0].moving, Some((1, 2)));
+    }
+
+    #[test]
+    fn lower_epoch_metadata_cannot_install_newer_chunk_versions() {
+        for id in [ISR, REFRESH] {
+            let mut f = Fixture::new(7);
+            let before = f.engine.targets["v"].view.clone();
+            let chunks = f.shrunk(999);
+            if id == ISR {
+                f.isr(chunks, 6);
+            } else {
+                let mut v = f.volume.clone();
+                v.epoch = 6;
+                v.chunks = chunks;
+                f.refresh(v);
+            }
+            assert_eq!(f.engine.targets["v"].view, before);
+        }
+    }
+}

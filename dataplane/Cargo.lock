@@ -623,6 +623,7 @@ dependencies = [
 name = "flaminio-metaclient"
 version = "0.1.0"
 dependencies = [
+ "flaminio-repl",
  "prost",
  "thiserror 2.0.21",
  "tokio",

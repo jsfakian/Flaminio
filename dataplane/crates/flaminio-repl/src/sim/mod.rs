@@ -771,13 +771,12 @@ impl Sim {
                 self.after(p.to);
             }
             Body::MetaReq { req, body } => {
-                if let MetaRequest::ChangeIsr { changes, .. } = &body {
-                    self.report.max_meta_batch = self.report.max_meta_batch.max(changes.len());
-                    if changes.len() > MAX_CHANGES_PER_REQUEST {
-                        // Production refuses before touching metadata. The adapter's failure
-                        // supplies no authoritative view, so the target must time out.
-                        return;
-                    }
+                if let MetaRequest::ChangeIsr { changes, .. } = &body
+                    && changes.len() > MAX_CHANGES_PER_REQUEST
+                {
+                    // Production refuses before touching metadata. The adapter's failure
+                    // supplies no authoritative view, so the target must time out.
+                    return;
                 }
                 let before: Vec<Vec<NodeId>> = self
                     .meta
@@ -884,6 +883,9 @@ impl Sim {
                     self.send(node, to, conn, Body::ToReplica(msg));
                 }
                 Output::Meta { req, body } => {
+                    if let MetaRequest::ChangeIsr { changes, .. } = &body {
+                        self.report.max_meta_batch = self.report.max_meta_batch.max(changes.len());
+                    }
                     self.send(node, META, None, Body::MetaReq { req, body })
                 }
                 Output::Done { op, result } => {

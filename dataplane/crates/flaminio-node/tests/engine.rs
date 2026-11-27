@@ -2,7 +2,7 @@
 //! the metadata service: a replicated volume end to end, through a replica failure and its
 //! resync.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::Path;
 use std::sync::mpsc;
@@ -19,6 +19,7 @@ use flaminio_net::token::TokenKey;
 use flaminio_node::engine::{Engine, EngineConfig, Input, Io, MetaPort, Output};
 use flaminio_node::net::{self, NetConfig, ServerSide};
 use flaminio_node::replica::ReplicaService;
+use flaminio_repl::meta::MAX_CHANGES_PER_REQUEST;
 use flaminio_repl::types::Timing;
 use flaminio_store::{MemDevice, Store, StoreConfig};
 use rcgen::{
@@ -38,6 +39,9 @@ struct Model {
     volume: Option<pb::Volume>,
     /// Registrations to refuse, as a contended or unreachable service does.
     refuse_registrations: u32,
+    batches: Vec<pb::ChangeIsrRequest>,
+    hold_isr_replies: bool,
+    held_isr: Vec<(mpsc::Sender<Input>, u64, Answer)>,
 }
 
 struct FakeMeta {
@@ -48,6 +52,7 @@ struct FakeMeta {
 impl MetaPort for FakeMeta {
     fn call(&self, id: u64, call: Call) {
         let mut m = self.model.lock().unwrap();
+        let hold = m.hold_isr_replies && matches!(&call, Call::ChangeIsr(_));
         let answer = match call {
             Call::RegisterNode(_) if m.refuse_registrations > 0 => {
                 m.refuse_registrations -= 1;
@@ -83,13 +88,44 @@ impl MetaPort for FakeMeta {
                 volume: m.volume.clone(),
             }),
             Call::ChangeIsr(r) => {
+                m.batches.push(r.clone());
+                if r.changes.is_empty() || r.changes.len() > MAX_CHANGES_PER_REQUEST {
+                    let _ = self.inbox.send(Input::Meta {
+                        id,
+                        answer: Answer::Failed {
+                            code: flaminio_metaclient::Code::InvalidArgument,
+                            message: "unsupported ISR batch size".into(),
+                        },
+                    });
+                    return;
+                }
                 let v = m.volume.as_mut().unwrap();
+                let distinct = r.changes.iter().map(|c| c.chunk).collect::<BTreeSet<_>>();
+                if distinct.len() != r.changes.len()
+                    || r.changes.iter().any(|c| c.chunk as usize >= v.chunks.len())
+                {
+                    let _ = self.inbox.send(Input::Meta {
+                        id,
+                        answer: Answer::Failed {
+                            code: flaminio_metaclient::Code::InvalidArgument,
+                            message: "invalid chunk list".into(),
+                        },
+                    });
+                    return;
+                }
                 let ok = r.epoch == v.epoch
                     && r.changes.iter().all(|c| {
                         let ch = &v.chunks[c.chunk as usize];
+                        let replicas = if c.change_replicas {
+                            &c.new_replicas
+                        } else {
+                            &ch.replicas
+                        };
                         ch.isr_ver == c.expected_ver
                             && c.new_isr.len() as u32 >= v.min_isr
-                            && c.new_isr.iter().all(|n| ch.replicas.contains(n))
+                            && c.new_isr.iter().all(|n| replicas.contains(n))
+                            && c.new_isr.iter().collect::<BTreeSet<_>>().len() == c.new_isr.len()
+                            && (!c.change_replicas || valid_move(ch, c))
                     });
                 if ok {
                     for c in &r.changes {
@@ -99,6 +135,13 @@ impl MetaPort for FakeMeta {
                         isr.dedup();
                         ch.isr = isr;
                         ch.isr_ver += 1;
+                        if c.change_replicas {
+                            ch.replicas = c.new_replicas.clone();
+                            if !ch.replicas.contains(&ch.moving_from) {
+                                ch.moving_from.clear();
+                                ch.moving_to.clear();
+                            }
+                        }
                     }
                 }
                 Answer::ChangeIsr(pb::ChangeIsrResponse {
@@ -112,8 +155,35 @@ impl MetaPort for FakeMeta {
                 })
             }
         };
+        if hold {
+            m.held_isr.push((self.inbox.clone(), id, answer));
+            return;
+        }
         let _ = self.inbox.send(Input::Meta { id, answer });
     }
+}
+
+fn valid_move(ch: &pb::ChunkMeta, c: &pb::IsrChange) -> bool {
+    if ch.moving_from.is_empty()
+        || ch.moving_to.is_empty()
+        || ch.moving_from == ch.moving_to
+        || !ch.replicas.contains(&ch.moving_from)
+    {
+        return false;
+    }
+    let old: BTreeSet<_> = ch.replicas.iter().cloned().collect();
+    let new: BTreeSet<_> = c.new_replicas.iter().cloned().collect();
+    if new.len() != c.new_replicas.len() {
+        return false;
+    }
+    let mut add = old.clone();
+    add.insert(ch.moving_to.clone());
+    let mut remove = old;
+    remove.remove(&ch.moving_from);
+    (!ch.replicas.contains(&ch.moving_to) && new == add)
+        || (ch.replicas.contains(&ch.moving_from)
+            && c.new_isr.contains(&ch.moving_to)
+            && new == remove)
 }
 
 fn identities(dir: &Path) -> BTreeMap<&'static str, Files> {
@@ -121,7 +191,7 @@ fn identities(dir: &Path) -> BTreeMap<&'static str, Files> {
     ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let ca_key = KeyPair::generate().unwrap();
     std::fs::write(dir.join("ca.pem"), ca.self_signed(&ca_key).unwrap().pem()).unwrap();
-    ["fl-a", "fl-b"]
+    ["fl-a", "fl-b", "fl-c"]
         .into_iter()
         .map(|name| {
             let mut p = CertificateParams::new(vec![]).unwrap();
@@ -169,7 +239,11 @@ fn token(key: &Ed25519KeyPair, volume: &str, epoch: u64, node: &str) -> Vec<u8> 
 }
 
 fn store() -> Store<MemDevice> {
-    let dev = MemDevice::new(256 * MIB);
+    store_of_size(256 * MIB)
+}
+
+fn store_of_size(size: u64) -> Store<MemDevice> {
+    let dev = MemDevice::new(size);
     Store::format(
         &dev,
         &FormatOptions {
@@ -191,9 +265,20 @@ fn store() -> Store<MemDevice> {
 struct Node {
     inputs: mpsc::Sender<Input>,
     outputs: mpsc::Receiver<Output>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
 fn start_node(name: &str, files: &Files, token_key: TokenKey, model: Arc<Mutex<Model>>) -> Node {
+    start_node_with_store(name, files, token_key, model, store())
+}
+
+fn start_node_with_store(
+    name: &str,
+    files: &Files,
+    token_key: TokenKey,
+    model: Arc<Mutex<Model>>,
+    store: Store<MemDevice>,
+) -> Node {
     let listener = TcpListener::bind((LOCALHOST, 0)).unwrap();
     let addr = listener.local_addr().unwrap();
     let (tx, rx) = mpsc::channel::<Input>();
@@ -232,9 +317,9 @@ fn start_node(name: &str, files: &Files, token_key: TokenKey, model: Arc<Mutex<M
         model,
         inbox: tx.clone(),
     });
-    let engine = Engine::new(cfg, ReplicaService::new(store()), net, meta);
+    let engine = Engine::new(cfg, ReplicaService::new(store), net, meta);
     let (otx, orx) = mpsc::channel();
-    thread::spawn(move || {
+    let worker = thread::spawn(move || {
         engine.run(rx, move |o| {
             let _ = otx.send(o);
         });
@@ -242,6 +327,19 @@ fn start_node(name: &str, files: &Files, token_key: TokenKey, model: Arc<Mutex<M
     Node {
         inputs: tx,
         outputs: orx,
+        worker: Some(worker),
+    }
+}
+
+impl Drop for Node {
+    fn drop(&mut self) {
+        let _ = self.inputs.send(Input::Stop);
+        if let Some(worker) = self.worker.take() {
+            let result = worker.join();
+            if !thread::panicking() {
+                result.expect("engine worker panicked");
+            }
+        }
     }
 }
 
@@ -2616,4 +2714,431 @@ fn an_attach_settles_a_held_group() {
     h.write(5, MIB, MIB);
     h.acked(5..=5);
     h.reads_back(5, MIB, MIB);
+}
+
+/// Memory devices keep the large-chunk-count recovery cases small: each chunk uses the minimum supported64KiB geometry.
+const SMALL_CHUNK: u64 = 64 << 10;
+// Slot capacity is based on logical device size (the256MiB default has only64 slots).
+// MemDevice is sparse:8GiB supplies enough slots without allocating unwritten data blocks.
+const LARGE_STORE: u64 = 8 << 30;
+
+fn small_volume(chunks: u64) -> pb::Volume {
+    pb::Volume {
+        size_bytes: chunks * SMALL_CHUNK,
+        chunk_bytes: SMALL_CHUNK,
+        ..volume_on(chunks, &["fl-a", "fl-b"], "fl-a", 1)
+    }
+}
+
+fn wait_model(model: &Arc<Mutex<Model>>, what: &str, ready: impl Fn(&Model) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        if ready(&model.lock().unwrap()) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn large_volume_recovers_with_production_batch_limit() {
+    let dir = std::env::temp_dir().join(format!("flaminio-large-batches-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[81; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let model = Arc::new(Mutex::new(Model::default()));
+    let a = start_node_with_store(
+        "fl-a",
+        &ids["fl-a"],
+        key.clone(),
+        model.clone(),
+        store_of_size(LARGE_STORE),
+    );
+    let b = start_node_with_store(
+        "fl-b",
+        &ids["fl-b"],
+        key,
+        model.clone(),
+        store_of_size(LARGE_STORE),
+    );
+    both_registered(&model);
+    {
+        let mut m = model.lock().unwrap();
+        m.volume = Some(small_volume(129));
+        m.hold_isr_replies = true;
+    }
+    b.inputs
+        .send(Input::Deafen {
+            until: Instant::now() + Duration::from_secs(60),
+        })
+        .unwrap();
+    assert_eq!(attach_result(&a, token(&signer, "v", 1, "fl-a")), Ok(1));
+    wait_model(&model, "the first bounded shrink", |m| {
+        !m.held_isr.is_empty()
+    });
+    {
+        let m = model.lock().unwrap();
+        assert_eq!(m.batches[0].changes.len(), MAX_CHANGES_PER_REQUEST);
+        assert_eq!(m.volume.as_ref().unwrap().chunks[128].isr.len(), 2);
+        a.inputs
+            .send(Input::Io {
+                volume: "v".into(),
+                op: 81,
+                io: Io::Write {
+                    offset: 128 * SMALL_CHUNK,
+                    data: vec![81; 4096].into(),
+                },
+            })
+            .unwrap();
+        // Metadata cannot commit another batch while this lock is held. A write to the
+        // deferred tail chunk must not inherit the first batch's committed shrink.
+        thread::sleep(Duration::from_millis(20));
+        while let Ok(o) = a.outputs.try_recv() {
+            assert!(
+                !matches!(o, Output::Done { op: 81, .. }),
+                "deferred write answered early"
+            );
+        }
+    }
+    let held = {
+        let mut m = model.lock().unwrap();
+        m.hold_isr_replies = false;
+        std::mem::take(&mut m.held_isr)
+    };
+    for (inbox, id, answer) in held {
+        inbox.send(Input::Meta { id, answer }).unwrap();
+    }
+    match a.wait("the deferred write after its own chunk commits", |o| {
+        matches!(o, Output::Done { op: 81, .. })
+    }) {
+        Output::Done { result, .. } => {
+            result.unwrap();
+        }
+        _ => unreachable!(),
+    }
+    wait_model(&model, "all129 shrinks", |m| {
+        m.volume
+            .as_ref()
+            .unwrap()
+            .chunks
+            .iter()
+            .all(|c| c.isr == ["fl-a"])
+    });
+    {
+        let m = model.lock().unwrap();
+        let changed: BTreeSet<_> = m
+            .batches
+            .iter()
+            .flat_map(|r| r.changes.iter())
+            .map(|c| c.chunk)
+            .collect();
+        assert_eq!(changed.len(), 129);
+        assert!(m.batches.len() >= 3);
+        assert!(
+            m.batches
+                .iter()
+                .all(|r| (1..=MAX_CHANGES_PER_REQUEST).contains(&r.changes.len()))
+        );
+    }
+    b.inputs
+        .send(Input::Deafen {
+            until: Instant::now(),
+        })
+        .unwrap();
+    wait_model(&model, "all129 rejoins", |m| {
+        m.volume
+            .as_ref()
+            .unwrap()
+            .chunks
+            .iter()
+            .all(|c| c.isr.len() == 2 && c.isr_ver >= 2)
+    });
+    assert_eq!(b.inspect(128 * SMALL_CHUNK, 4096), vec![81; 4096]);
+    assert_eq!(
+        a.io(
+            82,
+            Io::Read {
+                offset: 128 * SMALL_CHUNK,
+                len: 4096
+            }
+        ),
+        Some(vec![81; 4096])
+    );
+    {
+        let m = model.lock().unwrap();
+        assert!(m.batches.iter().all(|r| {
+            r.changes.len() <= MAX_CHANGES_PER_REQUEST
+                && r.changes
+                    .iter()
+                    .map(|c| c.chunk)
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == r.changes.len()
+        }));
+        let joined: BTreeSet<_> = m
+            .batches
+            .iter()
+            .flat_map(|r| r.changes.iter())
+            .filter(|c| c.new_isr.len() == 2)
+            .map(|c| c.chunk)
+            .collect();
+        assert_eq!(joined.len(), 129);
+    }
+    drop((a, b));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn bounded_batches_complete_mixed_moves_and_preserve_data() {
+    let dir = std::env::temp_dir().join(format!("flaminio-mixed-batches-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ids = identities(&dir);
+    let signer = Ed25519KeyPair::from_seed_unchecked(&[82; 32]).unwrap();
+    let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+    let model = Arc::new(Mutex::new(Model::default()));
+    let a = start_node_with_store(
+        "fl-a",
+        &ids["fl-a"],
+        key.clone(),
+        model.clone(),
+        store_of_size(LARGE_STORE),
+    );
+    let b = start_node_with_store(
+        "fl-b",
+        &ids["fl-b"],
+        key.clone(),
+        model.clone(),
+        store_of_size(LARGE_STORE),
+    );
+    let c = start_node_with_store(
+        "fl-c",
+        &ids["fl-c"],
+        key,
+        model.clone(),
+        store_of_size(LARGE_STORE),
+    );
+    wait_model(&model, "three registered nodes", |m| m.nodes.len() == 3);
+    model.lock().unwrap().volume = Some(small_volume(129));
+    assert_eq!(attach_result(&a, token(&signer, "v", 1, "fl-a")), Ok(1));
+    for (op, chunk) in [0, 1, 127].into_iter().enumerate() {
+        a.io(
+            100 + op as u64,
+            Io::Write {
+                offset: chunk * SMALL_CHUNK,
+                data: vec![chunk as u8 + 1; 4096].into(),
+            },
+        );
+    }
+    {
+        let mut m = model.lock().unwrap();
+        for (i, ch) in m.volume.as_mut().unwrap().chunks.iter_mut().enumerate() {
+            if i % 3 != 2 {
+                ch.moving_from = if i % 3 == 0 { "fl-b" } else { "fl-a" }.into();
+                ch.moving_to = "fl-c".into();
+            }
+        }
+    }
+    wait_model(&model, "mixed moves to finish", |m| {
+        m.volume
+            .as_ref()
+            .unwrap()
+            .chunks
+            .iter()
+            .enumerate()
+            .all(|(i, ch)| {
+                let expected: Vec<_> = match i % 3 {
+                    0 => vec!["fl-a", "fl-c"],
+                    1 => vec!["fl-b", "fl-c"],
+                    _ => vec!["fl-a", "fl-b"],
+                };
+                ch.moving_from.is_empty()
+                    && ch.moving_to.is_empty()
+                    && ch
+                        .replicas
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>()
+                        == expected.iter().copied().collect()
+                    && ch.isr.iter().map(String::as_str).collect::<BTreeSet<_>>()
+                        == expected.into_iter().collect()
+            })
+    });
+    for (op, chunk) in [0, 1, 127].into_iter().enumerate() {
+        let expected = vec![chunk as u8 + 1; 4096];
+        assert_eq!(c.inspect(chunk * SMALL_CHUNK, 4096), expected);
+        assert_eq!(
+            a.io(
+                200 + op as u64,
+                Io::Read {
+                    offset: chunk * SMALL_CHUNK,
+                    len: 4096
+                }
+            ),
+            Some(expected)
+        );
+    }
+    {
+        let m = model.lock().unwrap();
+        assert!(m.batches.iter().all(|r| {
+            (1..=MAX_CHANGES_PER_REQUEST).contains(&r.changes.len())
+                && r.changes
+                    .iter()
+                    .all(|ch| ch.new_isr.len() >= m.volume.as_ref().unwrap().min_isr as usize)
+        }));
+        let changes: Vec<_> = m.batches.iter().flat_map(|r| &r.changes).collect();
+        assert!(
+            changes
+                .iter()
+                .any(|ch| ch.change_replicas && ch.new_replicas.len() == 3),
+            "destinations added"
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|ch| !ch.change_replicas && ch.new_isr.len() == 3),
+            "synchronized destinations joined"
+        );
+        assert!(
+            changes
+                .iter()
+                .any(|ch| ch.change_replicas && ch.new_replicas.len() == 2),
+            "sources removed"
+        );
+    }
+    drop((a, b, c));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn fake_meta_atomically_refuses_unsupported_batches() {
+    let mut volume = small_volume(65);
+    for (i, ch) in volume.chunks.iter_mut().enumerate() {
+        ch.isr_ver = i as u64;
+    }
+    let model = Arc::new(Mutex::new(Model {
+        volume: Some(volume),
+        ..Default::default()
+    }));
+    let (inbox, replies) = mpsc::channel();
+    let meta = FakeMeta {
+        model: model.clone(),
+        inbox,
+    };
+    let changes: Vec<_> = (0..65)
+        .map(|chunk| pb::IsrChange {
+            chunk,
+            expected_ver: chunk as u64,
+            new_isr: vec!["fl-a".into()],
+            ..Default::default()
+        })
+        .collect();
+    let original = model.lock().unwrap().volume.clone().unwrap();
+    meta.call(
+        1,
+        Call::ChangeIsr(pb::ChangeIsrRequest {
+            volume: "v".into(),
+            epoch: 1,
+            changes: changes.clone(),
+        }),
+    );
+    assert!(matches!(
+        replies.recv().unwrap(),
+        Input::Meta {
+            answer: Answer::Failed {
+                code: flaminio_metaclient::Code::InvalidArgument,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(model.lock().unwrap().volume.as_ref().unwrap(), &original);
+    let mut wrong = changes[..64].to_vec();
+    wrong[63].expected_ver = 99;
+    meta.call(
+        2,
+        Call::ChangeIsr(pb::ChangeIsrRequest {
+            volume: "v".into(),
+            epoch: 1,
+            changes: wrong,
+        }),
+    );
+    assert!(matches!(
+        replies.recv().unwrap(),
+        Input::Meta {
+            answer: Answer::ChangeIsr(pb::ChangeIsrResponse { applied: false, .. }),
+            ..
+        }
+    ));
+    assert_eq!(model.lock().unwrap().volume.as_ref().unwrap(), &original);
+    let mut duplicate = changes[..64].to_vec();
+    duplicate[63] = duplicate[0].clone();
+    meta.call(
+        4,
+        Call::ChangeIsr(pb::ChangeIsrRequest {
+            volume: "v".into(),
+            epoch: 1,
+            changes: duplicate,
+        }),
+    );
+    assert!(matches!(
+        replies.recv().unwrap(),
+        Input::Meta {
+            answer: Answer::Failed {
+                code: flaminio_metaclient::Code::InvalidArgument,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(model.lock().unwrap().volume.as_ref().unwrap(), &original);
+    let mut outside = changes[..64].to_vec();
+    outside[63].new_isr = vec!["fl-c".into()];
+    meta.call(
+        5,
+        Call::ChangeIsr(pb::ChangeIsrRequest {
+            volume: "v".into(),
+            epoch: 1,
+            changes: outside,
+        }),
+    );
+    assert!(matches!(
+        replies.recv().unwrap(),
+        Input::Meta {
+            answer: Answer::ChangeIsr(pb::ChangeIsrResponse { applied: false, .. }),
+            ..
+        }
+    ));
+    assert_eq!(model.lock().unwrap().volume.as_ref().unwrap(), &original);
+    let mut ordered = changes[..64].to_vec();
+    ordered.reverse();
+    meta.call(
+        3,
+        Call::ChangeIsr(pb::ChangeIsrRequest {
+            volume: "v".into(),
+            epoch: 1,
+            changes: ordered,
+        }),
+    );
+    let Input::Meta {
+        answer: Answer::ChangeIsr(answer),
+        ..
+    } = replies.recv().unwrap()
+    else {
+        panic!("boundary refused")
+    };
+    assert!(answer.applied);
+    assert_eq!(answer.chunks.len(), MAX_CHANGES_PER_REQUEST);
+    assert!(
+        answer
+            .chunks
+            .iter()
+            .enumerate()
+            .all(|(i, ch)| ch.isr == ["fl-a"] && ch.isr_ver == 64 - i as u64)
+    );
+    assert_eq!(
+        model.lock().unwrap().volume.as_ref().unwrap().chunks[64],
+        original.chunks[64]
+    );
 }

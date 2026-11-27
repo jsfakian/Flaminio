@@ -2677,6 +2677,16 @@ impl<P: Clone + Debug> Target<P> {
 
 #[cfg(test)]
 impl<P: Clone + Debug> Target<P> {
+    /// Read-only scheduling observations for deterministic deferred-membership scenarios.
+    pub(crate) fn pending_membership(&self) -> Vec<(ChunkIdx, Option<NodeId>, BTreeSet<NodeId>)> {
+        self.chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.change_pending())
+            .map(|(i, c)| (i as ChunkIdx, c.joining, c.removing.clone()))
+            .collect()
+    }
+
     /// Deposes the target, then checks it, as the `pub` methods do.
     pub fn depose_checked(&mut self) {
         self.depose();
@@ -4761,5 +4771,451 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn holds_isr_change(body: &MetaRequest) -> bool {
+        matches!(body, MetaRequest::ChangeIsr { .. })
+    }
+
+    fn next_isr_batch(b: &mut Bench) -> (u64, MetaRequest) {
+        let (req, body) = b.held_meta.remove(0);
+        assert!(b.t.accepts_meta_reply(req));
+        let MetaRequest::ChangeIsr { changes, .. } = &body else {
+            panic!("not an ISR request");
+        };
+        assert!(!changes.is_empty());
+        assert!(changes.len() <= crate::meta::MAX_CHANGES_PER_REQUEST);
+        let unique: BTreeSet<_> = changes.iter().map(|c| c.chunk).collect();
+        assert_eq!(unique.len(), changes.len(), "duplicate chunk in a batch");
+        (req, body)
+    }
+
+    fn apply_isr_batch(b: &mut Bench, req: u64, body: &MetaRequest) -> MetaReply {
+        let reply = b.meta.handle(body);
+        b.t.on_meta(b.now, req, &reply);
+        b.run();
+        reply
+    }
+
+    fn shrinking_many_chunks(chunks: usize, takeover: bool) -> Bench {
+        let placement: Vec<&[NodeId]> = vec![&[1, 2]; chunks];
+        let mut b = Bench::with_chunks(&placement, 1);
+        b.hold_meta_if = Some(holds_isr_change);
+        b.down.insert(2);
+        if takeover {
+            b.restart(1);
+        } else {
+            b.t.fail_peer(b.now, 2);
+            b.t.tick(b.now);
+            b.run();
+        }
+        b.until("a shrink proposal", |b| !b.held_meta.is_empty());
+        b
+    }
+
+    /// The audit's 65-chunk peer-loss takeover, plus both sides of every batch boundary.
+    /// Committing one batch must leave the other chunks' pending membership untouched.
+    #[test]
+    fn shrink_after_losing_peer_fits_metadata_rpc_limit() {
+        for takeover in [false, true] {
+            for chunks in [1, 64, 65, 128, 129] {
+                let mut b = shrinking_many_chunks(chunks, takeover);
+                let mut committed = BTreeSet::new();
+                let mut batches = 0;
+                while committed.len() != chunks {
+                    let (req, body) = next_isr_batch(&mut b);
+                    let MetaRequest::ChangeIsr { changes, .. } = &body else {
+                        unreachable!();
+                    };
+                    assert_eq!(changes.len(), (chunks - committed.len()).min(64));
+                    let named: BTreeSet<_> = changes.iter().map(|c| c.chunk).collect();
+                    let deferred: Vec<_> =
+                        b.t.chunks
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| {
+                                !committed.contains(&(*i as u32)) && !named.contains(&(*i as u32))
+                            })
+                            .map(|(i, c)| (i, c.uncertain.clone(), c.dirty.clone()))
+                            .collect();
+                    for c in changes {
+                        assert!(committed.insert(c.chunk), "chunk committed twice");
+                        assert_eq!(c.expected_ver, 0);
+                        assert_eq!(c.new_isr, BTreeSet::from([1]));
+                    }
+                    assert!(matches!(
+                        apply_isr_batch(&mut b, req, &body),
+                        MetaReply::Applied { .. }
+                    ));
+                    batches += 1;
+                    for (i, uncertain, dirty) in deferred {
+                        let c = &b.t.chunks[i];
+                        assert_eq!(c.isr_ver, 0, "another batch changed chunk {i}");
+                        assert_eq!(c.required(), BTreeSet::from([1, 2]));
+                        assert!(c.removing.contains(&2));
+                        assert_eq!(c.uncertain, uncertain);
+                        assert_eq!(c.dirty, dirty);
+                    }
+                }
+                assert_eq!(batches, chunks.div_ceil(64));
+                assert!(b.t.chunks.iter().all(|c| c.isr == BTreeSet::from([1])));
+                assert!(
+                    b.meta
+                        .volume(VOL)
+                        .unwrap()
+                        .chunks
+                        .iter()
+                        .all(|c| c.isr_ver == 1)
+                );
+            }
+        }
+    }
+
+    /// Disabling the fix reproduces the original counterexample, rather than passing only
+    /// because the fixture silently accepts the same oversized request as the old engine.
+    #[test]
+    fn the_batch_boundary_check_catches_the_unbounded_producer() {
+        let mut b = shrinking_many_chunks(65, true);
+        let (req, _) = next_isr_batch(&mut b);
+        b.t.bugs.unbounded_meta_batch = true;
+        b.now += b.t.timing.meta_timeout;
+        b.t.tick(b.now);
+        b.run();
+        assert!(!b.t.accepts_meta_reply(req));
+        let (_, MetaRequest::ChangeIsr { changes, .. }) = b.held_meta.remove(0) else {
+            panic!("missing retry");
+        };
+        assert_eq!(changes.len(), 65, "the audit mutation was not exposed");
+        assert!(changes.len() > crate::meta::MAX_CHANGES_PER_REQUEST);
+        b.deposed_ok = true;
+    }
+
+    fn deferred_shrink(early_ack: bool) -> (Bench, u64) {
+        let mut b = shrinking_many_chunks(129, false);
+        b.t.bugs.ack_before_shrink = early_ack;
+        let op = b.write_at(128, 0, 42);
+        (b, op)
+    }
+
+    #[test]
+    fn deferred_shrink_keeps_write_waiting() {
+        let (mut b, op) = deferred_shrink(false);
+        assert!(!b.done.contains_key(&op));
+        for _ in 0..2 {
+            let (req, body) = next_isr_batch(&mut b);
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Applied { .. }
+            ));
+            assert!(
+                !b.done.contains_key(&op),
+                "another chunk's batch released the write"
+            );
+            assert!(b.t.chunks[128].required().contains(&2));
+        }
+        let (req, body) = next_isr_batch(&mut b);
+        assert!(matches!(
+            apply_isr_batch(&mut b, req, &body),
+            MetaReply::Applied { .. }
+        ));
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert_eq!(b.replicas[&1].block(VOL, 128, 0), Some(42));
+        assert!(b.t.chunks[128].dirty[&2].contains_block(0));
+    }
+
+    #[test]
+    fn deferred_shrink_exposes_ack_before_shrink() {
+        let (mut b, op) = deferred_shrink(true);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(b.meta.volume(VOL).unwrap().chunks[128].isr.contains(&2));
+        assert_ne!(b.replicas[&2].block(VOL, 128, 0), Some(42));
+        b.deposed_ok = true;
+    }
+
+    fn joining_many_chunks() -> Bench {
+        let placement: Vec<&[NodeId]> = vec![&[1, 2]; 65];
+        let mut b = Bench::with_chunks(&placement, 1);
+        for chunk in 0..65 {
+            b.out_of_isr(chunk, 2);
+        }
+        b.hold_meta_if = Some(holds_isr_change);
+        b.restart(1);
+        b.until("every joiner waiting for metadata", |b| {
+            b.t.chunks.iter().all(|c| c.joining == Some(2))
+        });
+        assert!(!b.held_meta.is_empty());
+        b
+    }
+
+    #[test]
+    fn deferred_joiner_counts_for_write_and_lease() {
+        let mut b = joining_many_chunks();
+        b.hold.insert(2, is_write);
+        let op = b.write_at(64, 0, 42);
+        assert!(!b.done.contains_key(&op));
+        assert_eq!(b.t.chunks[64].required(), BTreeSet::from([1, 2]));
+        let confirmed = b.t.peers[&2].confirmed_until;
+        b.t.peers.get_mut(&2).unwrap().confirmed_until = b.now;
+        assert!(
+            !b.t.lease_ok(64, b.now),
+            "an unconfirmed joiner was omitted from the lease"
+        );
+        b.t.peers.get_mut(&2).unwrap().confirmed_until = confirmed;
+        let (req, body) = next_isr_batch(&mut b);
+        assert!(
+            matches!(&body, MetaRequest::ChangeIsr { changes, .. } if changes.iter().all(|c| c.chunk != 64))
+        );
+        apply_isr_batch(&mut b, req, &body);
+        assert_eq!(b.t.chunks[64].joining, Some(2));
+        assert!(!b.done.contains_key(&op));
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            apply_isr_batch(&mut b, req, &body);
+        }
+        assert_eq!(b.t.chunks[64].joining, None);
+        assert!(
+            !b.done.contains_key(&op),
+            "committing the join is not a write acknowledgement"
+        );
+        b.hold.clear();
+        b.deliver_from(2);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+    }
+
+    #[test]
+    fn deferred_joiner_exposes_late_join() {
+        let mut b = joining_many_chunks();
+        b.t.bugs.late_join = true;
+        b.hold.insert(2, is_write);
+        let op = b.write_at(64, 0, 42);
+        assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert_eq!(b.t.chunks[64].joining, Some(2));
+        b.t.peers.get_mut(&2).unwrap().confirmed_until = b.now;
+        assert!(
+            b.t.lease_ok(64, b.now),
+            "late-join mutation was not exposed"
+        );
+        b.deposed_ok = true;
+    }
+
+    #[test]
+    fn lost_batch_reply_is_learned_by_refresh() {
+        let mut b = shrinking_many_chunks(129, false);
+        let (old_req, old_body) = next_isr_batch(&mut b);
+        let old_reply = b.meta.handle(&old_body);
+        assert!(matches!(old_reply, MetaReply::Applied { .. }));
+        b.t.next_refresh = Time::MAX;
+        b.advance(b.t.timing.meta_timeout);
+        assert!(!b.t.accepts_meta_reply(old_req));
+        let (next_req, next_body) = next_isr_batch(&mut b);
+        assert!(
+            matches!(&next_body, MetaRequest::ChangeIsr { changes, .. } if changes[0].chunk == 64)
+        );
+        b.t.on_meta(b.now, old_req, &old_reply);
+        assert!(
+            b.t.accepts_meta_reply(next_req),
+            "late reply cleared the next batch"
+        );
+        assert_eq!(b.t.chunks[0].isr_ver, 0, "late reply was installed");
+        b.t.next_refresh = b.now;
+        b.t.tick(b.now);
+        b.run();
+        assert_eq!(
+            b.t.chunks[0].isr_ver, 1,
+            "refresh did not recover the hidden commit"
+        );
+        assert!(
+            b.t.accepts_meta_reply(next_req),
+            "refresh answered a different batch's slot"
+        );
+        apply_isr_batch(&mut b, next_req, &next_body);
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            apply_isr_batch(&mut b, req, &body);
+        }
+        b.t.next_refresh = b.now;
+        b.t.tick(b.now);
+        b.run();
+        assert!(b.t.chunks.iter().all(|c| c.isr_ver == 1));
+        assert!(
+            b.meta
+                .volume(VOL)
+                .unwrap()
+                .chunks
+                .iter()
+                .all(|c| c.isr_ver == 1)
+        );
+    }
+
+    #[test]
+    fn takeover_between_batches_fences_old_owner() {
+        let mut b = shrinking_many_chunks(129, false);
+        let (req, body) = next_isr_batch(&mut b);
+        apply_isr_batch(&mut b, req, &body);
+        let (req, body) = next_isr_batch(&mut b);
+        let op = b.write_at(128, 0, 42);
+        let new_owner = b.meta.handle(&MetaRequest::Attach { vol: VOL, node: 3 });
+        assert!(matches!(new_owner, MetaReply::Applied { .. }));
+        assert!(matches!(
+            apply_isr_batch(&mut b, req, &body),
+            MetaReply::Rejected { .. }
+        ));
+        assert!(b.t.is_deposed());
+        assert_eq!(b.done.get(&op), Some(&OpResult::Failed));
+        assert!(
+            b.meta.volume(VOL).unwrap().chunks[64..]
+                .iter()
+                .all(|c| c.isr_ver == 0)
+        );
+        assert!(!b.t.accepts_meta_reply(req));
+        b.deposed_ok = true;
+    }
+
+    #[test]
+    fn round_robin_batches_do_not_starve_tail() {
+        let mut b = shrinking_many_chunks(129, false);
+        for first in [0, 64] {
+            let (req, body) = next_isr_batch(&mut b);
+            let MetaRequest::ChangeIsr { changes, epoch, .. } = &body else {
+                unreachable!()
+            };
+            assert_eq!(changes[0].chunk, first);
+            // A real competing transaction changes a version but retains the same ISR.
+            // Thus every removal remains pending after this whole batch is refused.
+            let c = &b.meta.volume(VOL).unwrap().chunks[first as usize];
+            let conflict = MetaRequest::ChangeIsr {
+                vol: VOL,
+                epoch: *epoch,
+                changes: vec![IsrChange {
+                    chunk: first,
+                    expected_ver: c.isr_ver,
+                    new_isr: c.isr.clone(),
+                    new_replicas: None,
+                }],
+            };
+            assert!(matches!(
+                b.meta.handle(&conflict),
+                MetaReply::Applied { .. }
+            ));
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Rejected { .. }
+            ));
+            assert!(b.t.chunks.iter().all(|c| c.removing.contains(&2)));
+        }
+        let (req, body) = next_isr_batch(&mut b);
+        assert!(matches!(&body, MetaRequest::ChangeIsr { changes, .. } if changes[0].chunk == 128));
+        apply_isr_batch(&mut b, req, &body);
+        assert_eq!(b.t.chunks[128].isr, BTreeSet::from([1]));
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Applied { .. }
+            ));
+        }
+        assert!(b.t.chunks.iter().all(|c| c.isr == BTreeSet::from([1])));
+    }
+
+    fn moving_many_chunks(early_drop: bool) -> Bench {
+        let placement: Vec<&[NodeId]> = vec![&[1, 2]; 65];
+        let mut b = Bench::with_chunks(&placement, 2);
+        b.replicas.insert(3, Replica::with_chunk_size(BLOCKS));
+        b.hold_meta_if = Some(holds_isr_change);
+        b.hold.insert(3, is_resync);
+        b.t.bugs.drop_before_join = early_drop;
+        for chunk in 0..65 {
+            assert!(matches!(
+                b.meta.handle(&MetaRequest::MoveReplica {
+                    vol: VOL,
+                    chunk,
+                    from: 2,
+                    to: 3,
+                }),
+                MetaReply::Applied { .. }
+            ));
+        }
+        b.t.next_refresh = b.now;
+        b.t.tick(b.now);
+        b.run();
+        b.until("move additions proposed", |b| !b.held_meta.is_empty());
+        b
+    }
+
+    #[test]
+    fn deferred_move_drop_waits_for_join() {
+        let mut b = moving_many_chunks(false);
+        // Commit additions, holding every destination resync acknowledgement.
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            assert!(
+                matches!(&body, MetaRequest::ChangeIsr { changes, .. } if changes.iter().all(|c| c.new_isr == BTreeSet::from([1, 2]) && c.new_replicas.as_ref().is_some_and(|r| r.contains(&2) && r.contains(&3))))
+            );
+            apply_isr_batch(&mut b, req, &body);
+        }
+        assert!(
+            b.t.chunks
+                .iter()
+                .all(|c| c.replicas.contains(&2) && !c.isr.contains(&3))
+        );
+        b.hold.clear();
+        while !b.held.is_empty() {
+            b.deliver(0);
+        }
+        b.until("all move destinations waiting to join", |b| {
+            b.t.chunks.iter().all(|c| c.joining == Some(3))
+        });
+        assert!(b.t.chunks.iter().all(|c| c.drop_replica.is_none()));
+        let mut batches = 0;
+        while !b.held_meta.is_empty() {
+            let (req, body) = next_isr_batch(&mut b);
+            let MetaRequest::ChangeIsr { changes, .. } = &body else {
+                unreachable!()
+            };
+            for c in changes {
+                if c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2)) {
+                    assert!(
+                        b.t.chunks[c.chunk as usize].isr.contains(&3),
+                        "source dropped before join committed"
+                    );
+                }
+                assert!(c.new_isr.len() >= 2);
+            }
+            assert!(matches!(
+                apply_isr_batch(&mut b, req, &body),
+                MetaReply::Applied { .. }
+            ));
+            batches += 1;
+        }
+        assert!(batches > 1);
+        assert!(
+            b.t.chunks
+                .iter()
+                .all(|c| c.replicas == [1, 3] && c.isr == BTreeSet::from([1, 3]))
+        );
+    }
+
+    #[test]
+    fn deferred_move_exposes_drop_before_join() {
+        let mut b = moving_many_chunks(true);
+        let (req, body) = next_isr_batch(&mut b);
+        apply_isr_batch(&mut b, req, &body);
+        while let Some((_, MetaRequest::ChangeIsr { changes, .. })) = b.held_meta.first() {
+            if changes
+                .iter()
+                .any(|c| c.new_replicas.as_ref().is_some_and(|r| !r.contains(&2)))
+            {
+                assert!(
+                    changes
+                        .iter()
+                        .any(|c| !b.t.chunks[c.chunk as usize].isr.contains(&3))
+                );
+                b.deposed_ok = true;
+                return;
+            }
+            let (req, body) = next_isr_batch(&mut b);
+            apply_isr_batch(&mut b, req, &body);
+        }
+        panic!("early source-removal mutation was not exposed");
     }
 }
