@@ -96,6 +96,8 @@ pub struct Bugs {
     pub fast_read_no_fence_check: bool,
     /// Trust digests from a single ISR member and skip repair (must be caught by the checker).
     pub trust_single_digest: bool,
+    /// Omit writes already in flight when a resync member installs its new filter.
+    pub skip_pending_resync_replay: bool,
     /// Not a bug: `pump` tries the queue in its order always, as before docs/issues/11, so that
     /// runs can be compared with it (S2). The order of the digests queued by one progress pass
     /// (S1) stays the new one.
@@ -1027,15 +1029,45 @@ impl<P: Clone + Debug> Target<P> {
                         r.discard.remove(&e);
                     }
                     r.started = true;
-                    let discards = r.discard.pieces(max_io);
-                    let digests = r.todo.pieces(max_digest);
-                    for ext in discards {
-                        self.queue.push_back(Work::Discard { chunk, round, ext });
+                    #[cfg(test)]
+                    let replay_pending = !self.bugs.skip_pending_resync_replay;
+                    #[cfg(not(test))]
+                    let replay_pending = true;
+                    if replay_pending {
+                        let pending: Vec<(u64, Extent)> = self
+                            .writes
+                            .iter()
+                            .filter(|(_, w)| w.chunk == chunk)
+                            .map(|(&seq, w)| (seq, w.ext))
+                            .collect();
+                        // A previous send's Ack cannot prove this replay reached the new
+                        // replica or its freshly installed filter. Retire its request first.
+                        if let Some(s) = self.peers.get_mut(&from).and_then(|p| p.session.as_mut())
+                        {
+                            s.inflight.retain(|_, (_, kind)| {
+                                !matches!(kind, ReqKind::Write { chunk: old, .. } if *old == chunk)
+                            });
+                        }
+                        for (seq, ext) in pending {
+                            if let Some(r) = self.resync_mut(chunk, round) {
+                                r.live.insert(ext);
+                            }
+                            // Even a previous Ack leaves the new filter unprotected. Replay
+                            // every pending write before sending any snapshot work.
+                            self.send_write(now, seq, from);
+                        }
                     }
-                    // Digests first: copy only blocks that still disagree with the source.
-                    for ext in digests {
-                        self.queue
-                            .push_back(Work::ResyncDigest { chunk, round, ext });
+                    if let Some(r) = self.resync_mut(chunk, round) {
+                        let discards = r.discard.pieces(max_io);
+                        let digests = r.todo.pieces(max_digest);
+                        for ext in discards {
+                            self.queue.push_back(Work::Discard { chunk, round, ext });
+                        }
+                        // Digests first: copy only blocks that still disagree with the source.
+                        for ext in digests {
+                            self.queue
+                                .push_back(Work::ResyncDigest { chunk, round, ext });
+                        }
                     }
                 }
             }
@@ -2568,9 +2600,8 @@ impl<P: Clone + Debug> Target<P> {
                 return;
             }
         }
-        // Writes already in flight are not sent to the member. Every copy of their blocks
-        // reads its source after them, over the same ordered session, so it carries them;
-        // and the member joins only once they have completed.
+        // The BeginResync Ack replays writes still in flight into the member's new filter.
+        // Ordered source requests alone do not prove that an earlier write was admitted.
     }
 
     /// Proposes the pending ISR changes, one request at a time.
@@ -3370,7 +3401,12 @@ mod tests {
             .map(|i| Extent::new(2 * UNCERTAINTY_BUDGET + i * 2, 1))
             .collect();
         let reports = [first, second.clone(), second, vec![Extent::new(0, blocks)]];
-        let expected_runs = [precise as usize, 2 * precise as usize, 2 * precise as usize, 1];
+        let expected_runs = [
+            precise as usize,
+            2 * precise as usize,
+            2 * precise as usize,
+            1,
+        ];
         for (round, (extents, expected)) in reports.into_iter().zip(expected_runs).enumerate() {
             let now = 10 + 3 * round as Time;
             let hello = if round == 0 {
@@ -3378,21 +3414,35 @@ mod tests {
             } else {
                 target.fail_peer(now, 1);
                 target.open_session(now + 1, 1);
-                target.take_output().into_iter().find_map(|out| match out {
-                    Output::Send { to: 1, msg } if is_hello(&msg) => Some(msg),
-                    _ => None,
-                }).unwrap()
+                target
+                    .take_output()
+                    .into_iter()
+                    .find_map(|out| match out {
+                        Output::Send { to: 1, msg } if is_hello(&msg) => Some(msg),
+                        _ => None,
+                    })
+                    .unwrap()
             };
             let rows = vec![(0, extents)];
             let mut checked = FencedWork::default();
-            assert!(Target::<Vec<Value>>::valid_fenced(&rows, &[0], 1, blocks, &mut checked));
-            target.on_reply(now + 2, 1, &FromReplica {
-                vol: hello.vol,
-                epoch: hello.epoch,
-                session: hello.session,
-                req: hello.req,
-                body: Response::Fenced { uncertain: rows },
-            });
+            assert!(Target::<Vec<Value>>::valid_fenced(
+                &rows,
+                &[0],
+                1,
+                blocks,
+                &mut checked
+            ));
+            target.on_reply(
+                now + 2,
+                1,
+                &FromReplica {
+                    vol: hello.vol,
+                    epoch: hello.epoch,
+                    session: hello.session,
+                    req: hello.req,
+                    body: Response::Fenced { uncertain: rows },
+                },
+            );
             let retained = target.chunks[0].uncertain.iter().count();
             assert_eq!(retained, expected);
             assert!(retained <= blocks.div_ceil(2) as usize);
@@ -3400,7 +3450,10 @@ mod tests {
         }
         // The map contains active block uncertainty, not one entry per received report.
         // It can exceed the producer's B-slot budget; its run bound is the chunk geometry.
-        assert_eq!(target.chunks[0].uncertain.iter().collect::<Vec<_>>(), vec![Extent::new(0, blocks)]);
+        assert_eq!(
+            target.chunks[0].uncertain.iter().collect::<Vec<_>>(),
+            vec![Extent::new(0, blocks)]
+        );
     }
 
     /// What the target started, read off the requests it sent: the chunk, and the first block
@@ -4250,8 +4303,8 @@ mod tests {
     }
 
     /// S11: node 2's replica acknowledges a write that waits on node 1, a move drops it, and
-    /// node 2 comes back as a new replica. Its resync copies the block, but node 2 joins only
-    /// once the write has completed: its old acknowledgement does not count.
+    /// node 2 comes back as a new replica. Its old acknowledgement cannot replace the fresh
+    /// replay's acknowledgement, even once the write has completed on the ISR.
     #[test]
     fn a_dropped_replicas_ack_does_not_count_after_it_rejoins() {
         let mut b = Bench::new(&[1, 2], 1);
@@ -4277,7 +4330,9 @@ mod tests {
             .get_mut(&2)
             .expect("replica")
             .remove_chunk(VOL, 0);
-        // Node 2 comes back as a new replica, and its resync copies everything.
+        // Node 2 comes back as a new replica. Hold its new replay acknowledgement so the
+        // already received acknowledgement from its deleted replica is the only one counted.
+        b.hold.insert(2, is_write);
         b.request_move(3, 2);
         b.until("node 2 resynced or joined", |b| {
             let c = &b.t.chunks[0];
@@ -4299,12 +4354,14 @@ mod tests {
             "node 2 joined on its old replica's acknowledgement: {}",
             b.t.describe()
         );
-        // Node 1's acknowledgement completes the write; then node 2 joins.
+        // Node 1's acknowledgement completes the write; the fresh replay still gates the join.
         let (_, _, reply) = b.held.remove(0);
         b.hold.clear();
         b.t.on_reply(b.now, TARGET, &reply);
         b.run();
         assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.isr().contains(&2), "node 2 still owes the replay Ack");
+        b.deliver_from(2);
         b.until("node 2 in the ISR", |b| b.isr().contains(&2));
         assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
     }
@@ -4345,9 +4402,13 @@ mod tests {
             .expect("replica")
             .remove_chunk(VOL, 0);
         let late = b.held_from(2, is_write);
+        let late_req = b.held[late].1.req;
         if !after_rejoin {
             b.deliver(late);
         }
+        // Hold the fresh replay separately: only its Ack can prove the recreated replica
+        // admitted the write, even while the node keeps its session through chunk 1.
+        b.hold.insert(2, is_write);
         b.request_move(3, 2);
         b.until("node 2 a replica again", |b| {
             b.t.chunks[0].replicas.contains(&2)
@@ -4371,10 +4432,17 @@ mod tests {
             b.t.describe()
         );
         assert_eq!(b.done.get(&op), None, "the write still waits on node 1");
-        // Node 1's acknowledgement completes the write; then node 2 joins.
+        let replay = b.held_from(2, is_write);
+        assert_ne!(
+            b.held[replay].1.req, late_req,
+            "a new send must prove admission"
+        );
+        // Node 1's acknowledgement completes the write; the replay Ack still gates the join.
         b.hold.clear();
         b.deliver_from(TARGET);
         assert_eq!(b.done.get(&op), Some(&OpResult::Written));
+        assert!(!b.isr().contains(&2), "node 2 still owes the replay Ack");
+        b.deliver_from(2);
         b.until("node 2 in the ISR", |b| b.isr().contains(&2));
         assert_eq!(b.replicas[&2].block(VOL, 0, 0), Some(42));
     }

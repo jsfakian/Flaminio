@@ -310,13 +310,18 @@ A replica outside the ISR rejoins in four steps:
    `r` joins the lease set and the write quorum at once.
 4. **Join.** On commit, `r` is an ISR member.
 
-**Writes in flight at `BeginResync`** are not sent to `r`:
-- **No copy can miss them:** a copy reads its source over the same ordered session that
-  carried the write, so the read sees it.
-- **`r` cannot join early:** it may only join once those writes have completed.
+**Writes in flight at `BeginResync`** are replayed to `r` after its BeginResync acknowledgement,
+before snapshot work is queued. Even a member that acknowledged a write earlier needs this
+fresh replay, because BeginResync installed a new filter. Earlier same-chunk Write request
+correlations are retired so an old acknowledgement cannot satisfy the new round's receipt.
+Replay extents enter the resync's live set, and its unacknowledged receipts survive normal
+client-write completion until fresh acknowledgement or resync abort.
 
-The real data plane's copier pulls from the source directly (ARCHITECTURE §11.4), which breaks
-the ordered-session argument. It must send those writes to `r` as well.
+An ordered source session alone is insufficient: a request can be dropped without closing
+the stream, so a later source read can return the older value before that write is admitted
+on retry. Replay and independent receipts prevent a stale copy from joining after the client
+write leaves the target's active-write map. The same rule covers the real copier's direct
+source reads (ARCHITECTURE §11.4).
 
 **Which blocks to copy:**
 - **If this target removed `r` itself:** the blocks of writes in flight to `r` at the removal,

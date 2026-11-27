@@ -416,7 +416,9 @@ fn after_a_restart_the_fence_holds_and_whole_chunks_are_uncertain() {
 #[test]
 fn a_failed_store_write_keeps_coarse_uncertainty_through_reconnect_and_restart() {
     let mut s = ReplicaService::with_budget(store_on(formatted()), 4);
-    let (sess, _) = s.hello(&accepted_in("coarse-failure", 6, 5, 1, &[0])).unwrap();
+    let (sess, _) = s
+        .hello(&accepted_in("coarse-failure", 6, 5, 1, &[0]))
+        .unwrap();
     for (seq, start) in [(1, 0), (2, 16), (3, 32)] {
         assert_eq!(
             s.handle(&[(sess, write(sess, seq + 1, 0, start, &[seq as u8], seq))]),
@@ -427,7 +429,10 @@ fn a_failed_store_write_keeps_coarse_uncertainty_through_reconnect_and_restart()
     assert_eq!(s.core.uncertainty_stats(sess.vol).records, 3);
     assert_eq!(
         before,
-        vec![(0, vec![Extent::new(0, 1), Extent::new(16, 1), Extent::new(32, 1)])],
+        vec![(
+            0,
+            vec![Extent::new(0, 1), Extent::new(16, 1), Extent::new(32, 1)]
+        )],
         "the next retained write exhausts the precise-record budget"
     );
 
@@ -441,7 +446,11 @@ fn a_failed_store_write_keeps_coarse_uncertainty_through_reconnect_and_restart()
     );
     let whole = vec![(0, vec![Extent::new(0, BLOCKS)])];
     assert_eq!(s.core.uncertainty_stats(sess.vol).records, 0);
-    assert_eq!(s.core.report(sess.vol), whole, "the failed attempt is conservatively covered");
+    assert_eq!(
+        s.core.report(sess.vol),
+        whole,
+        "the failed attempt is conservatively covered"
+    );
     assert_eq!(s.fenced_epoch(sess), 5);
 
     // Only the first three versions completed. A bound equal to the failed fourth
@@ -457,21 +466,31 @@ fn a_failed_store_write_keeps_coarse_uncertainty_through_reconnect_and_restart()
         )]),
         vec![Reply::Send(Frame::Ok { req: 6 })]
     );
-    assert_eq!(s.core.report(sess.vol), whole, "partial proof cannot prune the failed version");
+    assert_eq!(
+        s.core.report(sess.vol),
+        whole,
+        "partial proof cannot prune the failed version"
+    );
 
     let reconnect = accepted_in("coarse-failure", 6, 5, 2, &[0]);
     assert_eq!(
         s.hello(&reconnect).unwrap_err(),
         "store is unusable after an earlier failure; reopen it"
     );
-    assert_eq!(s.core.report(sess.vol), whole, "a failed reconnect cannot settle uncertainty");
+    assert_eq!(
+        s.core.report(sess.vol),
+        whole,
+        "a failed reconnect cannot settle uncertainty"
+    );
     assert_eq!(s.fenced_epoch(sess), 5);
 
     // Losing all unflushed blocks leaves the three acknowledged writes, and reopening
     // replaces volatile coarse state with independent restart coverage at the durable fence.
     let image = s.into_store().into_device().crash_keeping(|_| false);
     let mut s = ReplicaService::with_budget(store_on(image), 4);
-    let (sess, reply) = s.hello(&accepted_in("coarse-failure", 6, 5, 3, &[0])).unwrap();
+    let (sess, reply) = s
+        .hello(&accepted_in("coarse-failure", 6, 5, 3, &[0]))
+        .unwrap();
     assert_eq!(
         reply,
         Frame::Fenced {

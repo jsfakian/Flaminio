@@ -107,23 +107,25 @@ No completed runtime validation or issue closure is claimed by this entry.
 
 ### Blocking acceptance counterexamples
 
-The required clean forged-epoch campaign currently fails at seed 4 with `forge_epoch_pct=20`
+The required clean forged-epoch campaign initially failed at seed 4 with `forge_epoch_pct=20`
 and otherwise `Config::random(4)` (default budget 65,536, no mutation enabled): acknowledged
 write 294 at time 60,435,658 is followed by a final read at 60,438,805 returning older value
 292 (`not linearizable`). A mixed-fault repeat at budget 8 also fails clean seed 4 (acknowledged
 967, final read 917). Both assertions and seeds are preserved; fresh independent runtime and
 model diagnosis confirmed a target resync bug: a dropped in-flight write can be admitted only
-after its older value was copied to a joiner. The minimal pending-write replay fix passed an
-isolated 200-seed forged campaign and mixed-fault runs and is now being integrated.
+after its older value was copied to a joiner. The tracked pending-write replay and fresh
+receipt-correlation fix now passes all 67 Target tests, all 200 forged-epoch clean seeds and
+the budget-8/16 mixed-fault campaign, with the original regression assertions unchanged.
 
 The user requested draft PR publication while this work is in progress. The draft is not
-ready for merge: tracked-fix validation, independent code/security review and conformance
-remain pending. Both failing clean assertions remain in the branch.
+ready for merge: fresh replay and old-generation mutation assurance, full checks, independent
+code/security review and conformance remain pending. The original regression assertions remain.
 
 Other acceptance evidence passes: 200-seed normal budget-8/16 campaigns, 200 malformed-reply
 clean runs, all 35 old/new mutation tests, seven #81 large-volume simulator regressions, and
 the pending-write/coarsen/restart/real-repair/Settle scenarios at budgets 8/16. These passes do
-not override the clean safety failures.
+not complete final assurance. The replay fix invalidates the old `keep_dropped_acks` pinned
+witness; its assertion remains unchanged while a fresh semantic witness is established.
 
 ## Tests
 

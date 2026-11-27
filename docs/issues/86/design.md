@@ -87,6 +87,22 @@ needs no check: the store refuses a chunk above 1 GiB at replay (`flaminio-store
   metadata service) works as today and removes the mark. Otherwise an operator removes chunks
   and restarts; `new` evaluates the inventory again.
 
+## Resync integration after rejected requests (S4)
+
+The clean forged-epoch campaign exposed an admission gap in the existing ordered-source
+assumption: a Write can be dropped, a later resync read copies the old value, and the retried
+Write completes before the join check examines active writes. After a BeginResync Ack installs
+the new filter, replay every pending chunk Write before pumping snapshot work, even if this
+member acknowledged it earlier. Retire prior same-chunk Write request correlations first;
+their acknowledgements do not prove protection by this filter generation. Add replay extents
+to `r.live`; existing `send_write` records `r.unacked`, which must remain after the client
+operation completes. No new client acknowledgement quorum is introduced.
+
+Keep the seed-4 clean counterexample and add a deterministic replay/receipt regression plus
+`skip_pending_resync_replay` mutation. Preserve S11's stale-ack proof with fresh replay receipts;
+an obsolete pinned mutation witness must be replaced by an actual witnessed same-generation
+violation, never an assertion skip. See [decisions](decisions.md).
+
 ## Prune and restart proof (S3, S4)
 
 `ReplicaCore::handle` returns `Action::Drop` for a Write whose `version.epoch` or `prune.epoch`,
