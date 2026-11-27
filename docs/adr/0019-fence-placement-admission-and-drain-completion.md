@@ -1,6 +1,6 @@
 # 0019. Fence placement admission and validate drain generations
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-27
 - **Issue:** [#78](https://github.com/jsfakian/Flaminio/issues/78)
 
@@ -56,9 +56,11 @@ replica erasure or node shutdown authority.
 
 ## Confirmation
 
-Both-store service schedules must exercise admission/mark orders, hidden reservation handoff,
-crashes and uncertain responses. Phased model schedules and actual Go CAS replay must catch
-omitted admission compare, omitted reservation count and omitted final marker compare mutations,
-including unmark/re-mark between an empty inventory scan and validation. Authorization tests
-cover administrator-only completion; controller tests require generation validation even when
-visible inventory is empty. Final evidence is recorded in the [report](../issues/78/report.md).
+Both-store service schedules exercise admission/mark orders, hidden reservation handoff,
+crashes and uncertain responses. Phased model schedules and actual Go CAS replay catch omitted
+admission compare, reservation count and final marker compare mutations, including unmark/re-mark
+between an empty inventory scan and validation. Independent occupancy and fixture expectations
+also catch missing placement/incoming counts and publication after deletion fencing. Authorization
+and controller checks cover administrator-only completion and validation with empty visible
+inventory. All required project checks, code/security reviews and S1–S8 conformance passed;
+see the [report](../issues/78/report.md).

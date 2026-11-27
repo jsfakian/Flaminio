@@ -53,7 +53,7 @@ Rust tests green. This adds explicit stale-publication control to the same fix.
   gate revision (SA4006). Remove the dead expressions while preserving validation and gate init.
 
 All four reviewers are complete with no other findings or Nits. A fresh implementer addressed
-all three findings in one pending fix commit:
+all three findings in the single R1 fix commit:
 
 - Known struct field aliases (including Unicode case folding) are DataLoss; unknown/user map
   keys retain case semantics. Both-store regressions failed before the fix with `complete:true`
@@ -73,13 +73,24 @@ all three findings in one pending fix commit:
 
 Post-fix `make lint test race hygiene contracts sim` passed in full. This includes all three
 TLS interop tests, 20,000 simulation seeds (zero failures), and all 173 release replication
-checks including ignored mutation controls. One R1 fix commit follows, then fresh incremental
-code/security review. Status: fixes tested; incremental review pending.
+checks including ignored mutation controls. R1 fixes are committed as `c63e49b1d66e8f32ca00eb812ccb9800ae1656a0`.
+Status: resolved by the clear incremental review below.
+
+### Code/security round 2 — c63e49b1d66e8f32ca00eb812ccb9800ae1656a0
+
+Fresh code and security reviewers examined only `fd279db..c63e49b` and necessary callers,
+covering all seven changed paths. Both confirm R1-G-C1, R1-M-C1 and R1-CI-C1 fixed, with
+no new Low-or-higher findings or Nits. No additional source changes were requested.
+
+Later-round Sonnet is unavailable in this session; code review used the inherited default
+model at medium effort. Security retained the default model at medium effort. Both reviews
+were direct, as required for incremental rounds. Status: **clear** after two code/security
+rounds. Final conformance passed all S1–S8 rules.
 
 ## Implementation integration — 2026-11-27
 
 Existing commits `62f7424` (implementation) and `19a45ac` (tests), authored before the recent
-merges, are preserved on `issue/78-placement-admission-generation`. Merge current main at
+merges, are preserved on `issue/78-placement-admission-generation`. Merged current main at
 `7d03b6b08bee86058b3dfbc6942ca7b053aab547` after the user's merge of #80 / PR #105.
 The approved clear snapshot dates to 2026-11-20. One implementer owns semantic integration
 of the existing gate/controller/model work with #76 recovery, #77 coherent responses and
@@ -112,7 +123,7 @@ Final post-fix `make lint test race hygiene contracts sim` passed in full; the t
 interoperability tests, 20,000 seeds and 173 release replication checks passed.
 The baseline run at `fd279db` passed
 `make lint test race`, then stopped in `make hygiene` at R1-CI-C1; contracts and sim were not
-reached in that combined run. All required checks will rerun after the fixes.
+reached in that baseline run. The complete post-fix run passed all required checks.
 
 Controlled negative evidence: temporarily omitting recursive raw-inventory validation makes
 `TestCheckDrainRejectsAmbiguousNestedMove` fail on memory and embedded etcd with
@@ -130,18 +141,38 @@ corrected focused case and complete service/drain packages then passed (78.310s 
 
 ## Conformance
 
-Independent test acceptance passed S1–S8; the final conformance gate follows review clearance.
-Acceptance includes actual memory/etcd claim/mark and paused batch/scan schedules, cooperative
-and uncertain-reply recovery, original plan/generation retention, deletion fences, conservative
-raw inventory, controller generation/cancellation and direct-move lifecycle refusal. Inventory
-oracles in shared fixtures are independent of runtime count helpers. Final checker table pending.
+Final checker output at `c63e49b`, before ADR acceptance (verbatim):
+
+PASS
+
+| Rule | Implemented | Tested | Evidence |
+|---|---|---|---|
+| S1 Atomic admission | yes | yes | `meta/service/create.go:546` compares root/name/tombstone/gate; `MoveReplica` compares gate/header/chunk. Both-store `TestAdmissionDrainBeforeClaim`, `TestAdmissionDrainAfterClaim`, `TestAdmissionCreateDoesNotPlaceOnConcurrentDrain` and `TestAdmissionWitnessChangeForcesFreshPlan`. |
+| S2 Earlier reservations | yes | yes | Immutable header generation and original claim/root publication fences preserve admitted plans. Both-store `TestAdmissionLostRepliesRecoverOriginalGeneration`, `TestAdmissionConcurrentReservationsRemainAccounted` and phased `TestAdmissionScheduleReplay` cover restart, identical helpers, publication and deletion fencing. |
+| S3 Complete accounting | yes | yes | `meta/service/admission.go:137` scans raw headers before chunks, counts earlier creations/replicas/incoming moves, and rejects corrupt inventory. Both-store `TestCheckDrainInventoryAndValidation`, `TestCheckDrainRawInventorySchema`, `TestCheckDrainRejectsAmbiguousNestedMove` and `TestCheckDrainRejectsStructFieldAliases`. |
+| S4 Validated completion | yes | yes | `CheckDrain` compares the original marker after both scans; `control/drain/drain.go:181` retains its generation and requires validated completion. Phased both-store replay and controller tests cover empty visible inventory, unmark/re-mark, cancellation and repeated marks. |
+| S5 Direct move destinations | yes | yes | `MoveReplica` checks draining eligibility before `CheckMove`, then commits under the gate/header/chunk CAS. Both-store `TestAdmissionMoveRefusesDrainingDestination`, `TestAdmissionMoveNoOpStillRejectsDrainingDestination`, positive incoming replay and `TestCheckDrainAfterChangeIsrCompletesMove`. |
+| S6 Bounded and restartable | yes | yes | Admission remains 4 comparisons/2 writes; publication retains bounded root/claim batches; completion uses 1 comparison/0 writes. `TestAdmissionScheduleReplay` asserts exact fences/bounds; lost-response, concurrent reservation and storage-error tests cover restart and fail-closed behavior on both stores. |
+| S7 Compatibility and authority | yes | yes | Administrator-only `CheckDrain` authorization; positive gate initialization precedes admissions/no-op mutations. `TestAuthorization`, legacy initialization/lost-reply tests and unchanged geometry/identity tests pass; `make contracts` passes all three Rust/Go TLS interoperability tests. |
+| S8 Executable checks and documentation | yes | yes | Eight placement-admission model tests pass, including 827 interleavings, independent occupancy/count expectations, three required mutants and publication-fence mutation. Shared schedules replay actual phased Go CAS on both stores. Required `make lint test race hygiene contracts sim` passes; 20,000 simulation seeds and 173 release replication tests pass. |
+
+Contract drift: none. Generated protobuf bindings match the additive generation/CheckDrain contract. The approved integration decisions account for #76’s root comparison/write and defer unlanded #18 move-domain policy.
+
+ADR conformance: consistent with ADRs 0001/0002/0005/0006/0015/0016/0018. ADR 0019 exists and is indexed as Proposed, correctly awaiting this final gate.
+
+Scope drift: no functional drift. Additional paths beyond the original file list are `meta/service/admission.go` (extracted admission/inventory implementation), `meta/service/create.go` (#76 integration), `meta/service/service_test.go` (interception helper), numbered ADR/index and issue pipeline documentation. All listed implementation areas are covered.
+
+Docs: done. Architecture, protocol, lab guidance and follow-ups document linearization, conservative reservations, generation meaning, maintenance-barrier rollout and metadata-completion limits. No lab checks are required.
+
+Open review findings: none. R1-G-C1, R1-M-C1 and R1-CI-C1 are fixed at `c63e49b`; fresh incremental code/security reviews are clear.
 
 ## Lab
 
-None required by the approved design. No shared VM targets will run.
+None required by the approved design. No shared VM targets were run.
 
 ## ADRs
 
 The global gate/conservative inventory/maintenance-barrier policy was accepted with the plan.
-Prepare the next unused numbered ADR for review, then accept it after review/conformance pass.
-Existing linearizable-etcd and replication/fencing decisions remain unchanged.
+[ADR 0019](../../adr/0019-fence-placement-admission-and-drain-completion.md) is accepted
+and indexed after the clear review loop and final conformance PASS. ADRs 0001/0002/0016/0018
+remain consistent; replication/lease and node-shutdown authority decisions are unchanged.

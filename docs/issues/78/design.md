@@ -1,7 +1,7 @@
 # Issue #78: Placement admitted after drain marking — design
 
 [Specification](spec.md). Published clear snapshot approved 2026-11-20; integration and validation are recorded in [report.md](report.md).
-Protocol choice: [proposed ADR](adr-proposal.md).
+Protocol choice: [ADR 0019](../../adr/0019-fence-placement-admission-and-drain-completion.md) (the [approved proposal](adr-proposal.md)).
 Settled at approval, 2026-11-13: the protocol ADR is accepted with the plan (see decisions.md, Settled at approval).
 
 The facts it starts from:

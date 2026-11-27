@@ -62,3 +62,7 @@ with this gate; no new move-domain policy is claimed here.
   incoming move accounting and retain all original witnesses and the 827 exploration budget.
 - R1-CI-C1: remove the two statically dead expressions; preserve positive revision checks and
   missing-gate initialization on no-op mutations. No protocol change or accepted risk.
+
+Round 2 is clear: fresh code/security reviews confirmed all three R1 findings fixed, with no
+new findings or Nits. Required `make lint test race hygiene contracts sim` passed on the fixed
+source; final conformance passed S1–S8. ADR 0019 is accepted under the approved protocol choice.
