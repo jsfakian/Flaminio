@@ -27,6 +27,29 @@ Changes/resolution: Both fresh reviewers confirmed all four R1 fixes resolved: a
 
 Status: clear. Approval remains separate; no approval is inferred.
 
+### Code/security review round 1 — f735f89493c2dbecb0b8713abacfb7f8b58f0b58
+
+Full range: `946b4ea..f735f89`, split into Go and Rust parts because the complete
+non-generated change exceeds one review pass. Fresh code/security reviewers check each
+part and its cross-language contracts. Built-in review skills are unavailable; direct
+high-effort review is used. Go code and security reviews are clear without nits.
+
+**R1-R-C1 — Medium:** the engine membership validator accepts an R-member move whose
+destination is already a replica. RF 2 / minimum ISR 1, replicas/ISR [a,b] and move a→b
+passes validation; production Target then proposes source removal to [b], and the metadata
+removal branch can accept R−1 replicas. The source state cannot result from a legal requested
+move, so initial/refresh/ISR boundaries must reject it before authority or peer-map mutation.
+Require destination absent at R and present at R+1, preserving legal planned/joined stages.
+Independent code and security proofs use the exact validator and production replication
+core and both emit the R−1 removal proposal. All four scoped reviews are complete: this is
+the sole Medium finding, with no additional Low-or-higher findings or nits. The narrow correction makes destination membership equivalent to the temporary R+1 shape.
+The new shared initial/refresh/ISR rejection matrix fails under the original predicate and
+passes after the correction. It also covers higher-epoch deposition and accepts legal
+planned/prejoin/joined move stages. All 62 node unit tests, 20 integration tests and all-target
+Clippy pass. `make fmt lint test race hygiene contracts sim` passes after the fix, including
+20,000 normal seeds, all 165 release tests and all three TLS interop tests. Fresh incremental
+code/security review follows.
+
 ## Implementation — 2026-11-27
 
 Branch: `issue/80-supported-geometry`, based on
@@ -39,7 +62,7 @@ Both implementation halves are complete and the joined `make fmt lint` passes, i
 Rust/fuzz all-target clippy, Go vet, protobuf lint and script checks. The Go compatibility RPC
 uses #77's coherent reads, while Rust extends #86's existing checked encoder. [Units](units.md)
 tracks the remaining independent acceptance, code/security review and final conformance.
-No completed acceptance or readiness is claimed yet.
+Acceptance and project checks pass; the review correction awaits incremental clearance.
 
 ## Tests
 
@@ -89,12 +112,16 @@ fixture remains in the run. The client uses the normal explicit 4,194,304-byte r
 | 4 | 2607 | 4,135,353 | 4,194,104 | 4,194,304 |
 | 5 | 2239 | 4,138,323 | 4,193,456 | 4,194,304 |
 
-These are representation boundary checks, not scale/performance certification. Final
-`make race hygiene contracts sim`, sanitizers and independent review/conformance remain.
+These are representation boundary checks, not scale/performance certification.
+`make race hygiene contracts sim` passes at `f735f89`, including shared geometry vectors,
+all three TLS interop tests, 20,000 normal seeds and all 165 release tests. Local
+`make sanitize QUICK=1` also passes at that parent commit (address/leak and thread sanitizers).
+After the engine predicate correction, the complete required project checks pass again.
+Incremental review and final conformance remain before publication; final CI repeats sanitizers.
 
 ## Conformance
 
-Pending implementation, acceptance and review clearance.
+Pending correction of R1-R-C1, incremental review clearance and the final independent rule check.
 
 ## Lab
 

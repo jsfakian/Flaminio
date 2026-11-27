@@ -93,3 +93,13 @@ join them before review and publication.
   identity and oversize errors DataLoss. The corruption-after-initial-read Check race proves
   identity DataLoss on both backends; outer syntax/type known-commit/ISR matrices preserve
   their statuses and exact authority assertions.
+
+## Code/security review round 1
+
+- **R1-R-C1 — legal move cardinality:** an R-member planned move requires its destination
+  absent, while the R+1 temporary stage requires it present. Apply that equivalence in the
+  shared engine membership validator before initial/refresh/ISR adoption. Preserve legal
+  planned, prejoin and joined stages and higher-epoch deposition using current safe geometry.
+  This enforces existing CheckMove/validMove shapes at the input boundary; it changes no
+  replication algorithm, wire schema or metadata transition rule. The regression fails
+  before the predicate correction and passes afterward without relaxing mutation checks.

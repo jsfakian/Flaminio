@@ -35,7 +35,10 @@ header/prefix snapshots, commit-pinned Attach responses and atomic named ISR vie
 [implementation and validation report](issues/77/report.md)),
 [#78](https://github.com/jsfakian/Flaminio/issues/78) drain admission,
 [#79](https://github.com/jsfakian/Flaminio/issues/79) CSI mount ownership,
-[#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation,
+[#80](https://github.com/jsfakian/Flaminio/issues/80) geometry validation (shared whole-chunk
+admission and future-view budget, checked CSI capacity/identity retries, and validation before
+engine/session/store mutation; [implementation and validation report](issues/80/report.md),
+[ADR 0018](adr/0018-admit-only-representable-volume-geometries.md)),
 [#81](https://github.com/jsfakian/Flaminio/issues/81) ISR RPC batching (fixed: fair batches of
 at most 64 changes, stale-reply guards, production-bound fixtures and 129-chunk recovery
 interoperation; `make lint test race hygiene contracts sim` pass, with the review correction
@@ -50,7 +53,7 @@ unresolved source retirement. Coarsening can increase takeover reconciliation tr
 unsupported legacy held sets are quarantined without deletion and strict consumers require
 coordinated producer rollout. See [ADR 0017](adr/0017-bound-uncertainty-with-per-chunk-covers.md)
 and the [implementation report](issues/86/report.md) for validation/review status. Complete
-geometry/transport admission remains #80, and aggregate scheduling/resource limits remain #75.
+geometry/transport admission is tracked by #80 above; aggregate scheduling/resource limits remain #75.
 The clock contract is tracked by [#83](https://github.com/jsfakian/Flaminio/issues/83), and
 block-interface conformance by [#84](https://github.com/jsfakian/Flaminio/issues/84).
 A green existing suite does not close these issues; their separate adversarial reproductions

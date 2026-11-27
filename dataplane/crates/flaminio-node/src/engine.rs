@@ -495,7 +495,8 @@ fn valid_chunk_membership(chunks: &[pb::ChunkMeta], replica_count: usize, min_is
                         && valid_node_name(&c.moving_to)
                         && c.moving_from != c.moving_to
                         && replicas.contains(&c.moving_from)
-                        && (replicas.len() == replica_count || replicas.contains(&c.moving_to))))
+                        && (replicas.contains(&c.moving_to)
+                            == (replicas.len() == replica_count + 1))))
         })
 }
 
@@ -2956,24 +2957,31 @@ mod metadata_tests {
     #[test]
     fn higher_epoch_malformed_metadata_deposes_before_conversion() {
         for id in [ISR, REFRESH] {
-            let mut f = Fixture::new(7);
-            if id == ISR {
-                f.isr(vec![], 8);
-            } else {
+            for malformed_move in [false, true] {
+                let mut f = Fixture::new(7);
                 let mut v = f.volume.clone();
                 v.epoch = 8;
-                v.size_bytes = 0;
-                v.chunks.clear();
-                v.target = "bad\nnode".into();
-                f.refresh(v);
+                if malformed_move {
+                    v.chunks[0].moving_from = "fl-a".into();
+                    v.chunks[0].moving_to = "fl-b".into();
+                } else {
+                    v.size_bytes = 0;
+                    v.chunks.clear();
+                    v.target = "bad\nnode".into();
+                }
+                if id == ISR {
+                    f.isr(v.chunks, v.epoch);
+                } else {
+                    f.refresh(v);
+                }
+                assert!(!f.engine.targets.contains_key("v"));
+                assert!(
+                    f.engine
+                        .take_output()
+                        .iter()
+                        .any(|o| matches!(o, Output::Deposed { volume } if volume == "v"))
+                );
             }
-            assert!(!f.engine.targets.contains_key("v"));
-            assert!(
-                f.engine
-                    .take_output()
-                    .iter()
-                    .any(|o| matches!(o, Output::Deposed { volume } if volume == "v"))
-            );
         }
     }
 
@@ -3053,7 +3061,7 @@ mod metadata_tests {
     /// peer in the runtime map before the complete payload has been validated.
     fn malformed_memberships(base: &[pb::ChunkMeta]) -> Vec<(&'static str, Vec<pb::ChunkMeta>)> {
         let mut cases = Vec::new();
-        for case in 0..15 {
+        for case in 0..16 {
             let mut chunks = base.to_vec();
             chunks[0].replicas = vec!["fl-a".into(), "new-peer".into()];
             chunks[0].isr = vec!["fl-a".into()];
@@ -3120,6 +3128,11 @@ mod metadata_tests {
                     c.moving_from = "fl-b".into();
                     c.moving_to = "fl-d".into();
                     "grown move omits destination"
+                }
+                14 => {
+                    c.moving_from = "fl-a".into();
+                    c.moving_to = "fl-b".into();
+                    "planned move destination already placed"
                 }
                 _ => {
                     c.replicas[1] = "x".repeat(129);
@@ -3301,6 +3314,61 @@ mod metadata_tests {
     }
 
     #[test]
+    fn legal_move_stages_are_adopted_from_refresh_and_isr_replies() {
+        for id in [ISR, REFRESH] {
+            for stage in 0..3 {
+                let mut f = Fixture::new(7);
+                let mut v = f.volume.clone();
+                for c in &mut v.chunks {
+                    c.isr_ver = 100;
+                    c.moving_from = "fl-b".into();
+                    c.moving_to = "fl-c".into();
+                    if stage >= 1 {
+                        c.replicas.push(c.moving_to.clone());
+                    }
+                    if stage == 2 {
+                        c.isr.push(c.moving_to.clone());
+                    }
+                }
+                assert!(validate_volume("v", &v).is_ok());
+                if id == ISR {
+                    f.isr(v.chunks, v.epoch);
+                } else {
+                    f.refresh(v);
+                }
+                let rt = &f.engine.targets["v"];
+                assert_eq!(rt.nodes, ["fl-a", "fl-b", "fl-c"]);
+                for c in &rt.view.chunks {
+                    assert_eq!(c.isr_ver, 100);
+                    assert_eq!(c.moving, Some((1, 2)));
+                    assert_eq!(
+                        c.replicas,
+                        if stage == 0 {
+                            vec![0, 1]
+                        } else {
+                            vec![0, 1, 2]
+                        }
+                    );
+                    assert_eq!(
+                        c.isr,
+                        if stage == 2 {
+                            [0, 1, 2].into()
+                        } else {
+                            [0, 1].into()
+                        }
+                    );
+                }
+                assert!(!rt.sm.accepts_meta_reply(if id == ISR {
+                    f.isr_req
+                } else {
+                    f.refresh_req
+                }));
+                assert!(!rt.sm.is_deposed());
+            }
+        }
+    }
+
+    #[test]
     fn valid_concentrated_and_moving_views_at_every_rf_cap() {
         for (rf, count) in (1..=5).zip([5137, 3881, 3119, 2607, 2239]) {
             let mut v = Fixture::new(7).volume;
@@ -3323,6 +3391,8 @@ mod metadata_tests {
             v.chunks.fill(c.clone());
             assert!(validate_volume("v", &v).is_ok());
             c.replicas.push(c.moving_to.clone());
+            v.chunks.fill(c.clone());
+            assert!(validate_volume("v", &v).is_ok());
             c.isr = c.replicas.clone();
             v.chunks.fill(c.clone());
             assert!(validate_volume("v", &v).is_ok());
