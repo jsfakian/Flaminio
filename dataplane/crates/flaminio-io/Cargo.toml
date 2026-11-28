@@ -30,5 +30,10 @@ io-uring.workspace = true
 smol.workspace = true
 libc.workspace = true
 
+[dev-dependencies]
+futures-lite = "2"
+futures-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+ring = "0.17.14"
+
 [lints]
 workspace = true

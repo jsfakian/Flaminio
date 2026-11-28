@@ -293,3 +293,124 @@ impl ClockObserver {
         self.domain.success_permit(sample)
     }
 }
+
+#[cfg(test)]
+mod acceptance_tests {
+    use super::*;
+    use std::sync::Barrier;
+    use std::thread;
+    struct Script {
+        value: Mutex<Result<ClockReading, ClockFault>>,
+        reads: AtomicU64,
+    }
+    impl Script {
+        fn new() -> Self {
+            Self {
+                value: Mutex::new(Ok(reading(0, 0))),
+                reads: AtomicU64::new(0),
+            }
+        }
+        fn set(&self, r: Result<ClockReading, ClockFault>) {
+            *self.value.lock().unwrap() = r;
+        }
+    }
+    impl ElapsedClock for Script {
+        fn read(&self) -> Result<ClockReading, ClockFault> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            *self.value.lock().unwrap()
+        }
+    }
+    fn reading(m: u128, b: u128) -> ClockReading {
+        ClockReading {
+            monotonic_before_ns: m,
+            boottime_ns: b,
+            monotonic_after_ns: m,
+        }
+    }
+    fn domain(script: Arc<Script>) -> Arc<ClockDomain> {
+        Arc::new(ClockDomain::new(script, ClockQualification::new(1, 1000, 1000).unwrap()).unwrap())
+    }
+    #[test]
+    fn persistent_observers_have_independent_histories_and_one_shared_fault() {
+        let script = Arc::new(Script::new());
+        let d = domain(script.clone());
+        let (mut a, mut b) = (d.observer(), d.observer());
+        script.set(Ok(reading(100_000, 100_000)));
+        let _ = a.sample().unwrap();
+        script.set(Ok(reading(50_000, 50_000)));
+        let _ = b.sample().unwrap();
+        assert!(d.status().is_healthy());
+        let stale = b.sample().unwrap();
+        script.set(Ok(reading(99_000, 99_000)));
+        assert!(a.sample().is_err());
+        assert_eq!(d.status().generation.number(), 1);
+        assert_eq!(d.status().reason, Some(ClockFault::Backwards));
+        assert!(d.success_permit(stale).is_err());
+        script.set(Ok(reading(200_000, 200_000)));
+        assert!(b.sample().is_err());
+        d.quarantine(ClockFault::SampleFailed);
+        assert_eq!(d.status().reason, Some(ClockFault::Backwards));
+    }
+    #[test]
+    fn sampled_before_fault_cannot_be_permitted_after_but_earlier_permit_can_deliver() {
+        let script = Arc::new(Script::new());
+        let d = domain(script.clone());
+        let mut o = d.observer();
+        let earlier = d.success_permit(o.sample().unwrap()).unwrap();
+        let stale = o.sample().unwrap();
+        d.quarantine(ClockFault::SampleFailed);
+        assert!(d.success_permit(stale).is_err());
+        earlier.consume();
+        let reads = script.reads.load(Ordering::SeqCst);
+        assert!(o.sample().is_err());
+        assert_eq!(reads, script.reads.load(Ordering::SeqCst));
+        let other = domain(Arc::new(Script::new()));
+        let sample = other.observer().sample().unwrap();
+        assert!(d.admit(sample).is_err());
+        let sample = other.observer().sample().unwrap();
+        let third = domain(Arc::new(Script::new()));
+        assert_eq!(
+            third.success_permit(sample).unwrap_err(),
+            ClockError::StaleGeneration
+        );
+    }
+    #[test]
+    fn subscriptions_cannot_lose_a_concurrent_first_fault() {
+        for _ in 0..128 {
+            let d = domain(Arc::new(Script::new()));
+            let barrier = Arc::new(Barrier::new(2));
+            let worker = {
+                let (d, b) = (d.clone(), barrier.clone());
+                thread::spawn(move || {
+                    b.wait();
+                    d.quarantine(ClockFault::SuspendOffset);
+                })
+            };
+            barrier.wait();
+            let rx = d.subscribe();
+            worker.join().unwrap();
+            assert!(rx.try_recv().is_ok());
+            assert_eq!(d.status().generation.number(), 1);
+            assert!(d.subscribe().try_recv().is_ok());
+        }
+    }
+    #[test]
+    fn backend_failure_and_elapsed_overflow_close_all_observers() {
+        for fault in [ClockFault::SampleFailed, ClockFault::Overflow] {
+            let script = Arc::new(Script::new());
+            let d = domain(script.clone());
+            let mut o = d.observer();
+            script.set(Err(fault));
+            assert_eq!(o.sample().unwrap_err(), ClockError::Quarantined(fault));
+            assert!(d.observer().sample().is_err());
+        }
+        let script = Arc::new(Script::new());
+        let d = domain(script.clone());
+        let ns = (u64::MAX as u128 + 1) * 1000;
+        script.set(Ok(reading(ns, ns)));
+        assert_eq!(
+            d.observer().sample().unwrap_err(),
+            ClockError::Quarantined(ClockFault::Overflow)
+        );
+    }
+}

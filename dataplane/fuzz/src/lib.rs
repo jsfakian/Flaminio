@@ -197,6 +197,39 @@ pub fn capability_token(data: &[u8]) {
     }
 }
 
+/// Pure bounded profile decoder; never probes or admits the fuzzing host.
+pub fn clock_contract(data: &[u8]) {
+    let _ = flaminio_io::clock::decode_contract(data);
+}
+
+/// Layout nonce32, FLCH134, exact FLCT. Repair both signatures and digest so
+/// mutations reach authenticated fields and the nested capability decoder.
+pub fn target_handoff(data: &[u8]) {
+    use flaminio_net::handoff::{LEN, Purpose};
+    if data.len() < 32 + LEN {
+        return;
+    }
+    let nonce: &[u8; 32] = data[..32].try_into().unwrap();
+    let handoff = &data[32..32 + LEN];
+    let token = &data[32 + LEN..];
+    for purpose in [Purpose::Normal, Purpose::Initialization] {
+        let _ = TOKEN_KEY.verify_handoff(token, handoff, nonce, purpose);
+        if token.len() < 64 || token.len() > TOKEN_MAX_LEN {
+            continue;
+        }
+        let mut token = token[..token.len() - 64].to_vec();
+        token.extend_from_slice(TOKEN_SIGNER.sign(&token).as_ref());
+        let mut body = handoff[..LEN - 64].to_vec();
+        body[38..70].copy_from_slice(ring::digest::digest(&ring::digest::SHA256, &token).as_ref());
+        body.extend_from_slice(TOKEN_SIGNER.sign(&body).as_ref());
+        if let Ok(proof) = TOKEN_KEY.verify_handoff(&token, &body, nonce, purpose) {
+            assert_eq!(proof.capability(), token);
+            assert!(proof.is_current(nonce, purpose));
+            assert_ne!(proof.claims().first_epoch, 0);
+        }
+    }
+}
+
 /// Replays every committed regression input (docs/issues/4/spec.md, S4 and S6).
 #[cfg(test)]
 mod regressions {
@@ -219,6 +252,8 @@ mod regressions {
         journal,
         repl_frame,
         capability_token,
+        target_handoff,
+        clock_contract,
     ];
     /// Time and stack for one input: stricter than the fuzzer's (10 s, `-timeout=10` in
     /// scripts/dev/fuzz.sh, and an 8 MiB main thread) on purpose. This build runs faster and with

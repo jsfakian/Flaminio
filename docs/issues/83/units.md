@@ -20,4 +20,21 @@ No lab runs, host suspend, VM pause or shared-disk rollback are authorized.
 composition, implement existing #83 entry points strictly, and report any actual prerequisite
 that prevents safety before proceeding. Do not add a legacy or environment bypass.
 
-Independent S1–S8 acceptance and approved private test seams are now active after U5.
+Independent S1–S8 acceptance and approved private test seams are complete; source is frozen.
+Full project checks passed; code/security review is next.
+
+## Full-change review partitions
+
+The non-generated diff exceeds one review pass. Each part gets independent code and security
+review; callers/callees across parts are checked against the frozen contracts.
+
+| Part | Paths/focus |
+|---|---|
+| A Clock/profile foundations | repl clock/types/exports; node clock/exports; IO clock/lib/main/node/clock CLI; uring clock/exports; manifests/locks/fuzz policy/profile target and corpus; docs/ADRs |
+| B Engine/frontend lifetimes | repl target/replica; node engine/replica service/engine tests; IO control/ublk/test_support (excluding native_handoff_tests); actual completion/permit/pin ownership |
+| C Authority/network/callers | proto/captoken/metadata issuer/CLI/CSI/scripts; net handoff/token/session and node net; metaclient; real bridge/native_handoff_tests and handoff fuzz corpus |
+| D Executable models | repl sim; lease-clock-handoff JSON; independent ideal/fault/issuance oracles, event scheduling, mutant/clean controls and native replay correspondence |
+
+A owns docs/common build policy review, C the signed handoff interoperability harness. Generated
+protobuf output is verified through contracts rather than line-by-line review. Every part reads
+necessary cross-boundary contracts; no path is silently omitted.

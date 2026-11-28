@@ -56,7 +56,7 @@ help: ## Show this help
 
 ##@ Development (local)
 
-.PHONY: build release test crash-test sim fuzz fuzz-regressions meta-interop lint fmt proto meta-vectors geometry-vectors disk-demo clean
+.PHONY: build release test crash-test sim fuzz fuzz-regressions meta-interop clock-interop lint fmt proto meta-vectors geometry-vectors disk-demo clean
 build: ## Build the data plane (debug) and the Go services
 	cd $(DATAPLANE) && $(CARGO) build
 	$(GO) build ./...
@@ -85,6 +85,9 @@ fuzz: ## Run every cargo-fuzz target for FUZZ_SECONDS each (installs nightly + c
 meta-interop: ## The data plane's Rust metadata client against the Go service, over mutual TLS
 	CARGO=$(CARGO) scripts/dev/meta-interop.sh
 
+clock-interop: ## Signed process handoffs: real Go mTLS issuer against Rust control/engine
+	CARGO=$(CARGO) bash scripts/dev/clock-handoff-interop.sh
+
 lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellcheck, actionlint
 	cd $(DATAPLANE) && $(CARGO) clippy --all-targets -- -D warnings && $(CARGO) fmt --check
 	cd $(DATAPLANE)/fuzz && $(CARGO) clippy --all-targets --all-features -- -D warnings && $(CARGO) fmt --check
@@ -95,6 +98,7 @@ lint: ## clippy (warnings are errors), rustfmt, go vet, gofmt, buf lint, shellch
 	 else echo "shellcheck not installed (brew install shellcheck); skipped"; fi
 	@bash scripts/tools/bench-reference-test.sh
 	@bash scripts/tools/node-scripts-test.sh
+	@bash scripts/tools/clock-handoff-test.sh
 	@bash scripts/tools/lab-deletion-test.sh
 	@bash scripts/tools/failover-policy-test.sh
 	$(ACTIONLINT)
@@ -134,7 +138,7 @@ contracts: ## Generated code, metadata/geometry vectors, fuzz lockfile and Rust/
 	$(MAKE) --no-print-directory proto meta-vectors geometry-vectors
 	git diff --exit-code -- api/gen meta/testdata
 	cd $(DATAPLANE)/fuzz && $(CARGO) metadata --locked --format-version 1 >/dev/null
-	$(MAKE) --no-print-directory meta-interop
+	$(MAKE) --no-print-directory meta-interop clock-interop
 
 miri: ## Miri (nightly) on the data plane's unsafe code that runs without system calls
 	cd $(DATAPLANE) && MIRIFLAGS=-Zmiri-strict-provenance $(CARGO) +$(NIGHTLY) miri test -p flaminio-uring --lib aligned::tests::
@@ -419,7 +423,7 @@ demo: ## Interactive talk track (SCENARIOS=0,1,2,… DEMO_AUTO=1 unattended; LON
 ##@ Test suites
 
 .PHONY: check lab-test
-check: lint test sim meta-interop ## Everything that runs on this workstation: lint, tests, simulation, Rust/Go interop
+check: lint test sim meta-interop clock-interop ## Everything that runs on this workstation: lint, tests, simulation, Rust/Go interop
 
 lab-test: ## Every lab test, in order: overlay, metadata, node fault, partition, Kubernetes, CSI (about 30 min)
 	$(LAB) mesh check

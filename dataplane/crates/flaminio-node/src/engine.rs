@@ -3977,4 +3977,55 @@ mod metadata_tests {
             }
         }
     }
+    #[test]
+    fn clock_fault_keeps_only_consistently_prepermitted_piece_done_pairs() {
+        let mut f = Fixture::new(1);
+        f.engine.out.clear();
+        let domain = f.engine.clock_domain().clone();
+        let sample = domain.observer().sample().unwrap();
+        let generation = sample.generation();
+        let permit = domain.success_permit(sample).unwrap();
+        f.engine.out.push(Output::Piece {
+            generation,
+            op: 9001,
+            at: 0,
+            data: vec![1; 4096].into(),
+        });
+        f.engine.out.push(Output::Done {
+            op: 9001,
+            result: Ok(None),
+            permit: Some(permit),
+        });
+        f.engine.out.push(Output::Piece {
+            generation,
+            op: 9002,
+            at: 0,
+            data: vec![2; 4096].into(),
+        });
+        domain.quarantine(crate::clock::ClockFault::SampleFailed);
+        let outputs = f.engine.take_output();
+        assert_eq!(outputs.len(), 2);
+        assert!(matches!(&outputs[0], Output::Piece { op: 9001, .. }));
+        assert!(matches!(
+            &outputs[1],
+            Output::Done {
+                op: 9001,
+                result: Ok(_),
+                permit: Some(_)
+            }
+        ));
+        assert!(f.engine.targets.is_empty());
+        assert!(f.engine.meta_waits.is_empty());
+        f.engine.handle(Input::Meta {
+            id: ISR,
+            answer: Answer::ChangeIsr(pb::ChangeIsrResponse {
+                applied: true,
+                epoch: 7,
+                chunks: f.shrunk(99),
+            }),
+        });
+        assert!(f.engine.targets.is_empty());
+        assert!(f.engine.take_output().is_empty());
+        assert_eq!(domain.status().generation.number(), 1);
+    }
 }

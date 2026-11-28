@@ -77,7 +77,7 @@ pub fn spawn(
     Ok(())
 }
 
-fn serve(
+pub(crate) fn serve(
     conn: UnixStream,
     ctl: &mpsc::Sender<Control>,
     engine: &mpsc::Sender<Input>,

@@ -2285,6 +2285,10 @@ struct Holding {
 
 impl Holding {
     fn new(name: &str) -> Self {
+        Self::new_with_pipelined(name, false)
+    }
+
+    fn new_with_pipelined(name: &str, pipelined: bool) -> Self {
         use flaminio_store::DeferredDevice;
         let dir = std::env::temp_dir().join(format!("flaminio-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2325,7 +2329,14 @@ impl Holding {
             inbox: tx.clone(),
         });
         let dev = store().into_device();
-        let deferred = Store::open(DeferredDevice::new(dev), StoreConfig::default()).unwrap();
+        let deferred = Store::open(
+            DeferredDevice::new(dev),
+            StoreConfig {
+                pipelined_commits: pipelined,
+                ..StoreConfig::default()
+            },
+        )
+        .unwrap();
         let mut engine = Engine::new(cfg, ReplicaService::new(deferred), net, meta, clock, NONCE);
         engine.set_async_commits(true);
         let arrivals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3273,4 +3284,87 @@ fn fake_meta_atomically_refuses_unsupported_batches() {
         model.lock().unwrap().volume.as_ref().unwrap().chunks[64],
         original.chunks[64]
     );
+}
+
+#[test]
+fn clock_quarantine_keeps_submitted_and_held_writes_until_their_real_completions() {
+    use flaminio_node::clock::ClockFault;
+    for pipeline in [false, true] {
+        let mut h = Holding::new_with_pipelined(
+            if pipeline {
+                "clock-pipeline"
+            } else {
+                "clock-held"
+            },
+            pipeline,
+        );
+        h.engine.set_commit_target_bytes(0);
+        h.engine.set_commit_gather(Duration::ZERO);
+        h.write(700, 8192, 4096);
+        h.acked(700..=700);
+        let baseline_chunks = h.engine.service().store().chunks();
+        h.write(711, 0, 4096);
+        h.engine.flush();
+        assert!(
+            h.in_flight(),
+            "real device commit must be submitted before fault"
+        );
+        h.write(712, 4096, 4096);
+        h.engine.flush();
+        let submitted = h.engine.device().commits_in_flight();
+        assert!(submitted > 0);
+        h.engine.clock_domain().quarantine(ClockFault::SampleFailed);
+        h.engine.turn();
+        let outputs = h.engine.take_output();
+        for op in [711, 712] {
+            assert!(
+                outputs
+                    .iter()
+                    .any(|o| matches!(o,Output::Done{op:n,result:Err(_),permit:None}if *n==op)),
+                "pending operation lacked explicit error: {outputs:?}"
+            );
+        }
+        assert!(
+            !outputs
+                .iter()
+                .any(|o| matches!(o, Output::Done { result: Ok(_), .. }))
+        );
+        assert!(
+            h.engine.device().commits_in_flight() >= submitted,
+            "quarantine freed submitted I/O"
+        );
+        for _ in 0..16 {
+            if h.in_flight() {
+                h.engine.device().complete();
+            }
+            h.engine.turn();
+            assert!(
+                !h.engine
+                    .take_output()
+                    .iter()
+                    .any(|o| matches!(o, Output::Done { result: Ok(_), .. }))
+            );
+        }
+        assert!(!h.in_flight());
+        let recovered = Store::open(h.engine.device().crash(99), StoreConfig::default()).unwrap();
+        let chunks = recovered.chunks();
+        assert_eq!(chunks.len(), baseline_chunks.len());
+        for c in &chunks {
+            assert_eq!(c.fenced_epoch, 2);
+        }
+        let key = chunks.iter().find(|c| c.key.index == 0).unwrap().key;
+        let mut bytes = vec![0; 4096];
+        recovered.read(key, 8192, &mut bytes, 2).unwrap();
+        assert_eq!(
+            bytes,
+            pattern(700u64 as u8, 4096),
+            "acknowledged bytes erased by quarantine"
+        );
+        recovered.read(key, 0, &mut bytes, 2).unwrap();
+        assert_eq!(
+            bytes,
+            pattern(711u64 as u8, 4096),
+            "submitted unanswered write disappeared"
+        );
+    }
 }

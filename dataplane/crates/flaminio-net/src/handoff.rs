@@ -112,3 +112,103 @@ impl TokenKey {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+    fn token(signer: &Ed25519KeyPair, first: u64) -> Vec<u8> {
+        let mut b = b"FLCT\x02\x00\x01v".to_vec();
+        b.extend_from_slice(&7u64.to_be_bytes());
+        b.extend_from_slice(b"\x00\x04fl-a");
+        b.extend_from_slice(&0i64.to_be_bytes());
+        b.extend_from_slice(&first.to_be_bytes());
+        b.extend_from_slice(signer.sign(&b).as_ref());
+        b
+    }
+    fn envelope(signer: &Ed25519KeyPair, token: &[u8], nonce: &[u8; 32], purpose: u8) -> Vec<u8> {
+        let mut b = b"FLCH\x01".to_vec();
+        b.push(purpose);
+        b.extend_from_slice(nonce);
+        b.extend_from_slice(digest(&SHA256, token).as_ref());
+        b.extend_from_slice(signer.sign(&b).as_ref());
+        b
+    }
+    #[test]
+    fn both_signatures_exact_digest_nonce_purpose_and_nonlegacy_incarnation_are_required() {
+        let signer = Ed25519KeyPair::from_seed_unchecked(&[83; 32]).unwrap();
+        let key = TokenKey::from_raw(signer.public_key().as_ref()).unwrap();
+        let nonce = [83; 32];
+        let token = token(&signer, 1);
+        let handoff = envelope(&signer, &token, &nonce, 1);
+        assert_eq!(handoff.len(), 134);
+        let proof = key
+            .verify_handoff(&token, &handoff, &nonce, Purpose::Normal)
+            .unwrap();
+        assert!(proof.matches_target("v", "fl-a", 7));
+        assert!(!proof.matches_target("v", "fl-b", 7));
+        assert!(!proof.matches_target("v", "fl-a", 8));
+        assert!(!proof.matches_target("other", "fl-a", 7));
+        assert!(!proof.is_current(&[84; 32], Purpose::Normal));
+        assert!(!proof.is_current(&nonce, Purpose::Initialization));
+        for length in [0, 1, 69, 70, 133, 135, 4096] {
+            let mut b = handoff.clone();
+            b.resize(length, 0);
+            assert!(
+                key.verify_handoff(&token, &b, &nonce, Purpose::Normal)
+                    .is_err()
+            );
+        }
+        for byte in [0, 4, 5, 6, 37, 38, 69, 70, 133] {
+            let mut b = handoff.clone();
+            b[byte] ^= 1;
+            assert!(
+                key.verify_handoff(&token, &b, &nonce, Purpose::Normal)
+                    .is_err()
+            );
+        }
+        let mut b = handoff.clone();
+        b[38] ^= 1;
+        let signature = signer.sign(&b[..70]);
+        b[70..].copy_from_slice(signature.as_ref());
+        assert!(
+            key.verify_handoff(&token, &b, &nonce, Purpose::Normal)
+                .is_err(),
+            "valid FLCH signature cannot excuse wrong capability digest"
+        );
+        let mut broken = token.clone();
+        *broken.last_mut().unwrap() ^= 1;
+        let b = envelope(&signer, &broken, &nonce, 1);
+        assert!(
+            key.verify_handoff(&broken, &b, &nonce, Purpose::Normal)
+                .is_err(),
+            "FLCH cannot replace FLCT verification"
+        );
+        let legacy = {
+            let mut b = token[..token.len() - 72].to_vec();
+            b[4] = 1;
+            b.extend_from_slice(signer.sign(&b).as_ref());
+            b
+        };
+        let b = envelope(&signer, &legacy, &nonce, 1);
+        assert!(key.verify(&legacy).is_ok());
+        assert!(
+            key.verify_handoff(&legacy, &b, &nonce, Purpose::Normal)
+                .is_err()
+        );
+        for p in [0, 2, 3, 255] {
+            let b = envelope(&signer, &token, &nonce, p);
+            assert!(
+                key.verify_handoff(&token, &b, &nonce, Purpose::Normal)
+                    .is_err()
+            );
+        }
+        assert!(
+            key.verify_handoff(&token, &handoff, &[0; 32], Purpose::Normal)
+                .is_err()
+        );
+        let debug = format!("{proof:?}");
+        assert!(!debug.contains("capability:"));
+        assert!(!debug.contains("nonce:"));
+    }
+}

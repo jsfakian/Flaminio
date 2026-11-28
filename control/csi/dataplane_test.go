@@ -2,7 +2,9 @@ package csi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"net"
 	"os"
 	"path/filepath"
@@ -154,5 +156,59 @@ func TestControlSocketRefusesAnOlderDataPlane(t *testing.T) {
 	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"), make([]byte, 134))
 	if err == nil || dev != "" || !strings.Contains(err.Error(), "usage: attach") {
 		t.Fatalf("got %q, %v; want old-server refusal", dev, err)
+	}
+}
+
+func TestAttachChallengeRejectsOldMalformedAndZeroReplies(t *testing.T) {
+	for _, answer := range []string{"ok none", "ok " + strings.Repeat("0", 64), "ok " + strings.Repeat("A", 64), "ok " + strings.Repeat("1", 63), "error: unknown command"} {
+		t.Run(answer, func(t *testing.T) {
+			path := controlServer(t, 0, answer, nil)
+			if _, err := (ControlSocket{Path: path}).AttachChallenge(context.Background()); err == nil {
+				t.Fatal("invalid challenge admitted")
+			}
+		})
+	}
+}
+func TestControlSocketRetriesExactEncodedProofWithoutLegacyFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.sock")
+	lis, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	lines := make(chan string, 3)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 3; i++ {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			line, _ := bufio.NewReader(conn).ReadString('\n')
+			lines <- strings.TrimSpace(line)
+			answer := "error: v has an existing device lifetime; retry this handoff only after that device stops"
+			if i == 2 {
+				answer = "ok /dev/ublkb83"
+			}
+			_, _ = conn.Write([]byte(answer + "\n"))
+			_ = conn.Close()
+		}
+	}()
+	token := []byte{0xfb, 0xff, 0x01}
+	handoff := bytes.Repeat([]byte{0xfb}, 134)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	dev, err := (ControlSocket{Path: path}).Attach(ctx, "v", token, handoff)
+	if err != nil || dev != "/dev/ublkb83" {
+		t.Fatalf("%q %v", dev, err)
+	}
+	<-done
+	for i := 0; i < 3; i++ {
+		fields := strings.Fields(<-lines)
+		if len(fields) != 5 || fields[0] != "attach" || fields[2] != base64.StdEncoding.EncodeToString(token) || fields[3] != base64.RawURLEncoding.EncodeToString(handoff) || len(fields[3]) != 179 {
+			t.Fatalf("changed/legacy encoding: %q", fields)
+		}
 	}
 }

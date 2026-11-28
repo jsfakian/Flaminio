@@ -58,6 +58,10 @@ pub fn process_nonce() -> io::Result<[u8; 32]> {
     let mut nonce = [0u8; 32];
     // SAFETY: nonce is writable for exactly the passed length, with no concurrent access.
     let count = unsafe { libc::getrandom(nonce.as_mut_ptr().cast(), nonce.len(), 0) };
+    checked_nonce(count, nonce)
+}
+
+fn checked_nonce(count: isize, nonce: [u8; 32]) -> io::Result<[u8; 32]> {
     if count < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -65,4 +69,37 @@ pub fn process_nonce() -> io::Result<[u8; 32]> {
         return Err(io::Error::other("invalid OS process challenge"));
     }
     Ok(nonce)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn short_failed_zero_entropy_never_supplies_a_challenge() {
+        for count in [-1, 0, 1, 31, 33] {
+            assert!(checked_nonce(count, [1; 32]).is_err());
+        }
+        assert!(checked_nonce(32, [0; 32]).is_err());
+        let mut mixed = [0; 32];
+        mixed[31] = 1;
+        assert_eq!(checked_nonce(32, mixed).unwrap(), mixed);
+    }
+    #[test]
+    fn native_clock_entropy_and_actual_file_mount_wrappers() {
+        for source in [ElapsedSource::Boottime, ElapsedSource::Monotonic] {
+            let (s, n) = elapsed_time(source).unwrap();
+            assert!(s >= 0);
+            assert!((0..1_000_000_000).contains(&n));
+            let (s, n) = elapsed_resolution(source).unwrap();
+            assert!(s >= 0);
+            assert!((0..1_000_000_000).contains(&n));
+            assert!(s > 0 || n > 0);
+        }
+        let a = process_nonce().unwrap();
+        let b = process_nonce().unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, [0; 32]);
+        assert!(is_readonly(&std::fs::File::open("/proc/cpuinfo").unwrap()).is_ok());
+        assert!(is_readonly(&std::fs::File::open("/dev/null").unwrap()).is_ok());
+    }
 }

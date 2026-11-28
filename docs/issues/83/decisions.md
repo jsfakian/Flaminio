@@ -172,3 +172,36 @@ admission routes. Exact-live retry validation must invoke actual Engine::attachm
 no raw proof constructor or cached-time authorization is exposed. Native syscall-output helpers
 permit checked malformed/short/error tests. Review these seams with the tests, and report any
 actual behavior failure before making a semantic fix. No hardware qualification follows.
+
+### Native acceptance invocation
+
+`make clock-interop` runs the new authenticated Go issuer/Rust control-engine bridge via
+scripts/dev/clock-handoff-interop.sh. Contracts and workstation check depend on it, so the
+ignored native fixture test cannot silently disappear from required validation. The bridge
+supplies only FLAMINIO_CLOCK_INTEROP_DIR to its test binary; no production admission bypass.
+All shared fixture steps are checked with actual header/epoch/owner snapshots. The aggregate
+oracle uses the exact parsed fixture count (15 cases / 73 actions), not a guessed threshold.
+
+### Acceptance validation and dependency graph
+
+Independent required acceptance passed without a reproduced production behavior defect.
+Ordinary Rust checks run from dataplane under its pinned 1.99.0, not root's unrelated nightly
+default; explicit nightly is used for fuzz/Miri/sanitizers. Do not change user-global defaults
+or unrelated frozen code for nightly-only lint differences.
+
+The separate fuzz graph now includes the IO parser library. Reuse existing main-lock registry
+records/checksums (108 added); align its two prior fuzz-only equivalent/itoa versions to main's
+existing pins, with no checksum substitution or production upgrade. Both locked graphs pass.
+Thirteen new regression seeds are committed. Native/fake-CQE tests prove software boundaries,
+not physical clock qualification or actual ublk/kernel execution; Miri covers aligned helpers,
+not Linux clock/filesystem/entropy syscalls.
+
+### Full-check fuzz policy alignment
+
+The IO parser fuzz target now reaches the existing libublk → bitmaps dependency. Fuzz's policy
+says it follows the main workspace but had no advisory exception because that dependency was
+previously absent. Mirror main's existing RUSTSEC-2026-0247 entry and identical reason in the
+fuzz workspace; this applies the already documented same-dependency policy, not a new waiver
+or package upgrade. The first full run passed lint/test/race and exposed this mismatch in
+hygiene. Preserve the 4,097-byte oversized corpus boundary using non-whitespace bytes so the
+normal diff whitespace gate remains useful.

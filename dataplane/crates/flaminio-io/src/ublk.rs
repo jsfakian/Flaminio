@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use flaminio_format::Uuid;
 use flaminio_format::consts::GIB;
-use flaminio_store::{Store, StoreConfig};
+use flaminio_store::{BlockDevice, Store, StoreConfig};
 use flaminio_uring::UringDevice;
 use io_uring::{opcode, types};
 use libublk::ctrl::{UblkCtrl, UblkCtrlBuilder};
@@ -511,8 +511,8 @@ type Waiter = smol::channel::Sender<Event>;
 
 /// What every queue thread of a device shares: the engine, and the completions its tag tasks
 /// wait for. Locks are held only between awaits: admission, planning, completion.
-struct Shared {
-    engine: Mutex<flaminio_node::engine::Engine<UringDevice>>,
+struct Shared<D: BlockDevice = UringDevice> {
+    engine: Mutex<flaminio_node::engine::Engine<D>>,
     inputs: Mutex<mpsc::Receiver<Input>>,
     sender: mpsc::Sender<Input>,
     /// The store's device, for the local reads the tag tasks perform, and its path, for logs.
@@ -565,9 +565,9 @@ impl Drop for Arrival<'_> {
 }
 
 /// A queue thread's handle on the shared engine.
-struct EngineCtx {
+struct EngineCtx<D: BlockDevice = UringDevice> {
     observer: RefCell<ClockObserver>,
-    shared: Arc<Shared>,
+    shared: Arc<Shared<D>>,
     qid: u16,
     /// Requests were submitted since the last pump. The event loop pumps once per round, after
     /// running the tag tasks, so that the writes of a round reach the store together and share
@@ -582,7 +582,7 @@ struct EngineCtx {
     gather: std::cell::OnceCell<smol::channel::Sender<Instant>>,
 }
 
-impl EngineCtx {
+impl<D: BlockDevice> EngineCtx<D> {
     fn observe(&self) -> bool {
         let healthy = self.observer.borrow_mut().sample().is_ok();
         if !healthy {
@@ -598,7 +598,7 @@ impl EngineCtx {
         observer.success_permit(sample).ok()
     }
 
-    fn engine(&self) -> std::sync::MutexGuard<'_, flaminio_node::engine::Engine<UringDevice>> {
+    fn engine(&self) -> std::sync::MutexGuard<'_, flaminio_node::engine::Engine<D>> {
         self.shared.engine.lock().expect("engine")
     }
 
@@ -718,7 +718,7 @@ pub struct LiveDevice {
     pub id: i32,
     pub proof: VerifiedHandoff,
     pub live: Arc<AtomicBool>,
-    engine: std::sync::Weak<Shared>,
+    engine: std::sync::Weak<dyn EngineAccess>,
 }
 impl LiveDevice {
     pub fn retry_permit(&self, proof: &VerifiedHandoff) -> Option<SuccessPermit> {
@@ -726,11 +726,53 @@ impl LiveDevice {
             return None;
         }
         let shared = self.engine.upgrade()?;
-        let mut engine = shared.engine.lock().ok()?;
-        engine.attachment_permit(&self.volume, proof)
+        shared.attachment_permit(&self.volume, proof)
     }
 }
 pub type Attached = Arc<Mutex<Option<LiveDevice>>>;
+
+trait EngineAccess: Send + Sync {
+    fn attachment_permit(&self, volume: &str, proof: &VerifiedHandoff) -> Option<SuccessPermit>;
+}
+impl<D: BlockDevice + Send> EngineAccess for Shared<D> {
+    fn attachment_permit(&self, volume: &str, proof: &VerifiedHandoff) -> Option<SuccessPermit> {
+        self.engine.lock().ok()?.attachment_permit(volume, proof)
+    }
+}
+
+/// The real tag loop and deterministic completion tests share this submission boundary.
+/// A returned future owns the submission until its CQE; plans stay in the caller meanwhile.
+trait QueueIo {
+    fn submit(&self, sqe: io_uring::squeue::Entry) -> impl std::future::Future<Output = i32>;
+    fn commit_copy(
+        &self,
+        tag: u16,
+        bytes: &[u8],
+        result: i32,
+    ) -> impl std::future::Future<Output = Result<i32, UblkError>>;
+    fn commit_zc(
+        &self,
+        tag: u16,
+        result: i32,
+    ) -> impl std::future::Future<Output = Result<i32, UblkError>>;
+}
+impl QueueIo for UblkQueue<'_> {
+    fn submit(&self, sqe: io_uring::squeue::Entry) -> impl std::future::Future<Output = i32> {
+        self.ublk_submit_sqe(sqe)
+    }
+    async fn commit_copy(&self, tag: u16, bytes: &[u8], result: i32) -> Result<i32, UblkError> {
+        self.submit_io_commit_cmd(tag, BufDesc::Slice(bytes), result)
+            .await
+    }
+    async fn commit_zc(&self, tag: u16, result: i32) -> Result<i32, UblkError> {
+        let reg = sys::ublk_auto_buf_reg {
+            index: tag,
+            ..Default::default()
+        };
+        self.submit_io_commit_cmd(tag, BufDesc::AutoReg(reg), result)
+            .await
+    }
+}
 
 /// A command from the control socket to the main thread.
 pub enum Control {
@@ -1110,7 +1152,7 @@ fn run_device(
             id,
             proof: proof.clone(),
             live: ready_shared.live.clone(),
-            engine: Arc::downgrade(&ready_shared),
+            engine: Arc::downgrade(&(ready_shared.clone() as Arc<dyn EngineAccess>)),
         });
         permit.consume();
         let _ = ready_reply
@@ -1281,7 +1323,7 @@ async fn engine_io_task(
     bufs: &[RefCell<IoBuf<u8>>],
     ctx: &EngineCtx,
 ) -> Result<(), UblkError> {
-    let (done_tx, done_rx) = smol::channel::unbounded();
+    let events = smol::channel::unbounded();
     {
         let buf = bufs[tag as usize].borrow();
         q.submit_io_prep_cmd(tag, BufDesc::Slice(buf.as_slice()), 0, Some(&*buf))
@@ -1296,86 +1338,104 @@ async fn engine_io_task(
                 u64::from(iod.nr_sectors) << 9,
             )
         };
-        let n = len as usize;
-        let admitted = ctx.observe();
-        let res = if !admitted {
-            -libc::EIO
-        } else {
-            match op {
-                // Reads land in the tag's buffer directly: pieces from the local replica are read
-                // here, on this ring, as the engine admits them; other pieces are copied.
-                sys::UBLK_IO_OP_READ
-                    if n <= bufs[tag as usize].borrow().len()
-                        && fast_read_copy(q, &bufs[tag as usize], ctx, offset, len).await =>
-                {
-                    len as i32
-                }
-                sys::UBLK_IO_OP_READ if n <= bufs[tag as usize].borrow().len() => {
-                    ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
-                    loop {
-                        match done_rx.recv().await {
-                            Ok(Event::Local(lr)) => {
-                                local_read(q, &bufs[tag as usize], ctx, lr).await
-                            }
-                            Ok(Event::Piece { at, data }) => {
-                                bufs[tag as usize].borrow_mut()[at..at + data.len()]
-                                    .copy_from_slice(&data);
-                            }
-                            Ok(Event::Done(Ok(_))) => break len as i32,
-                            Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
-                            _ => break -libc::EIO,
-                        }
-                    }
-                }
-                sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE
-                    if n <= bufs[tag as usize].borrow().len() =>
-                {
-                    let io = if op == sys::UBLK_IO_OP_READ {
-                        Io::Read { offset, len }
-                    } else {
-                        // One copy, into an aligned shared buffer: the store and the replicas take
-                        // slices of it.
-                        Io::Write {
-                            offset,
-                            data: AlignedBuf::shared_copy_of(&bufs[tag as usize].borrow()[..n]),
-                        }
-                    };
-                    ctx.submit(io, done_tx.clone());
-                    match done_rx.recv().await {
-                        Ok(Event::Done(Ok(Some(data)))) if data.len() == n => {
-                            bufs[tag as usize].borrow_mut()[..n].copy_from_slice(&data);
-                            len as i32
-                        }
-                        Ok(Event::Done(Ok(None))) => len as i32,
-                        Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
-                        _ => -libc::EIO,
-                    }
-                }
-                // Writes are durable when acknowledged; the protocol has no discard yet, and a
-                // discard is only a hint.
-                sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => match ctx.noop_permit() {
-                    Some(p) => {
-                        p.consume();
-                        0
-                    }
-                    None => -libc::EIO,
-                },
-                sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
-                _ => -libc::EOPNOTSUPP,
-            }
-        };
-        let buf = bufs[tag as usize].borrow();
-        q.submit_io_commit_cmd(tag, BufDesc::Slice(buf.as_slice()), res)
-            .await?;
-        let _ = ctx.observe();
+        serve_copy_request(q, tag, bufs, ctx, op, offset, len, &events).await?;
     }
+}
+
+#[allow(clippy::too_many_arguments, clippy::await_holding_refcell_ref)]
+async fn serve_copy_request<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
+    tag: u16,
+    bufs: &[RefCell<IoBuf<u8>>],
+    ctx: &EngineCtx<D>,
+    op: u32,
+    offset: u64,
+    len: u64,
+    events: &(Waiter, smol::channel::Receiver<Event>),
+) -> Result<(), UblkError> {
+    let (done_tx, done_rx) = events;
+    let n = len as usize;
+    let admitted = ctx.observe();
+    let res = if !admitted {
+        -libc::EIO
+    } else {
+        match op {
+            // Reads land in the tag's buffer directly: pieces from the local replica are read
+            // here, on this ring, as the engine admits them; other pieces are copied.
+            sys::UBLK_IO_OP_READ
+                if n <= bufs[tag as usize].borrow().len()
+                    && fast_read_copy(q, &bufs[tag as usize], ctx, offset, len).await =>
+            {
+                len as i32
+            }
+            sys::UBLK_IO_OP_READ if n <= bufs[tag as usize].borrow().len() => {
+                ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
+                loop {
+                    match done_rx.recv().await {
+                        Ok(Event::Local(lr)) => local_read(q, &bufs[tag as usize], ctx, lr).await,
+                        Ok(Event::Piece { at, data }) => {
+                            bufs[tag as usize].borrow_mut()[at..at + data.len()]
+                                .copy_from_slice(&data);
+                        }
+                        Ok(Event::Done(Ok(_))) => break len as i32,
+                        Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
+                        _ => break -libc::EIO,
+                    }
+                }
+            }
+            sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE
+                if n <= bufs[tag as usize].borrow().len() =>
+            {
+                let io = if op == sys::UBLK_IO_OP_READ {
+                    Io::Read { offset, len }
+                } else {
+                    // One copy, into an aligned shared buffer: the store and the replicas take
+                    // slices of it.
+                    Io::Write {
+                        offset,
+                        data: AlignedBuf::shared_copy_of(&bufs[tag as usize].borrow()[..n]),
+                    }
+                };
+                ctx.submit(io, done_tx.clone());
+                match done_rx.recv().await {
+                    Ok(Event::Done(Ok(Some(data)))) if data.len() == n => {
+                        bufs[tag as usize].borrow_mut()[..n].copy_from_slice(&data);
+                        len as i32
+                    }
+                    Ok(Event::Done(Ok(None))) => len as i32,
+                    Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
+                    _ => -libc::EIO,
+                }
+            }
+            // Writes are durable when acknowledged; the protocol has no discard yet, and a
+            // discard is only a hint.
+            sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => match ctx.noop_permit() {
+                Some(p) => {
+                    p.consume();
+                    0
+                }
+                None => -libc::EIO,
+            },
+            sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
+            _ => -libc::EOPNOTSUPP,
+        }
+    };
+    let buf = bufs[tag as usize].borrow();
+    q.commit_copy(tag, buf.as_slice(), res).await?;
+    let _ = ctx.observe();
+    Ok(())
 }
 
 /// Reads one piece from the local store into the tag's buffer, on this ring, as the MVP's
 /// reads did: the engine plans it, the device reads run while the event loop keeps going, and
 /// the checksums are verified at the end. A mismatch is planned and read once more before the
 /// read counts as failed, which makes the target read it from another ISR member (docs/issues/5).
-async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx, lr: LocalRead) {
+async fn local_read<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
+    buf: &RefCell<IoBuf<u8>>,
+    ctx: &EngineCtx<D>,
+    lr: LocalRead,
+) {
     let (at, n) = (lr.at, lr.len);
     for attempt in 0..2 {
         let plan = {
@@ -1397,7 +1457,7 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
             )
             .offset(r.device_offset)
             .build();
-            pending.push((q.ublk_submit_sqe(sqe), r.len as i32));
+            pending.push((q.submit(sqe), r.len as i32));
         }
         let mut io_ok = true;
         for (completion, expected) in pending {
@@ -1426,8 +1486,8 @@ async fn local_read(q: &UblkQueue<'_>, buf: &RefCell<IoBuf<u8>>, ctx: &EngineCtx
 }
 
 /// Copies `len` bytes at `at` from the tag's staging slot into the request's pages.
-fn stage_to_request(
-    q: &UblkQueue<'_>,
+fn stage_to_request<Q: QueueIo>(
+    q: &Q,
     st: &Staging,
     tag: u16,
     at: usize,
@@ -1437,7 +1497,7 @@ fn stage_to_request(
     let sqe = opcode::ReadFixed::new(types::Fd(st.fd()), at as *mut u8, len as u32, tag)
         .offset(st.offset(tag as usize, at))
         .build();
-    let done = q.ublk_submit_sqe(sqe);
+    let done = q.submit(sqe);
     async move { done.await == len as i32 }
 }
 
@@ -1448,7 +1508,7 @@ async fn engine_io_task_zc(
     st: &Staging,
     ctx: &EngineCtx,
 ) -> Result<(), UblkError> {
-    let (done_tx, done_rx) = smol::channel::unbounded();
+    let events = smol::channel::unbounded();
     let reg = sys::ublk_auto_buf_reg {
         index: tag,
         ..Default::default()
@@ -1465,101 +1525,118 @@ async fn engine_io_task_zc(
                 iod.op_flags,
             )
         };
-        let n = len as usize;
-        let res = if !ctx.observe() || flags & sys::UBLK_IO_F_NEED_REG_BUF != 0 {
-            // The kernel could not register the request's pages.
-            -libc::EIO
-        } else {
-            match op {
-                sys::UBLK_IO_OP_READ
-                    if n <= st.slot_len() && fast_read_zc(q, tag, st, ctx, offset, len).await =>
-                {
-                    len as i32
-                }
-                sys::UBLK_IO_OP_READ if n <= st.slot_len() => {
-                    ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
-                    let mut failed = false;
-                    loop {
-                        match done_rx.recv().await {
-                            Ok(Event::Local(lr)) => local_read_zc(q, tag, st, ctx, lr).await,
-                            Ok(Event::Piece { at, data }) => {
-                                st.with_slot(tag as usize, |b| {
-                                    b[at..at + data.len()].copy_from_slice(&data)
-                                });
-                                let copied = stage_to_request(q, st, tag, at, data.len()).await;
-                                let _ = ctx.observe();
-                                failed |= !copied;
-                            }
-                            Ok(Event::Done(Ok(_))) if !failed => break len as i32,
-                            Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
-                            _ => break -libc::EIO,
-                        }
-                    }
-                }
-                sys::UBLK_IO_OP_WRITE if n <= st.slot_len() => {
-                    // A large write, while the engine holds groups, goes to it as soon as its
-                    // own data is copied in, and is counted in arrivals meanwhile. The others
-                    // wait for one another, which gathers them (docs/issues/10, S3).
-                    let large = ctx.shared.holding
-                        && flaminio_store::large(ctx.shared.cluster_size, offset, len);
-                    // The write's data, from the request's pages into the staging slot.
-                    let sqe = opcode::WriteFixed::new(
-                        types::Fd(st.fd()),
-                        std::ptr::null(),
-                        n as u32,
-                        tag,
-                    )
-                    .offset(st.offset(tag as usize, 0))
-                    .build();
-                    let arrival = large.then(|| Arrival::new(&ctx.shared.arrivals));
-                    if !large {
-                        ctx.staging.set(ctx.staging.get() + 1);
-                    }
-                    let copied = q.ublk_submit_sqe(sqe).await;
-                    let healthy = ctx.observe();
-                    if !large {
-                        ctx.staging.set(ctx.staging.get() - 1);
-                    }
-                    if copied != n as i32 || !healthy {
-                        drop(arrival);
-                        // A wait for writes may have held for this one: the engine looks again.
-                        ctx.due.set(true);
-                        -libc::EIO
-                    } else {
-                        // The one copy of the write's data in user space: into an aligned
-                        // shared buffer, which the store writes as is and the replicas share.
-                        let data =
-                            st.with_slot(tag as usize, |b| AlignedBuf::shared_copy_of(&b[..n]));
-                        ctx.submit(Io::Write { offset, data }, done_tx.clone());
-                        drop(arrival);
-                        match done_rx.recv().await {
-                            Ok(Event::Done(Ok(_))) => len as i32,
-                            Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
-                            _ => -libc::EIO,
-                        }
-                    }
-                }
-                sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => match ctx.noop_permit() {
-                    Some(p) => {
-                        p.consume();
-                        0
-                    }
-                    None => -libc::EIO,
-                },
-                sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
-                _ => -libc::EOPNOTSUPP,
-            }
-        };
-        q.submit_io_commit_cmd(tag, BufDesc::AutoReg(reg), res)
-            .await?;
-        let _ = ctx.observe();
+        serve_zc_request(q, tag, st, ctx, op, offset, len, flags, &events).await?;
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_zc_request<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
+    tag: u16,
+    st: &Staging,
+    ctx: &EngineCtx<D>,
+    op: u32,
+    offset: u64,
+    len: u64,
+    flags: u32,
+    events: &(Waiter, smol::channel::Receiver<Event>),
+) -> Result<(), UblkError> {
+    let (done_tx, done_rx) = events;
+    let n = len as usize;
+    let res = if !ctx.observe() || flags & sys::UBLK_IO_F_NEED_REG_BUF != 0 {
+        // The kernel could not register the request's pages.
+        -libc::EIO
+    } else {
+        match op {
+            sys::UBLK_IO_OP_READ
+                if n <= st.slot_len() && fast_read_zc(q, tag, st, ctx, offset, len).await =>
+            {
+                len as i32
+            }
+            sys::UBLK_IO_OP_READ if n <= st.slot_len() => {
+                ctx.submit(Io::ReadDirect { offset, len }, done_tx.clone());
+                let mut failed = false;
+                loop {
+                    match done_rx.recv().await {
+                        Ok(Event::Local(lr)) => local_read_zc(q, tag, st, ctx, lr).await,
+                        Ok(Event::Piece { at, data }) => {
+                            st.with_slot(tag as usize, |b| {
+                                b[at..at + data.len()].copy_from_slice(&data)
+                            });
+                            let copied = stage_to_request(q, st, tag, at, data.len()).await;
+                            let _ = ctx.observe();
+                            failed |= !copied;
+                        }
+                        Ok(Event::Done(Ok(_))) if !failed => break len as i32,
+                        Ok(Event::Done(Err(IoError::Invalid))) => break -libc::EINVAL,
+                        _ => break -libc::EIO,
+                    }
+                }
+            }
+            sys::UBLK_IO_OP_WRITE if n <= st.slot_len() => {
+                // A large write, while the engine holds groups, goes to it as soon as its
+                // own data is copied in, and is counted in arrivals meanwhile. The others
+                // wait for one another, which gathers them (docs/issues/10, S3).
+                let large = ctx.shared.holding
+                    && flaminio_store::large(ctx.shared.cluster_size, offset, len);
+                // The write's data, from the request's pages into the staging slot.
+                let sqe =
+                    opcode::WriteFixed::new(types::Fd(st.fd()), std::ptr::null(), n as u32, tag)
+                        .offset(st.offset(tag as usize, 0))
+                        .build();
+                let arrival = large.then(|| Arrival::new(&ctx.shared.arrivals));
+                if !large {
+                    ctx.staging.set(ctx.staging.get() + 1);
+                }
+                let copied = q.submit(sqe).await;
+                let healthy = ctx.observe();
+                if !large {
+                    ctx.staging.set(ctx.staging.get() - 1);
+                }
+                if copied != n as i32 || !healthy {
+                    drop(arrival);
+                    // A wait for writes may have held for this one: the engine looks again.
+                    ctx.due.set(true);
+                    -libc::EIO
+                } else {
+                    // The one copy of the write's data in user space: into an aligned
+                    // shared buffer, which the store writes as is and the replicas share.
+                    let data = st.with_slot(tag as usize, |b| AlignedBuf::shared_copy_of(&b[..n]));
+                    ctx.submit(Io::Write { offset, data }, done_tx.clone());
+                    drop(arrival);
+                    match done_rx.recv().await {
+                        Ok(Event::Done(Ok(_))) => len as i32,
+                        Ok(Event::Done(Err(IoError::Invalid))) => -libc::EINVAL,
+                        _ => -libc::EIO,
+                    }
+                }
+            }
+            sys::UBLK_IO_OP_FLUSH | sys::UBLK_IO_OP_DISCARD => match ctx.noop_permit() {
+                Some(p) => {
+                    p.consume();
+                    0
+                }
+                None => -libc::EIO,
+            },
+            sys::UBLK_IO_OP_READ | sys::UBLK_IO_OP_WRITE => -libc::EINVAL,
+            _ => -libc::EOPNOTSUPP,
+        }
+    };
+    q.commit_zc(tag, res).await?;
+    let _ = ctx.observe();
+    Ok(())
 }
 
 /// A local read with zero copy: the device reads land in the request's pages, and the store's
 /// zero-filled ranges (never written) are copied in from the staging slot. The checksums are
 /// not verified: the data never passes through this process.
-async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCtx, lr: LocalRead) {
+async fn local_read_zc<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
+    tag: u16,
+    st: &Staging,
+    ctx: &EngineCtx<D>,
+    lr: LocalRead,
+) {
     let (at, n) = (lr.at, lr.len);
     // The plan zero-fills the never-written ranges of the slot; they are copied in below.
     let plan = st.with_slot(tag as usize, |b| {
@@ -1579,11 +1656,11 @@ async fn local_read_zc(q: &UblkQueue<'_>, tag: u16, st: &Staging, ctx: &EngineCt
 /// `at`, and the plan's zero-filled ranges are copied in from the tag's staging slot. A device
 /// read the disk refuses with EINVAL, because the request's pages are not aligned for direct
 /// I/O on it, is done again through the staging slot (docs/issues/5, S1).
-async fn zc_read_plan(
-    q: &UblkQueue<'_>,
+async fn zc_read_plan<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
     tag: u16,
     st: &Staging,
-    ctx: &EngineCtx,
+    ctx: &EngineCtx<D>,
     plan: &flaminio_store::ReadPlan,
     at: usize,
     n: usize,
@@ -1602,7 +1679,7 @@ async fn zc_read_plan(
             opcode::ReadFixed::new(types::Fd(ctx.shared.fd), to as *mut u8, r.len as u32, tag)
                 .offset(r.device_offset)
                 .build();
-        pending.push((q.ublk_submit_sqe(sqe), to, r.len, r.device_offset));
+        pending.push((q.submit(sqe), to, r.len, r.device_offset));
         pos = r.buf_offset + r.len;
     }
     if pos < n {
@@ -1653,11 +1730,11 @@ async fn zc_read_plan(
 /// A device read the disk refused into the request's pages: from the disk into the tag's
 /// staging slot, which is page-aligned, then from the slot into the request's pages at the same
 /// place. True if both completed.
-async fn stage_device_read(
-    q: &UblkQueue<'_>,
+async fn stage_device_read<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
     st: &Staging,
     tag: u16,
-    ctx: &EngineCtx,
+    ctx: &EngineCtx<D>,
     to: usize,
     len: usize,
     device_offset: u64,
@@ -1671,7 +1748,7 @@ async fn stage_device_read(
     )
     .offset(device_offset)
     .build();
-    let got = q.ublk_submit_sqe(sqe).await;
+    let got = q.submit(sqe).await;
     let healthy = ctx.observe();
     if got != len as i32 || !healthy {
         eprintln!("flaminio-io: local read: device read returned {got}, not {len} (staged)");
@@ -1687,11 +1764,11 @@ async fn stage_device_read(
 }
 
 /// The fast path, with zero copy. True if the read was served; false to take the slow path.
-async fn fast_read_zc(
-    q: &UblkQueue<'_>,
+async fn fast_read_zc<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
     tag: u16,
     st: &Staging,
-    ctx: &EngineCtx,
+    ctx: &EngineCtx<D>,
     offset: u64,
     len: u64,
 ) -> bool {
@@ -1726,10 +1803,10 @@ async fn fast_read_zc(
 
 /// The fast path, into the tag's buffer: the pieces are planned, read and verified here,
 /// without the engine's queue. True if the read was served; false to take the slow path.
-async fn fast_read_copy(
-    q: &UblkQueue<'_>,
+async fn fast_read_copy<Q: QueueIo, D: BlockDevice>(
+    q: &Q,
     buf: &RefCell<IoBuf<u8>>,
-    ctx: &EngineCtx,
+    ctx: &EngineCtx<D>,
     offset: u64,
     len: u64,
 ) -> bool {
@@ -1765,7 +1842,7 @@ async fn fast_read_copy(
                 )
                 .offset(r.device_offset)
                 .build();
-                pending.push((q.ublk_submit_sqe(sqe), r.len as i32));
+                pending.push((q.submit(sqe), r.len as i32));
             }
         }
     }
@@ -1869,3 +1946,454 @@ mod tests {
         assert_eq!(n.load(Ordering::Relaxed), 0);
     }
 }
+
+#[cfg(test)]
+mod clock_acceptance {
+    use super::*;
+    use crate::test_support::{Clock, Fixture};
+    use flaminio_store::MemDevice;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+    #[derive(Default)]
+    struct Queue {
+        pending: RefCell<Vec<smol::channel::Sender<i32>>>,
+        offered: RefCell<Vec<i32>>,
+        delivered: RefCell<Vec<i32>>,
+        hold_commit: Cell<bool>,
+        commit: RefCell<Option<smol::channel::Sender<()>>>,
+    }
+    impl QueueIo for Queue {
+        fn submit(&self, _: io_uring::squeue::Entry) -> impl Future<Output = i32> {
+            let (tx, rx) = smol::channel::bounded(1);
+            self.pending.borrow_mut().push(tx);
+            async move { rx.recv().await.unwrap() }
+        }
+        async fn commit_copy(&self, _: u16, _: &[u8], result: i32) -> Result<i32, UblkError> {
+            self.commit_zc(0, result).await
+        }
+        async fn commit_zc(&self, _: u16, result: i32) -> Result<i32, UblkError> {
+            self.offered.borrow_mut().push(result);
+            if self.hold_commit.get() {
+                let (tx, rx) = smol::channel::bounded(1);
+                *self.commit.borrow_mut() = Some(tx);
+                rx.recv().await.unwrap();
+            }
+            self.delivered.borrow_mut().push(result);
+            Ok(0)
+        }
+    }
+    impl Queue {
+        fn complete(&self, result: i32) {
+            for tx in self.pending.borrow_mut().drain(..) {
+                tx.try_send(result).unwrap();
+            }
+        }
+        fn deliver(&self) {
+            self.commit
+                .borrow_mut()
+                .take()
+                .unwrap()
+                .try_send(())
+                .unwrap();
+        }
+    }
+    fn poll<F: Future + ?Sized>(f: Pin<&mut F>) -> Poll<F::Output> {
+        f.poll(&mut Context::from_waker(Waker::noop()))
+    }
+    fn context() -> (EngineCtx<MemDevice>, Arc<Clock>) {
+        let f = Fixture::new();
+        let domain = f.engine.clock_domain().clone();
+        let observer = domain.observer();
+        let arrivals = Arc::new(AtomicUsize::new(0));
+        let shared = Arc::new(Shared {
+            engine: Mutex::new(f.engine),
+            inputs: Mutex::new(f.rx),
+            sender: f.tx,
+            fd: -1,
+            device: "memory".into(),
+            staged: AtomicBool::new(false),
+            live: Arc::new(AtomicBool::new(true)),
+            waiters: Mutex::new(HashMap::new()),
+            next_op: AtomicU64::new(1000),
+            volume: "v".into(),
+            dev_id: -1,
+            verify: true,
+            poll: Duration::ZERO,
+            defer_taskrun: false,
+            wakes: vec![Arc::new(EventFd::new().unwrap())],
+            holding: false,
+            cluster_size: 65536,
+            arrivals,
+        });
+        (
+            EngineCtx {
+                observer: RefCell::new(observer),
+                shared,
+                qid: 0,
+                due: Cell::new(false),
+                staging: Cell::new(0),
+                gather: std::cell::OnceCell::new(),
+            },
+            f.clock,
+        )
+    }
+    fn drive<F: Future<Output = Result<(), UblkError>>>(
+        mut f: Pin<&mut F>,
+        ctx: &EngineCtx<MemDevice>,
+    ) {
+        for _ in 0..128 {
+            ctx.pump();
+            if let Poll::Ready(r) = poll(f.as_mut()) {
+                r.unwrap();
+                return;
+            }
+        }
+        panic!("request made no progress");
+    }
+    #[test]
+    fn copied_fast_read_retains_work_until_cqe_then_explicit_eio() {
+        let (ctx, clock) = context();
+        let q = Queue::default();
+        let bufs = [RefCell::new(IoBuf::<u8>::new(4096))];
+        bufs[0].borrow_mut().fill(0x55);
+        let events = smol::channel::unbounded();
+        let mut future = Box::pin(serve_copy_request(
+            &q,
+            0,
+            &bufs,
+            &ctx,
+            sys::UBLK_IO_OP_READ,
+            0,
+            4096,
+            &events,
+        ));
+        assert!(poll(future.as_mut()).is_pending());
+        assert_eq!(q.pending.borrow().len(), 1);
+        assert!(q.offered.borrow().is_empty());
+        clock.failed.store(true, Ordering::SeqCst);
+        ctx.pump();
+        assert!(
+            poll(future.as_mut()).is_pending(),
+            "fault must not drop a submitted device read"
+        );
+        assert!(q.offered.borrow().is_empty());
+        q.complete(4096);
+        drive(future.as_mut(), &ctx);
+        assert_eq!(*q.delivered.borrow(), [-libc::EIO]);
+        assert!(bufs[0].borrow().iter().all(|&b| b == 0x55));
+    }
+    #[test]
+    fn registered_fast_read_retains_plan_until_cqe_then_explicit_eio() {
+        let (ctx, clock) = context();
+        let q = Queue::default();
+        let st = Staging::new(1, 4096).unwrap();
+        let events = smol::channel::unbounded();
+        let mut future = Box::pin(serve_zc_request(
+            &q,
+            0,
+            &st,
+            &ctx,
+            sys::UBLK_IO_OP_READ,
+            0,
+            4096,
+            0,
+            &events,
+        ));
+        assert!(poll(future.as_mut()).is_pending());
+        assert_eq!(q.pending.borrow().len(), 1);
+        clock.failed.store(true, Ordering::SeqCst);
+        ctx.pump();
+        assert!(poll(future.as_mut()).is_pending());
+        assert!(q.offered.borrow().is_empty());
+        q.complete(4096);
+        drive(future.as_mut(), &ctx);
+        assert_eq!(*q.delivered.borrow(), [-libc::EIO]);
+    }
+    #[test]
+    fn final_permit_can_deliver_after_fault_but_next_request_cannot_succeed() {
+        let (ctx, clock) = context();
+        let q = Queue::default();
+        q.hold_commit.set(true);
+        let bufs = [RefCell::new(IoBuf::<u8>::new(4096))];
+        bufs[0].borrow_mut().fill(0x55);
+        let events = smol::channel::unbounded();
+        let mut future = Box::pin(serve_copy_request(
+            &q,
+            0,
+            &bufs,
+            &ctx,
+            sys::UBLK_IO_OP_READ,
+            0,
+            4096,
+            &events,
+        ));
+        assert!(poll(future.as_mut()).is_pending());
+        q.complete(4096);
+        assert!(poll(future.as_mut()).is_pending());
+        assert_eq!(*q.offered.borrow(), [4096]);
+        assert!(q.delivered.borrow().is_empty());
+        clock.failed.store(true, Ordering::SeqCst);
+        ctx.pump();
+        q.deliver();
+        drive(future.as_mut(), &ctx);
+        drop(future);
+        assert_eq!(*q.delivered.borrow(), [4096]);
+        q.hold_commit.set(false);
+        let mut next = Box::pin(serve_copy_request(
+            &q,
+            0,
+            &bufs,
+            &ctx,
+            sys::UBLK_IO_OP_READ,
+            0,
+            4096,
+            &events,
+        ));
+        drive(next.as_mut(), &ctx);
+        assert_eq!(*q.delivered.borrow(), [4096, -libc::EIO]);
+    }
+    #[test]
+    fn staged_write_fault_at_cqe_never_reaches_replication() {
+        let (ctx, clock) = context();
+        let q = Queue::default();
+        let st = Staging::new(1, 4096).unwrap();
+        let events = smol::channel::unbounded();
+        let before = ctx.engine().service().store().stats().journal_head;
+        let mut future = Box::pin(serve_zc_request(
+            &q,
+            0,
+            &st,
+            &ctx,
+            sys::UBLK_IO_OP_WRITE,
+            0,
+            4096,
+            0,
+            &events,
+        ));
+        assert!(poll(future.as_mut()).is_pending());
+        assert_eq!(ctx.staging.get(), 1);
+        clock.failed.store(true, Ordering::SeqCst);
+        q.complete(4096);
+        drive(future.as_mut(), &ctx);
+        assert_eq!(ctx.staging.get(), 0);
+        assert_eq!(*q.delivered.borrow(), [-libc::EIO]);
+        assert_eq!(before, ctx.engine().service().store().stats().journal_head);
+    }
+    #[test]
+    fn slow_local_copy_and_registered_reads_wait_for_actual_device_completion() {
+        for registered in [false, true] {
+            let (ctx, clock) = context();
+            let q = Queue::default();
+            let bufs = [RefCell::new(IoBuf::<u8>::new(4096))];
+            bufs[0].borrow_mut().fill(0x55);
+            let st = Staging::new(1, 4096).unwrap();
+            let (tx, rx) = smol::channel::unbounded();
+            ctx.submit(
+                Io::ReadDirect {
+                    offset: 0,
+                    len: 4096,
+                },
+                tx,
+            );
+            ctx.pump();
+            let lr = match rx.try_recv().unwrap() {
+                Event::Local(lr) => lr,
+                _ => panic!("slow local read not dispatched"),
+            };
+            let mut work: Pin<Box<dyn Future<Output = ()>>> = if registered {
+                Box::pin(local_read_zc(&q, 0, &st, &ctx, lr))
+            } else {
+                Box::pin(local_read(&q, &bufs[0], &ctx, lr))
+            };
+            assert!(poll(work.as_mut()).is_pending());
+            assert_eq!(q.pending.borrow().len(), 1);
+            clock.failed.store(true, Ordering::SeqCst);
+            ctx.pump();
+            assert!(poll(work.as_mut()).is_pending());
+            q.complete(4096);
+            assert!(poll(work.as_mut()).is_ready());
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                Event::Done(Err(IoError::ClockQuarantined))
+            ));
+        }
+    }
+    #[test]
+    fn registered_zero_fill_and_alignment_fallback_cqes_cannot_authorize_after_fault() {
+        for zero_fill in [false, true] {
+            let (ctx, clock) = context();
+            let q = Queue::default();
+            let st = Staging::new(1, 4096).unwrap();
+            let events = smol::channel::unbounded();
+            let mut work = Box::pin(serve_zc_request(
+                &q,
+                0,
+                &st,
+                &ctx,
+                sys::UBLK_IO_OP_READ,
+                if zero_fill { 4096 } else { 0 },
+                4096,
+                0,
+                &events,
+            ));
+            assert!(poll(work.as_mut()).is_pending());
+            if !zero_fill {
+                q.complete(-libc::EINVAL);
+                assert!(poll(work.as_mut()).is_pending());
+                assert_eq!(
+                    q.pending.borrow().len(),
+                    1,
+                    "fallback read must be in flight"
+                );
+            }
+            clock.failed.store(true, Ordering::SeqCst);
+            ctx.pump();
+            assert!(poll(work.as_mut()).is_pending());
+            assert!(q.offered.borrow().is_empty());
+            q.complete(4096);
+            drive(work.as_mut(), &ctx);
+            assert_eq!(*q.delivered.borrow(), [-libc::EIO]);
+        }
+    }
+    #[test]
+    fn pipelined_read_cqes_are_all_drained_after_the_first_fault() {
+        let (ctx, clock) = context();
+        {
+            let mut e = ctx.engine();
+            e.handle(Input::Io {
+                volume: "v".into(),
+                op: 101,
+                io: Io::Write {
+                    offset: 1 << 20,
+                    data: vec![0x55; 4096].into(),
+                },
+            });
+        }
+        ctx.pump();
+        let q = Queue::default();
+        let bufs = [RefCell::new(IoBuf::<u8>::new((1 << 20) + 4096))];
+        let events = smol::channel::unbounded();
+        let mut work = Box::pin(serve_copy_request(
+            &q,
+            0,
+            &bufs,
+            &ctx,
+            sys::UBLK_IO_OP_READ,
+            0,
+            (1 << 20) + 4096,
+            &events,
+        ));
+        assert!(poll(work.as_mut()).is_pending());
+        assert_eq!(q.pending.borrow().len(), 2);
+        clock.failed.store(true, Ordering::SeqCst);
+        q.pending.borrow_mut().remove(0).try_send(4096).unwrap();
+        assert!(poll(work.as_mut()).is_pending());
+        assert_eq!(q.pending.borrow().len(), 1);
+        assert!(q.offered.borrow().is_empty());
+        q.complete(4096);
+        drive(work.as_mut(), &ctx);
+        assert_eq!(*q.delivered.borrow(), [-libc::EIO]);
+    }
+    #[test]
+    fn fast_completion_revalidates_exact_lease_boundary_without_a_ticker() {
+        for us in [4_999_999, 5_000_000, 5_000_001] {
+            let mut f = Fixture::new();
+            let fast = f.engine.try_fast_read("v", 0, 4096).unwrap();
+            f.clock.ns.store(us * 1000, Ordering::SeqCst);
+            let permit = f.engine.finish_fast_read("v", fast, true);
+            assert_eq!(
+                permit.is_some(),
+                us < 5_000_000,
+                "send-time lease boundary {us}"
+            );
+        }
+    }
+    #[test]
+    fn quarantine_preserves_real_store_pins_until_the_planned_read_finishes() {
+        let mut f = Fixture::new();
+        let fast = f.engine.try_fast_read("v", 0, 4096).unwrap();
+        let mut bytes = vec![0; 4096];
+        let plan = f.engine.plan_fast_read(&fast, 0, &mut bytes).unwrap();
+        assert!(!plan.reads().is_empty());
+        f.clock.failed.store(true, Ordering::SeqCst);
+        f.engine.flush();
+        // Move the closed engine's memory store into the test and force reclamation
+        // pressure directly; this grants no client/session admission after quarantine.
+        let mut store = f.engine.into_service().into_store();
+        let key = store
+            .chunks()
+            .into_iter()
+            .find(|c| c.key.index == 0)
+            .unwrap()
+            .key;
+        store.write(key, 0, &vec![0x99; 65536], 999, 5).unwrap();
+        store.checkpoint().unwrap();
+        assert!(
+            store.stats().data_quarantined > 0,
+            "quarantine released an outstanding read pin"
+        );
+        for read in plan.reads() {
+            store
+                .device()
+                .read_at(
+                    read.device_offset,
+                    &mut bytes[read.buf_offset..read.buf_offset + read.len],
+                )
+                .unwrap();
+        }
+        assert_eq!(bytes, vec![0x55; 4096]);
+        assert!(plan.verify(&bytes).is_ok());
+        store.finish_read(plan);
+        store.checkpoint().unwrap();
+        assert_eq!(
+            store.stats().data_quarantined,
+            0,
+            "actual completion must release pin ownership"
+        );
+    }
+    #[test]
+    fn engine_entry_rejects_validly_signed_wrong_identity_nonce_and_stale_metadata() {
+        use crate::test_support::{NONCE, credentials, token_key};
+        use flaminio_net::handoff::Purpose;
+        for (volume, node, nonce) in [
+            ("other", "fl-a", NONCE),
+            ("v", "fl-b", NONCE),
+            ("v", "fl-a", [84; 32]),
+            ("v", "fl-a", NONCE),
+        ] {
+            let mut f = Fixture::new();
+            f.engine.handle(Input::Detach { volume: "v".into() });
+            f.drain();
+            let before = f.engine.service().store().chunks();
+            // Every envelope and nested capability has a valid signature/digest. Epoch6
+            // is greater than this process's last start but mismatches current metadata5.
+            let (token, handoff) = credentials(volume, node, 6, 1, &nonce);
+            let proof = token_key()
+                .verify_handoff(&token, &handoff, &nonce, Purpose::Normal)
+                .unwrap();
+            f.engine.handle(Input::Attach {
+                volume: "v".into(),
+                proof,
+            });
+            let outputs = f.drain();
+            assert!(
+                outputs
+                    .iter()
+                    .any(|o| matches!(o, Output::AttachFailed { .. }))
+            );
+            assert!(!outputs.iter().any(|o| matches!(o, Output::Attached { .. })));
+            let after = f.engine.service().store().chunks();
+            assert_eq!(after.len(), before.len());
+            for (a, b) in after.iter().zip(before.iter()) {
+                assert_eq!(
+                    a.fenced_epoch, b.fenced_epoch,
+                    "rejected proof reached Hello/fence effects"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_handoff_tests;

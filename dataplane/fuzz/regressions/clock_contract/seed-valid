@@ -1,0 +1,1 @@
+{"version": 1, "profile": "physical-boottime-v1", "node": "fl-a", "host_kind": "physical", "clocksource": "tsc", "lease_us": 5000000, "drift_ppm": 100000, "rate_bound_attested": true, "observation_error_ns": 1000, "no_live_rollback": true}

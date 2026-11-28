@@ -41,3 +41,6 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod test_support;

@@ -153,11 +153,50 @@ native end-to-end admission claim follows from symbolic models.
 
 ## Tests
 
-Pending implementation and independent S1–S8 acceptance. Required final checks:
-`make lint test race hygiene contracts sim`, `make sanitize QUICK=1` (now including IO/frontend)
-and `make miri` for the expanded syscall/lifetime boundary. Miri's aligned-helper scope cannot
-validate Linux clock/filesystem syscalls; native tests and sanitizers must cover those paths.
-No hardware qualification is claimed by local or model tests.
+Independent acceptance passed on the frozen post-U5 source plus its approved private seams.
+No production semantic defect was reproduced. The complete required project suite passed on the frozen source; review/conformance remain
+later gates.
+
+| Rules | Evidence |
+|---|---|
+| S1, S6 | Strict schema/profile/file/provenance fixtures, bounded native FIFO refusal, real CLI pre-effect refusal, status/quarantine checks |
+| S2, S3 | Persistent observers, concurrent cancellation, sticky faults, overflow, exact L−1/L/L+1 completion checks |
+| S4 | Actual copy/zero-copy/slow/staged completion paths, multiple CQEs, real store pins, held/pipelined writes, permitted Piece+Done retention |
+| S5 | Real mTLS/CAS/crypto/control/Engine replay: 15 schedules, 73 actions; reconciled I/O, CLI, busy-proof retirement, roles, outage and restart refusals |
+| S7 | 100 simulator seeds and all 186 controls passed; seven fuzz targets completed cleanly |
+| S8 | CSI retained-proof retries/cache clearing, canonical encoding, script preflight ordering and legacy refusal |
+
+Changed Rust/Go packages, ordinary and fuzz Clippy, locked graphs, regression replay, formatting,
+shell/script checks, full ASan/TSan QUICK1 and final IO/node sanitizer deltas pass. Seven fuzz
+targets ran for ten seconds each; thirteen new regression seeds cover the handoff/profile
+boundaries. Miri's two aligned-buffer tests pass; this does not validate Linux syscalls.
+Ordinary checks use the project-pinned Rust 1.99.0 from the dataplane working directory;
+nightly is selected explicitly for fuzz/Miri/sanitizers. No user-global toolchain was changed.
+
+The native bridge tests run actual mTLS Go Attach CAS/FLCT/FLCH and Rust control/Engine with
+injected clocks and fake completion/publication sinks. They assert all 73 parsed actions,
+header/epoch/owner/mutation outcomes, actual metactl, retained newer-proof busy/deposition retry,
+reconciled read/write and steady I/O during real metadata outage. Incoming/outgoing idle/TLS/
+pre-Hello/writer cancellation and queued/fallback/late metadata are also checked.
+
+Approved private evidence/FileFacts, backend/queue/completion and live-lifetime interfaces are
+shared with production; production constructors still use real probes and UringDevice. No
+profile bypass, raw proof constructor or cached-time authorization was introduced. The fuzz
+lock adds 108 existing main registry records, aligns equivalent 1.0.3→1.0.2 and itoa 1.0.19→1.0.18
+with existing main pins, and changes zero checksums. No production dependency upgrade.
+
+Logs: `/tmp/83-accept-{native,frontend,held,packages,go-packages,sim,fuzz,miri,sanitize,asan-delta,tsan-delta,clippy-stable,fuzz-clippy,fuzz-regressions,profile,scripts}.log`.
+Physical clock qualification and real ublk/kernel execution remain outside the approved fixture
+scope. No lab, host suspend, VM pause or shared-disk rollback occurred.
+
+Required project checks passed: `make lint test race`, followed by `make hygiene contracts sim`
+after the existing fuzz-policy alignment. All three metadata TLS interoperability checks and
+two native handoff checks pass; 20,000 simulation seeds and all 186 release controls pass.
+Logs: `/tmp/flaminio-83-validation.log` and `/tmp/flaminio-83-validation-final.log`.
+`make clock-interop` is
+included in contracts/check, and its script harness is included in lint. Full quick sanitizers
+include IO/frontend and Miri's limitation is recorded above. No hardware qualification is
+claimed by local or model results.
 
 ## Conformance
 

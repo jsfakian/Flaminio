@@ -1826,4 +1826,28 @@ mod tests {
         let blocks: Vec<_> = (0..4).map(|b| r.block(1, 0, b).unwrap()).collect();
         assert_eq!(blocks, vec![1, 20, 21, 4]);
     }
+    #[test]
+    fn clock_invalidation_revokes_sessions_without_erasing_precise_or_cover_evidence() {
+        for budget in [4, 8] {
+            let mut h = UncertaintyHarness::new(budget, &[0], 16);
+            for seq in 1..=4 {
+                h.write(0, Extent::new((seq * 2) as Block, 1), seq, None);
+            }
+            let report = h.core.report(1);
+            let stats = h.core.uncertainty_stats(1);
+            let fenced = h.core.vols[&1].fenced;
+            assert!(!report[0].1.is_empty());
+            h.core.invalidate_clock();
+            assert!(h.core.vols[&1].session.is_none());
+            assert_eq!(h.core.vols[&1].fenced, fenced);
+            assert_eq!(h.core.report(1), report);
+            assert_eq!(h.core.uncertainty_stats(1), stats);
+            h.hello(2);
+            assert_eq!(
+                h.core.report(1),
+                report,
+                "a new session/fence is not write-completion evidence"
+            );
+        }
+    }
 }

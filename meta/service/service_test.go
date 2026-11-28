@@ -2873,3 +2873,57 @@ func TestCheckCreateVolumeNestedTypeCorruptionAfterInitialRead(t *testing.T) {
 		}
 	})
 }
+
+func TestAttachProcessHandoffValidationAndLostCommitReply(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{83}, 32))
+	pub := key.Public().(ed25519.PublicKey)
+	// Invalid challenges must fail before even the first metadata read.
+	for _, nonce := range [][]byte{{1}, make([]byte, 31), make([]byte, 32), make([]byte, 33)} {
+		s := New(nil, Options{TokenKey: key})
+		out, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", TargetNonce: nonce})
+		if status.Code(err) != codes.InvalidArgument || out != nil {
+			t.Fatalf("nonce%d: %v %+v", len(nonce), err, out)
+		}
+	}
+	nonce := bytes.Repeat([]byte{1}, 32)
+	s := New(nil, Options{TokenKey: key})
+	if out, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", TargetNonce: nonce, UnlessTarget: true}); status.Code(err) != codes.InvalidArgument || out != nil {
+		t.Fatalf("read-only mint: %v %+v", err, out)
+	}
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, initial := coherentFixture(t, backend, Options{TokenKey: key})
+		// Simulate loss of the transaction reply after the real backend committed it.
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			store.txnRev = nil
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if err != nil || !ok {
+				t.Fatalf("expected first real CAS: %v %v", ok, err)
+			}
+			return rev, false, status.Error(codes.Unavailable, "lost commit reply")
+		}
+		out, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", TargetNonce: nonce})
+		if out != nil || status.Code(err) != codes.Unavailable {
+			t.Fatalf("lost reply returned authority: %+v %v", out, err)
+		}
+		if got := header(t, backend, "v").Epoch; got != initial.Epoch+1 {
+			t.Fatalf("lost commit epoch%d", got)
+		}
+		out, err = s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", OnlyIfTarget: true, TargetNonce: nonce})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims, err := captoken.VerifyHandoff(pub, captoken.HandoffNormal, nonce, out.Token, out.TargetHandoff)
+		if err != nil || claims.Epoch != initial.Epoch+2 || claims.Epoch != out.Volume.Epoch || claims.FirstEpoch != header(t, backend, "v").FirstEpoch {
+			t.Fatalf("retry did not mint after a distinct committed advance: %+v %v", claims, err)
+		}
+		before := header(t, backend, "v")
+		changed := bytes.Repeat([]byte{2}, 32)
+		_, err = s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "b", OnlyIfTarget: true, TargetNonce: changed})
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatal(err)
+		}
+		if after := header(t, backend, "v"); after.Epoch != before.Epoch || after.Target != before.Target {
+			t.Fatal("changed-owner refusal mutated metadata")
+		}
+	})
+}

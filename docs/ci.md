@@ -32,7 +32,9 @@ What the targets check:
 - **`contracts`:** the generated protobuf code and metadata transition vectors match their
   sources; Go and Rust check the same geometry admission vectors; the fuzz crate's lockfile
   is current; the Rust metadata client works against the Go service over mutual TLS, including
-  admitted maximum future-move views under the normal 4 MiB receive limit.
+  admitted maximum future-move views under the normal 4 MiB receive limit. `clock-interop`
+  replays signed process-handoff fixtures through real mTLS metadata CAS/crypto and the Rust
+  control/engine path with injected clocks and completion sinks; it does not qualify hardware.
 - **`sim`:** the replication-protocol simulator, 20 000 random runs, then every injected bug
   must be caught.
 - **`sanitize`** (nightly toolchain): the tests of the crates with threads, io_uring or unsafe code

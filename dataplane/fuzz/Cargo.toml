@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = { version = "0.4.10", optional = true }
+flaminio-io = { path = "../crates/flaminio-io" }
 flaminio-format = { path = "../crates/flaminio-format" }
 flaminio-net = { path = "../crates/flaminio-net", features = ["unverified"] }
 # Signs the capability_token harness's tokens, so its inputs get past the signature check.
@@ -73,3 +74,19 @@ required-features = ["fuzzing"]
 
 [dev-dependencies]
 toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
+
+[[bin]]
+name = "target_handoff"
+path = "fuzz_targets/target_handoff.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzzing"]
+
+[[bin]]
+name = "clock_contract"
+path = "fuzz_targets/clock_contract.rs"
+test = false
+doc = false
+bench = false
+required-features = ["fuzzing"]

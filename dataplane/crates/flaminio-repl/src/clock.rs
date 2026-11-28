@@ -257,3 +257,91 @@ impl ClockAdmissionState {
         })
     }
 }
+
+#[cfg(test)]
+mod acceptance_tests {
+    use super::*;
+    fn r(m1: u128, b: u128, m2: u128) -> ClockReading {
+        ClockReading {
+            monotonic_before_ns: m1,
+            boottime_ns: b,
+            monotonic_after_ns: m2,
+        }
+    }
+    fn guard() -> ClockGuard {
+        ClockGuard::new(
+            r(100, 200, 110),
+            ClockQualification::new(1, 1000, 1000).unwrap(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn interval_pause_short_suspend_and_detection_boundary() {
+        assert_eq!(
+            r(10, 30, 20).offset_interval().unwrap(),
+            OffsetInterval {
+                lower_ns: 10,
+                upper_ns: 20
+            }
+        );
+        let mut g = guard();
+        assert_eq!(g.observe(r(10_000_100, 10_000_200, 10_000_110)), Ok(10000));
+        // A wide sample is inconclusive, not a claim that suspend was absent.
+        let mut g = guard();
+        assert!(g.observe(r(110, 50_000_000, 100_000_000)).is_ok());
+        for suspend in [1, 999, 1000, 999_999, 1_000_000] {
+            let mut g = guard();
+            assert!(g.observe(r(110, 210 + suspend, 120)).is_ok(), "{suspend}");
+        }
+        let mut g = guard();
+        assert_eq!(
+            g.observe(r(110, 2_000_210, 120)),
+            Err(ClockFault::SuspendOffset)
+        );
+        assert_eq!(g.observe(r(200, 300, 210)), Err(ClockFault::SuspendOffset));
+    }
+    #[test]
+    fn checked_conversion_and_every_fault_are_sticky() {
+        assert_eq!(
+            checked_clock_ns(i64::MAX, 999_999_999),
+            Ok(i64::MAX as u128 * 1_000_000_000 + 999_999_999)
+        );
+        for (s, n) in [(-1, 0), (0, -1), (0, 1_000_000_000)] {
+            assert_eq!(checked_clock_ns(s, n), Err(ClockFault::SampleFailed));
+        }
+        for (reading, fault) in [
+            (r(100, 210, 120), ClockFault::Backwards),
+            (r(120, 199, 130), ClockFault::Backwards),
+            (r(120, u128::MAX, 130), ClockFault::Overflow),
+            (
+                r(120, (u64::MAX as u128 + 1) * 1000 + 200, 130),
+                ClockFault::SuspendOffset,
+            ),
+        ] {
+            let mut g = guard();
+            assert_eq!(g.observe(reading), Err(fault));
+            assert_eq!(g.observe(r(130, 230, 140)), Err(fault));
+        }
+        for fault in [
+            ClockFault::Profile,
+            ClockFault::SampleFailed,
+            ClockFault::Backwards,
+            ClockFault::SuspendOffset,
+            ClockFault::Overflow,
+        ] {
+            let closed = ClockAdmissionState::OPEN.quarantine(fault);
+            assert_eq!(closed.generation(), 1);
+            assert!(!closed.admits(0));
+            assert!(!closed.admits(1));
+            assert_eq!(closed.reason(), Some(fault));
+            assert_eq!(closed.quarantine(ClockFault::Profile), closed);
+        }
+        for b in [0, 1001] {
+            assert_eq!(
+                ClockQualification::new(b, 1, 1000),
+                Err(ClockFault::Profile)
+            );
+        }
+        assert!(ClockQualification::new(1, 1, 1001).is_err());
+    }
+}
