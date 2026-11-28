@@ -1,35 +1,16 @@
 #!/usr/bin/env bash
 # The ublk frontend in a lab VM (MVP step 4). Usage: ublk.sh up|down|status|smoke|fio [RUNTIME]
-#   up      start flaminio-io as the systemd service "flaminio-io" (FORMAT=1 reformats the disk)
+#   up      refuses the unsupported MVP serve path before preparation
 #   down    stop it and remove the ublk device
 #   smoke   ext4 on the device, write files, restart the daemon, verify every file
 #   fio     read benchmark on the device (fills the first 32 GiB with writes first, every time)
 bin="$HOME/flaminio/dataplane/target/release/flaminio-io"
 id=0
 dev=/dev/ublkb$id
-size=${VOLUME_SIZE:-64G}
 mnt=/mnt/flaminio
 
 up() {
-    [[ -x $bin ]] || die "flaminio-io not built; run make deploy"
-    if systemctl is-active --quiet flaminio-io; then
-        log "flaminio-io already running"
-        return
-    fi
-    local format=()
-    [[ ${FORMAT:-0} == 1 ]] && format=(--format --force)
-    sudo systemctl reset-failed flaminio-io 2>/dev/null || true
-    local replica=()
-    [[ -n ${REPLICA:-} ]] && replica=(--replica "$REPLICA")
-    sudo systemd-run --quiet --unit=flaminio-io --property=Restart=no \
-        "$bin" serve --device "$(data_disk)" --size "$size" --id "$id" "${format[@]}" "${replica[@]}"
-    for _ in $(seq 1 60); do
-        [[ -b $dev ]] && break
-        systemctl is-active --quiet flaminio-io || { sudo journalctl -u flaminio-io --no-pager | tail -20 >&2; die "flaminio-io exited"; }
-        sleep 1
-    done
-    [[ -b $dev ]] || die "$dev did not appear"
-    log "$(sudo journalctl -u flaminio-io --no-pager -o cat | grep -E 'volume ready|serving' | tail -2 | tr '\n' ' ')"
+    die "legacy MVP serve is unsupported; use node.sh up with a qualified physical clock contract, then authorized attach"
 }
 
 down() {

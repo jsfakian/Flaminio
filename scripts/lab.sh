@@ -676,7 +676,7 @@ meta_endpoints() {
 
 node_env() {
     local vm=$1
-    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0} GATHER_US=${GATHER_US:-} COMMIT_TARGET_MIB=${COMMIT_TARGET_MIB:-} FLUSH_COALESCE=${FLUSH_COALESCE:-} SYNC_COMMITS=${SYNC_COMMITS:-0} PIPELINED_COMMITS=${PIPELINED_COMMITS:-0} FIRST_FIT=${FIRST_FIT:-0} DEFER_TASKRUN=${DEFER_TASKRUN:-0}"
+    echo "NODE=$vm LISTEN=$(vmvar "$vm" WG):$NODE_PORT META=$(meta_endpoints) TRUST_DOMAIN=$TRUST_DOMAIN FORMAT=${FORMAT:-0} ZERO_COPY=${ZERO_COPY:-0} NO_VERIFY=${NO_VERIFY:-0} QUEUES=${QUEUES:-1} POLL_US=${POLL_US:-0} GATHER_US=${GATHER_US:-} COMMIT_TARGET_MIB=${COMMIT_TARGET_MIB:-} FLUSH_COALESCE=${FLUSH_COALESCE:-} SYNC_COMMITS=${SYNC_COMMITS:-0} PIPELINED_COMMITS=${PIPELINED_COMMITS:-0} FIRST_FIT=${FIRST_FIT:-0} DEFER_TASKRUN=${DEFER_TASKRUN:-0} CLOCK_CONTRACT=$(printf %q "${CLOCK_CONTRACT:-/etc/flaminio/clock-contract.json}")"
 }
 
 # node up|down|status [VM selector, default all]: the data VMs' nodes, replicas only.
@@ -697,14 +697,17 @@ cmd_node() {
 # vol create|attach VM|detach VM|show|delete: the test volume, as the lab administrator. delete
 # deletes its replicas too, and waits for its tombstone to go (delete_volume).
 cmd_vol() {
-    local out vm tok rc
+    local out vm rc
     case "${1:-show}" in
         create)
             out=$(metactl "$VM_A" "$VM_A" create "$VOL" "$VOL_SIZE" 2 1 "$VOL_CHUNK")
             log "created $VOL: $(jq -r '[.volume.chunks[].replicas | join("+")] | group_by(.) | map("\(length)×\(.[0])") | join(", ")' <<<"$out")"
             ;;
         attach)
+            valid_id "$VOL" || die "invalid volume id"
             vm=$(vms_of "${2:-a}")
+            valid_id "$vm" || die "select one target node"
+            run_on_vm "$vm" "$SCRIPTS/guest/node.sh" challenge >/dev/null
             # The volume moves: the other nodes let go of it first (best effort: a node that
             # is down lets go anyway, and a newer epoch deposes it).
             local other
@@ -713,9 +716,8 @@ cmd_vol() {
                 ENV_VARS="VOLUME=$VOL" run_on_vm "$other" "$SCRIPTS/guest/node.sh" detach >/dev/null 2>&1 || true
             done
             out=$(metactl "$VM_A" "$VM_A" attach "$VOL" "$vm")
-            tok=$(jq -r .token <<<"$out")
             log "attached $VOL to $vm at epoch $(jq -r .volume.epoch <<<"$out")"
-            ENV_VARS="VOLUME=$VOL TOKEN=$tok" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" attach
+            ENV_VARS="VOLUME=$VOL $(node_env "$vm")" run_on_vm "$vm" "$SCRIPTS/guest/node.sh" attach
             ;;
         detach)
             vm=$(vms_of "${2:-a}")
@@ -802,7 +804,8 @@ probe() { run_on_vm "$1" "$SCRIPTS/guest/probe.sh" "${@:2}"; }
 # was deposed, and rejoins every ISR as a replica. Checks use one clock at a time.
 cmd_partition() {
     local dev=/dev/ublkb1 x=$((1 << 30)) y=$((2 << 30)) lease=5 hold=${HOLD:-30}
-    local t_cut t_heal out tok line v first acked
+    local t_cut t_heal out line v first acked
+    valid_id "$VOL" || die "invalid volume id"
 
     vssh "$VM_W" "sudo test -f /etc/flaminio/pki/admin.crt" || cmd_pki issue w
     ensure_nodes
@@ -821,10 +824,10 @@ cmd_partition() {
     t_cut=$(run_on_vm "$VM_A" "$SCRIPTS/guest/partition.sh" on)
     log "$VM_A cut off the overlay at $t_cut; making $VM_B the target from $VM_W"
     sleep 2
+    run_on_vm "$VM_B" "$SCRIPTS/guest/node.sh" challenge >/dev/null
     out=$(metactl "$VM_W" "$VM_W" attach "$VOL" "$VM_B")
-    tok=$(jq -r .token <<<"$out")
     log "$VOL attached to $VM_B at epoch $(jq -r .volume.epoch <<<"$out")"
-    ENV_VARS="VOLUME=$VOL TOKEN=$tok" run_on_vm "$VM_B" "$SCRIPTS/guest/node.sh" attach
+    ENV_VARS="VOLUME=$VOL $(node_env "$VM_B")" run_on_vm "$VM_B" "$SCRIPTS/guest/node.sh" attach
 
     first=$(probe "$VM_B" read "$dev" "$x")
     log "$VM_B first read: $first"
@@ -1155,7 +1158,8 @@ cmd_agent() {
         return
     vssh "$vm" 'f=$(mktemp) && cat >"$f" && sudo install -m 755 "$f" /usr/local/bin/flaminio-agent; rc=$?; rm -f "$f"; exit $rc' <"$bin" ||
         return
-    run_on_vm "$vm" "$SCRIPTS/guest/agent.sh" "$action"
+    ENV_VARS="CLOCK_CONTRACT=$(printf %q "${CLOCK_CONTRACT:-/etc/flaminio/clock-contract.json}")" \
+        run_on_vm "$vm" "$SCRIPTS/guest/agent.sh" "$action"
 }
 
 # fl-c from nothing to a running data node: VM, overlay, identities, build, its disk claimed by
@@ -1798,6 +1802,7 @@ cmd_vol_confirm() {
 write_reset() {
     local node=$1 side=$2 rf=$3 host
     host=$(vmvar "$node" HOST)
+    ENV_VARS=$(node_env "$node") run_on_vm "$node" "$SCRIPTS/guest/node.sh" clock-check >/dev/null || return
     # A connection lost mid-run can leave fio running in the VM.
     vssh "$node" "sudo pkill -x fio; while pgrep -x fio >/dev/null; do sleep 1; done" || true
     delete_wbench "$node"
@@ -1844,10 +1849,10 @@ write_volume() {
 }
 
 attach_wbench() {
-    local node=$1 out tok
-    out=$(metactl "$VM_A" "$VM_A" attach wbench "$node")
-    tok=$(jq -r .token <<<"$out")
-    ENV_VARS="VOLUME=wbench TOKEN=$tok" run_on_vm "$node" "$SCRIPTS/guest/node.sh" attach >/dev/null
+    local node=$1
+    run_on_vm "$node" "$SCRIPTS/guest/node.sh" challenge >/dev/null || return
+    metactl "$VM_A" "$VM_A" attach wbench "$node" >/dev/null || return
+    ENV_VARS="VOLUME=wbench $(node_env "$node")" run_on_vm "$node" "$SCRIPTS/guest/node.sh" attach >/dev/null
 }
 
 # The integrity check after each Flaminio run (the plan's second run, for writes): fio writes
@@ -1908,6 +1913,7 @@ cmd_bench_writes_retrying() {
 write_whole() {
     local node=$1 side=$2 rf=$3
     if [[ $side == flaminio ]]; then
+        ENV_VARS=$(node_env "$node") run_on_vm "$node" "$SCRIPTS/guest/node.sh" clock-check >/dev/null || return
         delete_wbench "$node"
         cmd_node down "$(vms_of "$node")" >/dev/null
     fi
@@ -1964,6 +1970,7 @@ cmd_bench_writes() {
     local queues=${QUEUES:-1} jobs=${NUMJOBS:-1}
     local dir raw spec name rw bs qd mix r side dev k row mean fresh w0 w1 c0 c1 bytes
     node=$(vms_of "${NODE:-b}")
+    ENV_VARS=$(node_env "$node") run_on_vm "$node" "$SCRIPTS/guest/node.sh" clock-check >/dev/null
     dir=${RESUME:-$LOCAL_STATE_DIR/bench/writes-rf$rf-q$queues-jobs$jobs-$(date +%Y%m%dT%H%M%S)}
     mkdir -p "$dir"
     raw=$(run_on_vm "$node" "$SCRIPTS/guest/bench-reads.sh" disk)

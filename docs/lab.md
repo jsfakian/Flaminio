@@ -12,6 +12,11 @@ injected-clock tests do not grant replicated-node admission. Metadata and inject
 unit/loopback tests do not qualify a hypervisor. No shared host suspend, VM pause or rollback
 campaign is authorized by the issue's implementation/testing workflow.
 
+The legacy MVP `ublk.sh up` / `replica.sh up` paths have no authorized metadata handoff and
+now refuse before prepare, format or systemd-run, including on physical hosts. Their down/status
+commands remain available for cleanup. Use the qualified `node` flow for replicated targets;
+offline disk/store utilities do not substitute for target admission.
+
 ```
  workstation ── ssh ──▶ rhythm (147.52.71.227)              rhythm-backup (147.52.71.226)
    make …                 └─ fl-a  192.168.122.50 (NAT)        └─ fl-b  192.168.122.51 (NAT)
@@ -71,6 +76,13 @@ its new `attach-challenge`, and have the authorized node agent/administrator obt
 under only-if-target semantics bound to that nonce. Pass the exact FLCT and FLCH to the daemon;
 old startup tokens and old process handoffs cannot resume it. Metadata outage or changed target
 blocks recovery. Full ISR fencing, required wait and reconciliation still precede serving.
+For metactl, the global `--target-nonce HEX` flag precedes
+`attach VOLUME NODE only-if-target`; HEX is 64 lowercase characters. Protojson `.token` and
+`.targetHandoff` are standard base64; only the latter changes encoding for the socket. Guest
+`node.sh attach VOLUME NODE META` performs this flow and rejects supplied standalone tokens.
+`CLOCK_CONTRACT` selects a different operator contract file path; it never generates one or
+bypasses its checks. Startup/claim preflight runs before implicit formatting.
+
 A good later clock sample never clears quarantine. Private initialization interrupted by a
 future #79 daemon restart requires quiesced manual recovery, without another format.
 
@@ -203,15 +215,20 @@ make node-fault                   # verified writes through a replica restart, t
 A node is `flaminio-io node` as the systemd unit `flaminio-node`:
 - it replicates on port 7411 of the overlay, over mutual TLS with the identities in
   `/etc/flaminio/pki`;
-- a volume target serves ublk id 1 (`/dev/ublkb1`), so it never collides with the MVP
-  commands, which use id 0;
-- `vol attach` works in three steps:
-  1. It detaches the volume from the other data VMs.
-  2. It asks the metadata service, as the lab administrator, for the attach.
-  3. It hands the capability token to the running node through its control socket,
-     `/run/flaminio/node.sock`, with the line `attach VOLUME TOKEN-BASE64`.
+- a volume target serves ublk id 1 (`/dev/ublkb1`); legacy MVP id-0 startup paths now refuse;
+- `vol attach` preflights the target's healthy challenge before detach/metadata effects, then
+  performs the explicit administrator metadata placement. The guest helper fetches its current
+  challenge and uses its own agent certificate for a fresh only-if-target Attach with that nonce.
+  It validates the returned token/handoff and sends
+  `attach VOLUME TOKEN HANDOFF MS` to `/run/flaminio/node.sock`. TOKEN keeps standard base64;
+  HANDOFF is canonical unpadded base64url (179 characters).
 
-  Nothing restarts, so the replicas keep their state.
+  One credential pair is retained across bounded busy/socket retries; a newer epoch cannot
+  reuse an older live target. Normal higher-epoch observation/deposition/drain must retire it
+  before the retained proof starts. Outage or an old mounted lifetime can delay retirement and
+  produce an explicit timeout/error; status cannot authorize adoption or unconditional detach.
+  Metadata placement and agent credentials stay separate; no credentials are passed in host
+  ENV_VARS. Replicas keep their durable state.
 
 ### A third data node, and drains (step 6)
 

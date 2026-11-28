@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # A phase-1 node in a lab VM: flaminio-io node as the systemd service "flaminio-node".
-# Usage: node.sh up | down | status | attach | detach | delete
-#   up      NODE, LISTEN, META, TRUST_DOMAIN; FORMAT=1 reformats the data disk; DEVICE overrides
-#           the data disk (as the node agent claimed it); ZERO_COPY=1 serves local reads
+# Usage: node.sh clock-check | challenge | up | down | status | attach | detach | delete
+#   up      NODE, LISTEN, META, TRUST_DOMAIN; CLOCK_CONTRACT selects the operator file;
+#           FORMAT=1 reformats the data disk; DEVICE overrides the disk the agent claimed;
+#           ZERO_COPY=1 serves local reads
 #           without copies (and without checksum verification)
-#   attach  VOLUME, TOKEN (base64 capability token): the running node becomes VOLUME's target,
+#   attach  VOLUME, NODE, META: obtain a process-bound handoff as this node's agent;
 #           at /dev/ublkb1, through its control socket (no restart)
 #   detach  VOLUME; prints one line: "detached" or "not attached" (exit 0), "not running" (exit 3)
 #   delete  VOLUME; prints one line: "deleted <n>" (exit 0), "not running" (exit 3)
@@ -40,10 +41,13 @@ down() {
 up() {
     : "${NODE:?}" "${LISTEN:?}" "${META:?}" "${TRUST_DOMAIN:?}"
     [[ -x $bin ]] || die "flaminio-io not built; run make deploy"
+    [[ -z ${ATTACH:-} && -z ${TOKEN:-} ]] || die "legacy startup ATTACH/TOKEN refused; start unattached, then node.sh attach"
+    clock_preflight >/dev/null
     sudo modprobe ublk_drv
     systemctl is-active --quiet "$unit" && down
     local args=(node --device "${DEVICE:-$(data_disk)}" --node "$NODE" --listen "$LISTEN" --meta "$META"
-        --pki /etc/flaminio/pki --trust-domain "$TRUST_DOMAIN" --id "$id")
+        --pki /etc/flaminio/pki --trust-domain "$TRUST_DOMAIN" --id "$id"
+        --clock-contract "${CLOCK_CONTRACT:-/etc/flaminio/clock-contract.json}")
     [[ ${FORMAT:-0} == 1 ]] && args+=(--format --force)
     # Zero copy: local reads unverified, for measuring (docs/performance-plan.md).
     [[ ${ZERO_COPY:-0} == 1 ]] && args+=(--zero-copy)
@@ -57,14 +61,8 @@ up() {
     [[ ${PIPELINED_COMMITS:-0} == 1 ]] && args+=(--pipelined-commits)
     [[ ${FIRST_FIT:-0} == 1 ]] && args+=(--first-fit)
     [[ ${DEFER_TASKRUN:-0} == 1 ]] && args+=(--defer-taskrun)
-    if [[ -n ${ATTACH:-} ]]; then
-        sudo install -d -m 700 /run/flaminio
-        echo "${TOKEN:?}" | base64 -d | sudo tee "/run/flaminio/$ATTACH.token" >/dev/null
-        args+=(--attach "$ATTACH" --token "/run/flaminio/$ATTACH.token")
-    fi
     sudo systemd-run --quiet --unit="$unit" --property=Restart=no "$bin" "${args[@]}"
     local ready="serving replicas"
-    [[ -n ${ATTACH:-} ]] && ready="serving .* at $dev"
     for _ in $(seq 1 120); do
         journal | grep -E "$ready" >/dev/null && break
         systemctl is-active --quiet "$unit" || { journal | tail -20 >&2; die "flaminio-node exited"; }
@@ -74,14 +72,14 @@ up() {
 }
 
 attach() {
-    : "${VOLUME:?}" "${TOKEN:?}"
+    volume_id
+    [[ -z ${TOKEN:-} && -z ${HANDOFF:-} ]] || die "standalone credentials refused; use NODE/META for an authorized challenge handoff"
     systemctl is-active --quiet "$unit" || die "flaminio-node is not running"
-    local answer
-    answer=$(control "attach $VOLUME $TOKEN")
-    [[ $answer == ok* ]] || die "attach $VOLUME: $answer"
+    local path
+    path=$(attach_target) || return
     # udev creates the device node just after: until then, a write to the path would create a
     # regular file in /dev (in memory) and every later run would use it instead of the volume.
-    local path=${answer#ok } _
+    local _
     for _ in $(seq 100); do
         [[ -b $path ]] && break
         [[ -e $path ]] && die "$path exists but is not a block device: remove it"
@@ -134,11 +132,13 @@ status() {
 }
 
 case "${1:-status}" in
+    clock-check) clock_preflight ;;
+    challenge) attach_challenge ;;
     up) up ;;
     down) down ;;
     status) status ;;
     attach) attach ;;
     detach) detach ;;
     delete) delete ;;
-    *) die "usage: node.sh up|down|status|attach|detach|delete" ;;
+    *) die "usage: node.sh clock-check|challenge|up|down|status|attach|detach|delete" ;;
 esac

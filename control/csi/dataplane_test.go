@@ -61,7 +61,7 @@ func controlServer(t *testing.T, delay time.Duration, answer string, lines chan<
 func TestControlSocketGivesUpOnASilentDataPlane(t *testing.T) {
 	path := controlServer(t, 0, "", nil)
 	start := time.Now()
-	_, err := ControlSocket{Path: path, Timeout: 50 * time.Millisecond}.Attach(context.Background(), "v", []byte("t"))
+	_, err := ControlSocket{Path: path, Timeout: 50 * time.Millisecond}.Attach(context.Background(), "v", []byte("t"), make([]byte, 134))
 	if err == nil || !strings.Contains(err.Error(), "no answer") {
 		t.Fatalf("got %v, want no answer", err)
 	}
@@ -75,7 +75,7 @@ func TestControlSocketKeepsTheCallersEarlierDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := ControlSocket{Path: path, Timeout: 10 * time.Second}.Attach(ctx, "v", []byte("t"))
+	_, err := ControlSocket{Path: path, Timeout: 10 * time.Second}.Attach(ctx, "v", []byte("t"), make([]byte, 134))
 	if err == nil {
 		t.Fatal("attach succeeded")
 	}
@@ -93,7 +93,7 @@ func TestControlSocketDefaultWaitsForTheDataPlane(t *testing.T) {
 		}
 	}
 	path := controlServer(t, 200*time.Millisecond, "ok /dev/ublkb3", nil)
-	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"))
+	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"), make([]byte, 134))
 	if err != nil || dev != "/dev/ublkb3" {
 		t.Fatalf("got %q, %v", dev, err)
 	}
@@ -104,23 +104,22 @@ func TestControlSocketTellsTheDataPlaneItsTimeLeft(t *testing.T) {
 	path := controlServer(t, 0, "ok /dev/ublkb3", lines)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := (ControlSocket{Path: path}).Attach(ctx, "v", []byte("t")); err != nil {
+	if _, err := (ControlSocket{Path: path}).Attach(ctx, "v", []byte("t"), make([]byte, 134)); err != nil {
 		t.Fatal(err)
 	}
-	// "attach v dA== MS": the caller's 3 s, less the answer's margin.
+	// "attach v dA== HANDOFF MS": the caller's 3 s, less the answer's margin.
 	fields := strings.Fields(<-lines)
-	if len(fields) != 4 {
+	if len(fields) != 5 {
 		t.Fatalf("command %q", fields)
 	}
-	ms, err := strconv.Atoi(fields[3])
+	ms, err := strconv.Atoi(fields[4])
 	if err != nil || ms > 2000 || ms < 1500 {
-		t.Fatalf("time left %q, want about 2000 ms", fields[3])
+		t.Fatalf("time left %q, want about 2000 ms", fields[4])
 	}
 }
 
-// An older data plane takes only `attach VOLUME TOKEN`: the plugin sends that after its usage
-// line, so that the two can be upgraded in either order.
-func TestControlSocketFallsBackForAnOlderDataPlane(t *testing.T) {
+// An older data plane cannot verify process freshness and must be refused.
+func TestControlSocketRefusesAnOlderDataPlane(t *testing.T) {
 	dir, err := os.MkdirTemp("", "fl")
 	if err != nil {
 		t.Fatal(err)
@@ -152,8 +151,8 @@ func TestControlSocketFallsBackForAnOlderDataPlane(t *testing.T) {
 		<-served
 		_ = os.RemoveAll(dir)
 	})
-	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"))
-	if err != nil || dev != "/dev/ublkb3" {
-		t.Fatalf("got %q, %v", dev, err)
+	dev, err := ControlSocket{Path: path}.Attach(context.Background(), "v", []byte("t"), make([]byte, 134))
+	if err == nil || dev != "" || !strings.Contains(err.Error(), "usage: attach") {
+		t.Fatalf("got %q, %v; want old-server refusal", dev, err)
 	}
 }

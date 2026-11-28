@@ -98,6 +98,29 @@ Logs: `/tmp/u3-final-lint.log`, `/tmp/u3-final-tests.log`, `/tmp/u3-meta-interop
 `/tmp/u3-cli-smoke.json`. This is unit validation, not independent S1–S8 acceptance or hardware
 qualification. Authorized callers, models, adversarial acceptance and final sanitizers follow.
 
+### U4 Authorized callers
+
+CSI now requires a healthy challenge and own-agent only-if-target nonce Attach, validates the
+normal handoff and retains the pair across bounded socket/busy/subsequent kubelet retries.
+Scalar-status adoption and old-syntax fallback are removed. Unstage clears retained credentials.
+Metactl exposes global --target-nonce HEX before attach (64 lowercase characters); its token /
+targetHandoff protojson fields stay standard base64. Socket TOKEN retains that encoding;
+HANDOFF alone uses canonical unpadded base64url179.
+
+Guest clock_preflight/attach_challenge/attach_target helpers cover production node startup,
+claims, ensure-node, host volume/partition/benchmark attach, reconcile and resync. The host
+administrator performs metadata-only placement; the guest obtains its own agent handoff.
+Default contract path is /etc/flaminio/clock-contract.json (CLOCK_CONTRACT chooses another file,
+never an attestation/bypass). Preflight precedes implicit format effects; legacy MVP up paths
+refuse before prepare/format/systemd-run. Cleanup/status remain available. Offline control/agent
+does not launch/register and is unchanged; CSI already uses the agent identity/external daemon.
+
+Fmt/lint, scoped CSI/agent/CLI/metactl tests, shell syntax and whitespace pass. Logs:
+`/tmp/u4-fmt.log`, `/tmp/u4-final-lint.log`, `/tmp/u4-final-go-tests.log`.
+Older mounted devices or metadata outage may prevent retirement within the bounded wait;
+callers return an error rather than adopt or automatically detach. Guest credentials last for
+one invocation; CSI retains them in memory. Independent adversarial/script acceptance follows U5.
+
 ## Tests
 
 Pending implementation and independent S1–S8 acceptance. Required final checks:

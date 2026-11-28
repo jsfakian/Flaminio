@@ -9,6 +9,6 @@ tool="$HOME/flaminio/dataplane/target/release/flaminio-disk"
 args=(--serial "${SERIAL:-data}" --disk-tool "$tool")
 case "${1:-disks}" in
     disks) sudo /usr/local/bin/flaminio-agent disks "${args[@]}" ;;
-    claim) sudo /usr/local/bin/flaminio-agent claim "${args[@]}" --label "$(hostname)" ;;
+    claim) clock_preflight >/dev/null; sudo /usr/local/bin/flaminio-agent claim "${args[@]}" --label "$(hostname)" ;;
     *) die "usage: agent.sh disks|claim" ;;
 esac

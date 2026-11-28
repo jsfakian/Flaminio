@@ -1,7 +1,9 @@
 package csi
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"net"
 	"path/filepath"
 	"slices"
@@ -40,10 +42,10 @@ func serveMeta(t *testing.T, svc metav1.MetadataServiceServer) *Meta {
 }
 
 // metaFixture runs an in-memory metadata service, without authentication (its rules are
-// tested in meta/service), with live nodes a and b.
+// tested in meta/service), with signed credentials and live nodes a and b.
 func metaFixture(t *testing.T) *Meta {
 	t.Helper()
-	svc := service.New(kv.NewMem(nil), service.Options{})
+	svc := service.New(kv.NewMem(nil), service.Options{TokenKey: ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))})
 	m := serveMeta(t, svc)
 	ctx := context.Background()
 	for _, n := range []string{"a", "b"} {
@@ -195,14 +197,23 @@ type fakeDataplane struct {
 	volume, device string
 	tokens         int
 	detaches       int
+	token          []byte
 }
 
 func (f *fakeDataplane) Status(context.Context) (string, string, error) {
 	return f.volume, f.device, nil
 }
 
-// Attach counts attaches: the in-memory service signs no tokens, so there is none to check.
-func (f *fakeDataplane) Attach(_ context.Context, volume string, _ []byte) (string, error) {
+func (f *fakeDataplane) AttachChallenge(context.Context) ([]byte, error) {
+	return bytes.Repeat([]byte{1}, 32), nil
+}
+
+// Attach counts new lifetimes; an exact retained-credential retry returns its live device.
+func (f *fakeDataplane) Attach(_ context.Context, volume string, token, _ []byte) (string, error) {
+	if f.volume == volume && bytes.Equal(f.token, token) {
+		return f.device, nil
+	}
+	f.token = bytes.Clone(token)
 	f.volume, f.device = volume, "/dev/ublk-"+volume
 	f.tokens++
 	return f.device, nil

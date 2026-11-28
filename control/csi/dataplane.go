@@ -4,18 +4,26 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
+
+	"github.com/flaminio/flaminio/meta/domain"
+	"github.com/flaminio/flaminio/pkg/captoken"
 )
 
 // Dataplane is what the node plugin needs from the node's data plane (flaminio-io node).
 type Dataplane interface {
 	// Status returns the attached volume and its device, or empty strings.
 	Status(ctx context.Context) (volume, device string, err error)
-	// Attach starts the volume's target here with the capability token, and returns its device.
-	Attach(ctx context.Context, volume string, token []byte) (device string, err error)
+	// AttachChallenge returns the healthy daemon's process nonce, before metadata issues a handoff.
+	AttachChallenge(ctx context.Context) ([]byte, error)
+	// Attach starts or revalidates the exact target lifetime bound to token and handoff.
+	Attach(ctx context.Context, volume string, token, handoff []byte) (device string, err error)
 	// Detach stops the volume's target and device. Not attached is not an error.
 	Detach(ctx context.Context, volume string) error
 	// Delete removes this node's chunk replicas of a volume deleted from the metadata service.
@@ -68,6 +76,8 @@ func (s ControlSocket) command(ctx context.Context, line string) (string, error)
 		return "", fmt.Errorf("data plane: %w", err)
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
 	_ = conn.SetDeadline(s.deadline(ctx))
 	if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
 		return "", fmt.Errorf("data plane: %w", err)
@@ -77,10 +87,29 @@ func (s ControlSocket) command(ctx context.Context, line string) (string, error)
 		return "", fmt.Errorf("data plane: no answer: %w", err)
 	}
 	answer = strings.TrimSpace(answer)
-	if rest, ok := strings.CutPrefix(answer, "ok"); ok {
-		return strings.TrimSpace(rest), nil
+	if answer == "ok" {
+		return "", nil
 	}
-	return "", fmt.Errorf("data plane: %s", strings.TrimPrefix(answer, "error: "))
+	if rest, ok := strings.CutPrefix(answer, "ok "); ok {
+		return rest, nil
+	}
+	return "", controlError(strings.TrimPrefix(answer, "error: "))
+}
+
+type controlError string
+
+func (e controlError) Error() string { return "data plane: " + string(e) }
+
+func (s ControlSocket) AttachChallenge(ctx context.Context) ([]byte, error) {
+	answer, err := s.command(ctx, "attach-challenge")
+	if err != nil {
+		return nil, err
+	}
+	nonce, err := hex.DecodeString(answer)
+	if err != nil || len(answer) != 64 || answer != strings.ToLower(answer) || !captoken.ValidTargetNonce(nonce) {
+		return nil, errors.New("data plane: invalid attach challenge; a healthy handoff-capable daemon is required")
+	}
+	return nonce, nil
 }
 
 func (s ControlSocket) Status(ctx context.Context) (string, string, error) {
@@ -102,19 +131,47 @@ func (s ControlSocket) Status(ctx context.Context) (string, string, error) {
 // ends the attach in time to answer with its cause rather than leave the caller with only its
 // own deadline (docs/issues/6).
 //
-// A data plane older than this answers the time limit with its usage line: the attach is then
-// sent again without it, so the two can be upgraded in either order.
-func (s ControlSocket) Attach(ctx context.Context, volume string, token []byte) (string, error) {
-	within := max(time.Until(s.deadline(ctx))-answerMargin, 0)
-	line := "attach " + volume + " " + base64.StdEncoding.EncodeToString(token)
-	dev, err := s.command(ctx, fmt.Sprintf("%s %d", line, within.Milliseconds()))
-	if err != nil && strings.Contains(err.Error(), "usage: attach VOLUME TOKEN-BASE64 |") {
-		return s.command(ctx, line)
+// Retries keep these exact credentials. A newer epoch may have to wait for the old device's
+// ordinary metadata refresh, deposition and retirement; status cannot authorize adoption.
+func (s ControlSocket) Attach(ctx context.Context, volume string, token, handoff []byte) (string, error) {
+	if !domain.ValidID(volume) || len(token) == 0 || base64.StdEncoding.EncodedLen(len(token)) > 4096 || len(handoff) != captoken.HandoffLen {
+		return "", errors.New("data plane: valid volume, bounded token and 134-byte target handoff are required")
 	}
-	return dev, err
+	ctx, cancel := context.WithTimeout(ctx, s.timeout())
+	defer cancel()
+	line := "attach " + volume + " " + base64.StdEncoding.EncodeToString(token) + " " + base64.RawURLEncoding.EncodeToString(handoff)
+	for {
+		within := max(time.Until(s.deadline(ctx))-answerMargin, 0)
+		dev, err := s.command(ctx, fmt.Sprintf("%s %d", line, within.Milliseconds()))
+		if err == nil || !retryAttach(err) {
+			return dev, err
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", fmt.Errorf("data plane: attach wait ended: %w (last attempt: %v)", ctx.Err(), err)
+		case <-timer.C:
+		}
+	}
+}
+
+func retryAttach(err error) bool {
+	var reply controlError
+	if errors.As(err, &reply) {
+		return strings.Contains(string(reply), "has an existing device lifetime; retry this handoff only after that device stops") ||
+			string(reply) == "existing target lifetime is no longer live" ||
+			string(reply) == "already attaching" || strings.HasPrefix(string(reply), "no answer within ") ||
+			string(reply) == "the node dropped the attach without an answer (see its log)"
+	}
+	var network net.Error
+	return errors.As(err, &network) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func (s ControlSocket) Detach(ctx context.Context, volume string) error {
+	if !domain.ValidID(volume) {
+		return errors.New("data plane: invalid volume id")
+	}
 	_, err := s.command(ctx, "detach "+volume)
 	if err != nil && strings.Contains(err.Error(), "is not attached here") {
 		return nil
@@ -123,6 +180,9 @@ func (s ControlSocket) Detach(ctx context.Context, volume string) error {
 }
 
 func (s ControlSocket) Delete(ctx context.Context, volume string) error {
+	if !domain.ValidID(volume) {
+		return errors.New("data plane: invalid volume id")
+	}
 	_, err := s.command(ctx, "delete "+volume)
 	return err
 }

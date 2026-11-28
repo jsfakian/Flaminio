@@ -137,3 +137,26 @@ admission with persistent observers before each queued attempt/retry, while pres
 existing unguarded API. Late RPC results cannot reactivate a quarantined Engine. ReplicaCore
 clock invalidation revokes volatile sessions without clearing durable fences, #86 uncertainty,
 pending-write reservations/retirement evidence or actual in-flight I/O ownership.
+
+### U4 authorized caller integration
+
+Remove CSI scalar-status adoption and old control-syntax fallback that would bypass strict
+process proof. One challenge/authorized Attach result is retained across socket/busy retries;
+old-server or missing-handoff responses refuse before daemon effects.
+
+Caller startup preflight uses operator-supplied /etc/flaminio/clock-contract.json by default;
+CLOCK_CONTRACT may select another file path, never bypass validation or fabricate attestation.
+Run it before node.sh/agent.sh implicit formatting/claim effects. Direct lab/reconcile/resync
+attach paths must use the same handshake and bounded encoded operands. Metactl's nonce option
+is global --target-nonce with 64 lowercase hex characters before attach; its protojson token and
+targetHandoff fields remain standard base64. TOKEN keeps its existing standard-base64 control
+encoding; only HANDOFF is converted to canonical unpadded base64url (179 characters). Final implementation checks determine exact usage text.
+
+### U5 model preparation
+
+The pure admission state-word helpers currently live only in the node crate. Extract those
+helpers to repl::clock so simulation and runtime share encoding/decoding/closed construction
+and generation acceptance, while node keeps its atomic CAS order and behavior. This avoids a
+repl-to-node dependency or a second invented clock state machine. Expected fault/permit and
+authorized-issuance facts remain independently derived from ideal event/history, never from
+the shared admission predicate. U5 source starts only after U4's checked writer handoff.

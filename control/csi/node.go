@@ -1,7 +1,10 @@
 package csi
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,6 +15,8 @@ import (
 	"google.golang.org/grpc/status"
 
 	metav1 "github.com/flaminio/flaminio/api/gen/go/flaminio/meta/v1"
+	"github.com/flaminio/flaminio/meta/domain"
+	"github.com/flaminio/flaminio/pkg/captoken"
 )
 
 // Node is the CSI node service. It runs on each data node, beside flaminio-io node.
@@ -26,6 +31,14 @@ type Node struct {
 
 	// One operation at a time: they share the data plane's single attachment.
 	mu sync.Mutex
+	// Retain an issued epoch across lost socket replies and kubelet retries. The daemon
+	// revalidates the exact lifetime on every use; a new process challenge replaces it.
+	attachment *targetCredentials
+}
+
+type targetCredentials struct {
+	volume                string
+	nonce, token, handoff []byte
 }
 
 func (n *Node) NodeGetInfo(context.Context, *csi.NodeGetInfoRequest) (*csi.NodeGetInfoResponse, error) {
@@ -53,26 +66,52 @@ func (n *Node) NodeGetCapabilities(context.Context, *csi.NodeGetCapabilitiesRequ
 
 // device returns the volume's device on this node, starting its target if needed. Every start
 // is under a new epoch, which only this node's agent may take, and only while the metadata
-// service names this node the target (ControllerPublishVolume did). A target never restarts
-// under the epoch it had.
+// service names this node the target (ControllerPublishVolume did). Scalar status never
+// authorizes adoption: even an existing device is revalidated with its retained credentials.
 func (n *Node) device(ctx context.Context, volume string) (string, error) {
-	attached, dev, err := n.Dataplane.Status(ctx)
+	ctx, cancel := context.WithTimeout(ctx, DefaultControlTimeout)
+	defer cancel()
+	if !domain.ValidID(volume) {
+		return "", status.Error(codes.InvalidArgument, "invalid volume id")
+	}
+	nonce, err := n.Dataplane.AttachChallenge(ctx)
+	if err != nil || !captoken.ValidTargetNonce(nonce) {
+		return "", status.Error(codes.Unavailable, "healthy data plane attach challenge required")
+	}
+	attached, _, err := n.Dataplane.Status(ctx)
 	if err != nil {
 		return "", status.Error(codes.Unavailable, err.Error())
 	}
 	switch attached {
-	case volume:
-		return dev, nil
-	case "":
+	case volume, "":
 	default:
 		return "", status.Errorf(codes.ResourceExhausted, "this node serves %s; one volume per node in this version", attached)
 	}
-	r, err := n.Meta.Attach(ctx, &metav1.AttachRequest{Volume: volume, Node: n.NodeID, OnlyIfTarget: true})
-	if err != nil {
-		return "", err
+	a := n.attachment
+	if a == nil || a.volume != volume || !bytes.Equal(a.nonce, nonce) {
+		r, err := n.Meta.Attach(ctx, &metav1.AttachRequest{Volume: volume, Node: n.NodeID, OnlyIfTarget: true, TargetNonce: nonce})
+		if err != nil {
+			return "", err
+		}
+		token, handoff := r.GetToken(), r.GetTargetHandoff()
+		// Detect an old server or malformed result before sending any target-start command.
+		// The daemon remains the signature/current-metadata authority.
+		digest := sha256.Sum256(token)
+		if len(token) == 0 || base64.StdEncoding.EncodedLen(len(token)) > 4096 || len(handoff) != captoken.HandoffLen || string(handoff[:6]) != "FLCH\x01\x01" ||
+			!bytes.Equal(handoff[6:38], nonce) || !bytes.Equal(handoff[38:70], digest[:]) {
+			return "", status.Error(codes.FailedPrecondition, "metadata server did not return a process-bound target handoff")
+		}
+		a = &targetCredentials{volume: volume, nonce: bytes.Clone(nonce), token: bytes.Clone(token), handoff: bytes.Clone(handoff)}
+		n.attachment = a
 	}
-	dev, err = n.Dataplane.Attach(ctx, volume, r.GetToken())
+	dev, err := n.Dataplane.Attach(ctx, volume, a.token, a.handoff)
 	if err != nil {
+		// A definitive refusal ends this proof's usefulness. Transport/busy failures keep
+		// it, including across a later kubelet retry, because the start may have succeeded.
+		var reply controlError
+		if errors.As(err, &reply) && !retryAttach(err) {
+			n.attachment = nil
+		}
 		return "", status.Error(codes.Internal, err.Error())
 	}
 	return dev, nil
@@ -139,6 +178,9 @@ func (n *Node) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolume
 	}
 	if err := n.Dataplane.Detach(ctx, volume); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if n.attachment != nil && n.attachment.volume == volume {
+		n.attachment = nil
 	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
