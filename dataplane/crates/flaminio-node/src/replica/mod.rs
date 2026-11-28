@@ -207,6 +207,11 @@ impl<D: BlockDevice> ReplicaService<D> {
         &self.store
     }
 
+    /// Revoke sessions without dropping in-flight commits, pins, fences or data.
+    pub fn invalidate_clock(&mut self) {
+        self.core.invalidate_clock();
+    }
+
     pub fn into_store(self) -> Store<D> {
         self.store
     }

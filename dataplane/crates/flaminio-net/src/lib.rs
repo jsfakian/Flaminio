@@ -5,6 +5,7 @@
 //! - [`identity`]: SPIFFE-style workload identities, read from peer certificates.
 //! - [`tls`]: TLS 1.3 configurations that require and verify client certificates.
 //! - [`token`]: capability tokens issued by the metadata service (Ed25519).
+//! - [`handoff`]: signed local handoffs binding an exact capability to one daemon process.
 //! - [`session`]: one connection carries one session: the first frame is a `Hello` whose token
 //!   names the session's volume and epoch, and the node of the peer's certificate.
 //!
@@ -12,6 +13,7 @@
 //! `pkg/captoken`), and the tests check the Go vectors.
 
 pub mod frame;
+pub mod handoff;
 pub mod identity;
 pub mod session;
 pub mod tls;

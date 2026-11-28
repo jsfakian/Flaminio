@@ -12,6 +12,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 source <(sed -n '/^metactl()/,/^}/p' "$SCRIPTS/lab.sh")
 FROM=${FROM:-$VM_A}
 TO=${TO:-$VM_B}
+[[ $FROM =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ && $TO =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]] || die "invalid node id"
 VOL=resync-$(date +%Y%m%d%H%M%S)
 CHUNKS=64
 LIMIT_MIB=4608
@@ -30,11 +31,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+run_on_vm "$FROM" "$SCRIPTS/guest/node.sh" challenge >/dev/null
 metactl "$VM_A" "$VM_A" create "$VOL" 16G 1 1 256M "$FROM" >/dev/null
-tok=$(metactl "$VM_A" "$VM_A" attach "$VOL" "$FROM" | jq -r .token)
-dev=$(control "$FROM" "attach $VOL $tok")
-[[ $dev == ok* ]] || die "attach $VOL on $FROM: $dev"
-dev=${dev#ok }
+metactl "$VM_A" "$VM_A" attach "$VOL" "$FROM" >/dev/null
+ENV_VARS="VOLUME=$VOL NODE=$FROM META=$(vmvar "$VM_A" WG):$META_PORT" run_on_vm "$FROM" "$SCRIPTS/guest/node.sh" attach
+dev=/dev/ublkb1
 log "$VOL attached on $FROM at $dev; writing 64 MiB at the start of each chunk"
 vssh "$FROM" "set -e; for _ in \$(seq 100); do [[ -b $dev ]] && break; sleep 0.1; done
     head -c 64M /dev/urandom > /tmp/$VOL; md5sum < /tmp/$VOL | cut -d' ' -f1 > /tmp/$VOL.md5

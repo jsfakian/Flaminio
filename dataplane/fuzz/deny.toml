@@ -6,7 +6,9 @@ all-features = true
 
 [advisories]
 # Every advisory fails the check unless it is listed here, with its reason.
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0247", reason = "bitmaps is unmaintained; it comes only through libublk (the ublk binding), which has no replacement for it yet" },
+]
 
 [licenses]
 # Licenses that allow distributing Flaminio under Apache-2.0. MPL-2.0 is copyleft per file only.

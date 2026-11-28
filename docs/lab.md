@@ -4,6 +4,19 @@ Two servers with KVM VMs, driven from a workstation with `make`. The VMs are whe
 plane is built, tested and benchmarked on Linux (see [mvp-plan.md](mvp-plan.md)). Phase 1 adds a
 small witness VM and a metadata cluster (see [below](#phase-1-witness-overlay-and-metadata)).
 
+**Clock admission (#83):** these KVM VMs are unqualified for physical-boottime-v1. The strict
+node daemon refuses storage startup here; do not supply a false physical attestation or add a
+bypass. Replicated-node campaigns below document earlier results/procedures and need a separately
+qualified host/profile before they can run against this revision. Offline disk/store tools and
+injected-clock tests do not grant replicated-node admission. Metadata and injected-clock
+unit/loopback tests do not qualify a hypervisor. No shared host suspend, VM pause or rollback
+campaign is authorized by the issue's implementation/testing workflow.
+
+The legacy MVP `ublk.sh up` / `replica.sh up` paths have no authorized metadata handoff and
+now refuse before prepare, format or systemd-run, including on physical hosts. Their down/status
+commands remain available for cleanup. Use the qualified `node` flow for replicated targets;
+offline disk/store utilities do not substitute for target admission.
+
 ```
  workstation ── ssh ──▶ rhythm (147.52.71.227)              rhythm-backup (147.52.71.226)
    make …                 └─ fl-a  192.168.122.50 (NAT)        └─ fl-b  192.168.122.51 (NAT)
@@ -19,6 +32,59 @@ available. Both use the same libvirt definition
 ([`scripts/templates/libvirt-domain.xml`](../scripts/templates/libvirt-domain.xml)): q35,
 host-passthrough CPU, and a virtio-blk data disk backed by a preallocated raw file with
 `cache=none` and `io=native`. So the two sides differ only in hardware.
+
+## Qualified physical clock admission and restart
+
+This procedure is for a separately qualified physical deployment, not the KVM guests above.
+Provision a root-owned regular clock-contract file (for example mode 0600), with no symlink and
+no group/world write permission. Its JSON schema is strict; replace these identity/source
+placeholders and attest the booleans only after hardware qualification and deployment checks:
+
+```json
+{
+  "version": 1,
+  "profile": "physical-boottime-v1",
+  "node": "your-node-id",
+  "host_kind": "physical",
+  "clocksource": "your-qualified-clocksource",
+  "lease_us": 5000000,
+  "drift_ppm": 100000,
+  "rate_bound_attested": true,
+  "observation_error_ns": 1000,
+  "no_live_rollback": true
+}
+```
+
+Qualification covers the pairwise rate bound, physical suspend behavior and absolute read error
+at most 1 µs, including quantization. Reported clock resolution alone does not prove accuracy.
+All nodes use the fixed timing profile. Coordinate the upgrade and exclude older binaries
+before advertising this profile; mixed-profile timing is not qualified. Virtualization, live
+migration and rollback remain
+excluded; trusted root/hypervisor operators must honor those exclusions. Containers require
+read-only host proc/sys provenance under `/run/flaminio/host`; readonly input files, matching
+source and physical provenance are checked rather than inferred from the container identity.
+
+`flaminio-io clock-check --clock-contract /etc/flaminio/clock-contract.json --json` is read-only
+and makes no metadata call. Exit 0 reports satisfied prerequisites, not measured clock-rate or
+rollback certification; exit 1 refuses. Start `node` with the same `--clock-contract` file and
+matching node identity. No force/environment fallback qualifies an unsupported host.
+
+On a clock fault, `clock-status` remains available on the root-only control socket and reports
+the sticky quarantined generation/reason. Diagnose before restarting. Keep the existing disks
+and uncertainty evidence: unanswered writes may have landed. Start the daemon unattached, read
+its new `attach-challenge`, and have the authorized node agent/administrator obtain an Attach
+under only-if-target semantics bound to that nonce. Pass the exact FLCT and FLCH to the daemon;
+old startup tokens and old process handoffs cannot resume it. Metadata outage or changed target
+blocks recovery. Full ISR fencing, required wait and reconciliation still precede serving.
+For metactl, the global `--target-nonce HEX` flag precedes
+`attach VOLUME NODE only-if-target`; HEX is 64 lowercase characters. Protojson `.token` and
+`.targetHandoff` are standard base64; only the latter changes encoding for the socket. Guest
+`node.sh attach VOLUME NODE META` performs this flow and rejects supplied standalone tokens.
+`CLOCK_CONTRACT` selects a different operator contract file path; it never generates one or
+bypasses its checks. Startup/claim preflight runs before implicit formatting.
+
+A good later clock sample never clears quarantine. Private initialization interrupted by a
+future #79 daemon restart requires quiesced manual recovery, without another format.
 
 ## Requirements on the workstation
 
@@ -149,15 +215,20 @@ make node-fault                   # verified writes through a replica restart, t
 A node is `flaminio-io node` as the systemd unit `flaminio-node`:
 - it replicates on port 7411 of the overlay, over mutual TLS with the identities in
   `/etc/flaminio/pki`;
-- a volume target serves ublk id 1 (`/dev/ublkb1`), so it never collides with the MVP
-  commands, which use id 0;
-- `vol attach` works in three steps:
-  1. It detaches the volume from the other data VMs.
-  2. It asks the metadata service, as the lab administrator, for the attach.
-  3. It hands the capability token to the running node through its control socket,
-     `/run/flaminio/node.sock`, with the line `attach VOLUME TOKEN-BASE64`.
+- a volume target serves ublk id 1 (`/dev/ublkb1`); legacy MVP id-0 startup paths now refuse;
+- `vol attach` preflights the target's healthy challenge before detach/metadata effects, then
+  performs the explicit administrator metadata placement. The guest helper fetches its current
+  challenge and uses its own agent certificate for a fresh only-if-target Attach with that nonce.
+  It validates the returned token/handoff and sends
+  `attach VOLUME TOKEN HANDOFF MS` to `/run/flaminio/node.sock`. TOKEN keeps standard base64;
+  HANDOFF is canonical unpadded base64url (179 characters).
 
-  Nothing restarts, so the replicas keep their state.
+  One credential pair is retained across bounded busy/socket retries; a newer epoch cannot
+  reuse an older live target. Normal higher-epoch observation/deposition/drain must retire it
+  before the retained proof starts. Outage or an old mounted lifetime can delay retirement and
+  produce an explicit timeout/error; status cannot authorize adoption or unconditional detach.
+  Metadata placement and agent credentials stay separate; no credentials are passed in host
+  ENV_VARS. Replicas keep their durable state.
 
 ### A third data node, and drains (step 6)
 

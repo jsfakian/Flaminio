@@ -1,6 +1,6 @@
 # Issue #83: A supported lease clock contract — specification
 
-Approved 2026-11-13; not implemented. [Intent](intent.md); [decisions](decisions.md), if any;
+Published clear snapshot approved 2026-11-20; implementation and validation: [report.md](report.md). [Intent](intent.md); [decisions](decisions.md), if any;
 [design](design.md).
 The initial deployment policy remains [Proposed](adr-proposal.md).
 Settled at approval, 2026-11-13: the policy is accepted with the plan (see decisions.md, Settled at approval).

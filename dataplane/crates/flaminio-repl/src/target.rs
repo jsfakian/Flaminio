@@ -551,7 +551,7 @@ impl<P: Clone + Debug> Target<P> {
             meta_inflight: None,
             next_meta_chunk: 0,
             next_heartbeat: now,
-            next_refresh: now + timing.refresh,
+            next_refresh: now.saturating_add(timing.refresh),
             refresh_inflight: None,
             deposed: false,
             out: Vec::new(),
@@ -566,7 +566,11 @@ impl<P: Clone + Debug> Target<P> {
             #[cfg(test)]
             bugs: Bugs::default(),
         };
-        t.tick_inner(now);
+        if timing.takeover_wait().is_err() {
+            t.invalidate_clock();
+        } else {
+            t.tick_inner(now);
+        }
         #[cfg(test)]
         t.check_accounting();
         t
@@ -621,6 +625,20 @@ impl<P: Clone + Debug> Target<P> {
 
     pub fn is_deposed(&self) -> bool {
         self.deposed
+    }
+
+    /// Permanently stop this target after its process clock becomes untrustworthy.
+    /// Pending output has no success permit: fail completions and discard traffic before
+    /// the ordinary depose cleanup. This changes no durable replica state.
+    pub fn invalidate_clock(&mut self) {
+        self.out.retain_mut(|output| match output {
+            Output::Done { result, .. } => {
+                *result = OpResult::Failed;
+                true
+            }
+            _ => false,
+        });
+        self.depose();
     }
 
     /// True when every chunk is serving and fully replicated, and nothing is in flight.
@@ -825,7 +843,7 @@ impl<P: Clone + Debug> Target<P> {
         if self.deposed {
             return None;
         }
-        let wait = self.timing.takeover_wait();
+        let wait = self.timing.takeover_wait().ok()?;
         let requests = self.peers.values().filter_map(|p| match &p.session {
             Some(s) => s
                 .inflight
@@ -835,7 +853,7 @@ impl<P: Clone + Debug> Target<P> {
             None => Some(p.retry_at),
         });
         let fences = self.chunks.iter().filter_map(|c| match c.phase {
-            Phase::Fencing => c.first_fence.map(|t| t + wait),
+            Phase::Fencing => c.first_fence.and_then(|t| t.checked_add(wait)),
             _ => None,
         });
         let meta = self
@@ -1900,6 +1918,16 @@ impl<P: Clone + Debug> Target<P> {
         c.required()
     }
 
+    /// Revalidate a queued client success at the frontend's final clock sample.
+    /// The operation already passed its read/write rules; leases must still hold for
+    /// every chunk it touched, and no fencing transition may have deposed this target.
+    pub fn revalidate_success(&self, now: Time, chunks: &[ChunkIdx]) -> bool {
+        !self.deposed
+            && chunks.iter().all(|&chunk| {
+                self.chunks.get(chunk as usize).is_some() && self.lease_ok(chunk as usize, now)
+            })
+    }
+
     /// Every member that must confirm the lease has done so recently (spec §5).
     fn lease_ok(&self, i: usize, now: Time) -> bool {
         let c = &self.chunks[i];
@@ -2474,7 +2502,10 @@ impl<P: Clone + Debug> Target<P> {
 
     /// Advances one chunk: failed members, fencing, reconciliation, resync.
     fn advance_chunk(&mut self, now: Time, i: usize) {
-        let wait = self.timing.takeover_wait();
+        let Ok(wait) = self.timing.takeover_wait() else {
+            self.invalidate_clock();
+            return;
+        };
         {
             // ISR members without a session have failed.
             if self.chunks[i].phase != Phase::Fencing
@@ -2527,10 +2558,11 @@ impl<P: Clone + Debug> Target<P> {
                             self.settle(now, i);
                         }
                     } else if let Some(t) = c.first_fence {
+                        let waited = t.checked_add(wait).is_some_and(|deadline| deadline <= now);
                         #[cfg(test)]
-                        let t = if self.bugs.no_takeover_wait { 0 } else { t };
+                        let waited = waited || self.bugs.no_takeover_wait;
                         let fenced = c.isr.intersection(&c.fenced).count();
-                        if t + wait <= now && fenced >= min {
+                        if waited && fenced >= min {
                             let unfenced: Vec<NodeId> =
                                 c.isr.difference(&c.fenced).copied().collect();
                             c.removing.extend(unfenced);
@@ -3154,6 +3186,34 @@ mod tests {
     /// A request to a node, and its reply, held back from the target.
     type Held = (NodeId, ToReplica<Vec<Value>>, FromReplica<Vec<Value>>);
     type HelloRequests = BTreeMap<NodeId, ToReplica<Vec<Value>>>;
+
+    #[test]
+    fn overflowing_takeover_timing_deposes_without_protocol_work() {
+        let (healthy, _) = opening_target(&[&[TARGET]], BLOCKS);
+        for drift_ppm in [0, u64::MAX] {
+            let timing = Timing {
+                lease: u64::MAX,
+                drift_ppm,
+                ..Timing::default()
+            };
+            let view = VolumeMeta {
+                epoch: 3,
+                target: Some(TARGET),
+                min_isr: 1,
+                blocks_per_chunk: BLOCKS,
+                chunks: vec![ChunkMeta {
+                    replicas: vec![TARGET],
+                    isr: [TARGET].into(),
+                    isr_ver: 0,
+                    moving: None,
+                }],
+            };
+            let mut target = Target::<Vec<Value>>::new(TARGET, VOL, &view, timing, 1, 7);
+            assert!(!healthy.is_deposed());
+            assert!(target.is_deposed());
+            assert!(target.take_output().is_empty());
+        }
+    }
 
     fn opening_target(
         placement: &[&[NodeId]],

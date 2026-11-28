@@ -6,7 +6,7 @@
 //	flaminio-meta [--server host:7400] heartbeat <node>
 //	flaminio-meta [--server host:7400] create <volume> <size> [replicas] [min-isr] [chunk] [prefer-node] [failure-domain] [policy]
 //	flaminio-meta [--server host:7400] get <volume>
-//	flaminio-meta [--server host:7400] attach <volume> <node> [unless-target|only-if-target]
+//	flaminio-meta [--server host:7400] [--target-nonce HEX] attach <volume> <node> [unless-target|only-if-target]
 //	flaminio-meta [--server host:7400] delete <volume>
 //	flaminio-meta [--server host:7400] volumes
 //	flaminio-meta [--server host:7400] move <volume> <chunk> <from> <to>
@@ -35,6 +35,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -64,6 +65,7 @@ import (
 	"github.com/flaminio/flaminio/control/drain"
 	"github.com/flaminio/flaminio/meta/kv"
 	"github.com/flaminio/flaminio/meta/service"
+	"github.com/flaminio/flaminio/pkg/captoken"
 	"github.com/flaminio/flaminio/pkg/geometry"
 	"github.com/flaminio/flaminio/pkg/pki"
 )
@@ -224,6 +226,8 @@ func argOr(args []string, i int, def string) string {
 
 // usage is the client's usage text; the doc comment has every command's arguments.
 const usage = `usage: flaminio-meta serve|nodes|register|heartbeat|create|get|attach|delete|volumes|move|drain|undrain|tombstones|confirm [args]
+  --target-nonce HEX attach <volume> <node> [only-if-target]: bind the new epoch to the healthy
+  daemon's 64-lowercase-hex attach-challenge. JSON token and targetHandoff are standard base64.
   confirm <volume> <node> --replicas-deleted: only through lab.sh vol-confirm, which checks on the
   node first; never typed by hand or taken from shell history. A node confirmed while it still
   holds replicas keeps them, and a volume created again with that name serves their data there,
@@ -320,6 +324,7 @@ func client(args []string, stdout, stderr io.Writer) error {
 	fs.StringVar(&files.Key, "key", "", "client key")
 	fs.StringVar(&files.CA, "ca", "", "CA bundle for the server's certificate")
 	trustDomain := fs.String("trust-domain", "", "trust domain of the client's identity (confirm only)")
+	nonceHex := fs.String("target-nonce", "", "64 lowercase hex characters from attach-challenge (attach only; put before command)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -327,6 +332,24 @@ func client(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		fs.Usage()
 		return errors.New("no command")
+	}
+	var targetNonce []byte
+	nonceSet := false
+	fs.Visit(func(f *flag.Flag) { nonceSet = nonceSet || f.Name == "target-nonce" })
+	if nonceSet {
+		var err error
+		targetNonce, err = hex.DecodeString(*nonceHex)
+		if args[0] != "attach" || len(*nonceHex) != 64 || *nonceHex != strings.ToLower(*nonceHex) || err != nil || !captoken.ValidTargetNonce(targetNonce) {
+			return errors.New("--target-nonce requires attach and a nonzero 32-byte lowercase-hex daemon challenge")
+		}
+	}
+	if args[0] == "attach" {
+		if len(args) < 3 || len(args) > 4 {
+			return errors.New("attach needs volume, node and optional unless-target|only-if-target")
+		}
+		if nonceSet && argOr(args, 3, "") == "unless-target" {
+			return errors.New("--target-nonce cannot be combined with unless-target; a new epoch is required")
+		}
 	}
 	// confirm refuses before any call: its arguments, then the caller's identity.
 	var volume, node string
@@ -428,6 +451,7 @@ func client(args []string, stdout, stderr io.Writer) error {
 			out, err = c.Attach(ctx, &metav1.AttachRequest{
 				Volume: args[1], Node: args[2],
 				UnlessTarget: mode == "unless-target", OnlyIfTarget: mode == "only-if-target",
+				TargetNonce: targetNonce,
 			})
 		}
 	case "delete":

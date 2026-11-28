@@ -79,6 +79,17 @@ impl MetaClient {
         cfg: Config,
         on_answer: impl Fn(u64, Answer) + Send + 'static,
     ) -> Result<Self, ClientError> {
+        Self::spawn_guarded(cfg, on_answer, || true)
+    }
+
+    /// Production workers revalidate their process admission before each queued call,
+    /// endpoint attempt and callback. A request already dispatched may have committed;
+    /// this gate cannot undo it and must never infer a new epoch from cancellation.
+    pub fn spawn_guarded(
+        cfg: Config,
+        on_answer: impl Fn(u64, Answer) + Send + 'static,
+        mut admit: impl FnMut() -> bool + Send + 'static,
+    ) -> Result<Self, ClientError> {
         if cfg.endpoints.is_empty() {
             return Err(ClientError::NoEndpoints);
         }
@@ -108,7 +119,19 @@ impl MetaClient {
                     rt.block_on(async { channels.into_iter().map(|e| e.connect_lazy()).collect() });
                 let mut preferred = 0;
                 while let Ok((id, call)) = rx.recv() {
-                    let answer = rt.block_on(call_any(&chans, &mut preferred, cfg.timeout, call));
+                    if !admit() {
+                        break;
+                    }
+                    let answer = rt.block_on(call_any(
+                        &chans,
+                        &mut preferred,
+                        cfg.timeout,
+                        call,
+                        &mut admit,
+                    ));
+                    if !admit() {
+                        break;
+                    }
                     on_answer(id, answer);
                 }
             })?;
@@ -129,12 +152,19 @@ async fn call_any(
     preferred: &mut usize,
     timeout: Duration,
     call: Call,
+    admit: &mut dyn FnMut() -> bool,
 ) -> Answer {
     let mut last = Answer::Failed {
         code: tonic::Code::Unavailable,
         message: "no endpoint answered".into(),
     };
     for k in 0..chans.len() {
+        if !admit() {
+            return Answer::Failed {
+                code: tonic::Code::Cancelled,
+                message: "process admission closed".into(),
+            };
+        }
         let i = (*preferred + k) % chans.len();
         let answer = tokio::time::timeout(timeout, call_one(chans[i].clone(), call.clone()))
             .await

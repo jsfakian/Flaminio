@@ -299,6 +299,50 @@ func TestVolumeLifecycle(t *testing.T) {
 	})
 }
 
+func TestAttachEpochExhaustion(t *testing.T) {
+	backends(t, func(t *testing.T, store kv.KV) {
+		ctx := context.Background()
+		s := New(store, Options{TokenKey: ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))})
+		addNodes(t, s, "a")
+		if _, err := create(s, "v", 1, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+		original := header(t, store, "v")
+		for _, first := range []uint64{original.FirstEpoch, 0} {
+			for _, withNonce := range []bool{false, true} {
+				t.Run(fmt.Sprintf("first%d/nonce%t", first, withNonce), func(t *testing.T) {
+					h := original
+					h.Epoch, h.FirstEpoch, h.Target = ^uint64(0), first, "a"
+					writeTestHeader(t, store, h)
+					before, ok, err := store.Get(ctx, volumeKey("v"))
+					if err != nil || !ok {
+						t.Fatalf("read before attach: found=%t error=%v", ok, err)
+					}
+					r := &metav1.AttachRequest{Volume: "v", Node: "a", OnlyIfTarget: true}
+					if withNonce {
+						r.TargetNonce = make([]byte, captoken.TargetNonceLen)
+						r.TargetNonce[0] = 1
+					}
+					out, err := s.Attach(ctx, r)
+					if code(err) != codes.FailedPrecondition || out != nil {
+						t.Errorf("exhausted attach: response_present=%t error=%v", out != nil, err)
+					}
+					after, ok, err := store.Get(ctx, volumeKey("v"))
+					if err != nil || !ok || before.Rev != after.Rev || !bytes.Equal(before.Value, after.Value) {
+						t.Errorf("exhausted attach changed stored header or revision: found=%t error=%v", ok, err)
+					}
+					// A repeated controller publish still makes no epoch transition or credentials.
+					unchanged, err := s.Attach(ctx, &metav1.AttachRequest{Volume: "v", Node: "a", UnlessTarget: true})
+					if err != nil || unchanged.GetVolume().GetEpoch() != ^uint64(0) ||
+						len(unchanged.GetToken()) != 0 || len(unchanged.GetTargetHandoff()) != 0 {
+						t.Errorf("read-only attach at exhausted epoch: error=%v", err)
+					}
+				})
+			}
+		}
+	})
+}
+
 func TestChangeIsrBatchBoundary(t *testing.T) {
 	stores(t, func(t *testing.T, s *Service) {
 		ctx := context.Background()
@@ -2665,12 +2709,18 @@ func TestGeometryWorstMetadataReplies(t *testing.T) {
 			if len(tok) != 4+1+2+128+8+2+128+8+8+64 {
 				t.Fatalf("token len %d", len(tok))
 			}
+			nonce := make([]byte, captoken.TargetNonceLen)
+			nonce[0] = 1
+			handoff, e := captoken.SignHandoff(key, captoken.HandoffNormal, nonce, tok)
+			if e != nil || len(handoff) != captoken.HandoffLen || len(handoff) > 134 {
+				t.Fatalf("handoff len %d: %v", len(handoff), e)
+			}
 			p := volumePB(v)
 			b, e := geometry.MetadataBound(uint64(n), uint32(r+1))
 			if e != nil || b > 4<<20 {
 				t.Fatalf("budget %d,%v", b, e)
 			}
-			for name, msg := range map[string]proto.Message{"create": &metav1.CreateVolumeResponse{Volume: p}, "get": &metav1.GetVolumeResponse{Volume: p}, "attach": &metav1.AttachResponse{Volume: p, Token: tok}, "check": &metav1.CheckCreateVolumeResponse{Volume: p, LegacyIdentity: true}} {
+			for name, msg := range map[string]proto.Message{"create": &metav1.CreateVolumeResponse{Volume: p}, "get": &metav1.GetVolumeResponse{Volume: p}, "attach": &metav1.AttachResponse{Volume: p, Token: tok, TargetHandoff: handoff}, "check": &metav1.CheckCreateVolumeResponse{Volume: p, LegacyIdentity: true}} {
 				size := proto.Size(msg)
 				if uint64(size) > b {
 					t.Errorf("%s proto.Size=%d exceeds B=%d", name, size, b)
@@ -2820,6 +2870,60 @@ func TestCheckCreateVolumeNestedTypeCorruptionAfterInitialRead(t *testing.T) {
 		}
 		if e := json.Unmarshal(entry.Value, &raw); e != nil || raw.Epoch != original.Epoch {
 			t.Fatalf("corruption changed epoch: %d,%v", raw.Epoch, e)
+		}
+	})
+}
+
+func TestAttachProcessHandoffValidationAndLostCommitReply(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{83}, 32))
+	pub := key.Public().(ed25519.PublicKey)
+	// Invalid challenges must fail before even the first metadata read.
+	for _, nonce := range [][]byte{{1}, make([]byte, 31), make([]byte, 32), make([]byte, 33)} {
+		s := New(nil, Options{TokenKey: key})
+		out, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", TargetNonce: nonce})
+		if status.Code(err) != codes.InvalidArgument || out != nil {
+			t.Fatalf("nonce%d: %v %+v", len(nonce), err, out)
+		}
+	}
+	nonce := bytes.Repeat([]byte{1}, 32)
+	s := New(nil, Options{TokenKey: key})
+	if out, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", TargetNonce: nonce, UnlessTarget: true}); status.Code(err) != codes.InvalidArgument || out != nil {
+		t.Fatalf("read-only mint: %v %+v", err, out)
+	}
+	backends(t, func(t *testing.T, backend kv.KV) {
+		s, store, initial := coherentFixture(t, backend, Options{TokenKey: key})
+		// Simulate loss of the transaction reply after the real backend committed it.
+		store.txnRev = func(ctx context.Context, cmps []kv.Cmp, ops []kv.Op) (int64, bool, error) {
+			store.txnRev = nil
+			rev, ok, err := backend.TxnRev(ctx, cmps, ops)
+			if err != nil || !ok {
+				t.Fatalf("expected first real CAS: %v %v", ok, err)
+			}
+			return rev, false, status.Error(codes.Unavailable, "lost commit reply")
+		}
+		out, err := s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", TargetNonce: nonce})
+		if out != nil || status.Code(err) != codes.Unavailable {
+			t.Fatalf("lost reply returned authority: %+v %v", out, err)
+		}
+		if got := header(t, backend, "v").Epoch; got != initial.Epoch+1 {
+			t.Fatalf("lost commit epoch%d", got)
+		}
+		out, err = s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "a", OnlyIfTarget: true, TargetNonce: nonce})
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims, err := captoken.VerifyHandoff(pub, captoken.HandoffNormal, nonce, out.Token, out.TargetHandoff)
+		if err != nil || claims.Epoch != initial.Epoch+2 || claims.Epoch != out.Volume.Epoch || claims.FirstEpoch != header(t, backend, "v").FirstEpoch {
+			t.Fatalf("retry did not mint after a distinct committed advance: %+v %v", claims, err)
+		}
+		before := header(t, backend, "v")
+		changed := bytes.Repeat([]byte{2}, 32)
+		_, err = s.Attach(context.Background(), &metav1.AttachRequest{Volume: "v", Node: "b", OnlyIfTarget: true, TargetNonce: changed})
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatal(err)
+		}
+		if after := header(t, backend, "v"); after.Epoch != before.Epoch || after.Target != before.Target {
+			t.Fatal("changed-owner refusal mutated metadata")
 		}
 	})
 }

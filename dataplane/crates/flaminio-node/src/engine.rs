@@ -21,18 +21,20 @@
 //! length the engine asked for. Otherwise it is dropped, and the target's timeout treats the
 //! replica as failed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use crate::clock::{ClockDomain, ClockGeneration, ClockObserver, ClockSample, SuccessPermit};
 use bytes::Bytes;
 use flaminio_metaclient::{Answer, Call, MetaClient, pb};
 use flaminio_net::BLOCK;
 use flaminio_net::frame::Frame;
+use flaminio_net::handoff::{Purpose, VerifiedHandoff};
 use flaminio_net::session::Accepted;
-use flaminio_net::token::{Claims, decode_unverified};
+use flaminio_net::token::Claims;
 use flaminio_repl::extent::Extent;
 use flaminio_repl::geometry::{self, Geometry};
 use flaminio_repl::meta::{ChunkMeta, MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, VolumeMeta};
@@ -203,6 +205,7 @@ pub enum Io {
 /// local replica, and the frontend reads them from the store itself.
 #[derive(Debug)]
 pub struct FastLocal {
+    generation: ClockGeneration,
     pieces: Vec<FastPiece>,
 }
 
@@ -236,10 +239,13 @@ pub struct LocalRead {
     pub at: usize,
     pub len: usize,
     token: u64,
+    generation: ClockGeneration,
 }
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum IoError {
+    #[error("clock quarantined; operator restart required")]
+    ClockQuarantined,
     #[error("the volume is not attached here")]
     NotAttached,
     #[error("misaligned or out of range")]
@@ -259,7 +265,7 @@ pub enum Input {
     /// Become the target of `volume`, with the capability token from its attach.
     Attach {
         volume: String,
-        token: Vec<u8>,
+        proof: VerifiedHandoff,
     },
     Io {
         volume: String,
@@ -294,11 +300,12 @@ pub enum Input {
     Stop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Output {
     Done {
         op: u64,
         result: Result<Option<Vec<u8>>, IoError>,
+        permit: Option<SuccessPermit>,
     },
     Attached {
         volume: String,
@@ -322,14 +329,68 @@ pub enum Output {
     /// A piece of a direct read that came from another replica: copy it to the operation's
     /// buffer at `at`.
     Piece {
+        generation: ClockGeneration,
         op: u64,
         at: usize,
         data: Bytes,
     },
 }
 
+// Equality compares observable results; a permit is an uncloneable delivery capability,
+// not part of the client's result. Callers inspecting admission use the permit explicitly.
+impl PartialEq for Output {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Done {
+                    op: a, result: ar, ..
+                },
+                Self::Done {
+                    op: b, result: br, ..
+                },
+            ) => a == b && ar == br,
+            (
+                Self::Attached {
+                    volume: a,
+                    epoch: ae,
+                    size: az,
+                },
+                Self::Attached {
+                    volume: b,
+                    epoch: be,
+                    size: bz,
+                },
+            ) => a == b && ae == be && az == bz,
+            (
+                Self::AttachFailed { volume: a, why: ar },
+                Self::AttachFailed { volume: b, why: br },
+            ) => a == b && ar == br,
+            (Self::Deposed { volume: a }, Self::Deposed { volume: b })
+            | (Self::Detached { volume: a }, Self::Detached { volume: b }) => a == b,
+            (Self::LocalRead(a), Self::LocalRead(b)) => a == b,
+            (
+                Self::Piece {
+                    op: a,
+                    at: aa,
+                    data: ad,
+                    ..
+                },
+                Self::Piece {
+                    op: b,
+                    at: ba,
+                    data: bd,
+                    ..
+                },
+            ) => a == b && aa == ba && ad == bd,
+            _ => false,
+        }
+    }
+}
+impl Eq for Output {}
+
 /// An admitted local read, waiting for the frontend.
 struct PendingLocal {
+    generation: ClockGeneration,
     volume: String,
     /// The local replica's session the read was admitted on.
     sref: SessionRef,
@@ -342,6 +403,7 @@ struct PendingLocal {
 
 /// A client operation, split into one target operation per chunk it touches.
 struct ClientOp {
+    chunks: Vec<u32>,
     pending: usize,
     failed: Option<IoError>,
     read: Option<Vec<u8>>,
@@ -530,7 +592,7 @@ struct Attaching {
     /// Which attach of the volume this is: answers to an earlier one, dropped since, carry
     /// another (docs/issues/6).
     attempt: u64,
-    token: Vec<u8>,
+    proof: VerifiedHandoff,
     volume: Option<pb::Volume>,
     nodes: Option<Vec<pb::Node>>,
 }
@@ -584,7 +646,11 @@ pub struct Engine<D: BlockDevice> {
     service: ReplicaService<D>,
     net: Net,
     meta: Box<dyn MetaPort>,
-    start: Instant,
+    clock: Arc<ClockDomain>,
+    observers: HashMap<std::thread::ThreadId, ClockObserver>,
+    nonce: [u8; 32],
+    ran_epochs: BTreeMap<String, u64>,
+    quarantined: bool,
     conns: BTreeMap<ConnId, (SessionRef, channel::Sender<Reply>)>,
     targets: BTreeMap<String, TargetRt>,
     attaching: BTreeMap<String, Attaching>,
@@ -650,14 +716,25 @@ impl<D: BlockDevice> Engine<D> {
         service: ReplicaService<D>,
         net: Net,
         meta: Box<dyn MetaPort>,
+        clock: Arc<ClockDomain>,
+        nonce: [u8; 32],
     ) -> Self {
         let now = Instant::now();
+        if !Arc::ptr_eq(&clock, net.clock_domain()) {
+            clock.quarantine(crate::clock::ClockFault::Profile);
+            net.clock_domain()
+                .quarantine(crate::clock::ClockFault::Profile);
+        }
         let mut e = Self {
             cfg,
             service,
             net,
             meta,
-            start: now,
+            clock,
+            observers: HashMap::new(),
+            nonce,
+            ran_epochs: BTreeMap::new(),
+            quarantined: false,
             conns: BTreeMap::new(),
             targets: BTreeMap::new(),
             attaching: BTreeMap::new(),
@@ -716,15 +793,193 @@ impl<D: BlockDevice> Engine<D> {
         &self.service
     }
 
-    pub fn into_service(self) -> ReplicaService<D> {
+    pub fn into_service(mut self) -> ReplicaService<D> {
+        self.settle_local(Instant::now());
         self.service
     }
 
-    fn us(&self, now: Instant) -> u64 {
-        now.duration_since(self.start).as_micros() as u64
+    pub fn clock_domain(&self) -> &Arc<ClockDomain> {
+        &self.clock
+    }
+
+    pub fn attach_challenge(&mut self) -> Result<[u8; 32], String> {
+        let sample = self
+            .sample()
+            .ok_or("clock quarantined; operator restart required")?;
+        self.clock.admit(sample).map_err(|e| e.to_string())?;
+        Ok(self.nonce)
+    }
+
+    /// Validate a frontend's already-started lifetime immediately before publishing its
+    /// device. This cannot start a target or revive a quarantined/deposed lifetime.
+    pub fn attachment_permit(
+        &mut self,
+        volume: &str,
+        proof: &VerifiedHandoff,
+    ) -> Option<SuccessPermit> {
+        let sample = self.sample()?;
+        let rt = self.targets.get(volume)?;
+        if rt.sm.is_deposed()
+            || !proof.is_current(&self.nonce, Purpose::Normal)
+            || !proof.matches_target(volume, &self.cfg.node, rt.view.epoch)
+            || rt.token != proof.capability()
+        {
+            return None;
+        }
+        self.clock.success_permit(sample).ok()
+    }
+
+    fn sample(&mut self) -> Option<ClockSample> {
+        let observer = self
+            .observers
+            .entry(std::thread::current().id())
+            .or_insert_with(|| self.clock.observer());
+        match observer.sample() {
+            Ok(sample) => Some(sample),
+            Err(_) => {
+                self.invalidate_clock();
+                None
+            }
+        }
+    }
+
+    fn admit(&mut self) -> bool {
+        let Some(sample) = self.sample() else {
+            return false;
+        };
+        if self.clock.admit(sample).is_err() {
+            self.invalidate_clock();
+            return false;
+        }
+        true
+    }
+
+    fn invalidate_clock(&mut self) {
+        if self.quarantined {
+            return;
+        }
+        self.quarantined = true;
+        eprintln!(
+            "flaminio-node: clock quarantined: {}; operator restart required",
+            self.clock.status().reason.map_or("profile", |r| r.as_str())
+        );
+        self.net.send(NetCommand::Quarantine);
+        self.service.invalidate_clock();
+        self.conns.clear();
+        self.keys.clear();
+        self.local.clear();
+        self.local_reads.clear();
+        self.meta_waits.clear();
+        // Keep device work and its buffers alive. Poll/settle only work already submitted;
+        // no queued network or client request is admitted after the gate closes.
+        let permitted: BTreeSet<u64> = self
+            .out
+            .iter()
+            .filter_map(|o| match o {
+                Output::Done {
+                    op,
+                    permit: Some(_),
+                    ..
+                } => Some(*op),
+                _ => None,
+            })
+            .collect();
+        let unpublished: Vec<String> = self
+            .out
+            .iter()
+            .filter_map(|o| match o {
+                Output::Attached { volume, .. } => Some(volume.clone()),
+                _ => None,
+            })
+            .collect();
+        for volume in unpublished {
+            self.out.push(Output::AttachFailed {
+                volume,
+                why: "clock quarantined; operator restart required".into(),
+            });
+        }
+        self.out.retain(|o| {
+            matches!(
+                o,
+                Output::AttachFailed { .. }
+                    | Output::Done { result: Err(_), .. }
+                    | Output::Done {
+                        permit: Some(_),
+                        ..
+                    }
+            ) || matches!(o, Output::Piece { op, .. } if permitted.contains(op))
+        });
+        for (volume, _) in std::mem::take(&mut self.attaching) {
+            self.out.push(Output::AttachFailed {
+                volume,
+                why: "clock quarantined; operator restart required".into(),
+            });
+        }
+        for (_, mut rt) in std::mem::take(&mut self.targets) {
+            rt.sm.invalidate_clock();
+            for op in rt.ops.keys() {
+                self.out.push(Output::Done {
+                    op: *op,
+                    result: Err(IoError::ClockQuarantined),
+                    permit: None,
+                });
+            }
+        }
+    }
+
+    fn finish_quarantined_io(&mut self, _now: Instant) {
+        loop {
+            if self.staged.is_some() && self.service.holding() && self.service.launch() {
+                self.take_staged(true);
+            }
+            if self.committing.is_empty() {
+                break;
+            }
+            if self.service.poll(false).is_none() {
+                break;
+            }
+            self.committing.pop_front();
+            if !self.service.holding()
+                && let Some(st) = self.staged.take()
+            {
+                self.committing.push_back(st);
+            }
+        }
+        self.gather = None;
+        self.gather_timer = None;
+    }
+
+    fn reject_quarantined(&mut self, input: Input) -> bool {
+        match input {
+            Input::Stop => {
+                self.settle_local(Instant::now());
+                return false;
+            }
+            Input::Detach { volume } => self.detach(&volume),
+            Input::Io { op, .. } => self.out.push(Output::Done {
+                op,
+                result: Err(IoError::ClockQuarantined),
+                permit: None,
+            }),
+            Input::Attach { volume, .. } => self.out.push(Output::AttachFailed {
+                volume,
+                why: "clock quarantined; operator restart required".into(),
+            }),
+            Input::DeleteReplicas { reply, .. } => {
+                let _ = reply.send(Err("clock quarantined; operator restart required".into()));
+            }
+            Input::InspectLocal { reply, .. } => {
+                let _ = reply.send(None);
+            }
+            _ => {}
+        }
+        true
     }
 
     fn meta_call(&mut self, call: Call, wait: MetaWait) {
+        if !self.admit() {
+            return;
+        }
         let id = self.next_meta;
         self.next_meta += 1;
         self.meta_waits.insert(id, wait);
@@ -733,6 +988,7 @@ impl<D: BlockDevice> Engine<D> {
 
     /// Takes the outputs produced so far.
     pub fn take_output(&mut self) -> Vec<Output> {
+        let _ = self.sample();
         std::mem::take(&mut self.out)
     }
 
@@ -742,21 +998,32 @@ impl<D: BlockDevice> Engine<D> {
         if self.registration == Registration::Needed {
             t = t.min(self.next_register);
         }
-        for rt in self.targets.values() {
-            let now_us = self.us(Instant::now());
-            if let Some(w) = rt.sm.next_wakeup(now_us) {
-                t = t.min(self.start + Duration::from_micros(w));
-            }
+        // Relative timers only wake the driver; every awakened transition resamples BOOTTIME.
+        if !self.targets.is_empty() {
+            t = t.min(Instant::now() + Duration::from_millis(10));
         }
         t
     }
 
     /// Handles one input. Returns false on [`Input::Stop`].
-    pub fn handle(&mut self, now: Instant, input: Input) -> bool {
+    pub fn handle(&mut self, input: Input) -> bool {
+        let now = Instant::now();
+        if !self.admit() {
+            return self.reject_quarantined(input);
+        }
         match input {
             Input::Net(e) => self.on_net(now, e),
             Input::Meta { id, answer } => self.on_meta(now, id, answer),
-            Input::Attach { volume, token } => {
+            Input::Attach { volume, proof } => {
+                if !proof.is_current(&self.nonce, Purpose::Normal)
+                    || !proof.matches_target(&volume, &self.cfg.node, proof.claims().epoch)
+                {
+                    self.out.push(Output::AttachFailed {
+                        volume,
+                        why: "a current-process agent/admin Attach handoff is required".into(),
+                    });
+                    return true;
+                }
                 if self.targets.contains_key(&volume) {
                     self.out.push(Output::AttachFailed {
                         volume,
@@ -778,7 +1045,7 @@ impl<D: BlockDevice> Engine<D> {
                     volume.clone(),
                     Attaching {
                         attempt,
-                        token,
+                        proof,
                         volume: None,
                         nodes: None,
                     },
@@ -818,18 +1085,30 @@ impl<D: BlockDevice> Engine<D> {
                         Err(format!("{volume} is attached here"))
                     } else {
                         self.settle_local(now);
-                        self.service.delete_volume(&volume)
+                        if self.admit() {
+                            self.service.delete_volume(&volume)
+                        } else {
+                            Err("clock quarantined; operator restart required".into())
+                        }
                     };
                 let _ = reply.send(r);
             }
             Input::Nop => {}
-            Input::Stop => return false,
+            Input::Stop => {
+                self.settle_local(now);
+                return false;
+            }
         }
         true
     }
 
     /// Ticks targets and heartbeats, and sends what queued for the local replica.
-    pub fn turn(&mut self, now: Instant) {
+    pub fn turn(&mut self) {
+        let now = Instant::now();
+        if self.sample().is_none() {
+            self.finish_quarantined_io(now);
+            return;
+        }
         // A registration that failed, or that the service lost, goes again, with or without
         // heartbeats. Without this, a metadata service that was down or contended when the node
         // started would leave it unregistered, and never live, until a restart.
@@ -850,9 +1129,12 @@ impl<D: BlockDevice> Engine<D> {
         } else if self.cfg.heartbeat.is_none() {
             self.next_heartbeat = now + Duration::from_secs(3600);
         }
-        let us = self.us(now);
         let vols: Vec<String> = self.targets.keys().cloned().collect();
         for v in vols {
+            let Some(sample) = self.sample() else {
+                return;
+            };
+            let us = sample.elapsed_us();
             if let Some(rt) = self.targets.get_mut(&v) {
                 rt.sm.tick(us);
             }
@@ -864,16 +1146,25 @@ impl<D: BlockDevice> Engine<D> {
     /// Sends what queued for the local replica and routes the targets' outputs, without
     /// ticking: for after an I/O event. Ticks (timeouts, heartbeats, leases) scan every
     /// request in flight, so they belong on a timer, not on every I/O.
-    pub fn flush(&mut self, now: Instant) {
+    pub fn flush(&mut self) {
+        let now = Instant::now();
+        if self.sample().is_none() {
+            self.finish_quarantined_io(now);
+            return;
+        }
         self.flush_local(now);
     }
 
     /// Runs the engine on this thread until [`Input::Stop`] or until every sender is gone.
     pub fn run(mut self, inputs: mpsc::Receiver<Input>, mut outputs: impl FnMut(Output)) -> Self {
         loop {
-            let now = Instant::now();
-            self.turn(now);
-            for o in self.take_output() {
+            self.turn();
+            for mut o in self.take_output() {
+                if let Output::Done { permit, .. } = &mut o
+                    && let Some(p) = permit.take()
+                {
+                    p.consume();
+                }
                 outputs(o);
             }
             let wait = self.next_wakeup().saturating_duration_since(Instant::now());
@@ -882,15 +1173,14 @@ impl<D: BlockDevice> Engine<D> {
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return self,
             };
-            let now = Instant::now();
-            if !self.handle(now, first) {
+            if !self.handle(first) {
                 return self;
             }
             // Everything that has arrived is one batch.
             for _ in 0..1024 {
                 match inputs.try_recv() {
                     Ok(i) => {
-                        if !self.handle(now, i) {
+                        if !self.handle(i) {
                             return self;
                         }
                     }
@@ -915,6 +1205,9 @@ impl<D: BlockDevice> Engine<D> {
                 }
                 // A Hello fences the store, which settles it: a held group starts first.
                 self.settle_local(now);
+                if !self.admit() {
+                    return;
+                }
                 match self.service.hello(&accepted) {
                     Ok((s, reply)) => {
                         let _ = replies.try_send(Reply::Send(reply));
@@ -965,7 +1258,8 @@ impl<D: BlockDevice> Engine<D> {
     /// Lets the local replica's commits stay in flight between turns (`on`), for a thread that
     /// pumps the engine when the store's device signals a commit done. Turning it off settles
     /// the local replica: the commits in flight, a held group and the queued requests.
-    pub fn set_async_commits(&mut self, now: Instant, on: bool) {
+    pub fn set_async_commits(&mut self, on: bool) {
+        let now = Instant::now();
         // Settled while still asynchronous, so that a held group is handled by the held rules
         // (`holding()` reads this flag).
         if !on {
@@ -1150,7 +1444,13 @@ impl<D: BlockDevice> Engine<D> {
     /// Sends the requests queued for the local replica, a batch at a time, until none are left
     /// or a commit stays in flight.
     fn flush_local(&mut self, now: Instant) {
+        if self.sample().is_none() {
+            return;
+        }
         for _ in 0..16 {
+            if !self.admit() {
+                return;
+            }
             if !self.finish_commit(now, !self.async_commits) {
                 self.stage_local(now);
                 self.maybe_launch_staged(now);
@@ -1307,6 +1607,9 @@ impl<D: BlockDevice> Engine<D> {
     /// now. The staged group's commit starts when the oldest in flight lands, or, holding or
     /// with pipelined commits, by [`Self::maybe_launch_staged`].
     fn stage_local(&mut self, now: Instant) {
+        if !self.admit() {
+            return;
+        }
         if !self.async_commits {
             return;
         }
@@ -1447,10 +1750,36 @@ impl<D: BlockDevice> Engine<D> {
         }
     }
 
+    /// Retain submitted buffers until their real CQEs arrive, without delivering success.
+    fn drain_quarantined_local(&mut self) {
+        self.invalidate_clock();
+        // Stop/detach may wait for actual CQEs; submitted write buffers must outlive them.
+        while !self.committing.is_empty() || self.staged.is_some() {
+            self.launch_held();
+            if self.staged.is_some() && self.service.holding() && self.service.launch() {
+                self.take_staged(true);
+            }
+            if self.committing.is_empty() {
+                break;
+            }
+            let _ = self.service.poll(true);
+            self.committing.pop_front();
+            if !self.service.holding()
+                && let Some(st) = self.staged.take()
+            {
+                self.committing.push_back(st);
+            }
+        }
+    }
+
     /// Everything queued for the local replica handled and durable, a held group included,
     /// without waiting for writes to gather: before using the replica directly, or anything
     /// that settles its store (docs/issues/10, S5).
     fn settle_local(&mut self, now: Instant) {
+        if !self.clock.status().is_healthy() {
+            self.drain_quarantined_local();
+            return;
+        }
         let settling = std::mem::replace(&mut self.settling, true);
         while !self.committing.is_empty() || !self.local.is_empty() || self.staged.is_some() {
             let before = self.progress;
@@ -1458,6 +1787,10 @@ impl<D: BlockDevice> Engine<D> {
             self.finish_commit(now, true);
             self.launch_held();
             self.flush_local(now);
+            if !self.clock.status().is_healthy() {
+                self.drain_quarantined_local();
+                break;
+            }
             if self.progress == before {
                 eprintln!(
                     "flaminio-node: settling the local replica made no progress ({} commits in flight, {} requests queued, a group staged: {})",
@@ -1473,6 +1806,9 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     fn deliver_local(&mut self, now: Instant, from: Vec<LocalFrom>, replies: Vec<Reply>) {
+        if self.sample().is_none() {
+            return;
+        }
         let mut touched = Vec::new();
         for (from, reply) in from.into_iter().zip(replies) {
             match from {
@@ -1631,7 +1967,10 @@ impl<D: BlockDevice> Engine<D> {
                 sm_req,
                 chunks,
             } => {
-                let us = self.us(now);
+                let Some(sample) = self.sample() else {
+                    return;
+                };
+                let us = sample.elapsed_us();
                 let Some(rt) = self
                     .targets
                     .get_mut(&volume)
@@ -1671,7 +2010,9 @@ impl<D: BlockDevice> Engine<D> {
                         },
                     );
                 }
-                let rt = self.targets.get_mut(&volume).expect("target");
+                let Some(rt) = self.targets.get_mut(&volume) else {
+                    return;
+                };
                 let reply = if r.applied {
                     MetaReply::Applied { vol: 0, view }
                 } else {
@@ -1685,7 +2026,10 @@ impl<D: BlockDevice> Engine<D> {
                 generation,
                 sm_req,
             } => {
-                let us = self.us(now);
+                let Some(sample) = self.sample() else {
+                    return;
+                };
+                let us = sample.elapsed_us();
                 let Some(rt) = self
                     .targets
                     .get_mut(&volume)
@@ -1724,7 +2068,9 @@ impl<D: BlockDevice> Engine<D> {
                         },
                     );
                 }
-                let rt = self.targets.get_mut(&volume).expect("target");
+                let Some(rt) = self.targets.get_mut(&volume) else {
+                    return;
+                };
                 rt.sm
                     .on_meta(us, sm_req, &MetaReply::Applied { vol: 0, view });
                 self.drain(now, &volume);
@@ -1745,7 +2091,7 @@ impl<D: BlockDevice> Engine<D> {
         }
     }
 
-    fn start_target(&mut self, now: Instant, volume: &str, a: Attaching) -> Result<u64, String> {
+    fn start_target(&mut self, _now: Instant, volume: &str, a: Attaching) -> Result<u64, String> {
         let v = a.volume.ok_or("no such volume")?;
         let geometry = validate_volume(volume, &v)?;
         if v.target != self.cfg.node {
@@ -1756,16 +2102,26 @@ impl<D: BlockDevice> Engine<D> {
         }
         // The local replica takes the volume's first epoch from the token, so the token must be
         // this attach's: epochs of different volumes of a name never overlap, so the epoch fixes
-        // the volume (docs/issues/30, S6). Its signature is not checked here (#15).
-        if a.token.is_empty() {
-            return Err("no capability token: the data plane needs one".into());
-        }
-        let claims = decode_unverified(&a.token).map_err(|e| e.to_string())?;
-        if claims.volume != volume || claims.node != self.cfg.node || claims.epoch != v.epoch {
+        // the volume (docs/issues/30, S6). The opaque proof verified both signatures.
+        if !a.proof.is_current(&self.nonce, Purpose::Normal)
+            || !a.proof.matches_target(volume, &self.cfg.node, v.epoch)
+        {
             return Err(format!(
-                "the token is for {} epoch {} on {}, the volume is at {}",
-                claims.volume, claims.epoch, claims.node, v.epoch
+                "handoff is for epoch {} on {}; current metadata epoch {} requires a matching current-process agent/admin Attach",
+                a.proof.claims().epoch,
+                a.proof.claims().node,
+                v.epoch
             ));
+        }
+        let claims = a.proof.claims();
+        if self
+            .ran_epochs
+            .get(volume)
+            .is_some_and(|&old| v.epoch <= old)
+        {
+            return Err(
+                "this process already ran that epoch; obtain a new-epoch Attach handoff".into(),
+            );
         }
         // Validated record/member caps bound this map to 1 + N*(R+1), below u32::MAX.
         let mut nodes: Vec<String> = Vec::new();
@@ -1806,7 +2162,12 @@ impl<D: BlockDevice> Engine<D> {
             blocks_per_chunk: geometry.blocks_per_chunk,
             chunks,
         };
-        let us = self.us(now);
+        let sample = self
+            .sample()
+            .ok_or("clock quarantined; operator restart required")?;
+        let us = sample.elapsed_us();
+        self.clock.admit(sample).map_err(|e| e.to_string())?;
+        self.ran_epochs.insert(volume.to_string(), v.epoch);
         let sm = Target::new(local, 0, &view, self.cfg.timing, self.cfg.max_io, us);
         self.targets.insert(
             volume.to_string(),
@@ -1814,7 +2175,7 @@ impl<D: BlockDevice> Engine<D> {
                 sm,
                 view,
                 generation: a.attempt,
-                token: a.token,
+                token: a.proof.capability().to_vec(),
                 first_epoch: claims.first_epoch,
                 size: v.size_bytes,
                 chunk_size: v.chunk_bytes,
@@ -1833,11 +2194,21 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     fn submit(&mut self, now: Instant, volume: &str, op: u64, io: Io) {
-        let us = self.us(now);
+        let Some(sample) = self.sample() else {
+            // This operation is not in rt.ops yet, so invalidation cannot complete it.
+            self.out.push(Output::Done {
+                op,
+                result: Err(IoError::ClockQuarantined),
+                permit: None,
+            });
+            return;
+        };
+        let us = sample.elapsed_us();
         let Some(rt) = self.targets.get_mut(volume) else {
             self.out.push(Output::Done {
                 op,
                 result: Err(IoError::NotAttached),
+                permit: None,
             });
             return;
         };
@@ -1854,6 +2225,7 @@ impl<D: BlockDevice> Engine<D> {
             self.out.push(Output::Done {
                 op,
                 result: Err(IoError::Invalid),
+                permit: None,
             });
             return;
         }
@@ -1874,6 +2246,7 @@ impl<D: BlockDevice> Engine<D> {
         rt.ops.insert(
             op,
             ClientOp {
+                chunks: pieces.iter().map(|(chunk, ..)| *chunk).collect(),
                 pending: pieces.len(),
                 failed: None,
                 read: matches!(io, Io::Read { .. }).then(|| vec![0u8; len as usize]),
@@ -1913,6 +2286,9 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     fn drain_one(&mut self, now: Instant, volume: &str) {
+        if self.sample().is_none() {
+            return;
+        }
         let Some(rt) = self.targets.get_mut(volume) else {
             return;
         };
@@ -1924,6 +2300,9 @@ impl<D: BlockDevice> Engine<D> {
         let generation = rt.generation;
         let outs = rt.sm.take_output();
         for o in outs {
+            if self.sample().is_none() {
+                return;
+            }
             match o {
                 TOut::Send { to, msg } => self.send_from_target(now, volume, to, msg),
                 TOut::Meta {
@@ -1998,7 +2377,9 @@ impl<D: BlockDevice> Engine<D> {
                 TOut::Done { op: sub, result } => self.sub_done(volume, sub, result),
             }
         }
-        let rt = self.targets.get_mut(volume).expect("target");
+        let Some(rt) = self.targets.get_mut(volume) else {
+            return;
+        };
         if rt.sm.is_deposed() && !rt.deposed_reported {
             rt.deposed_reported = true;
             for key in rt.sessions.values().filter_map(|s| match s {
@@ -2029,6 +2410,7 @@ impl<D: BlockDevice> Engine<D> {
             self.out.push(Output::Done {
                 op: *op,
                 result: Err(IoError::NotAttached),
+                permit: None,
             });
         }
         self.keys.retain(|_, (v, _, _)| v != volume);
@@ -2039,6 +2421,9 @@ impl<D: BlockDevice> Engine<D> {
     }
 
     fn sub_done(&mut self, volume: &str, sub: u64, result: OpResult<Payload>) {
+        let Some(sample) = self.sample() else {
+            return;
+        };
         let Some(rt) = self.targets.get_mut(volume) else {
             return;
         };
@@ -2051,9 +2436,12 @@ impl<D: BlockDevice> Engine<D> {
             OpResult::Read(p) if p.len() != n => c.failed = Some(IoError::Invalid),
             // Already in the client's buffer.
             OpResult::Read(Payload::Placed(_)) if c.direct => {}
-            OpResult::Read(Payload::Bytes(b)) if c.direct => {
-                self.out.push(Output::Piece { op, at, data: b })
-            }
+            OpResult::Read(Payload::Bytes(b)) if c.direct => self.out.push(Output::Piece {
+                generation: sample.generation(),
+                op,
+                at,
+                data: b,
+            }),
             OpResult::Read(Payload::Bytes(b)) => match c.read.as_mut() {
                 Some(buf) => buf[at..at + n].copy_from_slice(&b),
                 None => c.failed = Some(IoError::Invalid),
@@ -2069,7 +2457,24 @@ impl<D: BlockDevice> Engine<D> {
                 Some(e) => Err(e),
                 None => Ok(c.read),
             };
-            self.out.push(Output::Done { op, result });
+            let mut result = result;
+            let permit = if result.is_ok() {
+                if rt.sm.revalidate_success(sample.elapsed_us(), &c.chunks) {
+                    self.clock.success_permit(sample).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if result.is_ok() && permit.is_none() {
+                result = Err(if self.clock.status().is_healthy() {
+                    IoError::Deposed
+                } else {
+                    IoError::ClockQuarantined
+                });
+            }
+            self.out.push(Output::Done { op, result, permit });
         }
     }
 
@@ -2080,6 +2485,10 @@ impl<D: BlockDevice> Engine<D> {
         to: NodeId,
         msg: ToReplica<Payload>,
     ) {
+        let Some(sample) = self.sample() else {
+            return;
+        };
+        let generation = sample.generation();
         let rt = self.targets.get_mut(volume).expect("target");
         if let Request::Read { ext, .. } = &msg.body {
             rt.reads.insert((to, msg.req), ext.len as usize * BLOCK);
@@ -2104,7 +2513,12 @@ impl<D: BlockDevice> Engine<D> {
                 };
                 // A Hello fences the store, which settles it: a held group starts first.
                 self.settle_local(now);
-                let rt = self.targets.get_mut(volume).expect("target");
+                if !self.admit() {
+                    return;
+                }
+                let Some(rt) = self.targets.get_mut(volume) else {
+                    return;
+                };
                 match self.service.hello(&a) {
                     Ok((sref, frame)) => {
                         rt.sessions.insert(
@@ -2159,6 +2573,7 @@ impl<D: BlockDevice> Engine<D> {
                 chunks,
             };
             self.net.send(NetCommand::Connect {
+                generation,
                 key,
                 addr,
                 node: rt.nodes[to as usize].clone(),
@@ -2191,6 +2606,7 @@ impl<D: BlockDevice> Engine<D> {
                     self.local_reads.insert(
                         token,
                         PendingLocal {
+                            generation,
                             volume: volume.to_string(),
                             sref,
                             session: msg.session,
@@ -2205,6 +2621,7 @@ impl<D: BlockDevice> Engine<D> {
                         at,
                         len: n,
                         token,
+                        generation,
                     }));
                 }
                 crate::replica::Admit::Reply(Reply::Send(frame)) => {
@@ -2232,7 +2649,11 @@ impl<D: BlockDevice> Engine<D> {
                 ));
             }
             Some(Sess::Remote { session, key }) if *session == msg.session => {
-                self.net.send(NetCommand::Send { key: *key, frame });
+                self.net.send(NetCommand::Send {
+                    generation,
+                    key: *key,
+                    frame,
+                });
             }
             _ => {} // no such session any more: the request times out
         }
@@ -2240,13 +2661,16 @@ impl<D: BlockDevice> Engine<D> {
 
     fn reply_to_target(
         &mut self,
-        now: Instant,
+        _now: Instant,
         volume: &str,
         from: NodeId,
         session: u64,
         frame: Frame,
     ) {
-        let us = self.us(now);
+        let Some(sample) = self.sample() else {
+            return;
+        };
+        let us = sample.elapsed_us();
         let Some(rt) = self.targets.get_mut(volume) else {
             return;
         };
@@ -2277,14 +2701,10 @@ impl<D: BlockDevice> Engine<D> {
     /// on the target's session, the frontend reads the pieces from the store itself
     /// ([`Self::plan_fast_read`]) and ends with [`Self::finish_fast_read`]. `None`: use
     /// [`Input::Io`], which applies the same rules through the queue.
-    pub fn try_fast_read(
-        &mut self,
-        now: Instant,
-        volume: &str,
-        offset: u64,
-        len: u64,
-    ) -> Option<FastLocal> {
-        let us = self.us(now);
+    pub fn try_fast_read(&mut self, volume: &str, offset: u64, len: u64) -> Option<FastLocal> {
+        let now = Instant::now();
+        let sample = self.sample()?;
+        let us = sample.elapsed_us();
         let rt = self.targets.get_mut(volume)?;
         let b = BLOCK as u64;
         if len == 0
@@ -2350,17 +2770,26 @@ impl<D: BlockDevice> Engine<D> {
             self.drain(now, volume);
             return None;
         }
-        Some(FastLocal { pieces })
+        Some(FastLocal {
+            pieces,
+            generation: sample.generation(),
+        })
     }
 
     /// Plans piece `i` of a fast read into `buf` (exactly its length): the device reads to
     /// perform. Never-written ranges are zero-filled now.
     pub fn plan_fast_read(
-        &self,
+        &mut self,
         fast: &FastLocal,
         i: usize,
         buf: &mut [u8],
     ) -> Result<flaminio_store::ReadPlan, IoError> {
+        if !self.admit() {
+            return Err(IoError::ClockQuarantined);
+        }
+        self.clock
+            .check_generation(fast.generation)
+            .map_err(|_| IoError::ClockQuarantined)?;
         let p = fast.pieces.get(i).ok_or(IoError::Invalid)?;
         if buf.len() != p.len {
             return Err(IoError::Invalid);
@@ -2373,41 +2802,50 @@ impl<D: BlockDevice> Engine<D> {
             })
     }
 
-    /// Ends a fast read: `ok` if every piece was read (and verified). True if its data
+    /// Ends a fast read: `ok` if every piece was read (and verified). A final permit means its data
     /// counts; otherwise the frontend submits the read again through [`Input::Io`]. The data
     /// counts only if no newer target fenced the local replica while the reads were under way:
     /// a newer target writes only to replicas it has fenced (spec §5, fast reads).
     pub fn finish_fast_read(
         &mut self,
-        now: Instant,
         volume: &str,
         fast: FastLocal,
         ok: bool,
-    ) -> bool {
-        let us = self.us(now);
+    ) -> Option<SuccessPermit> {
+        let now = Instant::now();
+        let sample = self.sample()?;
+        self.clock.check_generation(fast.generation).ok()?;
+        let us = sample.elapsed_us();
         let ok = ok
             && fast
                 .pieces
                 .iter()
                 .all(|p| self.service.still_fenced_at(p.sref));
-        let Some(rt) = self.targets.get_mut(volume) else {
-            return false;
-        };
+        let rt = self.targets.get_mut(volume)?;
         let mut all = ok;
         for p in fast.pieces {
             all &= rt.sm.finish_fast_read(us, p.fr, ok);
         }
+        let permit = all
+            .then(|| self.clock.success_permit(sample).ok())
+            .flatten();
         self.drain(now, volume);
-        all
+        permit
     }
 
     /// Plans a local read into `buf` (exactly `lr.len` bytes): the device reads for the
     /// frontend to perform. Unmapped ranges are zero-filled now.
     pub fn plan_local_read(
-        &self,
+        &mut self,
         lr: &LocalRead,
         buf: &mut [u8],
     ) -> Result<flaminio_store::ReadPlan, IoError> {
+        if !self.admit() {
+            return Err(IoError::ClockQuarantined);
+        }
+        self.clock
+            .check_generation(lr.generation)
+            .map_err(|_| IoError::ClockQuarantined)?;
         let p = self.local_reads.get(&lr.token).ok_or(IoError::Invalid)?;
         if buf.len() != lr.len {
             return Err(IoError::Invalid);
@@ -2431,21 +2869,28 @@ impl<D: BlockDevice> Engine<D> {
     /// sent again to another ISR member, and the local replica stays a member (docs/issues/5).
     pub fn local_read_done(
         &mut self,
-        now: Instant,
         lr: &LocalRead,
         plan: Option<flaminio_store::ReadPlan>,
         ok: bool,
     ) {
+        let now = Instant::now();
         if let Some(plan) = plan {
             self.service.finish_read(plan);
         }
         let Some(p) = self.local_reads.remove(&lr.token) else {
             return;
         };
+        if self.clock.check_generation(p.generation).is_err() {
+            let _ = self.sample();
+            return;
+        }
         if !ok {
             eprintln!("flaminio-node: {}: local read failed", p.volume);
         }
-        let us = self.us(now);
+        let Some(sample) = self.sample() else {
+            return;
+        };
+        let us = sample.elapsed_us();
         let Some(rt) = self.targets.get_mut(&p.volume) else {
             return;
         };
@@ -2588,6 +3033,52 @@ mod metadata_tests {
     const ISR: u64 = 100;
     const REFRESH: u64 = 101;
 
+    struct TestClock(
+        std::sync::atomic::AtomicU64,
+        std::sync::atomic::AtomicUsize,
+        std::sync::atomic::AtomicUsize,
+    );
+    impl TestClock {
+        fn fail_after(&self, successful_reads: usize) {
+            self.2.store(
+                self.1.load(Ordering::SeqCst) + successful_reads + 1,
+                Ordering::SeqCst,
+            );
+        }
+    }
+    impl crate::clock::ElapsedClock for TestClock {
+        fn read(&self) -> Result<crate::clock::ClockReading, crate::clock::ClockFault> {
+            let read = self.1.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.2.load(Ordering::SeqCst) == read {
+                return Err(crate::clock::ClockFault::SampleFailed);
+            }
+            let ns = self.0.load(Ordering::Relaxed) as u128 * 1000;
+            Ok(crate::clock::ClockReading {
+                monotonic_before_ns: ns,
+                boottime_ns: ns,
+                monotonic_after_ns: ns,
+            })
+        }
+    }
+    fn proof() -> VerifiedHandoff {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let key = Ed25519KeyPair::from_seed_unchecked(&[83; 32]).unwrap();
+        let mut token = b"FLCT\x02\x00\x01v".to_vec();
+        token.extend_from_slice(&7u64.to_be_bytes());
+        token.extend_from_slice(b"\x00\x04fl-a");
+        token.extend_from_slice(&0i64.to_be_bytes());
+        token.extend_from_slice(&1u64.to_be_bytes());
+        token.extend_from_slice(key.sign(&token).as_ref());
+        let mut handoff = b"FLCH\x01\x01".to_vec();
+        handoff.extend_from_slice(&[83; 32]);
+        handoff.extend_from_slice(ring::digest::digest(&ring::digest::SHA256, &token).as_ref());
+        handoff.extend_from_slice(key.sign(&handoff).as_ref());
+        flaminio_net::token::TokenKey::from_raw(key.public_key().as_ref())
+            .unwrap()
+            .verify_handoff(&token, &handoff, &[83; 32], Purpose::Normal)
+            .unwrap()
+    }
+
     struct NoMeta;
     impl MetaPort for NoMeta {
         fn call(&self, _: u64, _: Call) {}
@@ -2598,6 +3089,7 @@ mod metadata_tests {
         volume: pb::Volume,
         isr_req: u64,
         refresh_req: u64,
+        clock: Arc<TestClock>,
     }
 
     impl Fixture {
@@ -2649,7 +3141,7 @@ mod metadata_tests {
                     },
                 },
             );
-            sm.tick(12);
+            sm.tick(1 + timing.takeover_wait().unwrap());
             let isr_req = sm
                 .take_output()
                 .into_iter()
@@ -2692,8 +3184,21 @@ mod metadata_tests {
                 },
             )
             .unwrap();
+            let clock = Arc::new(TestClock(
+                std::sync::atomic::AtomicU64::new(0),
+                std::sync::atomic::AtomicUsize::new(0),
+                std::sync::atomic::AtomicUsize::new(0),
+            ));
+            let domain = Arc::new(
+                ClockDomain::new(
+                    clock.clone(),
+                    crate::clock::ClockQualification::new(1, 1, 1000).unwrap(),
+                )
+                .unwrap(),
+            );
             let net = crate::net::spawn(
                 crate::net::NetConfig {
+                    clock: domain.clone(),
                     trust_domain: "test".into(),
                     server: None,
                     client: None,
@@ -2712,6 +3217,8 @@ mod metadata_tests {
                 ReplicaService::new(Store::open(device, StoreConfig::default()).unwrap()),
                 net,
                 Box::new(NoMeta),
+                domain,
+                [83; 32],
             );
             engine.targets.insert(
                 "v".into(),
@@ -2772,12 +3279,13 @@ mod metadata_tests {
                 volume,
                 isr_req,
                 refresh_req,
+                clock,
             }
         }
 
         fn answer(&mut self, id: u64, answer: Answer) {
-            self.engine
-                .on_meta(self.engine.start + Duration::from_micros(31), id, answer);
+            self.clock.0.store(31, Ordering::Relaxed);
+            self.engine.on_meta(Instant::now(), id, answer);
         }
 
         fn isr(&mut self, chunks: Vec<pb::ChunkMeta>, epoch: u64) {
@@ -3157,11 +3665,11 @@ mod metadata_tests {
             let error = f
                 .engine
                 .start_target(
-                    f.engine.start,
+                    Instant::now(),
                     "v",
                     Attaching {
                         attempt: 1,
-                        token: vec![],
+                        proof: proof(),
                         volume: Some(initial.clone()),
                         nodes: Some(vec![]),
                     },
@@ -3225,11 +3733,11 @@ mod metadata_tests {
             }
             let before = f.engine.service.store().chunks();
             let result = f.engine.start_target(
-                f.engine.start,
+                Instant::now(),
                 "v",
                 Attaching {
                     attempt: 1,
-                    token: vec![],
+                    proof: proof(),
                     volume: Some(v),
                     nodes: Some(vec![]),
                 },
@@ -3438,7 +3946,7 @@ mod metadata_tests {
     fn hello_adapters_preserve_the_captured_chunk_set_instead_of_cached_placement() {
         for peer in [0, 1] {
             let mut f = Fixture::new(7);
-            let (net, commands) = crate::net::Net::test_channel();
+            let (net, commands) = crate::net::Net::test_channel(f.engine.clock.clone());
             f.engine.net = net;
             let rt = f.engine.targets.get_mut("v").unwrap();
             let mut original = rt.view.clone();
@@ -3503,5 +4011,104 @@ mod metadata_tests {
                 assert!(commands.try_recv().is_err());
             }
         }
+    }
+    #[test]
+    fn first_clock_fault_while_settling_a_queued_request_does_not_panic() {
+        let mut f = Fixture::new(1);
+        f.engine.out.clear();
+        let accepted = Accepted {
+            peer_node: "fl-a".into(),
+            req: 1,
+            epoch: 8,
+            session: 1,
+            claims: Claims {
+                volume: "v".into(),
+                epoch: 8,
+                node: "fl-a".into(),
+                issued_at: 0,
+                first_epoch: 1,
+            },
+            size: 2 << 20,
+            chunk_size: 1 << 20,
+            chunks: vec![0],
+        };
+        let (tx, _rx) = channel::unbounded();
+        f.engine.handle(Input::Net(NetEvent::Opened {
+            conn: 90,
+            accepted: Box::new(accepted.clone()),
+            replies: tx,
+        }));
+        f.engine.handle(Input::Net(NetEvent::Request {
+            conn: 90,
+            frame: Frame::Read {
+                req: 2,
+                chunk: 0,
+                ext: Extent::new(0, 1),
+            },
+        }));
+        assert_eq!(f.engine.local.len(), 1);
+        assert!(f.engine.committing.is_empty() && f.engine.staged.is_none());
+        f.clock.fail_after(1); // outer handle admits; flush_local first observes the fault.
+        let (tx, _rx) = channel::unbounded();
+        f.engine.handle(Input::Net(NetEvent::Opened {
+            conn: 91,
+            accepted: Box::new(accepted),
+            replies: tx,
+        }));
+        assert!(!f.engine.clock.status().is_healthy());
+        assert!(f.engine.local.is_empty() && f.engine.conns.is_empty());
+        assert_eq!(f.engine.clock.status().generation.number(), 1);
+    }
+
+    #[test]
+    fn clock_fault_keeps_only_consistently_prepermitted_piece_done_pairs() {
+        let mut f = Fixture::new(1);
+        f.engine.out.clear();
+        let domain = f.engine.clock_domain().clone();
+        let sample = domain.observer().sample().unwrap();
+        let generation = sample.generation();
+        let permit = domain.success_permit(sample).unwrap();
+        f.engine.out.push(Output::Piece {
+            generation,
+            op: 9001,
+            at: 0,
+            data: vec![1; 4096].into(),
+        });
+        f.engine.out.push(Output::Done {
+            op: 9001,
+            result: Ok(None),
+            permit: Some(permit),
+        });
+        f.engine.out.push(Output::Piece {
+            generation,
+            op: 9002,
+            at: 0,
+            data: vec![2; 4096].into(),
+        });
+        domain.quarantine(crate::clock::ClockFault::SampleFailed);
+        let outputs = f.engine.take_output();
+        assert_eq!(outputs.len(), 2);
+        assert!(matches!(&outputs[0], Output::Piece { op: 9001, .. }));
+        assert!(matches!(
+            &outputs[1],
+            Output::Done {
+                op: 9001,
+                result: Ok(_),
+                permit: Some(_)
+            }
+        ));
+        assert!(f.engine.targets.is_empty());
+        assert!(f.engine.meta_waits.is_empty());
+        f.engine.handle(Input::Meta {
+            id: ISR,
+            answer: Answer::ChangeIsr(pb::ChangeIsrResponse {
+                applied: true,
+                epoch: 7,
+                chunks: f.shrunk(99),
+            }),
+        });
+        assert!(f.engine.targets.is_empty());
+        assert!(f.engine.take_output().is_empty());
+        assert_eq!(domain.status().generation.number(), 1);
     }
 }

@@ -1,6 +1,6 @@
 # Proposal: Admit only qualified physical lease clocks and quarantine discontinuities
 
-- **Status:** Accepted with the plan, 2026-11-13; numbered and moved into docs/adr/ when implemented.
+- **Status:** Accepted with the plan, 2026-11-13; numbered as [ADR 0020](../../adr/0020-admit-qualified-physical-clocks-and-quarantine-faults.md), pending implementation review/conformance.
 - **Date:** 2026-11-12
 - **Issue:** [#83](https://github.com/jsfakian/Flaminio/issues/83)
 

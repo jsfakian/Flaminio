@@ -212,8 +212,8 @@ A new target starts from `Attach`, which bumps the epoch. For each chunk:
    **uncertain set**: blocks written in the replica's recent window, meaning writes that might
    not have completed. The window is defined below.
 2. **Wait for the ISR to be fenced.** The chunk may serve I/O only when **every ISR member is
-   fenced**. If some ISR members do not answer, the target waits `L × (1 + ρ)` from the first
-   fence of an ISR member, then removes the silent ones with `ChangeIsr` (if the ISR stays at
+   fenced**. If some ISR members do not answer, the target waits
+   `ceil((L + E) × (1 + ρ)) + E` (E = 3 µs) from the first fence of an ISR member, then removes the silent ones with `ChangeIsr` (if the ISR stays at
    or above the minimum; otherwise it keeps waiting). Why the wait is needed:
    - Until every ISR member is fenced, the old target may still hold a valid lease. It can then
      read from an unfenced member.
@@ -407,8 +407,22 @@ A move needs a running target; a volume that is not attached moves when it is ne
 
 - **Delays:** none are bounded. Messages may be delayed arbitrarily or lost with their
   connection.
-- **Clocks:** only the *rate* of local monotonic clocks is bounded: any two run at speeds within
-  a factor `1 + ρ`. No clock synchronization.
+- **Clocks:** the qualified physical-boottime-v1 profile bounds every pair's relative rate by
+  `1 + ρ`, with L = 5 s, ρ = 100,000 ppm, absolute read error/resolution ≤ 1 µs and elapsed
+  observation error E = 3 µs. The takeover bound is `ceil((L + E) × (1 + ρ)) + E`, or
+  5,500,007 µs. No wall-clock synchronization. Root-owned operator attestation and observed
+  physical provenance are required; software probes do not certify the rate or rollback claim.
+- **Discontinuities:** fresh BOOTTIME samples authorize each admission and completion. Atomic
+  daemon-wide quarantine forbids new success permits and sessions in the faulted generation,
+  including queued callbacks, copied/zero-copy reads and buffered replies. Earlier permits may
+  deliver after the fault. Restart requires an agent/admin new-epoch Attach signed over the
+  new process challenge (FLCH); old standalone tokens do not restart a target. Durable fences,
+  ISR/reconciliation gates and unresolved writes remain authoritative.
+- **Excluded events:** current unqualified VMs, live migration and running memory/disk rollback.
+  Supported process pauses and physical suspend are distinct from stopped/rolled-back virtual
+  clocks. The latter can evade local detection and are prohibited. The 1 ms suspend-offset
+  tolerance is an observation bound, never a clock-accuracy or lease-extension allowance.
+  See [#83](issues/83/design.md) and [ADR 0020](adr/0020-admit-qualified-physical-clocks-and-quarantine-faults.md).
 - **Liveness:** every node eventually comes back and partitions heal. Then all ISRs become full
   again.
 

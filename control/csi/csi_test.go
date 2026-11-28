@@ -1,7 +1,10 @@
 package csi
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"io"
 	"net"
 	"path/filepath"
 	"slices"
@@ -40,10 +43,10 @@ func serveMeta(t *testing.T, svc metav1.MetadataServiceServer) *Meta {
 }
 
 // metaFixture runs an in-memory metadata service, without authentication (its rules are
-// tested in meta/service), with live nodes a and b.
+// tested in meta/service), with signed credentials and live nodes a and b.
 func metaFixture(t *testing.T) *Meta {
 	t.Helper()
-	svc := service.New(kv.NewMem(nil), service.Options{})
+	svc := service.New(kv.NewMem(nil), service.Options{TokenKey: ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))})
 	m := serveMeta(t, svc)
 	ctx := context.Background()
 	for _, n := range []string{"a", "b"} {
@@ -195,14 +198,23 @@ type fakeDataplane struct {
 	volume, device string
 	tokens         int
 	detaches       int
+	token          []byte
 }
 
 func (f *fakeDataplane) Status(context.Context) (string, string, error) {
 	return f.volume, f.device, nil
 }
 
-// Attach counts attaches: the in-memory service signs no tokens, so there is none to check.
-func (f *fakeDataplane) Attach(_ context.Context, volume string, _ []byte) (string, error) {
+func (f *fakeDataplane) AttachChallenge(context.Context) ([]byte, error) {
+	return bytes.Repeat([]byte{1}, 32), nil
+}
+
+// Attach counts new lifetimes; an exact retained-credential retry returns its live device.
+func (f *fakeDataplane) Attach(_ context.Context, volume string, token, _ []byte) (string, error) {
+	if f.volume == volume && bytes.Equal(f.token, token) {
+		return f.device, nil
+	}
+	f.token = bytes.Clone(token)
 	f.volume, f.device = volume, "/dev/ublk-"+volume
 	f.tokens++
 	return f.device, nil
@@ -466,5 +478,88 @@ func TestGeometryInvalidParametersMakeNoRPC(t *testing.T) {
 		if status.Code(e) != codes.InvalidArgument || f.creates+f.checks+f.gets != 0 {
 			t.Fatalf("invalid parameters %v reached metadata: %v %+v", p, e, f)
 		}
+	}
+}
+
+type handoffDataplane struct {
+	fakeDataplane
+	nonce                    []byte
+	challengeErr             error
+	failures                 []error
+	seenTokens, seenHandoffs [][]byte
+}
+
+func (d *handoffDataplane) AttachChallenge(context.Context) ([]byte, error) {
+	return bytes.Clone(d.nonce), d.challengeErr
+}
+func (d *handoffDataplane) Attach(_ context.Context, _ string, token, handoff []byte) (string, error) {
+	d.seenTokens = append(d.seenTokens, bytes.Clone(token))
+	d.seenHandoffs = append(d.seenHandoffs, bytes.Clone(handoff))
+	if len(d.failures) > 0 {
+		err := d.failures[0]
+		d.failures = d.failures[1:]
+		return "", err
+	}
+	return "/dev/ublkb83", nil
+}
+func TestNodeRetainsProcessProofAcrossKubeletRetriesAndClearsOnUnstage(t *testing.T) {
+	m := metaFixture(t)
+	ctx := context.Background()
+	c := &Controller{Meta: m}
+	if _, err := c.CreateVolume(ctx, &csi.CreateVolumeRequest{Name: "pvc-proof", VolumeCapabilities: []*csi.VolumeCapability{blockCap()}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{VolumeId: "pvc-proof", NodeId: "a", VolumeCapability: blockCap()}); err != nil {
+		t.Fatal(err)
+	}
+	epoch := func() uint64 {
+		v, err := m.GetVolume(ctx, "pvc-proof")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v.Epoch
+	}
+	before := epoch()
+	dp := &handoffDataplane{fakeDataplane: fakeDataplane{volume: "pvc-proof", device: "/dev/scalar-must-not-be-adopted"}, nonce: bytes.Repeat([]byte{1}, 32), failures: []error{io.ErrUnexpectedEOF, controlError("pvc-proof has an existing device lifetime; retry this handoff only after that device stops")}}
+	n := &Node{NodeID: "a", Meta: m, Dataplane: dp, Mounter: &fakeMounter{fs: map[string]string{}, mounts: map[string]string{}}}
+	for i := 0; i < 2; i++ {
+		dev, err := n.device(ctx, "pvc-proof")
+		if err == nil || dev != "" {
+			t.Fatalf("ambiguous retry adopted scalar status: %q %v", dev, err)
+		}
+		if epoch() != before+1 || n.attachment == nil || dp.detaches != 0 {
+			t.Fatal("retry lost proof, reminted or detached")
+		}
+	}
+	dev, err := n.device(ctx, "pvc-proof")
+	if err != nil || dev != "/dev/ublkb83" {
+		t.Fatalf("exact retry %q %v", dev, err)
+	}
+	for i := 1; i < len(dp.seenTokens); i++ {
+		if !bytes.Equal(dp.seenTokens[0], dp.seenTokens[i]) || !bytes.Equal(dp.seenHandoffs[0], dp.seenHandoffs[i]) {
+			t.Fatal("retry changed issued credentials")
+		}
+	}
+	dp.nonce = bytes.Repeat([]byte{2}, 32)
+	if _, err := n.device(ctx, "pvc-proof"); err != nil {
+		t.Fatal(err)
+	}
+	if epoch() != before+2 || bytes.Equal(dp.seenTokens[0], dp.seenTokens[3]) {
+		t.Fatal("new daemon reused old process proof")
+	}
+	if _, err := n.NodeUnstageVolume(ctx, &csi.NodeUnstageVolumeRequest{VolumeId: "pvc-proof", StagingTargetPath: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	if n.attachment != nil {
+		t.Fatal("unstage retained credentials")
+	}
+	dp.challengeErr = io.EOF
+	prior := epoch()
+	calls := len(dp.seenTokens)
+	if _, err := n.device(ctx, "pvc-proof"); err == nil {
+		t.Fatal("unhealthy daemon admitted")
+	}
+	if epoch() != prior || len(dp.seenTokens) != calls {
+		t.Fatal("failed challenge reached metadata or attach")
 	}
 }

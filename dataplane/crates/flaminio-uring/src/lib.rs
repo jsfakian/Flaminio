@@ -7,11 +7,13 @@
 //! - `EventFd` (Linux): wakes a thread that waits on an io_uring.
 //! - `Staging` (Linux): a memfd-backed staging area for ublk zero copy.
 //!
-//! `unsafe` code in Flaminio lives only here, in the `aligned`, `eventfd`, `staging` and
+//! `unsafe` code in Flaminio lives only here, in the `aligned`, `clock`, `eventfd`, `staging` and
 //! `uring` modules.
 //! Each block states why it is sound.
 
 mod aligned;
+#[cfg(target_os = "linux")]
+pub mod clock;
 #[cfg(target_os = "linux")]
 mod eventfd;
 #[cfg(target_os = "linux")]

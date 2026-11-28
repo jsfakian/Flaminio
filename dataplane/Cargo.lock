@@ -613,9 +613,14 @@ dependencies = [
  "flaminio-repl",
  "flaminio-store",
  "flaminio-uring",
+ "futures-lite",
+ "futures-rustls",
  "io-uring",
  "libc",
  "libublk",
+ "ring",
+ "serde",
+ "serde_json",
  "smol",
 ]
 

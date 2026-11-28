@@ -1,7 +1,7 @@
 # Issue #83: A supported lease clock contract — design
 
 [Spec](spec.md); [decisions](decisions.md), if any; [policy proposal](adr-proposal.md).
-Approved 2026-11-13; not implemented.
+Published clear snapshot approved 2026-11-20; implementation and validation: [report.md](report.md).
 
 The facts it starts from:
 - `Engine::us` converts Instant since startup into u64 microseconds; turn/flush/run and the

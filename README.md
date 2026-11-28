@@ -14,6 +14,8 @@ and you restore from an encrypted, immutable backup.
 > The [2026-11-12 correctness audit](docs/audits/2026-11-12/README.md) records known defects,
 > validation evidence and unsupported environments. Historical results are in the
 > [MVP plan](docs/mvp-plan.md), [lab guide](docs/lab.md) and [benchmarks](docs/benchmarks/).
+> Current replicated-node admission requires the qualified physical clock profile below;
+> the historical VM results do not qualify that profile or authorize a VM bypass.
 >
 > **Phase 1 under way** ([plan](docs/phase1-plan.md)). The failover and consistency rules
 > (in-sync replica sets, epoch fencing, replica-confirmed leases, reconciliation after
@@ -161,6 +163,13 @@ publish it anywhere.
     Alma 10 (6.12), Debian 13 (6.12)
   - **Does not meet it:** RHEL 9 family (5.14), Debian 12 (6.1)
 - x86_64 or arm64
+- **Qualified lease clock:** physical-boottime-v1, matching node/source and root-owned operator
+  attestation, fixed 5 s leases / 100,000 ppm pairwise rate bound, qualified read error and
+  resolution ≤ 1 µs, no live rollback. Unknown/virtual host provenance is refused; containers
+  need the qualified physical host's provenance. Current lab VMs do not meet this profile.
+  `flaminio-io clock-check --clock-contract PATH --json` observes prerequisites without metadata
+  contact; `node --clock-contract PATH` enforces admission. The check cannot prove future drift
+  or rollback safety. See [the clock contract](docs/issues/83/design.md).
 - **Bare metal (first target):** at least 3 nodes for replicated volumes. 3 or 5 nodes run the
   metadata service. A 10 GbE network at minimum. 25 GbE+ or RDMA recommended for NVMe-class
   performance.

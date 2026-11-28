@@ -702,6 +702,14 @@ func logConfirmation(ctx context.Context, volume, node string, pending []string,
 }
 
 func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.AttachResponse, error) {
+	if nonce := r.GetTargetNonce(); len(nonce) != 0 {
+		if !captoken.ValidTargetNonce(nonce) {
+			return nil, errStatus(fmt.Errorf("%w: target_nonce must be 32 bytes and not all zero", domain.ErrInvalid))
+		}
+		if r.GetUnlessTarget() {
+			return nil, errStatus(fmt.Errorf("%w: target_nonce and unless_target together", domain.ErrInvalid))
+		}
+	}
 	if !domain.ValidID(r.GetNode()) {
 		return nil, errStatus(fmt.Errorf("%w: node id %q", domain.ErrInvalid, r.GetNode()))
 	}
@@ -730,6 +738,9 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 				return nil, errStatus(err)
 			}
 			return &metav1.AttachResponse{Volume: volumePB(v)}, nil
+		}
+		if h.Epoch == ^uint64(0) {
+			return nil, status.Error(codes.FailedPrecondition, "volume epoch exhausted; operator action is required")
 		}
 		h.Attach(r.GetNode())
 		b, _ := json.Marshal(h)
@@ -764,6 +775,12 @@ func (s *Service) Attach(ctx context.Context, r *metav1.AttachRequest) (*metav1.
 			})
 			if err != nil {
 				return nil, committedError(status.Error(codes.Internal, err.Error()))
+			}
+			if len(r.GetTargetNonce()) != 0 {
+				out.TargetHandoff, err = captoken.SignHandoff(s.opts.TokenKey, captoken.HandoffNormal, r.GetTargetNonce(), out.Token)
+				if err != nil {
+					return nil, committedError(status.Error(codes.Internal, err.Error()))
+				}
 			}
 		}
 		if err := ctx.Err(); err != nil {
