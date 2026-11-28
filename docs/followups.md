@@ -56,10 +56,17 @@ unsupported legacy held sets are quarantined without deletion and strict consume
 coordinated producer rollout. See [ADR 0017](adr/0017-bound-uncertainty-with-per-chunk-covers.md)
 and the [implementation report](issues/86/report.md) for validation/review status. Complete
 geometry/transport admission is tracked by #80 above; aggregate scheduling/resource limits remain #75.
-The clock contract is tracked by [#83](https://github.com/jsfakian/Flaminio/issues/83), and
-block-interface conformance by [#84](https://github.com/jsfakian/Flaminio/issues/84).
-A green existing suite does not close these issues; their separate adversarial reproductions
-fail on the audited revision. Proposed ADRs 0007–0011 record the design corrections.
+The clock contract in [#83](https://github.com/jsfakian/Flaminio/issues/83) is implemented:
+operator-qualified physical Linux admission, checked BOOTTIME lease/takeover timing, sticky
+process quarantine with retained I/O ownership, and signed current-process handoffs issued
+only after a new Attach epoch. Independent code/security review is clear after two rounds;
+full lint/test/race/hygiene/contracts/sim and quick sanitizers pass. See the
+[implementation report](issues/83/report.md) and
+[ADR 0020](adr/0020-admit-qualified-physical-clocks-and-quarantine-faults.md).
+Local injected-clock/native/model fixtures do not qualify physical hardware; unqualified lab
+VMs are refused. Block-interface conformance remains
+[#84](https://github.com/jsfakian/Flaminio/issues/84). Remaining audit findings need their own
+adversarial checks. Proposed ADRs 0007–0011 record the other design corrections.
 
 ## 1. Read performance
 

@@ -80,6 +80,18 @@ scripts and three consecutive native bridge runs pass. Full `make lint test race
 contracts sim` and `make sanitize QUICK=1` pass on the restored source: 20,000 seeds and all
 190 release tests pass. Status: fixes complete, awaiting a fresh incremental code/security round.
 
+### Code/security review round 2 — 427a3a708ea3a6cb876b3a15849209a741596d3f
+
+Fresh independent code and security reviewers inspected only
+`afb88d5c3c6ad5c9ab6bcd2aae5754ada6b3d2a6..427a3a708ea3a6cb876b3a15849209a741596d3f`
+and necessary callers/callees. Sonnet was unavailable; the code reviewer used the inherited
+default model at medium effort. Security retained the default model at medium effort.
+
+Both independently confirmed R1-B1/B2, A1/A2, C1/C2/C3, D1/D2 and Nit N1 fixed, and found
+no new Low-or-higher findings or Nits. Pending I/O ownership, quarantine drain, private test
+seams and strict issuance remain consistent with the frozen contracts. No edits or tests by
+reviewers. Status: **clear after two implementation review rounds**; final conformance follows.
+
 ## Implementation — 2026-11-28
 
 PR #106 / #78 is merged at `f952596f1b32c719efd2c65ab7347c052fc54f56`.
@@ -259,7 +271,31 @@ omission controls above provide the before/after evidence. All temporary changes
 
 ## Conformance
 
-Pending implementation, tests and clear code/security review.
+Fresh read-only checker used the inherited default model at medium effort because Sonnet was
+unavailable. Its result follows verbatim; ADR acceptance below follows this PASS gate.
+
+PASS
+
+| Rule | Implemented | Tested | Evidence |
+|---|---|---|---|
+| S1 Supported profile | yes | yes | `flaminio-io/src/clock.rs`: `fixed_profile_and_attestation_have_no_override`, `qualification_fixture_matrix_observes_only_prerequisites`, per-opened-input provenance tests. |
+| S2 Fresh clock authority | yes | yes | `flaminio-io/src/ublk.rs`: `fast_completion_revalidates_exact_lease_boundary_without_a_ticker`; copied, registered, slow-local and pipelined completion tests. |
+| S3 Detectable faults | yes | yes | `flaminio-node/src/clock.rs`: persistent-observer, concurrent-fault and overflow tests; `flaminio-repl/src/clock.rs`: checked conversion/offset guard tests. |
+| S4 Invalidation ordering | yes | yes | `flaminio-io/src/ublk.rs`: CQE/pin ownership and pre-fault permit tests; `native_handoff_tests.rs`: live incoming/outgoing session cancellation; engine held-write tests. |
+| S5 Restart recovery | yes | yes | `native_handoff_fixture`: 15 schedules/73 actions through actual mTLS/CAS/crypto/control/Engine; simulator partial-write recovery; metadata epoch-exhaustion regression. |
+| S6 Inspection/enforcement | yes | yes | `clock_cli.rs`: `refused_startup_has_no_storage_or_socket_effects`; native fixture asserts quarantine status, generation, bounded reason and mutation refusal. |
+| S7 Models/mutations | yes | yes | `sim/tests.rs`: supported/excluded clock histories and all four required clock/handoff mutants; final logs show 20,000 seeds and 190 release tests passing. |
+| S8 Documentation/compatibility | yes | yes | README, architecture/protocol, lab runbook, doctor contract and final working `docs/followups.md` align; native metadata-outage I/O, CSI and script compatibility tests pass. |
+
+Contract drift: none. Additive proto/generated fields, nonce32, FLCH134, canonical HANDOFF encoding, existing TOKEN encoding, CLI/control syntax, session cancellation and 5,500,007 µs takeover agree across participants. Replica FLCT, frames and disk formats remain unchanged.
+
+ADR conformance: consistent. ADR 0020 exists and is indexed as Proposed, ready for the planned acceptance after this gate. ADR 0007 remains Proposed; accepted ADR 0005 is unchanged and its historical early-read shortcut is not introduced.
+
+Scope drift: none. Supporting syscall wrappers, dependency declarations, fuzz corpus/lock alignment, required native bridge, private production-shared test seams and caller wiring are documented authorized extensions. No #15/#79 lifecycle APIs were invented.
+
+Docs: done, including the final working followups update. Physical qualification and actual ublk/kernel execution remain explicitly outside fixture evidence; no lab qualification is claimed.
+
+Open review findings: none. All nine deduplicated findings and Nit N1 are addressed; both fresh incremental reviewers independently confirmed clearance. Required project checks and quick ASan/TSan passed on frozen source `427a3a7`.
 
 ## Lab
 
@@ -268,6 +304,7 @@ Current unqualified lab VMs must be documented as refused by the accepted physic
 
 ## ADRs
 
-The physical-boottime-v1 and fresh-process handoff policy is accepted with the plan. Prepare
-numbered ADR 0020 for review; accept after clear reviews and conformance. Audit ADR 0007
-remains Proposed and accepted ADR 0005 is not rewritten or used to restore the early-read rule.
+The physical-boottime-v1 and fresh-process handoff policy was accepted with the plan. ADR 0020
+is now Accepted after clear code/security review and conformance PASS, as the approved pipeline
+requires. Audit ADR 0007 remains Proposed and accepted ADR 0005 is not rewritten or used to
+restore the early-read rule.

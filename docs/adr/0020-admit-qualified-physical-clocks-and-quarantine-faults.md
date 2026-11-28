@@ -1,6 +1,6 @@
 # 0020. Admit qualified physical lease clocks and quarantine discontinuities
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-28
 - **Issue:** [#83](https://github.com/jsfakian/Flaminio/issues/83)
 

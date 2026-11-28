@@ -23,8 +23,9 @@ that prevents safety before proceeding. Do not add a legacy or environment bypas
 Independent S1–S8 acceptance and approved private test seams are complete. Full project checks
 passed before review. All eight partitioned round-one reviewers finished; one fresh implementer
 completed the nine deduplicated fixes and negative regressions. Full lint/test/race/hygiene/
-contracts/sim and quick sanitizers pass. Fresh incremental code/security review follows the
-single fix commit.
+contracts/sim and quick sanitizers pass. Fresh incremental code/security review of fix commit
+`427a3a7` is clear. Final conformance is PASS for S1–S8 with no open findings; ADR 0020 is
+Accepted. Implementation, independent acceptance and review are complete.
 
 ## Full-change review partitions
 
