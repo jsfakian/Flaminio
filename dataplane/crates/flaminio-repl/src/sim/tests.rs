@@ -48,11 +48,8 @@ fn scheduled_isr_changes(sim: &Sim) -> Vec<&[IsrChange]> {
 }
 
 fn start_scenario(sim: &mut Sim, node: NodeId) {
-    let MetaReply::Applied { view, .. } = sim.meta.handle(&MetaRequest::Attach { vol: VOL, node })
-    else {
-        panic!("scenario attach refused");
-    };
-    sim.start_target(node, view);
+    let (view, credentials) = sim.attach(node).expect("authorized attach");
+    sim.start_target(node, view, credentials);
 }
 
 fn take_scenario_packet(sim: &mut Sim, matches: impl Fn(&Packet) -> bool) -> Packet {
@@ -1478,3 +1475,347 @@ mutation!(
     20_000,
     more_chunks
 );
+
+// #83 executable model witnesses. These are bounded deterministic schedules; native
+// runtime/CAS/crypto acceptance is deliberately separate from their symbolic identities.
+#[test]
+fn clock_profile_handoff_schedules_parse_and_execute_every_expectation() {
+    let file = process_handoff::parse_schedules(include_str!(
+        "../../../../../meta/testdata/lease-clock-handoff.json"
+    ))
+    .unwrap();
+    assert_eq!(file.schedules.len(), 15);
+    process_handoff::check_fixture(&file).unwrap();
+    for schedule in &file.schedules {
+        let report =
+            process_handoff::run_schedule(schedule, process_handoff::Mutation::None).unwrap();
+        assert_eq!(report.steps, schedule.steps.len());
+    }
+}
+
+#[test]
+fn catches_accept_old_process_handoff_without_a_local_replica() {
+    let file = process_handoff::parse_schedules(include_str!(
+        "../../../../../meta/testdata/lease-clock-handoff.json"
+    ))
+    .unwrap();
+    let schedule = file
+        .schedules
+        .iter()
+        .find(|s| s.name == "old_process_no_local_replica")
+        .unwrap();
+    assert!(!schedule.local_replica);
+    assert!(
+        process_handoff::run_schedule(schedule, process_handoff::Mutation::None)
+            .unwrap()
+            .violations
+            .is_empty()
+    );
+    let mutated =
+        process_handoff::run_schedule(schedule, process_handoff::Mutation::AcceptOldProcessHandoff)
+            .unwrap();
+    assert!(
+        mutated
+            .violations
+            .iter()
+            .any(|v| v.contains("FreshProcessEpoch"))
+    );
+}
+
+#[test]
+fn catches_mint_handoff_without_epoch_advance_before_target_admission() {
+    let file = process_handoff::parse_schedules(include_str!(
+        "../../../../../meta/testdata/lease-clock-handoff.json"
+    ))
+    .unwrap();
+    let schedule = file
+        .schedules
+        .iter()
+        .find(|s| s.name == "same_epoch_issuance_before_any_start")
+        .unwrap();
+    assert!(
+        process_handoff::run_schedule(schedule, process_handoff::Mutation::None)
+            .unwrap()
+            .violations
+            .is_empty()
+    );
+    let mutated = process_handoff::run_schedule(
+        schedule,
+        process_handoff::Mutation::MintHandoffWithoutEpochAdvance,
+    )
+    .unwrap();
+    assert_eq!(mutated.started, 0);
+    assert!(
+        mutated
+            .violations
+            .iter()
+            .any(|v| v.contains("strict epoch advance"))
+    );
+}
+
+#[test]
+fn catches_ignore_observation_error_with_independent_error_phase_reads() {
+    use lease_clock::{TimingMutation, takeover_witness};
+    for drift_ppm in [0, 1, 100_000] {
+        let timing = Timing {
+            drift_ppm,
+            ..Timing::default()
+        };
+        for phase in (0..1_000).step_by(7) {
+            let clean = takeover_witness(timing, TimingMutation::None, phase);
+            clean.check().unwrap();
+            let mutant = takeover_witness(timing, TimingMutation::IgnoreObservationError, phase);
+            assert!(
+                mutant
+                    .check()
+                    .unwrap_err()
+                    .contains("ideal takeover overlap")
+            );
+        }
+    }
+    assert_eq!(Timing::default().takeover_wait(), Ok(5_500_007));
+}
+
+#[test]
+fn excluded_clock_stop_and_snapshot_restore_do_not_rewind_ideal_history() {
+    use lease_clock::{ExcludedEvent, excluded_trace};
+    for event in [
+        ExcludedEvent::VirtualClockStop,
+        ExcludedEvent::SnapshotRollback,
+    ] {
+        let trace = excluded_trace(event);
+        assert!(!trace.profile_admitted);
+        assert!(trace.observations_indistinguishable);
+        assert!(trace.real_times.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(trace.observed_elapsed[1], trace.observed_elapsed[2]);
+        let action = match event {
+            ExcludedEvent::VirtualClockStop => Action::VirtualClockStop(0, SEC),
+            ExcludedEvent::SnapshotRollback => Action::SnapshotRollback(0),
+        };
+        let result = Sim::scripted(scenario_config(2, 1), vec![vec![0]], vec![(0, action)]).run();
+        assert!(result.unwrap_err().contains("excluded clock environment"));
+    }
+}
+
+fn clock_fault_fast_handle_scenario(fault: ClockFault, skip: bool) -> Result<Report, String> {
+    let mut cfg = scenario_config(2, 1);
+    cfg.fast_reads = true;
+    let mut sim = Sim::scripted(cfg, vec![vec![0]], Vec::new()).with_bugs(Bugs {
+        skip_clock_invalidation: skip,
+        ..Bugs::default()
+    });
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "clock target settled", |s| {
+        s.nodes[0].target.as_ref().unwrap().is_settled()
+    });
+    let read = sim.submit(0, 0, Extent::new(0, 1), None);
+    assert!(sim.nodes[0].fast.contains_key(&read));
+    let generation = sim.nodes[0].fast[&read].generation;
+    sim.script_step(Action::ClockFault(0, fault));
+    assert!(
+        sim.nodes[0].fast.contains_key(&read),
+        "device lifetime survives invalidation"
+    );
+    // Complete the already-admitted device read at the same ideal time: lease expiry is
+    // irrelevant, so the injected omission must fail admission, not allege stale data.
+    sim.fast_device(0, sim.nodes[0].inc, read);
+    sim.fast_done(0, sim.nodes[0].inc, read);
+    assert_eq!(generation, 0);
+    if skip {
+        return Err(sim
+            .check_failure
+            .unwrap_or_else(|| "mutation was not caught".into()));
+    }
+    assert!(sim.history[read as usize].result.is_none());
+    assert_eq!(sim.nodes[0].admission.generation(), 1);
+    assert!(!sim.nodes[0].admission.admits(generation));
+    sim.script_step(Action::Restart(0));
+    start_scenario(&mut sim, 0);
+    sim.run_mut()
+}
+
+#[test]
+fn catches_skip_clock_invalidation_on_bad_backwards_and_overflow_observations() {
+    for fault in [
+        ClockFault::SampleFailed,
+        ClockFault::Backwards,
+        ClockFault::Overflow,
+    ] {
+        clock_fault_fast_handle_scenario(fault, false).unwrap();
+        let error = clock_fault_fast_handle_scenario(fault, true).unwrap_err();
+        assert!(
+            error.contains("clock admission invariant"),
+            "{fault:?}: {error}"
+        );
+    }
+}
+
+#[test]
+fn supported_process_pause_and_short_full_host_suspend_preserve_history_or_quarantine() {
+    for duration in [1, 500, 1_001, 7 * SEC] {
+        for suspended in [false, true] {
+            let action = if suspended {
+                Action::HostSuspend(0, duration)
+            } else {
+                Action::ProcessPause(0, duration)
+            };
+            let script = vec![
+                (0, Action::Attach(0)),
+                (2 * SEC, Action::Write(0, 0, 0)),
+                (3 * SEC, action),
+                (3 * SEC + duration + MS, Action::Read(0, 0, 0)),
+                (3 * SEC + duration + 2 * MS, Action::Restart(0)),
+                (3 * SEC + duration + 3 * MS, Action::Attach(0)),
+                (3 * SEC + duration + 2 * SEC, Action::Read(0, 0, 0)),
+            ];
+            let mut cfg = scenario_config(2, 1);
+            cfg.chaos = 15 * SEC + duration;
+            cfg.fast_reads = true;
+            let report = Sim::scripted(cfg, vec![vec![0, 1]], script).run().unwrap();
+            assert_eq!(report.host_suspends, u64::from(suspended));
+            assert_eq!(report.process_pauses, u64::from(!suspended));
+            assert_eq!(report.clock_faults > 0, suspended && duration > 1_000);
+        }
+    }
+}
+
+#[test]
+fn partial_durable_write_clock_fault_fresh_epoch_fences_and_reconciles_actual_core() {
+    let mut sim = Sim::scripted(scenario_config(2, 1), vec![vec![0, 1]], Vec::new());
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "initial settled", |s| {
+        s.nodes[0].target.as_ref().unwrap().is_settled()
+    });
+    let old_epoch = sim.nodes[0].target.as_ref().unwrap().epoch();
+    let acknowledged = sim.submit(0, 0, Extent::new(1, 1), Some(11));
+    wait_scenario(&mut sim, "acknowledged durable baseline", |s| {
+        s.history[acknowledged as usize].result.is_some()
+    });
+    let write = sim.submit(0, 0, Extent::new(0, 1), Some(73));
+    let remote = take_scenario_packet(&mut sim, |p| {
+        p.to == 1
+            && matches!(
+                p.body,
+                Body::ToReplica(ToReplica {
+                    body: crate::msg::Request::Write { .. },
+                    ..
+                })
+            )
+    });
+    let pending = ToReplica {
+        vol: VOL,
+        epoch: old_epoch,
+        session: remote.conn.unwrap().1,
+        req: u64::MAX - 1,
+        body: crate::msg::Request::Write {
+            chunk: 0,
+            ext: Extent::new(1, 1),
+            data: vec![99],
+            version: crate::types::Version {
+                epoch: old_epoch,
+                seq: 2,
+            },
+            prune: None,
+        },
+    };
+    sim.deliver(remote);
+    // A second action is admitted but its device execution is still pending. Its exact
+    // uncertainty must survive invalidation even though it has neither durable data nor ACK.
+    let action = sim.nodes[1].replica.core.handle(&pending);
+    assert!(matches!(action, crate::replica::Action::Write { .. }));
+    sim.nodes[1]
+        .uncertainty
+        .observe(&pending, &action, sim.cfg.blocks_per_chunk);
+    let pending_report = sim.nodes[1].replica.core.report(VOL);
+    let pending_stats = sim.nodes[1].replica.core.uncertainty_stats(VOL);
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), Some(73));
+    assert!(sim.history[write as usize].result.is_none());
+    let fence = sim.nodes[1].replica.core.fenced(VOL);
+    sim.script_step(Action::ClockFault(1, ClockFault::SampleFailed));
+    assert_eq!(sim.nodes[1].replica.core.fenced(VOL), fence);
+    assert_eq!(sim.nodes[1].replica.core.report(VOL), pending_report);
+    assert_eq!(
+        sim.nodes[1].replica.core.uncertainty_stats(VOL),
+        pending_stats
+    );
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), Some(73));
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 1), Some(11));
+    sim.check_uncertainty(1);
+    assert!(sim.check_failure.is_none());
+    sim.script_step(Action::ClockFault(0, ClockFault::Backwards));
+    assert!(sim.history[write as usize].result.is_none());
+    sim.script_step(Action::Restart(0));
+    sim.script_step(Action::Restart(1));
+    start_scenario(&mut sim, 0);
+    assert!(sim.nodes[0].target.as_ref().unwrap().epoch() > old_epoch);
+    wait_scenario(&mut sim, "fresh epoch reconciled", |s| {
+        s.nodes[0].target.as_ref().unwrap().is_settled()
+    });
+    assert_eq!(sim.nodes[0].replica.core.fenced(VOL), old_epoch + 1);
+    assert_eq!(sim.nodes[1].replica.core.fenced(VOL), old_epoch + 1);
+    let read = sim.submit(0, 0, Extent::new(0, 1), None);
+    wait_scenario(&mut sim, "recovery read", |s| {
+        s.history[read as usize].result.is_some()
+    });
+    assert_eq!(sim.nodes[0].replica.block(VOL, 0, 1), Some(11));
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 1), Some(11));
+    let recovered = sim.nodes[0].replica.block(VOL, 0, 0).unwrap();
+    assert!([0, 73].contains(&recovered)); // unanswered write may have taken effect
+    assert_eq!(sim.nodes[1].replica.block(VOL, 0, 0), Some(recovered));
+    assert_eq!(
+        sim.history[read as usize].result.as_ref().unwrap().1,
+        OpResult::Read(vec![recovered])
+    );
+    sim.run_mut().unwrap();
+}
+
+#[test]
+fn pre_fault_permit_can_deliver_once_after_quarantine() {
+    let mut sim = Sim::scripted(scenario_config(2, 1), vec![vec![0]], Vec::new());
+    start_scenario(&mut sim, 0);
+    wait_scenario(&mut sim, "pre-permit target settled", |s| {
+        s.nodes[0].target.as_ref().unwrap().is_settled()
+    });
+    let read = sim.submit(0, 0, Extent::new(0, 1), None);
+    wait_scenario(&mut sim, "success permitted but not delivered", |s| {
+        s.payloads
+            .iter()
+            .any(|e| matches!(e, Some(Ev::DeliverSuccess { op, .. }) if *op == read))
+    });
+    assert!(sim.history[read as usize].result.is_none());
+    sim.script_step(Action::ClockFault(0, ClockFault::Backwards));
+    wait_scenario(&mut sim, "pre-fault permitted delivery", |s| {
+        s.history[read as usize].result.is_some()
+    });
+    check_clock_history(&sim.clock_history).unwrap();
+    let mut duplicated = sim.clock_history.clone();
+    let delivery = duplicated
+        .iter()
+        .find(|e| matches!(e, ClockEvent::Delivery { .. }))
+        .copied()
+        .unwrap();
+    duplicated.push(delivery);
+    assert!(
+        check_clock_history(&duplicated)
+            .unwrap_err()
+            .contains("unique earlier success permit")
+    );
+}
+
+#[test]
+fn piecewise_clock_inverse_resumes_from_current_ideal_time() {
+    let mut clock = Clock::new(1_100_000, 37, 0);
+    let before = clock.local(100);
+    clock.suspend(100, true);
+    assert_eq!(clock.real_at(before + 100, 500), None);
+    clock.resume(10 * SEC);
+    let wake = clock.real_at(before + 100, 10 * SEC).unwrap();
+    assert!(wake > 10 * SEC);
+    assert!(clock.local(wake) >= before + 100);
+    assert!(clock.local(wake - 1) < before + 100);
+    let mut physical = Clock::new(1_000_000, 37, 0);
+    physical.suspend(100, false);
+    physical.resume(10 * SEC);
+    assert_eq!(physical.local(10 * SEC), 10 * SEC);
+    assert_eq!(physical.real_at(1, 10 * SEC), Some(10 * SEC));
+}

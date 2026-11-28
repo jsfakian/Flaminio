@@ -2558,12 +2558,11 @@ impl<P: Clone + Debug> Target<P> {
                             self.settle(now, i);
                         }
                     } else if let Some(t) = c.first_fence {
+                        let waited = t.checked_add(wait).is_some_and(|deadline| deadline <= now);
                         #[cfg(test)]
-                        let t = if self.bugs.no_takeover_wait { 0 } else { t };
+                        let waited = waited || self.bugs.no_takeover_wait;
                         let fenced = c.isr.intersection(&c.fenced).count();
-                        if t.checked_add(wait).is_some_and(|deadline| deadline <= now)
-                            && fenced >= min
-                        {
+                        if waited && fenced >= min {
                             let unfenced: Vec<NodeId> =
                                 c.isr.difference(&c.fenced).copied().collect();
                             c.removing.extend(unfenced);

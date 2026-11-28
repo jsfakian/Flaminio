@@ -21,19 +21,27 @@
 
 pub mod check;
 pub mod create_recovery;
+pub mod lease_clock;
 pub mod placement_admission;
+pub mod process_handoff;
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
+use crate::clock::{ClockAdmissionState, ClockFault};
 use crate::extent::Extent;
 use crate::meta::{MAX_CHANGES_PER_REQUEST, MetaReply, MetaRequest, Metadata, VolumeMeta};
 use crate::msg::{FromReplica, MAX_MAPPED_BLOCKS, Response, ToReplica};
 use crate::replica::Replica;
 use crate::target::{Op, OpResult, Output, Target};
 use crate::types::{Block, ChunkIdx, Epoch, NodeId, Time, Timing, Value, VolumeId};
+use lease_clock::Clock;
+use process_handoff::{Capability, Credentials, Issuance, Process};
 
-use check::{CKind, COp, Uncertainty, check_fenced_authority, check_register, valid_fenced};
+use check::{
+    CKind, COp, ClockEvent, Uncertainty, check_clock_history, check_fenced_authority,
+    check_register, valid_fenced,
+};
 
 /// Payloads in the simulator: one value per block of the extent.
 pub type Data = Vec<Value>;
@@ -213,6 +221,10 @@ pub struct Report {
     pub uncertainty_settles: u64,
     pub forged_epoch_requests: u64,
     pub invalid_fenced_replies: u64,
+    pub clock_faults: u64,
+    pub clock_permits: u64,
+    pub process_pauses: u64,
+    pub host_suspends: u64,
 }
 
 /// Deliberate bugs to inject into every replica and target of a run.
@@ -221,6 +233,7 @@ pub struct Report {
 pub struct Bugs {
     pub target: crate::target::Bugs,
     pub replica: crate::replica::Bugs,
+    pub skip_clock_invalidation: bool,
 }
 
 /// A scripted step, for scenario tests: exact failures at exact times.
@@ -236,15 +249,30 @@ pub enum Action {
     /// The client on `node` reads or writes one block, if the node runs a live target.
     Read(NodeId, ChunkIdx, Block),
     Write(NodeId, ChunkIdx, Block),
+    ProcessPause(NodeId, u64),
+    HostSuspend(NodeId, u64),
+    ClockFault(NodeId, ClockFault),
+    Restart(NodeId),
+    VirtualClockStop(NodeId, u64),
+    SnapshotRollback(NodeId),
 }
 
 #[derive(Debug, Clone)]
 enum Body {
     ToReplica(ToReplica<Data>),
     FromReplica(FromReplica<Data>),
-    MetaReq { req: u64, body: MetaRequest },
-    MetaRep { req: u64, reply: MetaReply },
-    Start { view: VolumeMeta },
+    MetaReq {
+        req: u64,
+        body: MetaRequest,
+    },
+    MetaRep {
+        req: u64,
+        reply: MetaReply,
+    },
+    Start {
+        view: VolumeMeta,
+        credentials: Credentials,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +293,11 @@ type Conn = Option<(Epoch, u64)>;
 #[derive(Debug, Clone)]
 enum Ev {
     Deliver(Packet),
+    DeliverSuccess {
+        permit: usize,
+        op: u64,
+        result: OpResult<Data>,
+    },
     Wake {
         node: NodeId,
     },
@@ -273,6 +306,9 @@ enum Ev {
         inc: u64,
     },
     Fault,
+    Resume {
+        node: NodeId,
+    },
     Restart {
         node: NodeId,
     },
@@ -310,24 +346,7 @@ struct Fast {
     fr: crate::target::FastRead,
     epoch: Epoch,
     data: Option<Vec<Value>>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Clock {
-    rate_ppm: u64,
-    offset: u64,
-}
-
-impl Clock {
-    fn local(&self, real: u64) -> Time {
-        self.offset + (real as u128 * self.rate_ppm as u128 / 1_000_000) as u64
-    }
-
-    /// The first real time at which the local clock reads at least `local`.
-    fn real_at(&self, local: Time) -> u64 {
-        let d = local.saturating_sub(self.offset) as u128;
-        (d * 1_000_000).div_ceil(self.rate_ppm as u128) as u64
-    }
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -335,6 +354,10 @@ struct Node {
     up: bool,
     inc: u64,
     clock: Clock,
+    admission: ClockAdmissionState,
+    pause_until: u64,
+    expected_suspend_fault: bool,
+    process: Process,
     replica: Replica,
     /// Exact simulator-only records; independent of the bounded production representation.
     uncertainty: Uncertainty,
@@ -381,6 +404,9 @@ pub struct Sim {
     last_delivery: BTreeMap<(NodeId, NodeId, Conn), u64>,
     broken: BTreeSet<(NodeId, NodeId, Conn)>,
     history: Vec<HistOp>,
+    clock_history: Vec<ClockEvent>,
+    issuance_history: Vec<Issuance>,
+    faulted_processes: BTreeSet<(NodeId, u64)>,
     chaos: bool,
     report: Report,
     /// An event may detect a violation before the enclosing run loop can return it.
@@ -449,10 +475,11 @@ impl Sim {
                 Node {
                     up: true,
                     inc: 0,
-                    clock: Clock {
-                        rate_ppm: 1_000_000 + rng.range(0, drift),
-                        offset: rng.range(0, 1000 * SEC),
-                    },
+                    clock: Clock::new(1_000_000 + rng.range(0, drift), rng.range(0, 1000 * SEC), 0),
+                    admission: ClockAdmissionState::OPEN,
+                    pause_until: 0,
+                    expected_suspend_fault: false,
+                    process: Process::new(1),
                     replica,
                     uncertainty,
                     target: None,
@@ -477,6 +504,9 @@ impl Sim {
             last_delivery: BTreeMap::new(),
             broken: BTreeSet::new(),
             history: Vec::new(),
+            clock_history: Vec::new(),
+            issuance_history: Vec::new(),
+            faulted_processes: BTreeSet::new(),
             chaos: true,
             report: Report::default(),
             check_failure: None,
@@ -645,22 +675,57 @@ impl Sim {
         let n = v.target?;
         let node = &self.nodes[n as usize];
         let t = node.target.as_ref()?;
-        (node.up && t.epoch() == v.epoch && t.is_settled() && node.client.is_empty()).then_some(n)
+        (node.up
+            && node.admission.admits(0)
+            && node.pause_until <= self.now
+            && t.epoch() == v.epoch
+            && t.is_settled()
+            && node.client.is_empty())
+        .then_some(n)
     }
 
     fn step(&mut self) -> bool {
         let Some(Reverse((t, _, idx))) = self.events.pop() else {
             return false;
         };
+        assert!(t >= self.now, "scheduler cannot rewind ideal time");
         self.now = t;
         let ev = self.payloads[idx].take().expect("event");
+        let scheduled_node = match &ev {
+            Ev::Deliver(p) if p.to != META => Some(p.to),
+            Ev::Script(
+                Action::Read(node, ..) | Action::Write(node, ..) | Action::ClockFault(node, ..),
+            )
+            | Ev::Wake { node }
+            | Ev::ClientStep { node, .. }
+            | Ev::FastDevice { node, .. }
+            | Ev::FastDone { node, .. } => Some(*node),
+            _ => None,
+        };
+        if let Some(node) = scheduled_node {
+            let until = self.nodes[node as usize].pause_until;
+            if until > t {
+                if matches!(ev, Ev::Wake { .. }) {
+                    self.nodes[node as usize].wake_at = Some(until);
+                }
+                self.at(until, ev);
+                return true;
+            }
+        }
         match ev {
             Ev::Deliver(p) => self.deliver(p),
+            Ev::DeliverSuccess { permit, op, result } => {
+                self.clock_history.push(ClockEvent::Delivery {
+                    permit,
+                    real: self.now,
+                });
+                self.history[op as usize].result = Some((self.now, result));
+            }
             Ev::Wake { node } => {
+                let local = self.sample(node);
                 let n = &mut self.nodes[node as usize];
-                if n.wake_at == Some(t) {
+                if let Some(local) = local.filter(|_| n.wake_at == Some(t)) {
                     n.wake_at = None;
-                    let local = n.clock.local(t);
                     if let Some(tg) = n.target.as_mut() {
                         tg.tick(local);
                     }
@@ -669,6 +734,19 @@ impl Sim {
             }
             Ev::ClientStep { node, inc } => self.client_step(node, inc),
             Ev::Fault => self.fault(),
+            Ev::Resume { node } => {
+                let n = &mut self.nodes[node as usize];
+                if self.now >= n.pause_until {
+                    n.clock.resume(self.now);
+                    n.pause_until = 0;
+                    let expected = std::mem::take(&mut n.expected_suspend_fault);
+                    if expected {
+                        self.expected_fault(node);
+                    }
+                    self.sample(node);
+                    self.after(node);
+                }
+            }
             Ev::Restart { node } => self.restart(node),
             Ev::Heal { a, b } => {
                 self.down_links.remove(&(a, b));
@@ -698,6 +776,77 @@ impl Sim {
         Ok(stepped)
     }
 
+    fn expected_fault(&mut self, node: NodeId) {
+        self.faulted_processes
+            .insert((node, self.nodes[node as usize].inc));
+        self.clock_history.push(ClockEvent::Fault {
+            node,
+            process: self.nodes[node as usize].inc,
+            real: self.now,
+        });
+    }
+
+    fn sample(&mut self, node: NodeId) -> Option<Time> {
+        let n = &mut self.nodes[node as usize];
+        if !n.up || !n.admission.admits(0) {
+            return None;
+        }
+        match n.clock.observe(self.now) {
+            Ok(local) => Some(local),
+            Err(reason) => {
+                self.faulted_processes.insert((node, n.inc));
+                self.clock_history.push(ClockEvent::Fault {
+                    node,
+                    process: n.inc,
+                    real: self.now,
+                });
+                #[cfg(test)]
+                if self.bugs.skip_clock_invalidation {
+                    return Some(n.clock.local(self.now));
+                }
+                n.admission = n.admission.quarantine(reason);
+                n.process.quarantine();
+                self.report.clock_faults += 1;
+                if let Some(target) = &mut n.target {
+                    target.invalidate_clock();
+                }
+                n.replica.core.invalidate_clock();
+                n.wake_at = None;
+                self.check_uncertainty(node);
+                None
+            }
+        }
+    }
+
+    fn admit(&mut self, node: NodeId, generation: u64, success: bool) -> bool {
+        let n = &self.nodes[node as usize];
+        if !n.admission.admits(generation) {
+            return false;
+        }
+        self.clock_history.push(ClockEvent::Admission {
+            node,
+            process: n.inc,
+            generation,
+            real: self.now,
+            success,
+        });
+        if generation != 0 || self.faulted_processes.contains(&(node, n.inc)) {
+            self.check_failure.get_or_insert_with(|| format!("clock admission invariant: node {node} process {} success={success} after fault", n.inc));
+            return false;
+        }
+        if success {
+            self.report.clock_permits += 1;
+        }
+        true
+    }
+
+    fn permit_success(&mut self, node: NodeId, generation: u64, op: u64, result: OpResult<Data>) {
+        if self.admit(node, generation, true) {
+            let permit = self.clock_history.len() - 1;
+            self.at(self.now + 1, Ev::DeliverSuccess { permit, op, result });
+        }
+    }
+
     fn check_uncertainty(&mut self, node: NodeId) {
         let n = &self.nodes[node as usize];
         match n.uncertainty.check_core(&n.replica.core, VOL) {
@@ -721,7 +870,7 @@ impl Sim {
         if n == META {
             self.meta_up
         } else {
-            self.nodes[n as usize].up
+            self.nodes[n as usize].up && self.nodes[n as usize].admission.admits(0)
         }
     }
 
@@ -839,8 +988,16 @@ impl Sim {
             self.break_conn(p.from, p.to, p.conn);
             return;
         }
+        if p.to != META && self.sample(p.to).is_none() {
+            return;
+        }
         match p.body {
             Body::ToReplica(m) => {
+                if matches!(m.body, crate::msg::Request::Hello { .. })
+                    && !self.admit(p.to, 0, false)
+                {
+                    return;
+                }
                 if let Some((tc, tb)) = self.trace {
                     use crate::msg::Request as R;
                     let watched = match m.body {
@@ -1003,23 +1160,86 @@ impl Sim {
                 }
                 self.after(p.to);
             }
-            Body::Start { view } => self.start_target(p.to, view),
+            Body::Start { view, credentials } => self.start_target(p.to, view, credentials),
         }
     }
 
-    fn start_target(&mut self, node: NodeId, view: VolumeMeta) {
+    fn attach(&mut self, node: NodeId) -> Option<(VolumeMeta, Credentials)> {
+        if !self.meta_up {
+            return None;
+        }
+        let before = self.meta.volume(VOL)?.epoch;
+        if before == u64::MAX {
+            return None;
+        }
+        let MetaReply::Applied { view, .. } =
+            self.meta.handle(&MetaRequest::Attach { vol: VOL, node })
+        else {
+            return None;
+        };
+        let record = Issuance {
+            before_epoch: before,
+            committed_epoch: view.epoch,
+            committed_target: node,
+            nonce: self.nodes[node as usize].process.nonce,
+            capability: Capability {
+                volume: VOL,
+                node,
+                incarnation: 1,
+                epoch: view.epoch,
+            },
+            authorized: true,
+        };
+        if let Err(error) = record.check() {
+            self.check_failure.get_or_insert(error);
+            return None;
+        }
+        let credentials = record.credentials(self.issuance_history.len());
+        self.issuance_history.push(record);
+        Some((view, credentials))
+    }
+
+    fn start_target(&mut self, node: NodeId, view: VolumeMeta, credentials: Credentials) {
         let timing = self.cfg.timing;
+        let Some(local) = self.sample(node) else {
+            return;
+        };
+        if !self.admit(node, 0, false) {
+            return;
+        }
         let n = &mut self.nodes[node as usize];
         if n.target.as_ref().is_some_and(|t| t.epoch() >= view.epoch) {
             return;
         }
         #[cfg(test)]
         self.count_target(node);
+        let expected = Capability {
+            volume: VOL,
+            node,
+            incarnation: 1,
+            epoch: view.epoch,
+        };
         let n = &mut self.nodes[node as usize];
+        // Applying the coherent higher metadata epoch retires the previous lifetime first.
+        n.process.stop();
+        if !n
+            .process
+            .start(&credentials, expected, process_handoff::Mutation::None)
+        {
+            return;
+        }
+        if let Err(error) = process_handoff::check_start(
+            &self.issuance_history,
+            &credentials,
+            n.process.nonce,
+            expected,
+        ) {
+            self.check_failure.get_or_insert(error);
+            return;
+        }
         // The previous target on this node goes away: its operations stay unanswered.
         n.client.clear();
         n.fast.clear();
-        let local = n.clock.local(self.now);
         #[allow(unused_mut)]
         let mut t = Target::new(node, VOL, &view, timing, self.cfg.max_io, local);
         t.set_max_bulk(self.cfg.max_bulk);
@@ -1036,6 +1256,7 @@ impl Sim {
 
     /// Routes a node's target outputs and schedules its next wakeup.
     fn after(&mut self, node: NodeId) {
+        let healthy = self.sample(node).is_some();
         let n = &mut self.nodes[node as usize];
         let Some(t) = n.target.as_mut() else {
             return;
@@ -1045,10 +1266,20 @@ impl Sim {
         let local = n.clock.local(self.now);
         let wake = t
             .next_wakeup(local)
-            .map(|l| n.clock.real_at(l).max(self.now + 1));
+            .and_then(|l| n.clock.real_at(l, self.now))
+            .map(|real| real.max(self.now + 1));
         for o in out {
+            if !healthy {
+                if let Output::Done { op, .. } = o {
+                    self.nodes[node as usize].client.remove(&op);
+                }
+                continue;
+            }
             match o {
                 Output::Send { to, msg } => {
+                    if !self.admit(node, 0, false) {
+                        continue;
+                    }
                     if let Some((tc, tb)) = self.trace
                         && let crate::msg::Request::Write {
                             chunk,
@@ -1088,12 +1319,15 @@ impl Sim {
                     debug_assert_eq!(h.epoch, epoch);
                     match result {
                         OpResult::Failed | OpResult::Unreadable => {}
-                        r => h.result = Some((self.now, r)),
+                        r => {
+                            let _ = h;
+                            self.permit_success(node, 0, op, r);
+                        }
                     }
                 }
             }
         }
-        if let Some(w) = wake {
+        if let Some(w) = wake.filter(|_| healthy) {
             let n = &mut self.nodes[node as usize];
             if n.wake_at.is_none_or(|cur| w < cur) {
                 n.wake_at = Some(w);
@@ -1105,6 +1339,7 @@ impl Sim {
     /// Submits a client operation. A write puts the same value in every block of its extent.
     fn submit(&mut self, node: NodeId, chunk: ChunkIdx, ext: Extent, write: Option<Value>) -> u64 {
         let op = self.history.len() as u64;
+        let sampled = self.sample(node);
         let n = &mut self.nodes[node as usize];
         let t = n.target.as_mut().expect("target");
         self.history.push(HistOp {
@@ -1116,7 +1351,10 @@ impl Sim {
             result: None,
         });
         n.client.insert(op, (chunk, ext));
-        let local = n.clock.local(self.now);
+        let Some(local) = sampled else {
+            n.client.remove(&op);
+            return op;
+        };
         if write.is_none() && self.cfg.fast_reads && self.fast_read(node, op, chunk, ext) {
             return op;
         }
@@ -1139,8 +1377,10 @@ impl Sim {
     /// session) apply now, its device read happens later, and the target completes it after
     /// that, as in the data plane. Returns false if it must go through the queue.
     fn fast_read(&mut self, node: NodeId, op: u64, chunk: ChunkIdx, ext: Extent) -> bool {
+        let Some(local) = self.sample(node) else {
+            return false;
+        };
         let n = &mut self.nodes[node as usize];
-        let local = n.clock.local(self.now);
         let t = n.target.as_mut().expect("target");
         let Some(fr) = t.try_fast_read(local, chunk, ext) else {
             return false;
@@ -1171,6 +1411,7 @@ impl Sim {
                 fr,
                 epoch,
                 data: None,
+                generation: n.admission.generation(),
             },
         );
         // A device read: usually quick, sometimes slow enough to outlast a lease.
@@ -1203,6 +1444,7 @@ impl Sim {
     }
 
     fn fast_done(&mut self, node: NodeId, inc: u64, op: u64) {
+        let sampled = self.sample(node);
         let n = &mut self.nodes[node as usize];
         if n.inc != inc {
             return;
@@ -1210,7 +1452,11 @@ impl Sim {
         let Some(f) = n.fast.remove(&op) else {
             return;
         };
-        let local = n.clock.local(self.now);
+        let Some(local) = sampled else {
+            n.client.remove(&op);
+            return;
+        };
+        let generation = f.generation;
         // The local replica still fenced at the read's epoch: no newer target can have written
         // to it while the device read was under way (spec §5, fast reads).
         let fenced = n.replica.core.fenced(VOL) == f.epoch;
@@ -1224,7 +1470,7 @@ impl Sim {
             && let Some(data) = f.data
         {
             n.client.remove(&op);
-            self.history[op as usize].result = Some((self.now, OpResult::Read(data)));
+            self.permit_success(node, generation, op, OpResult::Read(data));
         } else {
             t.submit(local, op, Op::Read { chunk, ext });
         }
@@ -1268,13 +1514,38 @@ impl Sim {
     fn script_step(&mut self, a: Action) {
         let key = |a: NodeId, b: NodeId| (a.min(b), a.max(b));
         match a {
+            Action::ProcessPause(node, duration) | Action::HostSuspend(node, duration) => {
+                let suspended = matches!(a, Action::HostSuspend(..));
+                let n = &mut self.nodes[node as usize];
+                n.pause_until = self.now + duration;
+                if suspended {
+                    n.clock.suspend(self.now, false);
+                    n.expected_suspend_fault |= duration > 1_000;
+                    self.report.host_suspends += 1;
+                } else {
+                    self.report.process_pauses += 1;
+                }
+                self.at(self.now + duration, Ev::Resume { node });
+            }
+            Action::ClockFault(node, fault) => {
+                self.expected_fault(node);
+                self.nodes[node as usize].clock.inject(fault);
+                self.sample(node);
+                self.after(node);
+            }
+            Action::Restart(node) => {
+                self.crash(node);
+                self.restart(node);
+            }
+            Action::VirtualClockStop(..) | Action::SnapshotRollback(..) => {
+                self.check_failure.get_or_insert(
+                    "excluded clock environment: physical-boottime-v1 profile refusal".into(),
+                );
+            }
             Action::Attach(node) => {
-                let epoch = self.meta.volume(VOL).expect("volume").epoch;
-                let reply = self.meta.handle(&MetaRequest::Attach { vol: VOL, node });
-                if let MetaReply::Applied { view, .. } = reply {
-                    debug_assert_eq!(view.epoch, epoch + 1);
+                if let Some((view, credentials)) = self.attach(node) {
                     self.report.failovers += 1;
-                    self.send(META, node, None, Body::Start { view });
+                    self.send(META, node, None, Body::Start { view, credentials });
                 }
             }
             Action::Cut(a, b) => {
@@ -1330,12 +1601,15 @@ impl Sim {
             return;
         }
         n.up = true;
-        n.clock = Clock {
-            rate_ppm: rate,
-            offset,
-        };
+        n.clock = Clock::new(rate, offset, self.now);
+        n.admission = ClockAdmissionState::OPEN;
+        n.pause_until = 0;
+        n.expected_suspend_fault = false;
+        n.process = Process::new(n.inc.checked_add(1).expect("process identity overflow"));
         let inc = n.inc;
-        self.at(self.now + 1, Ev::ClientStep { node, inc });
+        if self.script.is_none() {
+            self.at(self.now + 1, Ev::ClientStep { node, inc });
+        }
     }
 
     fn fault(&mut self) {
@@ -1516,8 +1790,7 @@ impl Sim {
             return;
         }
         let node = self.rng.pick(&up);
-        let reply = self.meta.handle(&MetaRequest::Attach { vol: VOL, node });
-        if let MetaReply::Applied { view, .. } = reply {
+        if let Some((view, credentials)) = self.attach(node) {
             if self.trace.is_some() {
                 eprintln!(
                     "{:>10} attach epoch {} on node {node}",
@@ -1525,7 +1798,7 @@ impl Sim {
                 );
             }
             self.report.failovers += 1;
-            self.send(META, node, None, Body::Start { view });
+            self.send(META, node, None, Body::Start { view, credentials });
         }
     }
 
@@ -1535,6 +1808,9 @@ impl Sim {
         self.slow_links.clear();
         self.meta_up = true;
         for n in 0..self.cfg.nodes {
+            if !self.nodes[n as usize].admission.admits(0) {
+                self.crash(n);
+            }
             if !self.nodes[n as usize].up {
                 self.restart(n);
             }
@@ -1546,6 +1822,7 @@ impl Sim {
         if let Some(error) = &self.check_failure {
             return Err(error.clone());
         }
+        check_clock_history(&self.clock_history)?;
         for n in &self.nodes {
             n.uncertainty.check_core(&n.replica.core, VOL)?;
         }

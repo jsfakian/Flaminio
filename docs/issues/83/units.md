@@ -11,7 +11,7 @@ Root owns documentation/Makefile/git and does not read runtime code. Acceptance 
 | U2 Signed process handoff | proto/generated API, Go captoken + metadata Attach issuer, Rust net verifier, exact maximum-view fixture | fresh-process appendix, S5/S7; unchanged Attach roles/FLCT, exact FLCH134, nonce32, actual epoch advance | complete; codec/issuer/interop checks pass |
 | U3 Runtime enforcement | node engine/net and io clock/backend/node/ublk/control/main, including startup and all completion paths | Profile, observer, quarantine/completion, contracts; S1–S6; no cached authority time, all starts enforce current-process proof | complete; scoped runtime checks pass |
 | U4 Authorized callers | CSI dataplane/Node.device, metactl/admin and startup scripts; documented new control syntax | appendix current callers, S5/S8; agent/admin handshake, legacy startup refusal, no unsafe fallback | complete; Go/script/lint checks pass |
-| U5 Executable models | repl simulator event mapping/checker/clock and process-handoff schedules | Model/mutations, appendix; S7 plus S2–S5; independent ideal time/history, all required caught mutants | active |
+| U5 Executable models | repl simulator event mapping/checker/clock and process-handoff schedules | Model/mutations, appendix; S7 plus S2–S5; independent ideal time/history, all required caught mutants | complete; model/lint/node checks pass |
 
 Dependencies: U1 → U2 → U3 → U4 → U5 → independent test engineer → review/address loop → final checks/conformance.
 Units may extend the immediately relevant caller/export wiring to keep compilation coherent; report exact paths.
@@ -19,3 +19,5 @@ No lab runs, host suspend, VM pause or shared-disk rollback are authorized.
 #15 device-lifetime and #79 initialization APIs remain their issues' scope: preserve approved
 composition, implement existing #83 entry points strictly, and report any actual prerequisite
 that prevents safety before proceeding. Do not add a legacy or environment bypass.
+
+Independent S1–S8 acceptance and approved private test seams are now active after U5.

@@ -121,6 +121,36 @@ Older mounted devices or metadata outage may prevent retirement within the bound
 callers return an error rather than adopt or automatically detach. Guest credentials last for
 one invocation; CSI retains them in memory. Independent adversarial/script acceptance follows U5.
 
+### U5 Executable clock and handoff models
+
+Runtime and simulator share pure packed ClockAdmissionState helpers; node retains its SeqCst
+quarantine and permit CAS order. Piecewise BOOTTIME/active clock mappings distinguish scheduling
+pause, physical suspend, bad samples and excluded stop/rollback without rewinding ideal history.
+The append-only independent journal checks permits/sessions after fault and single-use permitted
+late delivery. Actual Target/ReplicaCore invalidation retains fences, landed/acknowledged data,
+pending uncertainty and reservations through fresh authorized epoch/fence/reconciliation.
+
+All four new controls are caught with clean counterparts: skip_clock_invalidation (three bad/
+backwards/overflow cases; admission violation, not a stale-data claim), ignore_observation_error
+(429 opposing-error/resolution/phase pairs over rho 0/1/100000), accept_old_process_handoff
+(no local-fence seed), and mint_handoff_without_epoch_advance (caught at issuance even if a
+later Start would refuse). Fifteen parsed schedules assert every step's epoch/owner/mutation
+expectations; own-agent issuance requires only-if-target. Symbolic authentication does not
+substitute for the native crypto/CAS acceptance that follows.
+
+Eight pause/suspend histories pass linearizability or sticky quarantine; two excluded traces
+show undetectable observations/profile refusal while ideal time advances. The partial-write
+oracle preserves acknowledged value 11 and permits unanswered value 73 to remain old or landed,
+with final per-block linearizability. Deterministic zero-client mode and the old test-only
+no-takeover-wait injection were corrected for process-origin-zero clocks, retaining the original
+split-brain witness rather than weakening it.
+
+Fmt/lint, focused Clippy, node62+20, 100 clean seeds and all 183 release checks pass (173 original
+plus ten new). Final strengthened recovery/error-phase cases and whitespace pass. Logs:
+`/tmp/u5-sim.log`, `/tmp/u5-lint-escalated.log`, `/tmp/u5-node-tests-escalated.log`,
+`/tmp/u5-partial-final.log` and `/tmp/u5-error-phase-final.log`. No hardware qualification or
+native end-to-end admission claim follows from symbolic models.
+
 ## Tests
 
 Pending implementation and independent S1–S8 acceptance. Required final checks:

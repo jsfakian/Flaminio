@@ -1,0 +1,723 @@
+{
+  "version": 1,
+  "schedules": [
+    {
+      "name": "old_process_no_local_replica",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": false,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 11
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 11,
+          "slot": "old",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "target_start",
+          "slot": "old",
+          "expect_started": true
+        },
+        {
+          "op": "clock_fault"
+        },
+        {
+          "op": "restart",
+          "nonce": 12
+        },
+        {
+          "op": "target_start",
+          "slot": "old",
+          "expect_started": false
+        }
+      ],
+      "mutant": "accept_old_process_handoff",
+      "expected_invariant": "FreshProcessEpoch"
+    },
+    {
+      "name": "same_epoch_issuance_before_any_start",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": false,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 21
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 21,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        }
+      ],
+      "mutant": "mint_handoff_without_epoch_advance",
+      "expected_invariant": "FreshProcessEpoch"
+    },
+    {
+      "name": "fresh_epoch_recovery_and_live_retry",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 31
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 31,
+          "slot": "old",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "target_start",
+          "slot": "old",
+          "expect_started": true
+        },
+        {
+          "op": "target_start",
+          "slot": "old",
+          "expect_started": true
+        },
+        {
+          "op": "clock_fault"
+        },
+        {
+          "op": "target_start",
+          "slot": "old",
+          "expect_started": false
+        },
+        {
+          "op": "restart",
+          "nonce": 32
+        },
+        {
+          "op": "target_start",
+          "slot": "old",
+          "expect_started": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 32,
+          "slot": "fresh",
+          "expect_issued": true,
+          "expect_epoch": 6,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "target_start",
+          "slot": "fresh",
+          "expect_started": true
+        },
+        {
+          "op": "stop_target"
+        },
+        {
+          "op": "target_start",
+          "slot": "fresh",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "authorization_and_read_only_mint_refusal",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 41
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": false,
+          "unless_target": false,
+          "nonce": 41,
+          "slot": "agent_unconditional",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "other_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 41,
+          "slot": "other_agent",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "io",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 41,
+          "slot": "io",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "node",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 41,
+          "slot": "node",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "reader",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 41,
+          "slot": "reader",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "anonymous",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 41,
+          "slot": "anonymous",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": true,
+          "nonce": 41,
+          "slot": "read_only",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 0,
+          "slot": "zero_nonce",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "admin",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 41,
+          "slot": "admin",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "target_start",
+          "slot": "admin",
+          "expect_started": true
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "metadata_outage_then_recovery",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 51
+        },
+        {
+          "op": "metadata_available",
+          "available": false
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 51,
+          "slot": "proof",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 0,
+          "expect_mutation": false
+        },
+        {
+          "op": "metadata_available",
+          "available": true
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 51,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": true
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "changed_owner_only_if_target_refuses",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 1,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 61
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 61,
+          "slot": "proof",
+          "expect_issued": false,
+          "expect_epoch": 4,
+          "expect_target": 1,
+          "expect_mutation": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exhausted_epoch_refuses_without_mutation",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 18446744073709551615,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 71
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 71,
+          "slot": "proof",
+          "expect_issued": false,
+          "expect_epoch": 18446744073709551615,
+          "expect_target": 0,
+          "expect_mutation": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_capability_volume",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 81
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 81,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_capability",
+          "slot": "proof",
+          "field": "volume",
+          "value": 2
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_capability_node",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 81
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 81,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_capability",
+          "slot": "proof",
+          "field": "node",
+          "value": 1
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_capability_incarnation",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 81
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 81,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_capability",
+          "slot": "proof",
+          "field": "incarnation",
+          "value": 2
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_capability_epoch",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 81
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 81,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_capability",
+          "slot": "proof",
+          "field": "epoch",
+          "value": 6
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_proof_nonce",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 91
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 91,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_proof",
+          "slot": "proof",
+          "field": "nonce",
+          "value": 92
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_proof_purpose",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 91
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 91,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_proof",
+          "slot": "proof",
+          "field": "purpose",
+          "value": 2
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_proof_signature",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 91
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 91,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_proof",
+          "slot": "proof",
+          "field": "signature",
+          "value": 0
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    },
+    {
+      "name": "exact_proof_digest",
+      "volume": 1,
+      "node": 0,
+      "first_epoch": 1,
+      "initial_epoch": 4,
+      "initial_target": 0,
+      "local_replica": true,
+      "steps": [
+        {
+          "op": "challenge",
+          "nonce": 101
+        },
+        {
+          "op": "authorized_attach",
+          "actor": "own_agent",
+          "only_if_target": true,
+          "unless_target": false,
+          "nonce": 101,
+          "slot": "proof",
+          "expect_issued": true,
+          "expect_epoch": 5,
+          "expect_target": 0,
+          "expect_mutation": true
+        },
+        {
+          "op": "tamper_proof",
+          "slot": "proof",
+          "field": "digest",
+          "value": 999
+        },
+        {
+          "op": "target_start",
+          "slot": "proof",
+          "expect_started": false
+        }
+      ],
+      "mutant": "none",
+      "expected_invariant": null
+    }
+  ]
+}

@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub use flaminio_repl::clock::{
-    ClockFault, ClockGuard, ClockQualification, ClockReading, OffsetInterval, checked_clock_ns,
+    ClockAdmissionState, ClockFault, ClockGuard, ClockQualification, ClockReading, OffsetInterval,
+    checked_clock_ns,
 };
 use flaminio_repl::types::Time;
 
@@ -99,8 +100,6 @@ impl ClockStatus {
 }
 
 static NEXT_DOMAIN: AtomicU64 = AtomicU64::new(1);
-const GENERATION_SHIFT: u32 = 4;
-const QUARANTINED: u64 = 1;
 
 /// One daemon's clock admission domain. There is exactly one healthy-to-quarantined
 /// transition and no reopen operation. State 0 is open generation 0; a closed state holds
@@ -184,14 +183,7 @@ impl ClockDomain {
     /// Close the whole process before dispatching a faulting observation's event. The
     /// first reason sticks and is published atomically with the advanced generation.
     pub fn quarantine(&self, reason: ClockFault) -> ClockStatus {
-        let code = match reason {
-            ClockFault::Profile => 1,
-            ClockFault::SampleFailed => 2,
-            ClockFault::Backwards => 3,
-            ClockFault::SuspendOffset => 4,
-            ClockFault::Overflow => 5,
-        };
-        let closed = (1 << GENERATION_SHIFT) | (code << 1) | QUARANTINED;
+        let closed = ClockAdmissionState::OPEN.quarantine(reason).word();
         let state = match self
             .state
             .compare_exchange(0, closed, Ordering::SeqCst, Ordering::SeqCst)
@@ -228,7 +220,9 @@ impl ClockDomain {
     }
 
     fn admit_generation(&self, generation: ClockGeneration) -> Result<(), ClockError> {
-        if generation.domain != self.identity || generation.number != 0 {
+        if generation.domain != self.identity
+            || !ClockAdmissionState::OPEN.admits(generation.number)
+        {
             return Err(ClockError::StaleGeneration);
         }
         self.state
@@ -238,21 +232,12 @@ impl ClockDomain {
     }
 
     fn decode(&self, state: u64) -> ClockStatus {
-        let reason = if state & QUARANTINED == 0 {
-            None
-        } else {
-            Some(match (state >> 1) & 7 {
-                1 => ClockFault::Profile,
-                2 => ClockFault::SampleFailed,
-                3 => ClockFault::Backwards,
-                4 => ClockFault::SuspendOffset,
-                _ => ClockFault::Overflow,
-            })
-        };
+        let state = ClockAdmissionState::from_word(state);
+        let reason = state.reason();
         ClockStatus {
             generation: ClockGeneration {
                 domain: self.identity,
-                number: state >> GENERATION_SHIFT,
+                number: state.generation(),
             },
             reason,
         }

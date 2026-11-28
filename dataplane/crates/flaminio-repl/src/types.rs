@@ -51,14 +51,23 @@ impl Timing {
     /// the others: `ceil((L + E) × (1 + ρ)) + E`, with E = 3 us. By then any older
     /// target's lease has expired, even under opposing elapsed-observation errors.
     pub fn takeover_wait(&self) -> Result<Time, crate::clock::ClockFault> {
-        let lease = u128::from(self.lease).checked_add(u128::from(Self::ELAPSED_ERROR_US));
+        self.takeover_wait_with_error(Self::ELAPSED_ERROR_US)
+    }
+
+    /// Model mutation seam: retain the real arithmetic while deliberately omitting E.
+    pub(crate) fn takeover_wait_without_error(&self) -> Result<Time, crate::clock::ClockFault> {
+        self.takeover_wait_with_error(0)
+    }
+
+    fn takeover_wait_with_error(&self, error_us: Time) -> Result<Time, crate::clock::ClockFault> {
+        let lease = u128::from(self.lease).checked_add(u128::from(error_us));
         let rate = u128::from(self.drift_ppm).checked_add(1_000_000);
         let wait = lease
             .zip(rate)
             .and_then(|(lease, rate)| lease.checked_mul(rate))
             .and_then(|product| product.checked_add(999_999))
             .map(|product| product / 1_000_000)
-            .and_then(|wait| wait.checked_add(u128::from(Self::ELAPSED_ERROR_US)))
+            .and_then(|wait| wait.checked_add(u128::from(error_us)))
             .ok_or(crate::clock::ClockFault::Overflow)?;
         Time::try_from(wait).map_err(|_| crate::clock::ClockFault::Overflow)
     }

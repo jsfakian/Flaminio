@@ -160,3 +160,15 @@ and generation acceptance, while node keeps its atomic CAS order and behavior. T
 repl-to-node dependency or a second invented clock state machine. Expected fault/permit and
 authorized-issuance facts remain independently derived from ideal event/history, never from
 the shared admission predicate. U5 source starts only after U4's checked writer handoff.
+
+### Independent acceptance testability boundary
+
+Existing profile qualification hardwires global probes and frontend EngineCtx/UblkQueue types;
+the approved injected-clock/fake-CQE acceptance cannot be established by lookalike test logic.
+After U5, authorize a narrow behavior-preserving private evidence/policy split and private
+backend/queue/completion interfaces reused by production and MemDevice/deferred tests. Real
+production constructors still use fixed probes and UringDevice, without test flags/environment
+admission routes. Exact-live retry validation must invoke actual Engine::attachment_permit;
+no raw proof constructor or cached-time authorization is exposed. Native syscall-output helpers
+permit checked malformed/short/error tests. Review these seams with the tests, and report any
+actual behavior failure before making a semantic fix. No hardware qualification follows.

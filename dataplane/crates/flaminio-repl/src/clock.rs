@@ -207,3 +207,53 @@ impl ClockGuard {
         Time::try_from(elapsed_ns / 1_000).map_err(|_| ClockFault::Overflow)
     }
 }
+
+/// Pure representation of the runtime atomic admission word. The only open state is
+/// generation zero; the first fault advances to generation one permanently. Atomic
+/// ordering remains the caller's responsibility (including the successful open-to-open CAS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockAdmissionState(u64);
+
+impl ClockAdmissionState {
+    pub const OPEN: Self = Self(0);
+
+    pub const fn from_word(word: u64) -> Self {
+        Self(word)
+    }
+    pub const fn word(self) -> u64 {
+        self.0
+    }
+    pub const fn generation(self) -> u64 {
+        self.0 >> 4
+    }
+    pub const fn admits(self, generation: u64) -> bool {
+        self.0 == 0 && generation == 0
+    }
+
+    pub const fn quarantine(self, reason: ClockFault) -> Self {
+        if self.0 != 0 {
+            return self;
+        }
+        let code = match reason {
+            ClockFault::Profile => 1,
+            ClockFault::SampleFailed => 2,
+            ClockFault::Backwards => 3,
+            ClockFault::SuspendOffset => 4,
+            ClockFault::Overflow => 5,
+        };
+        Self(16 | (code << 1) | 1)
+    }
+
+    pub const fn reason(self) -> Option<ClockFault> {
+        if self.0 & 1 == 0 {
+            return None;
+        }
+        Some(match (self.0 >> 1) & 7 {
+            1 => ClockFault::Profile,
+            2 => ClockFault::SampleFailed,
+            3 => ClockFault::Backwards,
+            4 => ClockFault::SuspendOffset,
+            _ => ClockFault::Overflow,
+        })
+    }
+}

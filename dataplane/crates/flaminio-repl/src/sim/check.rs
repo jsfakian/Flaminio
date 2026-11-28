@@ -460,3 +460,82 @@ mod tests {
         assert!(check_register(&[opt(0, 4, 1), op(2, 4, W(2)), op(5, 6, R(2))]).is_ok());
     }
 }
+
+/// Append-only oracle journal. Fault entries come from the scripted environment (and
+/// observed backend failures), never from the admission state's own healthy predicate.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ClockEvent {
+    Delivery {
+        permit: usize,
+        real: u64,
+    },
+    Fault {
+        node: u32,
+        process: u64,
+        real: u64,
+    },
+    Admission {
+        node: u32,
+        process: u64,
+        generation: u64,
+        real: u64,
+        success: bool,
+    },
+}
+
+pub(super) fn check_clock_history(history: &[ClockEvent]) -> Result<(), String> {
+    let mut faults = std::collections::BTreeSet::new();
+    let mut last_real = 0;
+    let mut consumed = std::collections::BTreeSet::new();
+    for (index, event) in history.iter().enumerate() {
+        let real = match *event {
+            ClockEvent::Delivery { permit, real } => {
+                if permit >= index
+                    || !matches!(
+                        history.get(permit),
+                        Some(ClockEvent::Admission { success: true, .. })
+                    )
+                    || !consumed.insert(permit)
+                {
+                    return Err(
+                        "clock admission invariant: delivery lacks a unique earlier success permit"
+                            .into(),
+                    );
+                }
+                real
+            }
+            ClockEvent::Fault {
+                node,
+                process,
+                real,
+            } => {
+                faults.insert((node, process));
+                real
+            }
+            ClockEvent::Admission {
+                node,
+                process,
+                generation,
+                real,
+                success,
+            } => {
+                if generation != 0 || faults.contains(&(node, process)) {
+                    return Err(format!(
+                        "clock admission invariant: node {node} process {process} generation {generation} {} after fault at ideal time {real}",
+                        if success {
+                            "success permit"
+                        } else {
+                            "session/dispatch"
+                        }
+                    ));
+                }
+                real
+            }
+        };
+        if real < last_real {
+            return Err("clock history rewound ideal time".into());
+        }
+        last_real = real;
+    }
+    Ok(())
+}
