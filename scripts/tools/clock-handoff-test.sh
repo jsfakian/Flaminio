@@ -82,4 +82,30 @@ for script in replica ublk; do
     if bash "$t/mvp" up >"$t/out" 2>"$t/err"; then echo "legacy MVP admitted" >&2; exit 1; fi
     [[ ! -s $t/events ]]
 done
+# Exercise the actual destructive agent dispatcher, with guarded binary overrides only.
+export DISK_TOOL="$t/disk-tool" AGENT_BIN="$t/agent"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$DISK_TOOL"
+cat >"$AGENT_BIN" <<'STUB'
+#!/usr/bin/env bash
+printf 'agent %s\n' "$*" >>"$STATE/events"
+STUB
+chmod +x "$DISK_TOOL" "$AGENT_BIN"
+cat "$root/scripts/guest/common.sh" >"$t/agent-functions"
+printf 'sudo() { "$@"; }\n' >>"$t/agent-functions"
+cat "$root/scripts/guest/agent.sh" >>"$t/agent-functions"
+fresh
+if PREFLIGHT_RC=1 bash "$t/agent-functions" claim >"$t/out" 2>"$t/err"; then
+    echo 'failed preflight admitted disk claim' >&2; exit 1
+fi
+[[ $(wc -l <"$t/events") == 1 ]]
+rg -q '^clock clock-check ' "$t/events"
+fresh
+bash "$t/agent-functions" claim >"$t/out" 2>"$t/err"
+[[ $(wc -l <"$t/events") == 2 ]]
+[[ $(head -1 "$t/events") == 'clock clock-check --clock-contract /operator/clock-contract.json --json' ]]
+rg -q '^agent claim --serial data --disk-tool .* --label ' "$t/events"
+fresh
+PREFLIGHT_RC=1 bash "$t/agent-functions" disks >"$t/out" 2>"$t/err"
+[[ $(wc -l <"$t/events") == 1 ]]
+rg -q '^agent disks ' "$t/events"
 echo 'clock-handoff-test: preflight, legacy refusal, own-agent handshake and retained canonical credentials pass'

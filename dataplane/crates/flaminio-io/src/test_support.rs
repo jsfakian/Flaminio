@@ -18,10 +18,13 @@ pub const NONCE: [u8; 32] = [83; 32];
 pub struct Clock {
     pub ns: AtomicU64,
     pub failed: AtomicBool,
+    pub reads: std::sync::atomic::AtomicUsize,
+    pub fail_on_read: std::sync::atomic::AtomicUsize,
 }
 impl ElapsedClock for Clock {
     fn read(&self) -> Result<ClockReading, ClockFault> {
-        if self.failed.load(Ordering::SeqCst) {
+        let read = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.failed.load(Ordering::SeqCst) || self.fail_on_read.load(Ordering::SeqCst) == read {
             return Err(ClockFault::SampleFailed);
         }
         let n = self.ns.load(Ordering::SeqCst) as u128;
@@ -32,6 +35,29 @@ impl ElapsedClock for Clock {
         })
     }
 }
+pub fn b64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for b in bytes.chunks(3) {
+        let n = (b[0] as u32) << 16
+            | (b.get(1).copied().unwrap_or(0) as u32) << 8
+            | b.get(2).copied().unwrap_or(0) as u32;
+        out.push(ALPHABET[(n >> 18) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
+        out.push(if b.len() > 1 {
+            ALPHABET[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if b.len() > 2 {
+            ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 pub fn signer() -> Ed25519KeyPair {
     Ed25519KeyPair::from_seed_unchecked(&[83; 32]).unwrap()
 }

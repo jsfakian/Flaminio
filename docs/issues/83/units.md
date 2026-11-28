@@ -20,8 +20,11 @@ No lab runs, host suspend, VM pause or shared-disk rollback are authorized.
 composition, implement existing #83 entry points strictly, and report any actual prerequisite
 that prevents safety before proceeding. Do not add a legacy or environment bypass.
 
-Independent S1–S8 acceptance and approved private test seams are complete; source is frozen.
-Full project checks passed; code/security review is next.
+Independent S1–S8 acceptance and approved private test seams are complete. Full project checks
+passed before review. All eight partitioned round-one reviewers finished; one fresh implementer
+completed the nine deduplicated fixes and negative regressions. Full lint/test/race/hygiene/
+contracts/sim and quick sanitizers pass. Fresh incremental code/security review follows the
+single fix commit.
 
 ## Full-change review partitions
 

@@ -38,7 +38,7 @@ impl Clock {
         }
     }
 
-    fn values(&self, real: u64) -> (u128, u128) {
+    pub(super) fn values(&self, real: u64) -> (u128, u128) {
         assert!(real >= self.anchor_real, "ideal time cannot rewind");
         let delta =
             u128::from(real - self.anchor_real) * 1_000 * u128::from(self.rate_ppm) / 1_000_000;

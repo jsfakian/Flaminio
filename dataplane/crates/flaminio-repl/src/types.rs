@@ -101,4 +101,33 @@ mod tests {
         assert_eq!(t.takeover_wait(), Ok(1_000_009));
         assert_eq!(Timing::default().takeover_wait(), Ok(5_500_007));
     }
+    #[test]
+    fn takeover_wait_checks_intermediate_and_result_overflow_at_the_valid_boundary() {
+        for (lease, drift_ppm) in [
+            (u64::MAX, 0),
+            (u64::MAX, u64::MAX),
+            (u64::MAX - 1, u64::MAX - 999_999),
+        ] {
+            let t = Timing {
+                lease,
+                drift_ppm,
+                ..Timing::default()
+            };
+            assert_eq!(t.takeover_wait(), Err(crate::clock::ClockFault::Overflow));
+        }
+        let largest = Timing {
+            lease: u64::MAX - 2 * Timing::ELAPSED_ERROR_US,
+            drift_ppm: 0,
+            ..Timing::default()
+        };
+        assert_eq!(largest.takeover_wait(), Ok(u64::MAX));
+        assert_eq!(
+            Timing {
+                lease: largest.lease + 1,
+                ..largest
+            }
+            .takeover_wait(),
+            Err(crate::clock::ClockFault::Overflow)
+        );
+    }
 }

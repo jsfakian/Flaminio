@@ -44,7 +44,8 @@ pub fn elapsed_resolution(source: ElapsedSource) -> io::Result<(i64, i64)> {
 /// Inspect the mount of the actual opened input, including nested provenance mounts.
 pub fn is_readonly(file: &impl AsRawFd) -> io::Result<bool> {
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: file's borrowed descriptor is live; stat is valid writable output storage.
+    // SAFETY: fstatvfs only borrows the descriptor (invalid ones return an error);
+    // stat is valid writable output storage.
     if unsafe { libc::fstatvfs(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -84,6 +85,28 @@ mod tests {
         mixed[31] = 1;
         assert_eq!(checked_nonce(32, mixed).unwrap(), mixed);
     }
+    #[test]
+    fn actual_writable_file_and_invalid_descriptor_mount_facts_are_not_success() {
+        struct InvalidFd;
+        impl AsRawFd for InvalidFd {
+            fn as_raw_fd(&self) -> std::os::fd::RawFd {
+                -1
+            }
+        }
+        let path = std::env::temp_dir().join(format!("fl-clock-rw-{}", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        assert!(
+            !is_readonly(&file).unwrap(),
+            "a newly created file is on a writable filesystem"
+        );
+        assert_eq!(
+            is_readonly(&InvalidFd).unwrap_err().raw_os_error(),
+            Some(libc::EBADF)
+        );
+        drop(file);
+        std::fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn native_clock_entropy_and_actual_file_mount_wrappers() {
         for source in [ElapsedSource::Boottime, ElapsedSource::Monotonic] {

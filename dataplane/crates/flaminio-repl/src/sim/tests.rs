@@ -302,7 +302,7 @@ fn large_chunk_recovery_uses_production_metadata_batches() {
             assert!(report.max_meta_batch > 0);
             assert!(report.max_meta_batch <= MAX_CHANGES_PER_REQUEST);
             assert!(report.completed >= chunks as usize);
-            assert_eq!(report.final_epoch, 2);
+            assert_eq!(report.final_epoch, 3); // birth epoch 1, then two Attach transitions.
         }
     }
 }
@@ -537,7 +537,7 @@ fn deferred_join_scenario(late_join: bool) -> (Sim, u64) {
         assert!(matches!(
             sim.meta.handle(&MetaRequest::ChangeIsr {
                 vol: VOL,
-                epoch: 0,
+                epoch: sim.first_epoch,
                 changes: vec![IsrChange {
                     chunk,
                     expected_ver: 0,
@@ -1647,6 +1647,84 @@ fn catches_skip_clock_invalidation_on_bad_backwards_and_overflow_observations() 
             error.contains("clock admission invariant"),
             "{fault:?}: {error}"
         );
+    }
+}
+
+#[test]
+fn overlapping_process_and_host_pauses_compose_scheduling_and_active_clock_separately() {
+    for (first, second, active_us) in [
+        (
+            Action::ProcessPause(0, 10 * SEC),
+            Action::ProcessPause(0, 1),
+            2 * SEC,
+        ),
+        (
+            Action::HostSuspend(0, 10 * SEC),
+            Action::ProcessPause(0, 1),
+            0,
+        ),
+        (
+            Action::ProcessPause(0, 10 * SEC),
+            Action::HostSuspend(0, 1),
+            2 * SEC - 1,
+        ),
+        (
+            Action::HostSuspend(0, 10 * SEC),
+            Action::HostSuspend(0, 1),
+            0,
+        ),
+    ] {
+        let mut sim = Sim::scripted(scenario_config(2, 1), vec![vec![0, 1]], vec![]);
+        sim.nodes[0].clock = Clock::new(1_000_000, 0, 0);
+        sim.script_step(first);
+        sim.at(SEC, Ev::Script(second));
+        sim.at(
+            2 * SEC,
+            Ev::Script(Action::ClockFault(0, ClockFault::SampleFailed)),
+        );
+        advance_scenario(&mut sim, 2 * SEC);
+        assert_eq!(sim.nodes[0].pause_until, 10 * SEC, "{first:?} / {second:?}");
+        assert!(
+            sim.nodes[0].admission.admits(0),
+            "paused node must not execute its queued fault"
+        );
+        assert_eq!(
+            sim.nodes[0].clock.values(sim.now),
+            (u128::from(2 * SEC) * 1_000, u128::from(active_us) * 1_000)
+        );
+        advance_scenario(&mut sim, 10 * SEC);
+        assert!(!sim.nodes[0].admission.admits(0));
+    }
+}
+
+#[test]
+fn integrated_handoffs_start_after_birth_and_refuse_invalid_incarnations() {
+    use process_handoff::{Capability, Issuance, Mutation, Process};
+    let mut sim = Sim::scripted(scenario_config(2, 1), vec![vec![0, 1]], vec![]);
+    let birth = sim.meta.volume(VOL).unwrap().epoch;
+    assert!(birth > 0);
+    let (_, credentials) = sim.attach(0).unwrap();
+    assert_eq!(credentials.capability.incarnation, birth);
+    assert!(credentials.capability.epoch > birth);
+    for incarnation in [0, 2, 3] {
+        let expected = Capability {
+            volume: VOL,
+            node: 0,
+            incarnation,
+            epoch: 2,
+        };
+        let record = Issuance {
+            before_epoch: 1,
+            committed_epoch: 2,
+            committed_target: 0,
+            nonce: 1,
+            capability: expected,
+            authorized: true,
+        };
+        assert!(record.check().is_err(), "invalid incarnation {incarnation}");
+        let proof = record.credentials(0);
+        assert!(!Process::new(1).start(&proof, expected, Mutation::None));
+        assert!(process_handoff::check_start(&[record], &proof, 1, expected).is_err());
     }
 }
 

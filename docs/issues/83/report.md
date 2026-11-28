@@ -37,6 +37,49 @@ Changes/resolution: Both fresh reviewers confirmed the table-row Nit resolved an
 
 Status: clear. Approval remains separate; no approval is inferred.
 
+### Code/security review round 1 — afb88d5c3c6ad5c9ab6bcd2aae5754ada6b3d2a6
+
+Full non-generated change against merged main `f952596f1b32c719efd2c65ab7347c052fc54f56`,
+split into the four [review partitions](units.md). Each partition received independent code
+and security review by fresh high-effort agents. Built-in review skills were unavailable;
+reviewers used the documented manual fallback. All eight completed before fixes began.
+
+- **R1-B1 — High:** A fault at `Engine::submit`'s second admission sample returns before
+  operation registration, losing the frontend's error completion and leaving its waiter blocked.
+- **R1-B2 — Medium:** First detecting quarantine during `settle_local` clears local work without
+  changing progress, reaching the healthy no-progress debug assertion.
+- **R1-A1 — Medium:** Per-opened-input read-only provenance enforcement lacks negative coverage,
+  including writable nested mounts and filesystem-query failure.
+- **R1-A2 — Medium:** Checked takeover arithmetic lacks extreme result/intermediate overflow,
+  representable-boundary and actual Target fail-closed tests required by the design.
+- **R1-C1 — Medium:** The destructive agent claim path's preflight is absent from script fixtures.
+- **R1-C2 — Medium:** Idle-session acceptance drops the sole network handle before checking
+  closure, allowing normal shutdown to mask missing quarantine cancellation; timeout can count
+  as closure.
+- **R1-C3 — Medium:** Real control-handler tests omit malformed textual handoffs, legacy arity,
+  bounds, canonical encoding and signed unknown versions before effects.
+- **R1-D1 — Low:** Overlapping simulator pauses overwrite deadlines and mixed pause/suspend
+  resumes clocks early.
+- **R1-D2 — Low:** The integrated handoff model initially admits incarnation 1 / epoch 1,
+  which the strict production verifier rejects.
+- **R1-N1 — Nit:** The fuzz lock adds 108 package records: 103 registry records and five local
+  crates, rather than 108 registry records.
+
+The independent reviewers agreed on shared findings. No production profile, authorization or
+signature bypass was reproduced. One fresh implementer addressed all nine findings: explicit
+pre-registration error completion; quarantine drain during settling; opened-FD and extreme
+timing tests; destructive-claim fixtures; live-network closure checks; actual-handler malformed
+handoffs; composed simulator scheduling/suspend deadlines; and positive birth epochs with
+strict incarnation ordering. Documentation wording is corrected here.
+
+Both runtime regressions failed before their fixes; copied and registered frontend requests now
+also prove termination. Nine omitted-guard controls were caught and restored, including the
+properly scheduled same/mixed overlap cases. The first overlap fixture was initialized
+incorrectly and its failure is excluded from evidence. Changed-package tests, scoped Clippy,
+scripts and three consecutive native bridge runs pass. Full `make lint test race hygiene
+contracts sim` and `make sanitize QUICK=1` pass on the restored source: 20,000 seeds and all
+190 release tests pass. Status: fixes complete, awaiting a fresh incremental code/security round.
+
 ## Implementation — 2026-11-28
 
 PR #106 / #78 is merged at `f952596f1b32c719efd2c65ab7347c052fc54f56`.
@@ -154,8 +197,9 @@ native end-to-end admission claim follows from symbolic models.
 ## Tests
 
 Independent acceptance passed on the frozen post-U5 source plus its approved private seams.
-No production semantic defect was reproduced. The complete required project suite passed on the frozen source; review/conformance remain
-later gates.
+Acceptance did not reproduce a production semantic defect; the subsequent review found the
+submission/settling error paths and coverage/model gaps recorded above. The complete required
+project suite passed before review; fix validation and conformance remain later gates.
 
 | Rules | Evidence |
 |---|---|
@@ -182,7 +226,8 @@ pre-Hello/writer cancellation and queued/fallback/late metadata are also checked
 Approved private evidence/FileFacts, backend/queue/completion and live-lifetime interfaces are
 shared with production; production constructors still use real probes and UringDevice. No
 profile bypass, raw proof constructor or cached-time authorization was introduced. The fuzz
-lock adds 108 existing main registry records, aligns equivalent 1.0.3→1.0.2 and itoa 1.0.19→1.0.18
+lock adds 108 package records (103 existing main registry records and five local crates), aligns
+equivalent 1.0.3→1.0.2 and itoa 1.0.19→1.0.18
 with existing main pins, and changes zero checksums. No production dependency upgrade.
 
 Logs: `/tmp/83-accept-{native,frontend,held,packages,go-packages,sim,fuzz,miri,sanitize,asan-delta,tsan-delta,clippy-stable,fuzz-clippy,fuzz-regressions,profile,scripts}.log`.
@@ -197,6 +242,20 @@ Logs: `/tmp/flaminio-83-validation.log` and `/tmp/flaminio-83-validation-final.l
 included in contracts/check, and its script harness is included in lint. Full quick sanitizers
 include IO/frontend and Miri's limitation is recorded above. No hardware qualification is
 claimed by local or model results.
+
+Round-one fix validation also passed the complete required suite and quick ASan/TSan on the
+restored tree. It includes 20,000 simulator seeds, all 190 release tests, actual copied/registered
+frontend termination, per-opened-FD provenance refusal, extreme timing/Target refusal, actual
+agent claim ordering, malformed control handling and live-network cancellation. Three native
+bridge reruns passed two tests / 73 actions each before the full contracts rerun.
+
+Logs: `/tmp/flaminio-83-r1-{validation,sanitize}.log`,
+`/tmp/83-r1-{packages-restored,clippy-final}.log`,
+`/tmp/83-r1-native-{restored,repeat2,repeat3}.log`,
+`/tmp/83-r1-{submit,settle}-before.log`,
+`/tmp/83-r1-control-{overlap,mixed-suspend,network-cancel-final}.log`.
+The earlier incorrectly initialized overlap fixture is excluded; the correctly scheduled
+omission controls above provide the before/after evidence. All temporary changes were restored.
 
 ## Conformance
 

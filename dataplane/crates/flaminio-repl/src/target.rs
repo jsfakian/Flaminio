@@ -3187,6 +3187,34 @@ mod tests {
     type Held = (NodeId, ToReplica<Vec<Value>>, FromReplica<Vec<Value>>);
     type HelloRequests = BTreeMap<NodeId, ToReplica<Vec<Value>>>;
 
+    #[test]
+    fn overflowing_takeover_timing_deposes_without_protocol_work() {
+        let (healthy, _) = opening_target(&[&[TARGET]], BLOCKS);
+        for drift_ppm in [0, u64::MAX] {
+            let timing = Timing {
+                lease: u64::MAX,
+                drift_ppm,
+                ..Timing::default()
+            };
+            let view = VolumeMeta {
+                epoch: 3,
+                target: Some(TARGET),
+                min_isr: 1,
+                blocks_per_chunk: BLOCKS,
+                chunks: vec![ChunkMeta {
+                    replicas: vec![TARGET],
+                    isr: [TARGET].into(),
+                    isr_ver: 0,
+                    moving: None,
+                }],
+            };
+            let mut target = Target::<Vec<Value>>::new(TARGET, VOL, &view, timing, 1, 7);
+            assert!(!healthy.is_deposed());
+            assert!(target.is_deposed());
+            assert!(target.take_output().is_empty());
+        }
+    }
+
     fn opening_target(
         placement: &[&[NodeId]],
         blocks: Block,

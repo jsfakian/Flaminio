@@ -134,12 +134,23 @@ fn read_contract(path: &Path) -> Result<Contract, String> {
 
 #[cfg(target_os = "linux")]
 fn bounded_text(path: &Path) -> Result<String, String> {
+    bounded_text_with(
+        path,
+        Path::new("/run/flaminio/host"),
+        flaminio_uring::clock::is_readonly,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_text_with(
+    path: &Path,
+    host_root: &Path,
+    inspect: impl FnOnce(&File) -> std::io::Result<bool>,
+) -> Result<String, String> {
     let mut text = String::new();
     let file = File::open(path).map_err(|_| "unreadable host provenance or clocksource")?;
-    #[cfg(target_os = "linux")]
-    if path.starts_with("/run/flaminio/host")
-        && !flaminio_uring::clock::is_readonly(&file)
-            .map_err(|_| "cannot inspect host provenance mount")?
+    if path.starts_with(host_root)
+        && !inspect(&file).map_err(|_| "cannot inspect host provenance mount")?
     {
         return Err("each host provenance input must be on a read-only mount".into());
     }
@@ -541,6 +552,53 @@ mod tests {
         assert_eq!(json["attestation"], false);
         assert!(json.get("measured_drift").is_none());
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn provenance_collection_inspects_each_opened_input_not_its_parent_mount() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("fl-clock-mounts-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        let path = root.join("nested/cpuinfo");
+        std::fs::write(&path, "physical cpu").unwrap();
+        let input = std::fs::metadata(&path).unwrap();
+        let parent = std::fs::metadata(&root).unwrap();
+        assert_ne!(input.ino(), parent.ino());
+        // The parent mount is read-only in this fixture; the nested input has its own fact.
+        for state in [
+            Ok(true),
+            Ok(false),
+            Err(std::io::Error::other("query failed")),
+        ] {
+            let expected_ok = matches!(state, Ok(true));
+            let mut inspected = false;
+            let answer = bounded_text_with(&path, &root, |file| {
+                inspected = true;
+                let actual = file.metadata().unwrap();
+                assert_eq!((actual.dev(), actual.ino()), (input.dev(), input.ino()));
+                assert_ne!(
+                    actual.ino(),
+                    parent.ino(),
+                    "inspect the opened child, not its parent"
+                );
+                state
+            });
+            assert!(inspected);
+            assert_eq!(answer.is_ok(), expected_ok);
+            if expected_ok {
+                assert_eq!(answer.unwrap(), "physical cpu");
+            }
+        }
+        // Direct-host inputs do not require a read-only host mount.
+        assert_eq!(
+            bounded_text_with(&path, &root.join("other"), |_| panic!(
+                "unrelated input inspected"
+            ))
+            .unwrap(),
+            "physical cpu"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn opened_file_facts_require_root_regular_bounded_nonwritable_file() {
         for mode in [0o400, 0o600, 0o644, 0o440] {

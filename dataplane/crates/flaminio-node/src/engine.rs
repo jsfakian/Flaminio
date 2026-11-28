@@ -1750,29 +1750,34 @@ impl<D: BlockDevice> Engine<D> {
         }
     }
 
+    /// Retain submitted buffers until their real CQEs arrive, without delivering success.
+    fn drain_quarantined_local(&mut self) {
+        self.invalidate_clock();
+        // Stop/detach may wait for actual CQEs; submitted write buffers must outlive them.
+        while !self.committing.is_empty() || self.staged.is_some() {
+            self.launch_held();
+            if self.staged.is_some() && self.service.holding() && self.service.launch() {
+                self.take_staged(true);
+            }
+            if self.committing.is_empty() {
+                break;
+            }
+            let _ = self.service.poll(true);
+            self.committing.pop_front();
+            if !self.service.holding()
+                && let Some(st) = self.staged.take()
+            {
+                self.committing.push_back(st);
+            }
+        }
+    }
+
     /// Everything queued for the local replica handled and durable, a held group included,
     /// without waiting for writes to gather: before using the replica directly, or anything
     /// that settles its store (docs/issues/10, S5).
     fn settle_local(&mut self, now: Instant) {
         if !self.clock.status().is_healthy() {
-            self.invalidate_clock();
-            // Stop/detach may wait for actual CQEs; submitted write buffers must outlive them.
-            while !self.committing.is_empty() || self.staged.is_some() {
-                self.launch_held();
-                if self.staged.is_some() && self.service.holding() && self.service.launch() {
-                    self.take_staged(true);
-                }
-                if self.committing.is_empty() {
-                    break;
-                }
-                let _ = self.service.poll(true);
-                self.committing.pop_front();
-                if !self.service.holding()
-                    && let Some(st) = self.staged.take()
-                {
-                    self.committing.push_back(st);
-                }
-            }
+            self.drain_quarantined_local();
             return;
         }
         let settling = std::mem::replace(&mut self.settling, true);
@@ -1782,6 +1787,10 @@ impl<D: BlockDevice> Engine<D> {
             self.finish_commit(now, true);
             self.launch_held();
             self.flush_local(now);
+            if !self.clock.status().is_healthy() {
+                self.drain_quarantined_local();
+                break;
+            }
             if self.progress == before {
                 eprintln!(
                     "flaminio-node: settling the local replica made no progress ({} commits in flight, {} requests queued, a group staged: {})",
@@ -2186,6 +2195,12 @@ impl<D: BlockDevice> Engine<D> {
 
     fn submit(&mut self, now: Instant, volume: &str, op: u64, io: Io) {
         let Some(sample) = self.sample() else {
+            // This operation is not in rt.ops yet, so invalidation cannot complete it.
+            self.out.push(Output::Done {
+                op,
+                result: Err(IoError::ClockQuarantined),
+                permit: None,
+            });
             return;
         };
         let us = sample.elapsed_us();
@@ -3018,9 +3033,25 @@ mod metadata_tests {
     const ISR: u64 = 100;
     const REFRESH: u64 = 101;
 
-    struct TestClock(std::sync::atomic::AtomicU64);
+    struct TestClock(
+        std::sync::atomic::AtomicU64,
+        std::sync::atomic::AtomicUsize,
+        std::sync::atomic::AtomicUsize,
+    );
+    impl TestClock {
+        fn fail_after(&self, successful_reads: usize) {
+            self.2.store(
+                self.1.load(Ordering::SeqCst) + successful_reads + 1,
+                Ordering::SeqCst,
+            );
+        }
+    }
     impl crate::clock::ElapsedClock for TestClock {
         fn read(&self) -> Result<crate::clock::ClockReading, crate::clock::ClockFault> {
+            let read = self.1.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.2.load(Ordering::SeqCst) == read {
+                return Err(crate::clock::ClockFault::SampleFailed);
+            }
             let ns = self.0.load(Ordering::Relaxed) as u128 * 1000;
             Ok(crate::clock::ClockReading {
                 monotonic_before_ns: ns,
@@ -3153,7 +3184,11 @@ mod metadata_tests {
                 },
             )
             .unwrap();
-            let clock = Arc::new(TestClock(std::sync::atomic::AtomicU64::new(0)));
+            let clock = Arc::new(TestClock(
+                std::sync::atomic::AtomicU64::new(0),
+                std::sync::atomic::AtomicUsize::new(0),
+                std::sync::atomic::AtomicUsize::new(0),
+            ));
             let domain = Arc::new(
                 ClockDomain::new(
                     clock.clone(),
@@ -3977,6 +4012,54 @@ mod metadata_tests {
             }
         }
     }
+    #[test]
+    fn first_clock_fault_while_settling_a_queued_request_does_not_panic() {
+        let mut f = Fixture::new(1);
+        f.engine.out.clear();
+        let accepted = Accepted {
+            peer_node: "fl-a".into(),
+            req: 1,
+            epoch: 8,
+            session: 1,
+            claims: Claims {
+                volume: "v".into(),
+                epoch: 8,
+                node: "fl-a".into(),
+                issued_at: 0,
+                first_epoch: 1,
+            },
+            size: 2 << 20,
+            chunk_size: 1 << 20,
+            chunks: vec![0],
+        };
+        let (tx, _rx) = channel::unbounded();
+        f.engine.handle(Input::Net(NetEvent::Opened {
+            conn: 90,
+            accepted: Box::new(accepted.clone()),
+            replies: tx,
+        }));
+        f.engine.handle(Input::Net(NetEvent::Request {
+            conn: 90,
+            frame: Frame::Read {
+                req: 2,
+                chunk: 0,
+                ext: Extent::new(0, 1),
+            },
+        }));
+        assert_eq!(f.engine.local.len(), 1);
+        assert!(f.engine.committing.is_empty() && f.engine.staged.is_none());
+        f.clock.fail_after(1); // outer handle admits; flush_local first observes the fault.
+        let (tx, _rx) = channel::unbounded();
+        f.engine.handle(Input::Net(NetEvent::Opened {
+            conn: 91,
+            accepted: Box::new(accepted),
+            replies: tx,
+        }));
+        assert!(!f.engine.clock.status().is_healthy());
+        assert!(f.engine.local.is_empty() && f.engine.conns.is_empty());
+        assert_eq!(f.engine.clock.status().generation.number(), 1);
+    }
+
     #[test]
     fn clock_fault_keeps_only_consistently_prepermitted_piece_done_pairs() {
         let mut f = Fixture::new(1);

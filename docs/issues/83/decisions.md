@@ -189,9 +189,10 @@ Ordinary Rust checks run from dataplane under its pinned 1.99.0, not root's unre
 default; explicit nightly is used for fuzz/Miri/sanitizers. Do not change user-global defaults
 or unrelated frozen code for nightly-only lint differences.
 
-The separate fuzz graph now includes the IO parser library. Reuse existing main-lock registry
-records/checksums (108 added); align its two prior fuzz-only equivalent/itoa versions to main's
-existing pins, with no checksum substitution or production upgrade. Both locked graphs pass.
+The separate fuzz graph now includes the IO parser library. Add 108 package records: 103 reused
+main-lock registry records/checksums and five local crates; align its two prior fuzz-only
+equivalent/itoa versions to main's existing pins, with no checksum substitution or production
+upgrade. Both locked graphs pass.
 Thirteen new regression seeds are committed. Native/fake-CQE tests prove software boundaries,
 not physical clock qualification or actual ublk/kernel execution; Miri covers aligned helpers,
 not Linux clock/filesystem/entropy syscalls.
@@ -205,3 +206,26 @@ fuzz workspace; this applies the already documented same-dependency policy, not 
 or package upgrade. The first full run passed lint/test/race and exposed this mismatch in
 hygiene. Preserve the 4,097-byte oversized corpus boundary using non-whitespace bytes so the
 normal diff whitespace gate remains useful.
+
+### Code/security round 1 corrections
+
+R1-B1/B2 require explicit error completion even before operation registration and transition
+from healthy settling into the existing quarantine drain when a fresh sample first faults.
+Completion ownership and actual CQE lifetime remain binding; a detected fault must leave
+inspection available without a debug assertion panic.
+
+R1-A1/A2 and R1-C1/C2/C3 require meaningful negative controls through production input-reading,
+target construction, destructive claim, session cancellation and textual control handling.
+Private test seams may supply opened-input filesystem facts; production still inspects each
+actual descriptor. Idle-session tests keep the network alive while verifying quarantine-driven
+closure, and timeouts fail. These corrections grant no additional admission route.
+The textual handoff decoder stays private to the binary: actual-handler tables cover bounds,
+alphabet, padding, unused bits, legacy arity and signed unknown versions, including an omitted
+canonical-bit guard that the test catches. The existing binary verifier fuzz target is retained;
+this fix introduces no public parser API solely for fuzz access.
+
+R1-D1 composes scheduling pauses with a separate host-suspend interval, so overlapping process
+pauses cannot resume execution or MONOTONIC early. R1-D2 initializes a valid positive volume
+birth epoch and propagates it into independent strict issuance/start checks requiring
+`0 < incarnation < epoch`, matching the existing production verifier. Both correct model
+fidelity; the supported/excluded event policy remains as approved.

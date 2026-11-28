@@ -61,6 +61,8 @@ impl Issuance {
     pub fn check(&self) -> Result<(), String> {
         if !self.authorized
             || self.committed_epoch <= self.before_epoch
+            || self.capability.incarnation == 0
+            || self.capability.incarnation >= self.capability.epoch
             || self.capability.epoch != self.committed_epoch
             || self.capability.node != self.committed_target
             || self.nonce == 0
@@ -104,6 +106,8 @@ impl Process {
         mutation: Mutation,
     ) -> bool {
         if !self.healthy
+            || expected.incarnation == 0
+            || expected.incarnation >= expected.epoch
             || !credentials.authenticated
             || credentials.purpose != 1
             || credentials.capability != expected

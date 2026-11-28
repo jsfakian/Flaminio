@@ -274,6 +274,86 @@ fn detach(engine: &mpsc::Sender<Input>, wake: &Wake, attached: &Attached, volume
 mod tests {
     use super::*;
 
+    #[test]
+    fn malformed_handoff_socket_commands_refuse_before_dispatch() {
+        use crate::test_support::{Clock, NONCE, b64, credentials, signer, token_key};
+        use flaminio_node::clock::ClockQualification;
+        use std::sync::atomic::AtomicUsize;
+        let (token, handoff) = credentials("v", "fl-a", 5, 1, &NONCE);
+        let encoded_token = b64(&token);
+        let rawurl = |bytes: &[u8]| {
+            b64(bytes)
+                .trim_end_matches('=')
+                .replace('+', "-")
+                .replace('/', "_")
+        };
+        let encoded_handoff = rawurl(&handoff);
+        let mut noncanonical = encoded_handoff.as_bytes().to_vec();
+        let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let last = noncanonical.last_mut().unwrap();
+        let digit = alphabet.iter().position(|b| b == last).unwrap();
+        assert_eq!(digit & 3, 0);
+        *last = alphabet[digit + 1]; // same decoded bytes, forbidden unused bits
+        let noncanonical = String::from_utf8(noncanonical).unwrap();
+        let mut unknown = handoff[..70].to_vec();
+        unknown[4] = 2;
+        unknown.extend_from_slice(signer().sign(&unknown).as_ref());
+        let lines = [
+            "attach".into(),
+            "attach v".into(),
+            format!("attach v {encoded_token}"),
+            format!("attach v {} {encoded_handoff}", "A".repeat(4097)),
+            format!("attach v {encoded_token} {}", "A".repeat(180)),
+            format!("attach v {encoded_token} {}", "!".repeat(179)),
+            format!("attach v {encoded_token} {encoded_handoff}="),
+            format!("attach v {encoded_token} {noncanonical} 1"),
+            format!("attach v {encoded_token} {}", rawurl(&unknown)),
+            format!("attach v {encoded_token} {encoded_handoff} 1 extra"),
+        ];
+        let domain = Arc::new(
+            ClockDomain::new(
+                Arc::new(Clock::default()),
+                ClockQualification::new(1, 1, 1000).unwrap(),
+            )
+            .unwrap(),
+        );
+        let clock = ClockControl {
+            domain,
+            nonce: NONCE,
+            key: token_key(),
+        };
+        for (case, line) in lines.iter().enumerate() {
+            let (ctl, requests) = mpsc::channel();
+            let (engine, inputs) = mpsc::channel();
+            let wakes = Arc::new(AtomicUsize::new(0));
+            let count = wakes.clone();
+            let wake: Wake = Arc::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+            let attached = Arc::new(std::sync::Mutex::new(None));
+            let (mut client, server) = UnixStream::pair().unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            writeln!(client, "{line}").unwrap();
+            serve(server, &ctl, &engine, &wake, &attached, &clock);
+            let mut answer = String::new();
+            BufReader::new(client).read_line(&mut answer).unwrap();
+            assert!(answer.starts_with("error:"), "case {case}: {answer}");
+            assert!(
+                requests.try_recv().is_err(),
+                "case {case}: attach dispatched"
+            );
+            assert!(inputs.try_recv().is_err(), "case {case}: engine mutated");
+            assert_eq!(
+                wakes.load(Ordering::SeqCst),
+                0,
+                "case {case}: engine awakened"
+            );
+            assert!(attached.lock().unwrap().is_none());
+        }
+    }
+
     fn proof() -> VerifiedHandoff {
         fn hex(s: &str) -> Vec<u8> {
             s.as_bytes()

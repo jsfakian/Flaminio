@@ -356,6 +356,7 @@ struct Node {
     clock: Clock,
     admission: ClockAdmissionState,
     pause_until: u64,
+    suspend: Option<(u64, u64)>,
     expected_suspend_fault: bool,
     process: Process,
     replica: Replica,
@@ -397,6 +398,7 @@ pub struct Sim {
     payloads: Vec<Option<Ev>>,
     nodes: Vec<Node>,
     meta: Metadata,
+    first_epoch: Epoch,
     meta_up: bool,
     down_links: BTreeSet<(NodeId, NodeId)>,
     /// Links with high latency for a while (gray failure): range of extra delay.
@@ -455,7 +457,14 @@ impl Sim {
             "chunks exceed uncertainty budget"
         );
         let mut meta = Metadata::default();
-        meta.create_volume(VOL, 0, cfg.min_isr, cfg.blocks_per_chunk, placement.clone());
+        let first_epoch = 1;
+        meta.create_volume(
+            VOL,
+            first_epoch,
+            cfg.min_isr,
+            cfg.blocks_per_chunk,
+            placement.clone(),
+        );
         let drift = cfg.timing.drift_ppm;
         let nodes = (0..cfg.nodes)
             .map(|n| {
@@ -478,6 +487,7 @@ impl Sim {
                     clock: Clock::new(1_000_000 + rng.range(0, drift), rng.range(0, 1000 * SEC), 0),
                     admission: ClockAdmissionState::OPEN,
                     pause_until: 0,
+                    suspend: None,
                     expected_suspend_fault: false,
                     process: Process::new(1),
                     replica,
@@ -498,6 +508,7 @@ impl Sim {
             payloads: Vec::new(),
             nodes,
             meta,
+            first_epoch,
             meta_up: true,
             down_links: BTreeSet::new(),
             slow_links: BTreeMap::new(),
@@ -736,8 +747,13 @@ impl Sim {
             Ev::Fault => self.fault(),
             Ev::Resume { node } => {
                 let n = &mut self.nodes[node as usize];
-                if self.now >= n.pause_until {
+                // Host time resumes at the suspend deadline even if a scheduling pause
+                // still prevents the process from handling events.
+                if n.suspend.is_some_and(|(_, until)| self.now >= until) {
                     n.clock.resume(self.now);
+                    n.suspend = None;
+                }
+                if self.now >= n.pause_until {
                     n.pause_until = 0;
                     let expected = std::mem::take(&mut n.expected_suspend_fault);
                     if expected {
@@ -1185,7 +1201,7 @@ impl Sim {
             capability: Capability {
                 volume: VOL,
                 node,
-                incarnation: 1,
+                incarnation: self.first_epoch,
                 epoch: view.epoch,
             },
             authorized: true,
@@ -1216,7 +1232,7 @@ impl Sim {
         let expected = Capability {
             volume: VOL,
             node,
-            incarnation: 1,
+            incarnation: self.first_epoch,
             epoch: view.epoch,
         };
         let n = &mut self.nodes[node as usize];
@@ -1517,10 +1533,16 @@ impl Sim {
             Action::ProcessPause(node, duration) | Action::HostSuspend(node, duration) => {
                 let suspended = matches!(a, Action::HostSuspend(..));
                 let n = &mut self.nodes[node as usize];
-                n.pause_until = self.now + duration;
+                let until = self.now + duration;
+                n.pause_until = n.pause_until.max(until);
                 if suspended {
-                    n.clock.suspend(self.now, false);
-                    n.expected_suspend_fault |= duration > 1_000;
+                    let (since, previous_until) = n.suspend.unwrap_or((self.now, self.now));
+                    if n.suspend.is_none() {
+                        n.clock.suspend(self.now, false);
+                    }
+                    let until = previous_until.max(until);
+                    n.suspend = Some((since, until));
+                    n.expected_suspend_fault |= until - since > 1_000;
                     self.report.host_suspends += 1;
                 } else {
                     self.report.process_pauses += 1;
@@ -1604,6 +1626,7 @@ impl Sim {
         n.clock = Clock::new(rate, offset, self.now);
         n.admission = ClockAdmissionState::OPEN;
         n.pause_until = 0;
+        n.suspend = None;
         n.expected_suspend_fault = false;
         n.process = Process::new(n.inc.checked_add(1).expect("process identity overflow"));
         let inc = n.inc;

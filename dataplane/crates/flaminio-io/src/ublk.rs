@@ -2038,7 +2038,7 @@ mod clock_acceptance {
             f.clock,
         )
     }
-    fn drive<F: Future<Output = Result<(), UblkError>>>(
+    fn drive<F: Future<Output = Result<(), UblkError>> + ?Sized>(
         mut f: Pin<&mut F>,
         ctx: &EngineCtx<MemDevice>,
     ) {
@@ -2051,6 +2051,93 @@ mod clock_acceptance {
         }
         panic!("request made no progress");
     }
+    #[test]
+    fn clock_fault_between_io_admissions_completes_the_registered_frontend_waiter() {
+        let (ctx, clock) = context();
+        let (tx, rx) = smol::channel::unbounded();
+        clock
+            .fail_on_read
+            .store(clock.reads.load(Ordering::SeqCst) + 2, Ordering::SeqCst);
+        ctx.submit(
+            Io::Read {
+                offset: 0,
+                len: 4096,
+            },
+            tx,
+        );
+        assert!(
+            !ctx.shared
+                .engine
+                .lock()
+                .unwrap()
+                .clock_domain()
+                .status()
+                .is_healthy()
+        );
+        ctx.pump();
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::Done(Err(IoError::ClockQuarantined)))
+        ));
+        assert!(rx.try_recv().is_err(), "exactly one completion");
+        assert!(ctx.shared.waiters.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn copied_and_registered_requests_terminate_when_submit_detects_the_fault() {
+        for registered in [false, true] {
+            let (ctx, clock) = context();
+            let q = Queue::default();
+            let bufs = [RefCell::new(IoBuf::<u8>::new(4096))];
+            let st = Staging::new(1, 4096).unwrap();
+            let events = smol::channel::unbounded();
+            let mut work: Pin<Box<dyn Future<Output = Result<(), UblkError>>>> = if registered {
+                Box::pin(serve_zc_request(
+                    &q,
+                    0,
+                    &st,
+                    &ctx,
+                    sys::UBLK_IO_OP_WRITE,
+                    0,
+                    4096,
+                    0,
+                    &events,
+                ))
+            } else {
+                Box::pin(serve_copy_request(
+                    &q,
+                    0,
+                    &bufs,
+                    &ctx,
+                    sys::UBLK_IO_OP_WRITE,
+                    0,
+                    4096,
+                    &events,
+                ))
+            };
+            if registered {
+                assert!(poll(work.as_mut()).is_pending());
+                q.complete(4096); // source-page copy ends before Engine submission.
+            }
+            clock
+                .fail_on_read
+                .store(clock.reads.load(Ordering::SeqCst) + 3, Ordering::SeqCst);
+            assert!(poll(work.as_mut()).is_pending());
+            assert!(
+                !ctx.shared
+                    .engine
+                    .lock()
+                    .unwrap()
+                    .clock_domain()
+                    .status()
+                    .is_healthy()
+            );
+            drive(work.as_mut(), &ctx);
+            assert_eq!(*q.delivered.borrow(), [-libc::EIO]);
+            assert!(ctx.shared.waiters.lock().unwrap().is_empty());
+        }
+    }
+
     #[test]
     fn copied_fast_read_retains_work_until_cqe_then_explicit_eio() {
         let (ctx, clock) = context();

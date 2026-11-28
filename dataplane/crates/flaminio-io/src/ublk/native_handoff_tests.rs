@@ -17,28 +17,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::Command;
 
-fn b64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for b in bytes.chunks(3) {
-        let n = (b[0] as u32) << 16
-            | (b.get(1).copied().unwrap_or(0) as u32) << 8
-            | b.get(2).copied().unwrap_or(0) as u32;
-        out.push(ALPHABET[(n >> 18) as usize] as char);
-        out.push(ALPHABET[((n >> 12) & 63) as usize] as char);
-        out.push(if b.len() > 1 {
-            ALPHABET[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if b.len() > 2 {
-            ALPHABET[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
+use crate::test_support::b64;
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -675,6 +654,54 @@ fn native_handoff_fixture() {
     eprintln!("native handoff replay: {executed} steps, real mTLS/CAS/FLCT/FLCH/control/Engine");
 }
 
+async fn bounded_closure<F: std::future::Future>(future: F) -> F::Output {
+    futures_lite::future::or(future, async {
+        smol::Timer::after(Duration::from_secs(2)).await;
+        panic!("quarantine did not close the live network session");
+    })
+    .await
+}
+fn assert_closed(result: std::io::Result<usize>) {
+    match result {
+        Ok(0) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            ) => {}
+        other => panic!("expected EOF/reset, not a timeout or data: {other:?}"),
+    }
+}
+fn assert_listener_closed(addr: std::net::SocketAddr) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)) {
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => return,
+            // Shutdown can race a connect already queued in the listener backlog.
+            // These outcomes are not closure evidence; retry until refusal or the bound.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(e) => panic!("listener closure was not proven: {e}"),
+            Ok(stream) => drop(stream),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "quarantined listener still accepts connections"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 #[ignore = "isolated loopback fixture: scripts/dev/clock-handoff-interop.sh"]
 fn native_handoff_fixture_cancels_idle_sessions_writers_and_metadata() {
@@ -724,20 +751,18 @@ fn native_handoff_fixture_cancels_idle_sessions_writers_and_metadata() {
                     .unwrap()
             });
             domain.quarantine(flaminio_node::clock::ClockFault::SampleFailed);
-            drop(n);
             use futures_lite::io::AsyncReadExt;
-            let r = smol::block_on(stream.read(&mut [0; 1]));
-            assert!(r.is_err() || matches!(r, Ok(0)));
+            assert_closed(smol::block_on(bounded_closure(stream.read(&mut [0; 1]))));
         } else {
             let mut stream = std::net::TcpStream::connect(addr).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(1)))
                 .unwrap();
             domain.quarantine(flaminio_node::clock::ClockFault::SampleFailed);
-            drop(n);
-            let r = stream.read(&mut [0; 1]);
-            assert!(r.is_err() || matches!(r, Ok(0)));
+            assert_closed(stream.read(&mut [0; 1]));
         }
+        assert_listener_closed(addr);
+        drop(n);
     }
     // Both accepted writer queues and outgoing sessions are cancelled, including an idle TLS handshake.
     let clock = Arc::new(Clock::default());
@@ -794,13 +819,23 @@ fn native_handoff_fixture_cancels_idle_sessions_writers_and_metadata() {
     replies.try_send(Reply::Send(Frame::Ok { req: 1 })).unwrap();
     domain.quarantine(flaminio_node::clock::ClockFault::SampleFailed);
     let _ = replies.try_send(Reply::Send(Frame::Ok { req: 2 }));
-    drop(n);
     let mut received = 0;
-    while let Ok(frame) = smol::block_on(client.recv()) {
-        assert!(matches!(frame, Frame::Ok { req: 1 }));
-        received += 1;
-        assert!(received <= 1, "postfault writer admitted queued frame");
+    loop {
+        match smol::block_on(bounded_closure(client.recv())) {
+            Ok(frame) => {
+                assert!(matches!(frame, Frame::Ok { req: 1 }));
+                received += 1;
+                assert!(received <= 1, "postfault writer admitted queued frame");
+            }
+            Err(session::SessionError::Io(e)) => {
+                assert_closed(Err(e));
+                break;
+            }
+            Err(e) => panic!("session did not close cleanly: {e}"),
+        }
     }
+    assert_listener_closed(addr);
+    drop(n);
     let clock = Arc::new(Clock::default());
     let domain =
         Arc::new(ClockDomain::new(clock, ClockQualification::new(1, 1, 1000).unwrap()).unwrap());
@@ -827,13 +862,17 @@ fn native_handoff_fixture_cancels_idle_sessions_writers_and_metadata() {
     let (mut raw, _) = listener.accept().unwrap();
     raw.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
     domain.quarantine(flaminio_node::clock::ClockFault::SampleFailed);
-    drop(n);
     loop {
         match raw.read(&mut [0; 4096]) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(e) => {
+                assert_closed(Err(e));
+                break;
+            }
             Ok(_) => {}
         }
     }
+    drop(n);
     // Persistent worker guard stops endpoint fallback, a queued second request and late callbacks.
     for fallback in [false, true] {
         std::fs::write(dir.join("available"), if fallback { "0" } else { "1" }).unwrap();
